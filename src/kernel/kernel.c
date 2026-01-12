@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "gdt.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -42,24 +43,31 @@ void terminal_initialize(void)
 
 void terminal_print(const char *str)
 {
-
     for (size_t i = 0; str[i] != '\0'; i++)
     {
-        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
+        char c = str[i];
 
-        terminal_buffer[index] = vga_entry(str[i], terminal_color);
-
-        terminal_column++;
-
-        if (terminal_column == VGA_WIDTH)
+        if (c == '\n')
         {
             terminal_column = 0;
             terminal_row++;
+        }
+        else
+        {
+            const size_t index = terminal_row * VGA_WIDTH + terminal_column;
+            terminal_buffer[index] = vga_entry(c, terminal_color);
+            terminal_column++;
+        }
 
-            if (terminal_row == VGA_HEIGHT)
-            {
-                terminal_row = 0;
-            }
+        if (terminal_column >= VGA_WIDTH)
+        {
+            terminal_column = 0;
+            terminal_row++;
+        }
+
+        if (terminal_row >= VGA_HEIGHT)
+        {
+            terminal_row = 0;
         }
     }
 }
@@ -67,5 +75,7 @@ void terminal_print(const char *str)
 void kernel_main()
 {
     terminal_initialize();
+    init_gdt();
+    terminal_print("GDT initialized successfully!\n");
     terminal_print("Hello from Ranix!");
 }
