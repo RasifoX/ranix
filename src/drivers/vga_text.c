@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
-#include <stdbool.h>
-#include "gdt.h"
+#include "vga_text.h"
 
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -13,21 +12,20 @@ enum vga_color
     VGA_COLOR_WHITE = 15,
 };
 
-size_t terminal_row;
-size_t terminal_column;
-uint8_t terminal_color;
-uint16_t *terminal_buffer = (uint16_t *)VGA_MEMORY;
-
 static inline uint16_t vga_entry(unsigned char uc, uint8_t color)
 {
     return (uint16_t)uc | (uint16_t)color << 8;
 }
 
+size_t terminal_row;
+size_t terminal_column;
+uint8_t terminal_color;
+uint16_t *terminal_buffer;
+
 void terminal_initialize(void)
 {
     terminal_row = 0;
     terminal_column = 0;
-
     terminal_color = VGA_COLOR_WHITE | VGA_COLOR_BLACK << 4;
     terminal_buffer = (uint16_t *)VGA_MEMORY;
 
@@ -70,12 +68,4 @@ void terminal_print(const char *str)
             terminal_row = 0;
         }
     }
-}
-
-void kernel_main()
-{
-    terminal_initialize();
-    init_gdt();
-    terminal_print("GDT initialized successfully!\n");
-    terminal_print("Hello from Ranix!");
 }

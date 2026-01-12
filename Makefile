@@ -1,38 +1,50 @@
 CC = i686-elf-gcc
 AS = i686-elf-as 
+
+BUILD_DIR = build
+
+ASFLAGS = --32 -march=i686
 CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Isrc/include
-LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
+LDFLAGS = -ffreestanding -O2 -nostdlib 
 
-C_SOURCES = $(wildcard src/kernel/*.c)
-ASM_SOURCES = $(wildcard src/boot/*.s src/kernel/*.s)
+C_SOURCES := $(shell find src -name '*.c')
+ASM_SOURCES := $(shell find src -name '*.s')
 
-C_OBJECTS = $(C_SOURCES:.c=.o)
-ASM_OBJECTS = $(ASM_SOURCES:.s=.o)
+
+C_OBJECTS = $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(C_SOURCES))
+ASM_OBJECTS = $(patsubst src/%.s, $(BUILD_DIR)/%.o, $(ASM_SOURCES))
 
 OBJS = $(C_OBJECTS) $(ASM_OBJECTS)
 
-all: ranix.bin
+KERNEL_BIN = $(BUILD_DIR)/ranix.bin
+KERNEL_ISO = $(BUILD_DIR)/ranix.iso
 
-ranix.bin: $(OBJS) linker.ld
-	$(CC) -T linker.ld -o ranix.bin $(LDFLAGS) $(OBJS)
-	grub-file --is-x86-multiboot ranix.bin
+all: $(KERNEL_ISO)
 
-%.o: %.c
+$(KERNEL_BIN): $(OBJS) src/linker.ld
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -T src/linker.ld -o $@ $(OBJS) $(LDFLAGS) -lgcc	
+	@grub-file --is-x86-multiboot $@
+
+$(BUILD_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $@)
 	$(CC) -c $< -o $@ $(CFLAGS)
 
-%.o: %.s
-		$(AS) $< -o $@
+$(BUILD_DIR)/%.o: src/%.s
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS) $< -o $@
 
-iso: ranix.bin
-	mkdir -p isodir/boot/grub
-	cp ranix.bin isodir/boot/ranix.bin
-	cp grub.cfg isodir/boot/grub/grub.cfg
-	grub-mkrescue -o ranix.iso isodir
-
+$(KERNEL_ISO): $(KERNEL_BIN) src/boot/grub.cfg
+	@mkdir -p $(BUILD_DIR)/isodir/boot/grub
+	cp $(KERNEL_BIN) $(BUILD_DIR)/isodir/boot/ranix.bin
+	cp src/boot/grub.cfg $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	grub-mkrescue -o $@ $(BUILD_DIR)/isodir
+	@echo "ISO OK"
+	
 clean: 
-	rm -f ranix.bin ranix.iso
-	find src -name "*.o" -type f -delete
-	rm -rf isodir
+	rm -rf $(BUILD_DIR)
 
-run: iso
-	qemu-system-i386 -cdrom ranix.iso
+run: $(KERNEL_ISO)
+	qemu-system-i386 -cdrom $(KERNEL_ISO)
+
+.PHONY: all clean run

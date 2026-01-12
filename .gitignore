@@ -2,7 +2,7 @@
 *.obj
 
 *.bin
-*iso
+*.iso
 
 isodir/
 build/
