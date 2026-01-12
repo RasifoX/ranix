@@ -1,0 +1,11 @@
+*.o
+*.obj
+
+*.bin
+*iso
+
+isodir/
+build/
+
+.vscode/
+*.swp
