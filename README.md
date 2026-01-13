@@ -1,13 +1,17 @@
 # Ranix
 
-**Ranix** is a modular monolithic kernel built from scratch.
+**Ranix** is a "modular monolithic"(Planned) kernel built from scratch.
 
-The goal is clearly defined: **One kernel core for everything.** No unnecessary overhead, just control.
+The goal is clearly defined: **Architecture-independent core design with HAL support** No unnecessary overhead, just control.
 
 Website: [ranix.org](https://ranix.org/)
 
 ## Technology Stack
-* **Architecture:** x86 (i686) — *The primary target is x86 (i686). Architectural abstraction is planned via HAL.*
+* **Architecture:**
+  - ***Primary Target:** x86 (i686).*
+  - ***Planned Targets:** ARM (Cortex-M), x86_64*
+  - ***Portability:** Multi-arch support via HAL (Hardware Abstraction Layer).*
+
 * **Bootloader:** GRUB (Multiboot compliant)
 * **Design:** Modular Monolithic Kernel with a Hardware Abstraction Layer (HAL)
 
@@ -16,10 +20,19 @@ Website: [ranix.org](https://ranix.org/)
 *HAL does not abstract memory management or scheduling logic, which remain part of the kernel.*
 
 ## Requirements
-* `i686-elf-gcc` & `binutils`
-* `make`
-* `xorriso`
-* `qemu` (for testing)
+* [**i686-elf-gcc & binutils**](https://wiki.osdev.org/GCC_Cross-Compiler)
+* [**xorriso**](https://www.gnu.org/software/xorriso/)
+* [**GRUB**](https://www.gnu.org/software/grub/)
+* [**QEMU**](https://www.qemu.org/)
+
+## Quick Start
+```bash
+git clone https://github.com/rasifox/ranix.git
+
+cd ranix
+
+make run
+```
 
 ## Build & Run
 
@@ -49,4 +62,11 @@ make clean
 
 GPLv2. See [LICENSE](LICENSE).
 
+## Compliance
+
+Fully compliant with the Multiboot Specification.
+
 Copyright (C) 2026–present RasifoX
+
+
+
