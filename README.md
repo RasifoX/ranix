@@ -27,7 +27,7 @@ Website: [ranix.org](https://ranix.org/)
 
 ## Quick Start
 ```bash
-git clone https://github.com/rasifox/ranix.git
+git clone https://github.com/RasifoX/ranix.git
 
 cd ranix
 

@@ -3,5 +3,4 @@
 
 void hal_init(void);
 void hal_kprint(const char* str);
-
 #endif
