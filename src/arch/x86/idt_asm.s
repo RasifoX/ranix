@@ -93,3 +93,23 @@ ISR_NOERRCODE 28  # Hypervisor Injection Exception
 ISR_ERRCODE   29  # VMM Communication Exception 	
 ISR_ERRCODE   30  # Security Exception
 ISR_NOERRCODE 31  # Reserved
+
+
+# IRQ. IDT = IRQ + 32
+
+ISR_NOERRCODE 32  # Timer 
+ISR_NOERRCODE 33  # Keyboard
+ISR_NOERRCODE 34  # Cascade (PIC2)
+ISR_NOERRCODE 35  # COM2 (Serial)
+ISR_NOERRCODE 36  # COM1 (Serial)
+ISR_NOERRCODE 37  # LPT2 (Printer)
+ISR_NOERRCODE 38  # Floppy Drive
+ISR_NOERRCODE 39  # LPT1 (Printer)
+ISR_NOERRCODE 40  # CMOS / RTC (Real Time Clock)
+ISR_NOERRCODE 41  # Free
+ISR_NOERRCODE 42  # Free
+ISR_NOERRCODE 43  # Free
+ISR_NOERRCODE 44  # PS/2 Mouse
+ISR_NOERRCODE 45  # FPU/Coprocessor
+ISR_NOERRCODE 46  # Primary ATA (Hard Drive)
+ISR_NOERRCODE 47  # Secondary ATA
