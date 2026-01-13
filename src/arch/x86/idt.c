@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "io.h"
 #include "keyboard.h"
+#include "pit.h"
 
 idt_entry_t idt_entries[256];
 idt_ptr_t idt_ptr;
@@ -134,7 +135,7 @@ void isr_handler(registers_t *regs)
 
     if (regs->int_no == 32)
     {
-        // IRQ 0: Timer
+        timer_handler();
     }
     else if (regs->int_no == 33)
     {

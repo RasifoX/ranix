@@ -5,6 +5,7 @@
 #include "pic.h"
 #include "keymap.h"
 #include "vga_text.h"
+#include "pit.h"
 
 extern keymap_t keymap_us;
 
@@ -14,9 +15,11 @@ void hal_init()
     init_idt();
     terminal_initialize();
     pic_remap(0x20, 0x28);
+    
+    init_pit(100);
 
     keyboard_set_map(&keymap_us);
-    
+
     asm volatile("sti");
 }
 

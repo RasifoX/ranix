@@ -9,7 +9,18 @@ void kernel_main()
     hal_kprint("GDT initialized successfully!\n");
     hal_kprint("Terminal initialized successfully!\n");
     hal_kprint("PIC remapped successfully!\n");
-    hal_kprint("\nHello from Ranix!");
+    hal_kprint("\nHello from Ranix!\n");
 
-    while (1);
+    hal_kprint("Waiting 3 seconds...");
+    
+    sleep(300);
+
+    hal_kprint(" Done!\n");
+
+    hal_kprint("Now spamming keys allowed:\n");
+
+    while (1)
+    {
+        asm volatile("hlt");
+    }
 }
