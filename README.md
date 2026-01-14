@@ -1,10 +1,10 @@
-# Ranix
+# Ranix Kernel
 
-**Ranix** is a "modular monolithic"(Planned) kernel built from scratch.
+**Ranix** is a modular monolithic kernel built from scratch. It is designed to separate tasks and drivers with a hardware-specific architecture.
 
-The goal is clearly defined: **Architecture-independent core design with HAL support** No unnecessary overhead, just control.
+Unlike typical hobby kernels that tightly integrate logic with the x86 architecture, Ranix implements a robust **Hardware Abstraction Layer (HAL)**, making it a “portability-first” design ready for future architectures such as ARM or x86_64.
 
-Website: [ranix.org](https://ranix.org/)
+#### Website: [ranix.org](https://ranix.org/)
 
 ## Technology Stack
 * **Architecture:**
@@ -19,13 +19,34 @@ Website: [ranix.org](https://ranix.org/)
 
 *HAL does not abstract memory management or scheduling logic, which remain part of the kernel.*
 
-## Requirements
-* [**i686-elf-gcc & binutils**](https://wiki.osdev.org/GCC_Cross-Compiler)
-* [**xorriso**](https://www.gnu.org/software/xorriso/)
+# Roadmap
+
+- **Phase 1 (Done):** Booting, GDT, IDT, PIC, PIT drivers.
+
+- **Phase 2 (Done):** Memory Management (PMM/VMM/Heap), Keyboard Driver, Shell.
+
+- **Phase 3 (Current):** Virtual File System (VFS), Initrd, File Operations.
+
+- **Phase 4 (Future):** User Space, Multitasking, ELF Loading.
+
+## The Toolchain (Critical)
+
+Do not attempt to compile Ranix using your main system's gcc (e.g., /usr/bin/gcc). This will fail because Ranix does not use the standard C library (libc).
+
+You **must** use a Cross-Compiler targeting i686-elf.
+
+[**How to build a Cross-Compiler**](https://wiki.osdev.org/GCC_Cross-Compiler)
+
+* [**i686-elf-gcc & binutils**](https://wiki.osdev.org/GCC_Cross-Compiler) - Kernel Complier
+* [**xorriso**](https://www.gnu.org/software/xorriso/) - ISO Image Creation
 * [**GRUB**](https://www.gnu.org/software/grub/)
-* [**QEMU**](https://www.qemu.org/)
+* [**QEMU**](https://www.qemu.org/) - Emulation/Testing
 
 ## Quick Start
+Everything is automated via Makefile.
+
+*Requires GRUB tools and xorriso to be installed on the host system.*
+
 ```bash
 git clone https://github.com/RasifoX/ranix.git
 
@@ -34,37 +55,9 @@ cd ranix
 make run
 ```
 
-## Build & Run
-
-Everything is automated via Makefile.
-
-**Build ISO:**
-
-*Requires GRUB tools and xorriso to be installed on the host system.*
-
-```bash
-make all
-```
-
-**Run in QEMU:**
-
-```bash
-make run
-```
-
-**Clean:**
-
-```bash
-make clean
-```
-
 ## License
 
-GPLv2. See [LICENSE](LICENSE).
-
-## Compliance
-
-Fully compliant with the Multiboot Specification.
+Ranix is open-source software licensed under the GPLv2. See [LICENSE](LICENSE).
 
 Copyright (C) 2026–present RasifoX
 
