@@ -18,6 +18,7 @@ void hal_init()
 
     init_pit(100);
 
+    keyboard_init();
     keyboard_set_map(&keymap_us);
 }
 

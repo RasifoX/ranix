@@ -136,14 +136,10 @@ void terminal_putchar(char c)
         if (terminal_column > 0)
         {
             terminal_column--;
+
+            const size_t index = terminal_row * vga_width + terminal_column;
+            terminal_buffer[index] = vga_entry(' ', terminal_color);
         }
-        else if (terminal_row > 0)
-        {
-            terminal_row--;
-            terminal_column = vga_width - 1;
-        }
-        const size_t index = terminal_row * vga_width + terminal_column;
-        terminal_buffer[index] = vga_entry(' ', terminal_color);
     }
     else
     {

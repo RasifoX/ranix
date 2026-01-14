@@ -1,6 +1,16 @@
 #ifndef ARCH_X86_KEYBOARD_H
 #define ARCH_X86_KEYBOARD_H
 
-void keyboard_handler();
+#include <stdint.h>
+
+#define KB_BUFFER_SIZE 256
+
+void keyboard_init(void);
+
+void keyboard_handler(void);
+
+char keyboard_get_char(void);
+
+int keyboard_has_chars(void);
 
 #endif

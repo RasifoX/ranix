@@ -4,22 +4,25 @@
 #include "stdio.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "heap.h"
+#include "shell.h"
+
+extern uint32_t _kernel_end;
 
 void kernel_main(uint32_t magic, uint32_t addr)
 {
     hal_init();
+    hal_clear_screen(); 
 
-    kprintf("HAL initialized successfully.\n");
-    kprintf("Hello from Ranix v0.0.1!\n");
+    kprintf("Ranix Kernel v0.0.1 Booting...\n");
+    kprintf("----------------------------\n");
 
     hal_cpu_enable_interrupts();
-    kprintf("CPU Interrupts enabled.\n");
+    kprintf("[+] Interrupts enabled\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC)
     {
-        kprintf("FATAL: Invalid bootloader magic number: 0x%x\n", magic);
-        kprintf("Expected: 0x%x\n", MULTIBOOT_BOOTLOADER_MAGIC);
-        // İleride panic() fonksiyonu buraya gelecek.
+        kprintf("FATAL: Invalid bootloader magic: 0x%x\n", magic);
         return;
     }
 
@@ -27,29 +30,37 @@ void kernel_main(uint32_t magic, uint32_t addr)
 
     if (mboot_ptr->flags & 1)
     {
-        kprintf("RAM Information:\n");
-        kprintf(" - Lower Memory: %d KB\n", mboot_ptr->mem_lower);
-        kprintf(" - Upper Memory: %d KB\n", mboot_ptr->mem_upper);
-
         uint32_t total_mb = (mboot_ptr->mem_upper + 1024) / 1024;
-        kprintf(" - Total Detected RAM: %d MB\n", total_mb);
+        kprintf("[+] Detected RAM: %d MB\n", total_mb);
 
         pmm_init(mboot_ptr->mem_upper);
-
-        void *new_page = pmm_alloc_block();
-        kprintf("Test Alloc: 0x%x\n", new_page);
-
+ 
         vmm_init();
+        
+        uint32_t mem_total_kb = mboot_ptr->mem_upper + 1024;
+        uint32_t max_blocks = mem_total_kb / 4;
+        uint32_t bitmap_size = max_blocks / 8;
+        
+        uint32_t heap_start = ((uint32_t)&_kernel_end) + bitmap_size + 4096;
+        heap_start = (heap_start + 4095) & ~4095;
+
+        kheap_init((void*)heap_start, 1024 * 1024);
+        kprintf("[+] Kernel Heap Initialized (1MB)\n");
     }
     else
     {
         kprintf("WARNING: Bootloader did not provide memory info!\n");
     }
 
-    kprintf("\nSystem initialization complete. Entering idle loop.\n");
+    kprintf("----------------------------\n");
+    kprintf("System Ready. Type something...\n");
+
+    shell_init();
 
     while (1)
     {
+        shell_update();
+        
         hal_cpu_halt();
     }
 }
