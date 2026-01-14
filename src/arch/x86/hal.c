@@ -31,6 +31,11 @@ void hal_kprint(const char *str)
     terminal_print(str);
 }
 
+void hal_clear_screen(void)
+{
+    terminal_clear();
+}
+
 void hal_cpu_halt(void)
 {
     asm volatile("hlt");

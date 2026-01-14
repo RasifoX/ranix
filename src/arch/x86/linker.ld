@@ -4,10 +4,12 @@ SECTIONS
 {
         . = 1M;
 
+        _kernel_start = .;
+
         .text BLOCK(4K) : ALIGN(4K)
         {
                     *(.multiboot)
-                    *(.text)
+                    *(.text)    
         }
 
         .rodata BLOCK(4K) : ALIGN(4K)
@@ -25,4 +27,7 @@ SECTIONS
                     *(COMMON)
                     *(.bss)
         }
+
+        . = ALIGN(4096);
+        _kernel_end = .;
 }
