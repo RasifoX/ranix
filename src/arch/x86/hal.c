@@ -3,6 +3,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "pic.h"
+#include "keyboard.h"
 #include "keymap.h"
 #include "vga_text.h"
 #include "pit.h"

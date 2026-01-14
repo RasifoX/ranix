@@ -39,7 +39,7 @@ isr_common_stub:
 
     push %esp
     call isr_handler
-    add $4, %esp 
+    mov %eax, %esp
 
     pop %eax
     mov %ax, %ds

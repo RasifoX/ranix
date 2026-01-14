@@ -5,6 +5,7 @@
 #include "keyboard.h"
 #include "pit.h"
 #include "stdio.h"
+#include "process.h"
 
 idt_entry_t idt_entries[256];
 idt_ptr_t idt_ptr;
@@ -98,8 +99,10 @@ void init_idt()
     idt_flush((uint32_t)&idt_ptr);
 }
 
-void isr_handler(registers_t *regs)
+uintptr_t isr_handler(uintptr_t stack)
 {
+
+    registers_t *regs = (registers_t *)stack;
 
     if (regs->int_no == 14)
     {
@@ -132,10 +135,13 @@ void isr_handler(registers_t *regs)
     if (regs->int_no == 32)
     {
         timer_handler();
+
+        return scheduler_schedule(stack);
     }
     else if (regs->int_no == 33)
     {
         keyboard_handler();
+        return stack;
     }
     else if (regs->int_no < 32)
     {
@@ -147,5 +153,6 @@ void isr_handler(registers_t *regs)
     else
     {
         kprintf("Unknown Interrupt: %d\n", regs->int_no);
+        return stack;
     }
 }
