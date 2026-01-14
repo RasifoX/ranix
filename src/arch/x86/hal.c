@@ -19,11 +19,29 @@ void hal_init()
     init_pit(100);
 
     keyboard_set_map(&keymap_us);
+}
 
-    asm volatile("sti");
+void hal_kputc(char c)
+{
+    terminal_putchar(c);
 }
 
 void hal_kprint(const char *str)
 {
     terminal_print(str);
+}
+
+void hal_cpu_halt(void)
+{
+    asm volatile("hlt");
+}
+
+void hal_cpu_enable_interrupts(void)
+{
+    asm volatile("sti");
+}
+
+void hal_cpu_disable_interrupts(void)
+{
+    asm volatile("cli");
 }

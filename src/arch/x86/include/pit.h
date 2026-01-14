@@ -4,5 +4,7 @@
 #include <stdint.h>
 
 void init_pit(uint32_t frequency);
+void timer_handler();
+void sleep(uint32_t ms);
 
 #endif

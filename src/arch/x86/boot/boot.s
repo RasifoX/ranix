@@ -25,6 +25,9 @@ stack_top:
 _start:
         mov $stack_top, %esp
         
+        push %ebx       # 2. Argüman: Multiboot Info Structure Pointer (addr)
+        push %eax       # 1. Argüman: Multiboot Magic Number (0x2BADB002 olmalı)
+
         call kernel_main
 
         cli

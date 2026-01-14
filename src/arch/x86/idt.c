@@ -4,6 +4,7 @@
 #include "io.h"
 #include "keyboard.h"
 #include "pit.h"
+#include "stdio.h"
 
 idt_entry_t idt_entries[256];
 idt_ptr_t idt_ptr;
@@ -96,36 +97,7 @@ void init_idt()
 
     idt_flush((uint32_t)&idt_ptr);
 }
-
-void print_int(uint32_t num)
-{
-    char str[16];
-    int i = 0;
-
-    if (num == 0)
-    {
-        hal_kprint("0");
-        return;
-    }
-
-    while (num > 0)
-    {
-        str[i] = (num % 10) + '0';
-        num /= 10;
-        i++;
-    }
-
-    char rev[16];
-    int j = 0;
-    while (i > 0)
-    {
-        rev[j++] = str[--i];
-    }
-    rev[j] = '\0';
-
-    hal_kprint(rev);
-}
-
+ 
 void isr_handler(registers_t *regs)
 {
     if (regs->int_no >= 32)
@@ -143,16 +115,13 @@ void isr_handler(registers_t *regs)
     }
     else if (regs->int_no < 32)
     {
-        hal_kprint("\nCPU EXCEPTION! Int No: ");
-        print_int(regs->int_no);
-        hal_kprint("\nSystem Halted.\n");
+        kprintf("\nCPU EXCEPTION! Int No: %d (Hex: 0x%x)\n", regs->int_no, regs->int_no);
+        kprintf("System Halted.\n");
         for (;;)
             ;
     }
     else
     {
-        hal_kprint("Unknown Interrupt: ");
-        print_int(regs->int_no);
-        hal_kprint("\n");
+        kprintf("Unknown Interrupt: %d\n", regs->int_no);
     }
 }

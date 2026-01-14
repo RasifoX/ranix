@@ -3,5 +3,5 @@
 
 void terminal_initialize(void);
 void terminal_print(const char *str);
-
+void terminal_putchar(char c);
 #endif

@@ -39,33 +39,38 @@ void terminal_initialize(void)
     }
 }
 
+void terminal_putchar(char c)
+{
+    if (c == '\n')
+    {
+        terminal_column = 0;
+        terminal_row++;
+    }
+    else if (c == '\b')
+    {
+        if (terminal_column > 0) terminal_column--;
+    }
+    else
+    {
+        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
+        terminal_buffer[index] = vga_entry(c, terminal_color);
+        terminal_column++;
+    }
+
+    if (terminal_column >= VGA_WIDTH)
+    {
+        terminal_column = 0;
+        terminal_row++;
+    }
+
+    if (terminal_row >= VGA_HEIGHT)
+    {
+        terminal_row = 0;
+    }
+}
+
 void terminal_print(const char *str)
 {
     for (size_t i = 0; str[i] != '\0'; i++)
-    {
-        char c = str[i];
-
-        if (c == '\n')
-        {
-            terminal_column = 0;
-            terminal_row++;
-        }
-        else
-        {
-            const size_t index = terminal_row * VGA_WIDTH + terminal_column;
-            terminal_buffer[index] = vga_entry(c, terminal_color);
-            terminal_column++;
-        }
-
-        if (terminal_column >= VGA_WIDTH)
-        {
-            terminal_column = 0;
-            terminal_row++;
-        }
-
-        if (terminal_row >= VGA_HEIGHT)
-        {
-            terminal_row = 0;
-        }
-    }
+        terminal_putchar(str[i]);
 }

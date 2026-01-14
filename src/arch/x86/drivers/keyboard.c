@@ -7,8 +7,8 @@
 
 keymap_t *current_layout = 0;
 
-bool shift_pressed = 0;
-bool altgr_pressed = 0;
+bool shift_pressed = false;
+bool altgr_pressed = false;
 
 void keyboard_set_map(keymap_t *new_map)
 {
@@ -19,13 +19,15 @@ void keyboard_handler()
 {
     uint8_t scancode = inb(0x60);
 
-    if (scancode == 0x36 || scancode == 0x2A)
+    if (scancode == 0x2A || scancode == 0x36) 
     {
-        shift_pressed = 1;
+        shift_pressed = true;
+        return;
     }
     else if (scancode == 0xAA || scancode == 0xB6)
     {
-        shift_pressed = 0;
+        shift_pressed = false;
+        return;
     }
 
     if (scancode & 0x80)
@@ -50,8 +52,7 @@ void keyboard_handler()
 
         if (c)
         {
-            char str[2] = {c, '\0'};
-            hal_kprint(str);
+            hal_kputc(c);
         }
     }
 }
