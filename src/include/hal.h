@@ -12,4 +12,6 @@ void hal_cpu_halt(void);
 void hal_cpu_enable_interrupts(void);
 void hal_cpu_disable_interrupts(void);
 
+uint32_t hal_get_fault_addr(void);
+
 #endif

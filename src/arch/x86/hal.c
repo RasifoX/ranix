@@ -15,7 +15,7 @@ void hal_init()
     init_idt();
     terminal_initialize();
     pic_remap(0x20, 0x28);
-    
+
     init_pit(100);
 
     keyboard_set_map(&keymap_us);
@@ -44,4 +44,11 @@ void hal_cpu_enable_interrupts(void)
 void hal_cpu_disable_interrupts(void)
 {
     asm volatile("cli");
+}
+
+uint32_t hal_get_fault_addr(void)
+{
+    uint32_t val;
+    asm volatile("mov %%cr2, %0" : "=r"(val));
+    return val;
 }

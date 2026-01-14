@@ -97,9 +97,33 @@ void init_idt()
 
     idt_flush((uint32_t)&idt_ptr);
 }
- 
+
 void isr_handler(registers_t *regs)
 {
+
+    if (regs->int_no == 14)
+    {
+        uint32_t faulting_addr = hal_get_fault_addr();
+
+        kprintf("\nPAGE FAULT DETECTED!\n");
+        kprintf("Faulting Address: 0x%x\n", faulting_addr);
+        kprintf("Error Code: 0x%x\n", regs->err_code);
+
+        int present = !(regs->err_code & 0x1);
+        int rw = regs->err_code & 0x2;
+        int us = regs->err_code & 0x4;
+
+        kprintf("Reason: %s %s operation at 0x%x by %s\n",
+                present ? "Page Not Present" : "Protection Violation",
+                rw ? "Write" : "Read",
+                faulting_addr,
+                us ? "User" : "Kernel");
+
+        kprintf("System Halted.\n");
+        for (;;)
+            asm volatile("hlt");
+    }
+
     if (regs->int_no >= 32)
     {
         pic_send_eoi(regs->int_no - 32);
