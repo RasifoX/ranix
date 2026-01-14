@@ -1,0 +1,73 @@
+#include <stdint.h>
+#include "vmm.h"
+#include "pmm.h"
+#include "string.h"
+#include "stdio.h"
+
+uint32_t page_directory[1024] __attribute__((aligned(4096)));
+
+uint32_t first_page_table[1024] __attribute__((aligned(4096)));
+
+#define PD_INDEX(vaddr) ((uint32_t)vaddr >> 22)
+#define PT_INDEX(vaddr) (((uint32_t)vaddr >> 12) & 0x03FF)
+
+void vmm_enable_paging()
+{
+    asm volatile("mov %0, %%cr3" : : "r"(&page_directory));
+
+    uint32_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= 0x80000000;
+    asm volatile("mov %0, %%cr0" : : "r"(cr0));
+}
+
+int vmm_map_page(void *phys, void *virt)
+{
+    uint32_t pd_index = PD_INDEX(virt);
+    uint32_t pt_index = PT_INDEX(virt);
+
+    uint32_t *pde = &page_directory[pd_index];
+
+    if (!(*pde & I86_PDE_PRESENT))
+    {
+        uint32_t new_pt_phys = (uint32_t)pmm_alloc_block();
+        if (!new_pt_phys)
+        {
+            kprintf("VMM: Out of memory while allocating Page Table!\n");
+            return 0;
+        }
+
+        memset((void *)new_pt_phys, 0, 4096);
+
+        *pde = new_pt_phys | I86_PDE_PRESENT | I86_PDE_WRITABLE;
+    }
+
+    uint32_t *pt = (uint32_t *)(*pde & I86_PDE_FRAME);
+
+    pt[pt_index] = ((uint32_t)phys) | I86_PTE_PRESENT | I86_PTE_WRITABLE;
+
+    return 1;
+}
+
+void vmm_init()
+{
+    for (int i = 0; i < 1024; i++)
+    {
+        page_directory[i] = I86_PDE_WRITABLE;
+    }
+
+    for (int i = 0; i < 1024; i++)
+    {
+        first_page_table[i] = (i * 4096) | I86_PTE_PRESENT | I86_PTE_WRITABLE;
+    }
+
+    page_directory[0] = ((uint32_t)first_page_table) | I86_PDE_PRESENT | I86_PDE_WRITABLE;
+
+    page_directory[768] = ((uint32_t)first_page_table) | I86_PDE_PRESENT | I86_PDE_WRITABLE;
+
+    vmm_enable_paging();
+
+    kprintf("VMM Initialized: Paging Enabled!\n");
+    kprintf(" - Identity Map (0-4MB): OK\n");
+    kprintf(" - Higher Half Map (3GB): OK\n");
+}
