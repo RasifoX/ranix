@@ -15,4 +15,6 @@ void hal_cpu_disable_interrupts(void);
 
 uint32_t hal_get_fault_addr(void);
 
+void enter_user_mode(uint32_t func_addr);
+
 #endif

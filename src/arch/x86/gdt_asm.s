@@ -28,3 +28,31 @@ tss_flush:
     mov $0x28, %ax
     ltr %ax
     ret
+
+.global enter_user_mode
+.type enter_user_mode, @function
+
+enter_user_mode:
+    mov 4(%esp), %ecx
+
+    mov $0x23, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    push $0x23
+
+    push %esp 
+
+    pushf
+
+    pop %eax
+    or $0x200, %eax
+    push %eax
+
+    push $0x1B
+
+    push %ecx
+
+    iret

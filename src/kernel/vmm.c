@@ -66,12 +66,12 @@ void vmm_init()
 
     for (uint32_t i = 0; i < total_pages; i++)
     {
-        first_page_table[i] = (i * 4096) | I86_PTE_PRESENT | I86_PTE_WRITABLE;
+        first_page_table[i] = (i * 4096) | I86_PTE_PRESENT | I86_PTE_WRITABLE | I86_PTE_USER;
     }
 
-    page_directory[0] = ((uint32_t)first_page_table) | I86_PDE_PRESENT | I86_PDE_WRITABLE;
+    page_directory[0] = (uint32_t)first_page_table | I86_PDE_PRESENT | I86_PDE_WRITABLE | I86_PDE_USER;
 
-    page_directory[768] = ((uint32_t)first_page_table) | I86_PDE_PRESENT | I86_PDE_WRITABLE;
+    page_directory[768] = ((uint32_t)first_page_table) | I86_PDE_PRESENT | I86_PDE_WRITABLE | I86_PDE_USER;
 
     vmm_enable_paging();
 
