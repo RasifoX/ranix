@@ -10,9 +10,10 @@ keymap_t *current_layout = 0;
 static bool shift_pressed = false;
 static bool altgr_pressed = false;
 
-static char kb_buffer[KB_BUFFER_SIZE];
-static uint16_t kb_head = 0;
-static uint16_t kb_tail = 0;
+static volatile char kb_buffer[KB_BUFFER_SIZE];
+static volatile uint16_t kb_head = 0;
+static volatile uint16_t kb_tail = 0;
+
 
 void keyboard_init(void)
 {
@@ -20,12 +21,10 @@ void keyboard_init(void)
     kb_tail = 0;
 }
 
-static void buffer_put(char c)
-{
+void keyboard_push_char(char c) {
     uint16_t next_head = (kb_head + 1) % KB_BUFFER_SIZE;
 
-    if (next_head != kb_tail)
-    {
+    if (next_head != kb_tail) {
         kb_buffer[kb_head] = c;
         kb_head = next_head;
     }
@@ -89,7 +88,7 @@ void keyboard_handler()
 
         if (c)
         {
-            buffer_put(c);
+            keyboard_push_char(c);
         }
     }
 }

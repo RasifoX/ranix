@@ -206,6 +206,18 @@ void shell_update()
                 hal_kputc('\b');
             }
         }
+        else if (c == '\t')
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                if (cmd_len < CMD_BUFFER_SIZE - 1)
+                {
+                    cmd_buffer[cmd_len++] = ' ';
+                    cmd_buffer[cmd_len] = '\0';
+                    hal_kputc(' ');
+                }
+            }
+        }
         else
         {
             if (cmd_len < CMD_BUFFER_SIZE - 1)

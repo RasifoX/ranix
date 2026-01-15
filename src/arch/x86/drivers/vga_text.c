@@ -131,6 +131,10 @@ void terminal_putchar(char c)
         terminal_column = 0;
         terminal_row++;
     }
+    else if (c == '\t')
+    {
+        terminal_column = (terminal_column + 4) & ~3;
+    }
     else if (c == '\b')
     {
         if (terminal_column > 0)

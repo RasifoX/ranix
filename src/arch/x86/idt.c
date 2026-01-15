@@ -6,6 +6,7 @@
 #include "pit.h"
 #include "stdio.h"
 #include "process.h"
+#include "serial.h"
 
 idt_entry_t idt_entries[256];
 idt_ptr_t idt_ptr;
@@ -141,6 +142,11 @@ uintptr_t isr_handler(uintptr_t stack)
     else if (regs->int_no == 33)
     {
         keyboard_handler();
+        return stack;
+    }
+    else if (regs->int_no == 36)
+    {
+        serial_handler();
         return stack;
     }
     else if (regs->int_no < 32)

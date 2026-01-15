@@ -13,4 +13,6 @@ char keyboard_get_char(void);
 
 int keyboard_has_chars(void);
 
+void keyboard_push_char(char c);
+
 #endif

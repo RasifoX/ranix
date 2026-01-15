@@ -58,6 +58,6 @@ clean:
 	rm -rf build/
 
 run: $(KERNEL_ISO)
-	$(QEMU) -cdrom $(KERNEL_ISO)
+	$(QEMU) -cdrom $(KERNEL_ISO) -serial stdio
 
 .PHONY: all clean run
