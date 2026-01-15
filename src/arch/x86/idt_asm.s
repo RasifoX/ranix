@@ -113,3 +113,6 @@ ISR_NOERRCODE 44  # PS/2 Mouse
 ISR_NOERRCODE 45  # FPU/Coprocessor
 ISR_NOERRCODE 46  # Primary ATA (Hard Drive)
 ISR_NOERRCODE 47  # Secondary ATA
+
+# Syscall 0x80 = 128
+ISR_NOERRCODE 128

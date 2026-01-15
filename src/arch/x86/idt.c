@@ -7,6 +7,7 @@
 #include "stdio.h"
 #include "process.h"
 #include "serial.h"
+#include "syscall.h"
 
 idt_entry_t idt_entries[256];
 idt_ptr_t idt_ptr;
@@ -63,6 +64,8 @@ extern void isr45();
 extern void isr46();
 extern void isr47();
 
+extern void isr128();
+
 void *isr_stub_table[48] = {
     isr0, isr1, isr2, isr3, isr4, isr5, isr6, isr7,
     isr8, isr9, isr10, isr11, isr12, isr13, isr14, isr15,
@@ -97,6 +100,8 @@ void init_idt()
         idt_set_gate(i, (uint32_t)isr_stub_table[i], 0x08, 0x8E);
     }
 
+    idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);
+
     idt_flush((uint32_t)&idt_ptr);
 }
 
@@ -126,6 +131,12 @@ uintptr_t isr_handler(uintptr_t stack)
         kprintf("System Halted.\n");
         for (;;)
             asm volatile("hlt");
+    }
+
+    if (regs->int_no == 128)
+    {
+        syscall_handler(regs);
+        return stack;
     }
 
     if (regs->int_no >= 32)

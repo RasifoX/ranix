@@ -98,6 +98,8 @@ void kernel_main(uint32_t magic, uint32_t addr)
     kprintf("[+] Multitasking Enabled.\n");
     kprintf("[+] System Running.\n");
 
+    asm volatile("int $0x80" : : "a"(0), "b"(123), "c"(456));
+
     shell_init();
 
     while (1)

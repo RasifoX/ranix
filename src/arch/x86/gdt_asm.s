@@ -24,10 +24,6 @@ gdt_flush:
 .type tss_flush, @function
 
 tss_flush:
-    # TSS Segment Selector: 5. index * 8 = 40 (0x28)
-    # Ring 3 yetkisi için OR 0x03 yapabiliriz (0x2B), ama LTR için genelde 0x28 (RPL=0) yeterlidir.
-    # Biz güvenli olan 0x2B (0x28 | 3) kullanalım ki User Mode erişebilsin diyeceğiz ama
-    # LTR bir "privileged instruction" olduğu için kernel modda çalışır.
     
     mov $0x28, %ax
     ltr %ax
