@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include "hal.h"
-#include "multiboot.h"
+#include "multiboot2.h"
 #include "stdio.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -15,32 +15,55 @@ extern uint32_t _kernel_end;
 void kernel_main(uint32_t magic, uint32_t addr)
 {
     hal_init();
-    hal_clear_screen();
 
-    kprintf("Ranix Kernel v0.0.1 Booting...\n");
-    kprintf("----------------------------\n");
+    kprintf("Ranix Kernel (Multiboot2) Booting...\n");
+    kprintf("------------------------------------\n");
 
-    hal_cpu_enable_interrupts();
-    kprintf("[+] Interrupts enabled\n");
-
-    if (magic != MULTIBOOT_BOOTLOADER_MAGIC)
+    if (magic != MULTIBOOT2_BOOTLOADER_MAGIC)
     {
-        kprintf("FATAL: Invalid bootloader magic: 0x%x\n", magic);
+        kprintf("FATAL: Invalid magic number: 0x%x\n", magic);
         return;
     }
 
-    multiboot_info_t *mboot_ptr = (multiboot_info_t *)((uintptr_t)addr);
+    struct multiboot_tag *tag;
+    uint32_t total_size = *(uint32_t *)addr;
 
-    if (mboot_ptr->flags & 1)
+    uint32_t mem_upper = 0;
+    uint32_t mod_start = 0;
+    uint32_t mod_end = 0;
+
+    for (tag = (struct multiboot_tag *)(addr + 8);
+         tag->type != MULTIBOOT_TAG_TYPE_END;
+         tag = (struct multiboot_tag *)((uint8_t *)tag + ((tag->size + 7) & ~7)))
     {
-        uint32_t total_mb = (mboot_ptr->mem_upper + 1024) / 1024;
-        kprintf("[+] Detected RAM: %d MB\n", total_mb);
+        switch (tag->type)
+        {
+        case MULTIBOOT_TAG_TYPE_BASIC_MEMINFO:
+        {
+            struct multiboot_tag_basic_meminfo *meminfo = (struct multiboot_tag_basic_meminfo *)tag;
+            mem_upper = meminfo->mem_upper;
+            kprintf("[+] Memory Info: Upper=%dKB\n", mem_upper);
+        }
+        break;
 
-        pmm_init(mboot_ptr->mem_upper);
+        case MULTIBOOT_TAG_TYPE_MODULE:
+        {
+            struct multiboot_tag_module *mod = (struct multiboot_tag_module *)tag;
+            mod_start = mod->mod_start;
+            mod_end = mod->mod_end;
+            kprintf("[+] Module Found: %s (0x%x - 0x%x)\n", mod->cmdline, mod_start, mod_end);
+        }
+        break;
+        }
+    }
+
+    if (mem_upper > 0)
+    {
+        pmm_init(mem_upper);
 
         vmm_init();
 
-        uint32_t mem_total_kb = mboot_ptr->mem_upper + 1024;
+        uint32_t mem_total_kb = mem_upper + 1024;
         uint32_t max_blocks = mem_total_kb / 4;
         uint32_t bitmap_size = max_blocks / 8;
 
@@ -48,64 +71,38 @@ void kernel_main(uint32_t magic, uint32_t addr)
         heap_start = (heap_start + 4095) & ~4095;
 
         kheap_init((void *)heap_start, 1024 * 1024);
-        kprintf("[+] Kernel Heap Initialized (1MB)\n");
+        kprintf("[+] Kernel Heap Initialized\n");
     }
     else
     {
-        kprintf("WARNING: Bootloader did not provide memory info!\n");
+        kprintf("FATAL: Memory info not found!\n");
+        while (1)
+            hal_cpu_halt();
     }
 
-    if (mboot_ptr->flags & 0x08)
+    if (mod_start > 0 && mod_end > 0)
     {
-        kprintf("Modules found: %d\n", mboot_ptr->mods_count);
-
-        // Modül bulunduktan sonra:
-        if (mboot_ptr->mods_count > 0)
-        {
-            multiboot_module_t *mod = (multiboot_module_t *)((uintptr_t)mboot_ptr->mods_addr);
-
-            // Initrd Sürücüsünü Başlat
-            // Bu bize bir "Root Node" döndürecek.
-            fs_root = initialise_initrd(mod->mod_start, mod->mod_end);
-
-            kprintf("[+] VFS Initialized. Root mounted.\n");
-
-            // TEST: VFS Üzerinden Dosya Okuma
-            // 1. Dosyayı Bul
-            fs_node_t *fsnode = finddir_fs(fs_root, "test.txt");
-
-            if (fsnode)
-            {
-                kprintf("Found file: %s (Size: %d bytes)\n", fsnode->name, fsnode->length);
-
-                // 2. İçeriğini Oku
-                char buf[256];
-                uint32_t sz = read_fs(fsnode, 0, 255, (uint8_t *)buf);
-                buf[sz] = 0; // Null terminator
-
-                kprintf("File Content (via VFS): %s\n", buf);
-            }
-            else
-            {
-                kprintf("Error: Could not find test.txt in VFS!\n");
-            }
-        }
+        fs_root = initialise_initrd(mod_start, mod_end);
+        kprintf("[+] VFS Initialized. Initrd Mounted.\n");
     }
     else
     {
-        kprintf("No modules loaded via GRUB.\n");
+        kprintf("[-] Warning: No Initrd module found (check grub.cfg)\n");
     }
 
-    kprintf("----------------------------\n");
+    kprintf("------------------------------------\n");
 
     scheduler_init();
+
+    hal_cpu_enable_interrupts();
+    kprintf("[+] Multitasking Enabled.\n");
+    kprintf("[+] System Running.\n");
 
     shell_init();
 
     while (1)
     {
         shell_update();
-
         hal_cpu_halt();
     }
 }

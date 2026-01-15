@@ -8,7 +8,7 @@ ifeq ($(ARCH),x86)
 	ARCH_DIR = src/arch/x86
 	CFLAGS_ARCH = -Isrc/arch/x86/include
 	ASFLAGS = --32 -march=i686
-	CHECK_MULTIBOOT = @grub-file --is-x86-multiboot
+	CHECK_MULTIBOOT = @grub-file --is-x86-multiboot2
 else
 	CHECK_MULTIBOOT = @true
 endif
