@@ -1,7 +1,9 @@
-#include "../include/gdt.h"
+#include "gdt.h"
+#include "string.h"
 
-gdt_entry_t gdt_entries[5];
+gdt_entry_t gdt_entries[6];
 gdt_ptr_t   gdt_ptr;
+tss_entry_t tss_entry;
 
 extern void gdt_flush(uint32_t);
 
