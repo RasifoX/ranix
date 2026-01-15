@@ -50,9 +50,10 @@ $(KERNEL_ISO): $(KERNEL_BIN) $(GRUB_CFG)
 	@mkdir -p $(BUILD_DIR)/isodir/boot/grub
 	cp $(KERNEL_BIN) $(BUILD_DIR)/isodir/boot/ranix.bin
 	cp $(GRUB_CFG) $(BUILD_DIR)/isodir/boot/grub/grub.cfg
+	echo "Test string file for testing VFS." > $(BUILD_DIR)/isodir/boot/test.txt
 	grub-mkrescue -o $@ $(BUILD_DIR)/isodir
 	@echo "ISO OK for $(ARCH)"
-
+     
 clean: 
 	rm -rf build/
 

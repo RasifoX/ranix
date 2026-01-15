@@ -4,6 +4,8 @@
 #include "string.h"
 #include "hal.h"
 #include "io.h"
+#include "fs.h"
+#include "heap.h"
 
 #define CMD_BUFFER_SIZE 128
 
@@ -15,10 +17,97 @@ static void print_prompt()
     kprintf("Ranix> ");
 }
 
+static void cmd_ls()
+{
+    if (!fs_root)
+    {
+        kprintf("Error: No filesystem mounted.\n");
+        return;
+    }
+
+    struct dirent *node = 0;
+    int i = 0;
+
+    kprintf("Files in /:\n");
+
+    while ((node = readdir_fs(fs_root, i)) != 0)
+    {
+        kprintf(" - %s (Inode: %d)\n", node->name, node->ino);
+        i++;
+    }
+}
+
+static void cmd_cat(char *filename)
+{
+    if (!fs_root)
+    {
+        kprintf("Error: No filesystem mounted.\n");
+        return;
+    }
+
+    fs_node_t *fsnode = finddir_fs(fs_root, filename);
+
+    if (!fsnode)
+    {
+        kprintf("Error: File '%s' not found.\n", filename);
+        return;
+    }
+
+    if ((fsnode->flags & 0x7) == FS_DIRECTORY)
+    {
+        kprintf("Error: '%s' is a directory.\n", filename);
+        return;
+    }
+
+    uint32_t size = fsnode->length;
+    if (size > 1024)
+        size = 1024;
+
+    char *buf = (char *)kmalloc(size + 1);
+    if (!buf)
+    {
+        kprintf("Error: Out of memory for read buffer.\n");
+        return;
+    }
+
+    uint32_t read_bytes = read_fs(fsnode, 0, size, (uint8_t *)buf);
+    buf[read_bytes] = 0;
+
+    kprintf("%s\n", buf);
+
+    kfree(buf);
+}
+
 static void execute_command(char *input)
 {
     if (cmd_len == 0)
         return;
+
+    char cmd[32];
+    char arg[64];
+
+    int i = 0;
+    while (input[i] != ' ' && input[i] != 0 && i < 31)
+    {
+        cmd[i] = input[i];
+        i++;
+    }
+    cmd[i] = 0;
+
+    if (input[i] == ' ')
+    {
+        i++;
+        int j = 0;
+        while (input[i] != 0 && j < 63)
+        {
+            arg[j++] = input[i++];
+        }
+        arg[j] = 0;
+    }
+    else
+    {
+        arg[0] = 0;
+    }
 
     if (strcmp(input, "help") == 0)
     {
@@ -28,6 +117,8 @@ static void execute_command(char *input)
         kprintf(" - reboot   : Reboot the system\n");
         kprintf(" - shutdown : Halt the CPU\n");
         kprintf(" - memory   : Show memory usage (TODO)\n");
+        kprintf(" - ls       : List files\n");
+        kprintf(" - cat <f>  : Read file content\n");
     }
     else if (strcmp(input, "clear") == 0)
     {
@@ -51,6 +142,25 @@ static void execute_command(char *input)
             hal_cpu_halt();
         }
     }
+    else if (strcmp(cmd, "ls") == 0)
+    {
+        kprintf("\n");
+        cmd_ls();
+    }
+    else if (strcmp(cmd, "cat") == 0)
+    {
+        if (arg[0] == 0)
+        {
+            kprintf("Usage: cat <filename>\n");
+        }
+        else
+        {
+            kprintf("\n--- --- ---\n");
+            cmd_cat(arg);
+            kprintf("--- --- ---\n");
+        }
+    }
+
     else
     {
         kprintf("\nUnknown command: %s\n", input);

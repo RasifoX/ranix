@@ -7,6 +7,8 @@
 #include "heap.h"
 #include "shell.h"
 #include "process.h"
+#include "fs.h"
+#include "initrd.h"
 
 extern uint32_t _kernel_end;
 
@@ -52,6 +54,48 @@ void kernel_main(uint32_t magic, uint32_t addr)
     {
         kprintf("WARNING: Bootloader did not provide memory info!\n");
     }
+
+    if (mboot_ptr->flags & 0x08)
+    {
+        kprintf("Modules found: %d\n", mboot_ptr->mods_count);
+
+        // Modül bulunduktan sonra:
+        if (mboot_ptr->mods_count > 0)
+        {
+            multiboot_module_t *mod = (multiboot_module_t *)((uintptr_t)mboot_ptr->mods_addr);
+
+            // Initrd Sürücüsünü Başlat
+            // Bu bize bir "Root Node" döndürecek.
+            fs_root = initialise_initrd(mod->mod_start, mod->mod_end);
+
+            kprintf("[+] VFS Initialized. Root mounted.\n");
+
+            // TEST: VFS Üzerinden Dosya Okuma
+            // 1. Dosyayı Bul
+            fs_node_t *fsnode = finddir_fs(fs_root, "test.txt");
+
+            if (fsnode)
+            {
+                kprintf("Found file: %s (Size: %d bytes)\n", fsnode->name, fsnode->length);
+
+                // 2. İçeriğini Oku
+                char buf[256];
+                uint32_t sz = read_fs(fsnode, 0, 255, (uint8_t *)buf);
+                buf[sz] = 0; // Null terminator
+
+                kprintf("File Content (via VFS): %s\n", buf);
+            }
+            else
+            {
+                kprintf("Error: Could not find test.txt in VFS!\n");
+            }
+        }
+    }
+    else
+    {
+        kprintf("No modules loaded via GRUB.\n");
+    }
+
     kprintf("----------------------------\n");
 
     scheduler_init();
