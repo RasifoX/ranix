@@ -112,14 +112,12 @@ void kernel_main(uint32_t magic, uint32_t addr)
 
     scheduler_init();
 
-    scheduler_init();
-
     tss_set_stack(0x10, (uint32_t)&stack_top);
 
     kprintf("[+] Multitasking Enabled.\n");
     kprintf("------------------------------------\n");
     scheduler_add_task(user_mode_wrapper, "UserShell");
-        
+
     // shell_init();
 
     while (1)
