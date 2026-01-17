@@ -18,7 +18,7 @@ BUILD_DIR = build/$(ARCH)
 CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Isrc/include -Isrc/lib $(CFLAGS_ARCH)
 LDFLAGS = -ffreestanding -O2 -nostdlib
 
-C_SOURCES = $(shell find src/kernel src/drivers src/hal src/lib -name '*.c' 2>/dev/null)
+C_SOURCES = $(shell find src/kernel src/drivers src/hal src/lib src/user -name '*.c' 2>/dev/null)
 C_SOURCES += $(shell find $(ARCH_DIR) -name '*.c' 2>/dev/null)
 ASM_SOURCES = $(shell find $(ARCH_DIR) -name '*.s' 2>/dev/null)
 

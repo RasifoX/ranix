@@ -9,13 +9,14 @@ process_t *process_list = 0;
 process_t *current_process = 0;
 static int next_pid = 1;
 
+extern uint32_t stack_bottom;
+
 static process_t *get_next_ready_process()
 {
     if (!current_process)
         return 0;
 
     process_t *p = current_process->next;
-
     process_t *start = p;
     do
     {
@@ -47,6 +48,12 @@ void scheduler_init(void)
     kernel_proc->state = PROCESS_STATE_RUNNING;
     kernel_proc->next = kernel_proc;
 
+    uintptr_t boot_stack_top = (uintptr_t)&stack_bottom + 16384;
+
+    kernel_proc->stack_base = (uintptr_t)&stack_bottom;
+    kernel_proc->kstack_base = (uintptr_t)&stack_bottom;
+    kernel_proc->kstack_top = boot_stack_top;
+
     process_list = kernel_proc;
     current_process = kernel_proc;
 
@@ -61,37 +68,47 @@ void scheduler_add_task(void (*entry_point)(), const char *name)
     memset(new_proc, 0, sizeof(process_t));
 
     uint32_t stack_size = 4096;
-    void *stack_addr = kmalloc(stack_size);
-    memset(stack_addr, 0, stack_size);
+    void *u_stack = kmalloc(stack_size);
+    memset(u_stack, 0, stack_size);
 
-    uint32_t *esp = (uint32_t *)((uintptr_t)stack_addr + stack_size);
+    uint32_t *esp = (uint32_t *)((uintptr_t)u_stack + stack_size);
+
+    void *k_stack = kmalloc(stack_size);
+    memset(k_stack, 0, stack_size);
 
     *--esp = 0x202;                 // EFLAGS
     *--esp = 0x08;                  // CS
     *--esp = (uint32_t)entry_point; // EIP
-    *--esp = 0;                     // Error
-    *--esp = 0;                     // Int No
-    *--esp = 0;                     // EAX
-    *--esp = 0;                     // ECX
-    *--esp = 0;                     // EDX
-    *--esp = 0;                     // EBX
-    *--esp = 0;                     // ESP
-    *--esp = 0;                     // EBP
-    *--esp = 0;                     // ESI
-    *--esp = 0;                     // EDI
-    *--esp = 0x10;                  // (DS/ES/FS/GS)
+
+    *--esp = 0; // Dummy Error Code
+    *--esp = 0; // Dummy Interrupt Number
+
+    *--esp = 0; // EAX
+    *--esp = 0; // ECX
+    *--esp = 0; // EDX
+    *--esp = 0; // EBX
+    *--esp = 0; // ESP
+    *--esp = 0; // EBP
+    *--esp = 0; // ESI
+    *--esp = 0; // EDI
+
+    *--esp = 0x10; // DS
 
     new_proc->pid = next_pid++;
 
-    int i = 0;
-    while (name[i])
+    int k = 0;
+    while (name[k])
     {
-        new_proc->name[i] = name[i];
-        i++;
+        new_proc->name[k] = name[k];
+        k++;
     }
 
     new_proc->stack_ptr = (uintptr_t)esp;
-    new_proc->stack_base = (uintptr_t)stack_addr;
+    new_proc->stack_base = (uintptr_t)u_stack;
+
+    new_proc->kstack_base = (uintptr_t)k_stack;
+    new_proc->kstack_top = (uintptr_t)k_stack + stack_size;
+
     new_proc->state = PROCESS_STATE_READY;
 
     process_t *last = process_list;
@@ -119,16 +136,16 @@ uintptr_t scheduler_schedule(uintptr_t current_stack_ptr)
     }
 
     process_t *next = get_next_ready_process();
-
     if (!next)
-    {
         next = current_process;
-    }
 
     current_process = next;
     current_process->state = PROCESS_STATE_RUNNING;
 
-    tss_set_stack(0x10, current_process->stack_ptr);
+    if (current_process->pid != 0)
+    {
+        tss_set_stack(0x10, current_process->kstack_top);
+    }
 
     return current_process->stack_ptr;
 }
@@ -139,9 +156,7 @@ void scheduler_exit_current(int code)
             current_process->pid, current_process->name, code);
 
     current_process->state = PROCESS_STATE_ZOMBIE;
-
     asm volatile("int $0x20");
-
     while (1)
         ;
 }

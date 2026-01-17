@@ -32,13 +32,13 @@ static void write_tss(int32_t num, uint16_t ss0, uint32_t esp0)
 
     tss_entry.ss0 = ss0;
     tss_entry.esp0 = esp0;
-
-    tss_entry.cs = 0x08 | 0x3;
-    tss_entry.ss = 0x10 | 0x3;
-    tss_entry.ds = 0x10 | 0x3;
-    tss_entry.es = 0x10 | 0x3;
-    tss_entry.fs = 0x10 | 0x3;
-    tss_entry.gs = 0x10 | 0x3;
+    
+    tss_entry.cs = 0x08 | 0;
+    tss_entry.ss = 0x10 | 0;
+    tss_entry.ds = 0x10 | 0;
+    tss_entry.es = 0x10 | 0;
+    tss_entry.fs = 0x10 | 0;
+    tss_entry.gs = 0x10 | 0;
 
     tss_entry.iomap_base = sizeof(tss_entry);
 }
