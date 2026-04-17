@@ -41,8 +41,9 @@ extern void exc_stub_12(void); extern void exc_stub_13(void);
 extern void exc_stub_14(void); extern void exc_stub_15(void);
 extern void exc_stub_16(void); extern void exc_stub_17(void);
 extern void exc_stub_18(void); extern void exc_stub_19(void);
-extern void irq_stub_0(void);  /* PIT timer */
+extern void irq_stub_0(void);
 extern void irq_stub_yield(void);
+extern void irq_stub_syscall(void);
 
 void idt_init(void)
 {
@@ -57,8 +58,9 @@ void idt_init(void)
 	for (int i = 0; i < 20; i++)
 		idt_set_gate(i, exc_stubs[i], 0x8E);  /* present, ring0, interrupt gate */
 
-	idt_set_gate(VEC_TIMER, irq_stub_0,     0x8E);
-	idt_set_gate(VEC_YIELD, irq_stub_yield, 0xEE);  /* ring0+3 callable */
+	idt_set_gate(VEC_TIMER,   irq_stub_0,       0x8E);
+	idt_set_gate(VEC_YIELD,   irq_stub_yield,   0xEE);
+	idt_set_gate(VEC_SYSCALL, irq_stub_syscall, 0xEE);
 
 	struct idtr idtr = {
 		.limit = sizeof(idt) - 1,

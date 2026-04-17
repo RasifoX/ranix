@@ -88,6 +88,22 @@ irq_stub_0:
 	add  $16, %rsp
 	iretq
 
+.global irq_stub_syscall
+irq_stub_syscall:
+	push $0
+	push $0x80
+	save_context
+	mov  %rsp, %r15
+	call task_current
+	mov  %r15, 16(%rax)
+	mov  %rsp, %rdi         /* arg: arch_context_t* */
+	call syscall_handle
+	call sched_get_current_ctx
+	mov  %rax, %rsp
+	restore_context
+	add  $16, %rsp
+	iretq
+
 .global irq_stub_yield
 irq_stub_yield:
 	push $0
