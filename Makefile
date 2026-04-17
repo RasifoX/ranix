@@ -26,6 +26,7 @@ ifeq ($(ARCH),aarch64)
         arch/aarch64/irq.c \
         arch/aarch64/cpu.c \
         arch/aarch64/mmu.c \
+        arch/aarch64/vm.c \
         $(MACH_DIR)/board.c
     SRCS_ARCH_ASM = \
         arch/aarch64/boot.S \
@@ -46,6 +47,7 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/gdt.c \
         arch/x86_64/idt.c \
         arch/x86_64/mmu.c \
+        arch/x86_64/vm.c \
         arch/x86_64/exceptions.c \
         arch/x86_64/mach-pc/board.c
     SRCS_ARCH_ASM = \
@@ -68,6 +70,7 @@ SRCS_KERNEL = \
     kernel/tty/fb_tty.c \
     kernel/sync.c \
     kernel/mm/buddy.c \
+    kernel/mm/vm.c \
     kernel/mm/pmm.c \
     kernel/mm/heap.c \
     kernel/lib/string.c

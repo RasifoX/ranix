@@ -1,4 +1,5 @@
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/vm.h>
 
 static uint64_t ram_limit = 0x3C000000UL;
 static uint64_t fb_limit  = 0x40000000UL;
@@ -11,16 +12,16 @@ void mmu_set_fb_region(uint64_t fb_start, uint64_t fb_end)
 	fb_limit  = fb_end;
 }
 
-__attribute__((aligned(4096))) static uint64_t l1[512];
+__attribute__((aligned(4096))) uint64_t kernel_l1[512];
 __attribute__((aligned(4096))) static uint64_t l2[512];
 
 extern void enable_mmu(uint64_t table_addr);
 
 void mmu_init(void)
 {
-	for (int i = 0; i < 512; i++) l1[i] = l2[i] = 0;
+	for (int i = 0; i < 512; i++) kernel_l1[i] = l2[i] = 0;
 
-	l1[0] = (uint64_t)l2 | PTE_TABLE | PTE_VALID;
+	kernel_l1[0] = (uint64_t)l2 | PTE_TABLE | PTE_VALID;
 
 	for (int i = 0; i < 512; i++) {
 		uint64_t addr = (uint64_t)i * 0x200000;
@@ -33,9 +34,10 @@ void mmu_init(void)
 		l2[i] = addr | PTE_BLOCK | PTE_AF | PTE_VALID | attr;
 	}
 
-	l1[1] = 0x40000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
-	l1[2] = 0x80000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
-	l1[3] = 0xC0000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
+	kernel_l1[1] = 0x40000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
+	kernel_l1[2] = 0x80000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
+	kernel_l1[3] = 0xC0000000UL | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_DEVICE;
 
-	enable_mmu((uint64_t)l1);
+	enable_mmu((uint64_t)kernel_l1);
+	vm_set_kernel_pt((uint64_t)kernel_l1);
 }

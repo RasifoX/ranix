@@ -81,6 +81,7 @@ irq_stub_0:
 	mov  $0x20, %edi
 	call irq_dispatch
 	call schedule
+	call vm_activate
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context
@@ -96,6 +97,7 @@ irq_stub_yield:
 	call task_current
 	mov  %r15, 16(%rax)
 	call schedule
+	call vm_activate
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context

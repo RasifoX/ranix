@@ -99,6 +99,7 @@ gdt32_ptr:
 
 .section ".bss"
 .balign 4096
+.global pml4
 pml4: .skip 4096
 pdpt: .skip 4096
 pd:   .skip 4096
