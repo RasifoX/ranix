@@ -61,7 +61,7 @@ int task_create(const char *name, void (*fn)(void))
 	current_task->next = t;
 
 	task_cnt++;
-	kprintf("[SCHED] task %d '%s' created\n", (int)t->id, t->name);
+	kprintf("[sched] task %d '%s'\n", (int)t->id, t->name);
 	return (int)t->id;
 }
 

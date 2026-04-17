@@ -38,7 +38,7 @@ void timer_init(uint32_t hz) {
     board_config_t *cfg = board_get_config();
     *(volatile uint32_t *)(cfg->local_base + 0x40) = (1 << 3);
 
-    kprintf("[TIMER] %d Hz, freq=%d\n", (int)hz, (int)freq);
+    kprintf("[timer] ARM, %d Hz\n", (int)hz);
 }
 
 uint64_t timer_ticks(void) { return ticks; }

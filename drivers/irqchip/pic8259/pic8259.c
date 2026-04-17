@@ -28,7 +28,7 @@ void pic8259_init(void)
 	outb(PIC1_DATA, 0xFE);
 	outb(PIC2_DATA, 0xFF);
 
-	kprintf("[PIC] Initialized\n");
+	kprintf("[  irq] PIC 8259\n");
 }
 
 void pic8259_eoi(uint32_t irq)

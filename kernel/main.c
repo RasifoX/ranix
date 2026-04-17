@@ -24,7 +24,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t ram_limit)
 	pmm_init(start, size);
 	pmm_free_region(start, size);
 
-	kprintf("PMM: %x - %x (%d MB)\n",
+	kprintf("[  mem] %x-%x, %d MB\n",
 	        (unsigned int)start, (unsigned int)end, (int)(size >> 20));
 }
 
@@ -56,12 +56,11 @@ void kernel_main(void)
 		kprintf_set_fb();
 	}
 
-	kprintf("Ranix booting...\n");
+	kprintf("[ranix] Ranix\n");
 	if (fdt_ok == 0) {
-		kprintf("Board: %s\n", fi->model);
-		kprintf("CPU: %d cores\n", (int)fi->num_cpus);
+		kprintf("[ranix] %s, %d cores\n", fi->model, (int)fi->num_cpus);
 	} else {
-		kprintf("Board: %s\n", cfg->name);
+		kprintf("[ranix] %s\n", cfg->name);
 	}
 
 	setup_physical_memory(fb_phys, ram_size);
@@ -69,7 +68,7 @@ void kernel_main(void)
 	irq_init();
 	board_irq_init();
 
-	kprintf("Kernel ready.\n");
+	kprintf("[ranix] ready\n");
 	sched_init();
 	irq_enable();
 
