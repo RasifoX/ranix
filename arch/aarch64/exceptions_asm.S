@@ -123,6 +123,7 @@ irq_handler:
 	mov  w0, #0
 	bl   irq_dispatch
 	bl   schedule
+	bl   vm_activate
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret
@@ -137,6 +138,7 @@ sync_handler:
 	mov  x1, sp
 	str  x1, [x0, #16]
 	bl   schedule
+	bl   vm_activate
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret

@@ -25,6 +25,7 @@ void sched_init(void)
 	t->ctx        = 0;
 	t->entry      = 0;
 	t->stack_base = 0;
+	t->vm         = 0;
 	set_name(t, "idle");
 	t->next = t;
 
@@ -41,6 +42,7 @@ int task_create(const char *name, void (*fn)(void))
 	t->id    = task_cnt;
 	t->state = TASK_READY;
 	t->entry = fn;
+	t->vm    = 0;
 	set_name(t, name);
 
 	uint8_t *p0 = (uint8_t *)pmm_alloc();
@@ -69,7 +71,7 @@ void schedule(void)
 	task_t *next = prev->next;
 
 	while (next != prev) {
-		if (next->state == TASK_READY)
+		if (next->state == TASK_READY || next->state == TASK_RUNNING)
 			break;
 		next = next->next;
 	}
@@ -86,6 +88,7 @@ void schedule(void)
 
 void yield(void)      { arch_yield(); }
 void task_sleep(void) { current_task->state = TASK_SLEEPING; arch_yield(); }
+void task_exit(void)  { current_task->state = TASK_DEAD;     arch_yield(); }
 
 void task_wake(task_t *t)
 {
