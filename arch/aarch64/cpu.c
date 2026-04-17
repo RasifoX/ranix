@@ -11,3 +11,18 @@ void arch_context_init(arch_context_t *ctx, void (*entry)(void), uint64_t stack_
 	ctx->spsr = ARCH_SPSR_KERNEL_TASK;
 	ctx->sp   = stack_top;
 }
+
+void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack_top)
+{
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->elr  = entry;
+	ctx->spsr = ARCH_SPSR_USER_TASK;  /* EL0t */
+	ctx->sp   = ustack_top;
+}
+
+void arch_set_user_kstack(uint64_t kstack_top)
+{
+	/* On aarch64 EL0→EL1 exceptions land on SP_EL1.
+	 * Update it so each user process gets its own kernel stack. */
+	__asm__ volatile("msr sp_el1, %0; isb" :: "r"(kstack_top));
+}

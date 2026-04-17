@@ -22,6 +22,24 @@ typedef struct {
 	uint64_t rip, cs, rflags, rsp, ss;
 } arch_context_t;
 
-#define ARCH_SPSR_KERNEL_TASK  0x202UL  /* RFLAGS: IF=1, reserved bit 1 */
+#define ARCH_SPSR_KERNEL_TASK  0x202UL   /* RFLAGS kernel: IF=1 */
+#define ARCH_SPSR_USER_TASK    0x202UL   /* RFLAGS user:   IF=1 */
+
+#define GDT_USER_CODE  0x1BUL   /* 0x18 | RPL3 */
+#define GDT_USER_DATA  0x23UL   /* 0x20 | RPL3 */
+
+/* syscall register convention (Linux x86_64 ABI) */
+#define CTX_SYSCALL_N(ctx)      ((ctx)->rax)
+#define CTX_SYSCALL_ARG0(ctx)   ((ctx)->rdi)
+#define CTX_SYSCALL_ARG1(ctx)   ((ctx)->rsi)
+#define CTX_SYSCALL_ARG2(ctx)   ((ctx)->rdx)
+#define CTX_SYSCALL_ARG3(ctx)   ((ctx)->r10)
+#define CTX_SYSCALL_RET(ctx, v) ((ctx)->rax = (uint64_t)(long)(v))
+
+/* Linux x86_64 syscall numbers */
+#define SYS_ARCH_READ    0
+#define SYS_ARCH_WRITE   1
+#define SYS_ARCH_EXIT   60
+#define SYS_ARCH_GETPID 39
 
 #endif
