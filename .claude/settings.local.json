@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make clean *)",
+      "Bash(make BOARD=raspi4)",
+      "Bash(make BOARD=virt *)",
+      "Bash(make ARCH=x86_64)",
+      "Bash(qemu-system-x86_64 --version)",
+      "Bash(xxd build/ranix.elf)",
+      "Bash(objdump -h build/ranix.elf)",
+      "Bash(python3 *)",
+      "Bash(timeout 5 qemu-system-x86_64 -M q35 -nographic -kernel build/ranix.elf -serial stdio)",
+      "Bash(timeout 6 qemu-system-x86_64 -M q35 -nographic -kernel build/ranix.elf)",
+      "Bash(dpkg -l grub-common grub-pc-bin)",
+      "Bash(awk '{print $1,$2,$3}')",
+      "Bash(make ARCH=x86_64 *)",
+      "Bash(timeout 8 qemu-system-x86_64 -M q35 -nographic -cdrom ranix.iso)",
+      "Bash(timeout 5 qemu-system-x86_64 -M q35 -nographic -cdrom ranix.iso)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git reset *)",
+      "Bash(git rm *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
