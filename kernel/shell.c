@@ -74,7 +74,7 @@ static void cmd_ps(void)
     for (int i = 0; i < n; i++) {
         task_t *t = task_get(i);
         kprintf("  %d   %s  %s\n",
-                (int)t->id, t->name,
+                (int)t->pid, t->name,
                 state_names[t->state]);
     }
 }

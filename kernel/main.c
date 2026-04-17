@@ -7,9 +7,10 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
-#include <kernel/sched.h>
+#include <kernel/proc.h>
 #include <kernel/shell.h>
 #include <kernel/tty/fb_tty.h>
+#include <kernel/vfs.h>
 
 extern char     __bss_end;
 extern uint64_t _dtb_ptr;
@@ -67,6 +68,12 @@ void kernel_main(void)
 	heap_init();
 	irq_init();
 	board_irq_init();
+
+	vfs_init();
+	vfs_mount("/", "ramfs", NULL);
+	vfs_mkdir("/dev",  0755);
+	vfs_mkdir("/proc", 0555);
+	vfs_mkdir("/tmp",  0777);
 
 	kprintf("[ranix] ready\n");
 	sched_init();
