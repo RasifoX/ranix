@@ -41,7 +41,9 @@ void vm_destroy(vm_space_t *vs)
 static uint64_t *get_or_alloc(uint64_t *table, uint64_t idx, uint64_t eflags)
 {
 	if (table[idx] & PTE_P) {
-		if (table[idx] & PTE_PS) return 0;  /* huge page, can't descend */
+		if (table[idx] & PTE_PS) return 0;  /* huge page */
+		/* propagate flags (e.g. PTE_U) that the existing entry may lack */
+		table[idx] |= eflags & PTE_U;
 		return (uint64_t *)(table[idx] & ~0xFFFUL);
 	}
 	uint64_t *child = alloc_table();

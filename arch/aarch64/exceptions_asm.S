@@ -131,9 +131,15 @@ irq_handler:
 sync_handler:
 	save_trapframe
 	mrs  x0, esr_el1
-	lsr  x1, x0, #26
+	ubfx x1, x0, #26, #6   /* EC = esr[31:26] */
 	cmp  x1, #0x15
-	b.ne .sync_not_svc
+	b.ne .sync_fault
+
+	/* EC=0x15: SVC — check immediate (ISS = esr[15:0]) */
+	and  x2, x0, #0xFFFF
+	cbnz x2, .syscall
+
+	/* SVC #0: yield */
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
@@ -143,7 +149,18 @@ sync_handler:
 	restore_trapframe
 	eret
 
-.sync_not_svc:
+.syscall:
+	/* SVC #1: syscall from user */
+	bl   task_current
+	mov  x1, sp
+	str  x1, [x0, #16]
+	mov  x0, sp              /* arg: arch_context_t* */
+	bl   syscall_handle
+	bl   sched_get_current_ctx
+	restore_trapframe
+	eret
+
+.sync_fault:
 	bl   sync_dispatch
 	b    .
 
