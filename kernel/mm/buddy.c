@@ -2,7 +2,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 
-#define MAX_PAGES  32768   /* 128 MB / 4 KB */
+#define MAX_PAGES  262144  /* 1 GB / 4 KB */
 
 struct node { struct node *next; };
 
