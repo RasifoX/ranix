@@ -24,6 +24,13 @@ static void cmd_help(void)
     kprintf("drivers  - list drivers\n");
     kprintf("ps       - list tasks\n");
     kprintf("dtb      - device tree info\n");
+    kprintf("fault    - trigger test fault\n");
+}
+
+static void cmd_fault(void)
+{
+    volatile uint32_t *p = (volatile uint32_t *)0xdeadbeef;
+    *p = 0;
 }
 
 static void cmd_info(void)
@@ -104,6 +111,8 @@ static void execute(const char *line)
         cmd_ps();
     else if (strcmp(line, "dtb") == 0)
         cmd_dtb();
+    else if (strcmp(line, "fault") == 0)
+        cmd_fault();
     else
         kprintf("Unknown command: %s\n", line);
 }
