@@ -1,109 +1,117 @@
-#include <kernel/sched.h>
+#include <kernel/proc.h>
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 #include <kernel/irq.h>
-#include <kernel/mm/pmm.h>
+#include <kernel/mm/buddy.h>
 #include <kernel/lib/string.h>
 
-static task_t  tasks[TASK_MAX];
-static int     task_cnt = 0;
-static task_t *current_task = NULL;
+static process_t *proctab[PROC_MAX];
+static process_t  idle_proc;
+static int        proc_cnt  = 0;
+static process_t *current   = NULL;
 
-static void set_name(task_t *t, const char *s)
-{
-	int i;
-	for (i = 0; i < TASK_NAME_MAX - 1 && s[i]; i++)
-		t->name[i] = s[i];
-	t->name[i] = '\0';
-}
+/* ── scheduler ───────────────────────────────────────────── */
 
 void sched_init(void)
 {
-	task_t *t = &tasks[0];
-	t->id         = 0;
-	t->state      = TASK_RUNNING;
-	t->ctx        = 0;
-	t->entry      = 0;
-	t->stack_base = 0;
-	t->vm         = 0;
-	set_name(t, "idle");
-	t->next = t;
+	process_t *p = &idle_proc;
+	memset(p, 0, sizeof(*p));
+	p->pid   = 0;
+	p->state = PROC_RUNNING;
+	p->ppid  = 0;
+	p->uid   = 0;
+	p->gid   = 0;
+	p->next  = p;
+	memcpy(p->name, "idle", 5);
 
-	current_task = t;
-	task_cnt = 1;
+	proctab[0] = p;
+	current    = p;
+	proc_cnt   = 1;
 }
 
-int task_create(const char *name, void (*fn)(void))
+pid_t proc_create(const char *name, void (*fn)(void))
 {
-	if (task_cnt >= TASK_MAX)
+	if (proc_cnt >= PROC_MAX)
 		return -1;
 
-	task_t *t = &tasks[task_cnt];
-	t->id    = task_cnt;
-	t->state = TASK_READY;
-	t->entry = fn;
-	t->vm    = 0;
-	set_name(t, name);
+	process_t *p = buddy_alloc(0);
+	if (!p) return -1;
+	memset(p, 0, sizeof(*p));
 
-	uint8_t *p0 = (uint8_t *)pmm_alloc();
-	uint8_t *p1 = (uint8_t *)pmm_alloc();
-	(void)p1;
-	if (!p0 || !p1)
-		return -1;
-	t->stack_base = p0;
+	p->pid   = proc_cnt;
+	p->ppid  = current->pid;
+	p->state = PROC_READY;
+	p->uid   = current->uid;
+	p->gid   = current->gid;
+	p->entry = fn;
 
-	uint8_t *sp_top = p0 + TASK_STACK_SIZE;
+	int nlen = 0;
+	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
+	memcpy(p->name, name, nlen);
+	p->name[nlen] = '\0';
+
+	/* kernel stack */
+	p->kstack = buddy_alloc(1);   /* 2 pages = 8 KB */
+	if (!p->kstack) { buddy_free((uint64_t)p, 0); return -1; }
+
+	uint8_t *sp_top = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
 	arch_context_init(ctx, fn, (uint64_t)sp_top);
-	t->ctx = ctx;
+	p->ctx = ctx;
 
-	t->next = current_task->next;
-	current_task->next = t;
+	/* insert into scheduler ring */
+	p->next = current->next;
+	current->next = p;
 
-	task_cnt++;
-	kprintf("[sched] task %d '%s'\n", (int)t->id, t->name);
-	return (int)t->id;
+	proctab[proc_cnt++] = p;
+	kprintf("[sched] proc %d '%s'\n", (int)p->pid, p->name);
+	return p->pid;
+}
+
+process_t *proc_find(pid_t pid)
+{
+	if (pid < 0 || pid >= proc_cnt) return NULL;
+	return proctab[pid];
 }
 
 void schedule(void)
 {
-	task_t *prev = current_task;
-	task_t *next = prev->next;
+	process_t *prev = current;
+	process_t *next = prev->next;
 
 	while (next != prev) {
-		if (next->state == TASK_READY || next->state == TASK_RUNNING)
+		if (next->state == PROC_READY || next->state == PROC_RUNNING)
 			break;
 		next = next->next;
 	}
 
-	if (next == prev || next->state != TASK_READY)
+	if (next == prev || next->state != PROC_READY)
 		return;
 
-	if (prev->state == TASK_RUNNING)
-		prev->state = TASK_READY;
+	if (prev->state == PROC_RUNNING)
+		prev->state = PROC_READY;
 
-	next->state  = TASK_RUNNING;
-	current_task = next;
+	next->state = PROC_RUNNING;
+	current     = next;
 }
 
 void yield(void)      { arch_yield(); }
-void task_sleep(void) { current_task->state = TASK_SLEEPING; arch_yield(); }
-void task_exit(void)  { current_task->state = TASK_DEAD;     arch_yield(); }
+void task_sleep(void) { current->state = PROC_SLEEPING; arch_yield(); }
+void task_exit(void)  { current->state = PROC_DEAD;     arch_yield(); }
 
-void task_wake(task_t *t)
+void task_wake(process_t *p)
 {
-	if (t->state == TASK_SLEEPING)
-		t->state = TASK_READY;
+	if (p && p->state == PROC_SLEEPING)
+		p->state = PROC_READY;
 }
 
-arch_context_t *sched_get_current_ctx(void) { return current_task->ctx; }
+arch_context_t *sched_get_current_ctx(void) { return current->ctx; }
 
-task_t *task_current(void) { return current_task; }
-int     task_count(void)   { return task_cnt; }
+process_t *task_current(void) { return current; }
+int        task_count(void)   { return proc_cnt; }
 
-task_t *task_get(int index)
+process_t *task_get(int i)
 {
-	if (index < 0 || index >= task_cnt)
-		return 0;
-	return &tasks[index];
+	if (i < 0 || i >= proc_cnt) return NULL;
+	return proctab[i];
 }
