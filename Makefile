@@ -66,6 +66,7 @@ SRCS_KERNEL = \
     kernel/sched.c \
     kernel/shell.c \
     kernel/tty/fb_tty.c \
+    kernel/sync.c \
     kernel/mm/buddy.c \
     kernel/mm/pmm.c \
     kernel/mm/heap.c \
