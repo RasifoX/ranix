@@ -41,25 +41,20 @@ static void scroll_up(void)
     u32 row_bytes = FONT_H * _fb->pitch;
     u32 max_scroll = _fb->virt_height - _fb->height;
 
-    /* shift shadow up — cached RAM, fast */
     memcpy(shadow, shadow + row_bytes, (_rows - 1) * row_bytes);
 
-    /* clear last row in shadow */
     u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
     u64 *last = (u64 *)(shadow + (_rows - 1) * row_bytes);
     u32 count = row_bytes / 8;
     for (u32 i = 0; i < count; i++)
         last[i] = bg;
 
-    /* advance GPU scroll */
     _scroll_y += FONT_H;
 
     if (_scroll_y > max_scroll) {
-        /* out of virtual space — reset to top, one full flush */
         _scroll_y = 0;
         flush_all();
     } else {
-        /* just clear the new bottom row directly in the virtual FB */
         u32 bottom_abs = _scroll_y + (_rows - 1) * FONT_H;
         u64 *fb_last = (u64 *)((u8 *)_fb->fb + bottom_abs * _fb->pitch);
         for (u32 i = 0; i < count; i++)
@@ -100,14 +95,12 @@ void fb_tty_init(fb_info_t *fb)
     _dirty_y0 = fb->height;
     _dirty_y1 = 0;
 
-    /* clear shadow */
     u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
     u64 *p = (u64 *)shadow;
     u32 total = (fb->pitch / 8) * fb->height;
     for (u32 i = 0; i < total; i++)
         p[i] = bg;
 
-    /* clear only visible region of virtual FB */
     flush_all();
 }
 
