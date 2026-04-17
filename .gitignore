@@ -1,0 +1,8 @@
+build/
+ranix.iso
+iso/
+kernel8.img
+*.o
+*.elf
+*.bin
+.claude/
