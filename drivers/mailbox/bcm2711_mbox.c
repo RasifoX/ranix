@@ -42,6 +42,26 @@ int mbox_call(u8 channel, volatile u32 *msg) {
     }
 }
 
+int mbox_get_display_size(u32 *w, u32 *h)
+{
+    u32 i = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = MBOX_TAG_GET_PHYS_WH;
+    mbox_buf[i++] = 8;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = MBOX_TAG_END;
+    mbox_buf[0] = i * sizeof(u32);
+
+    if (mbox_call(MBOX_CH_PROP, mbox_buf) != 0) return -1;
+    if (mbox_buf[5] == 0 || mbox_buf[6] == 0) return -1;
+    *w = mbox_buf[5];
+    *h = mbox_buf[6];
+    return 0;
+}
+
 int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
     u32 i = 0;
 

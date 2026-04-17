@@ -129,8 +129,13 @@ static void cmd_fault(void)
 static void cmd_info(void)
 {
     kprintf("Ranix kernel\n");
+#if defined(__aarch64__)
     kprintf("Arch: aarch64\n");
-    kprintf("Display: 800x480 32bpp\n");
+#elif defined(__x86_64__)
+    kprintf("Arch: x86_64\n");
+#else
+    kprintf("Arch: unknown\n");
+#endif
 }
 
 static void cmd_mem(void)
@@ -217,6 +222,7 @@ void shell_init(void)
     cmd_len = 0;
     cmd_buf[0] = '\0';
     kprintf(PROMPT);
+    kprintf_flush();
 }
 
 void shell_poll(void)
@@ -237,7 +243,7 @@ void shell_poll(void)
             }
         } else if (c >= 32 && c < 127 && cmd_len < CMD_MAX - 1) {
             cmd_buf[cmd_len++] = c;
-            uart_putc(c);
+            kprintf("%c", c);
         }
     }
     kprintf_flush();

@@ -4,6 +4,7 @@
 #include <drivers/mailbox/mbox.h>
 #include <kernel/board.h>
 #include <kernel/irq.h>
+#include <kernel/kprintf.h>
 
 static board_config_t config = {
 	.name          = "Raspberry Pi 4",
@@ -27,7 +28,14 @@ void board_early_init(void)
 int board_fb_alloc(fb_info_t *out)
 {
 	mbox_init(config.mbox_base, config.bus_offset);
-	if (mbox_fb_init(config.fb_width, config.fb_height, out) != 0)
+
+	u32 w = config.fb_width, h = config.fb_height;
+	if (mbox_get_display_size(&w, &h) == 0)
+		kprintf("[  mem] display: %dx%d (GPU)\n", (int)w, (int)h);
+	else
+		kprintf("[  mem] display: %dx%d (default)\n", (int)w, (int)h);
+
+	if (mbox_fb_init(w, h, out) != 0)
 		return -1;
 	out->set_virt_offset = mbox_set_virt_offset;
 	return 0;
