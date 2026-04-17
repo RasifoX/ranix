@@ -42,6 +42,7 @@ void kernel_main(void)
 	if (ram_size > 0x40000000ULL) ram_size = 0x40000000ULL;
 	mmu_set_ram_limit(ram_size);
 
+	/* allocate framebuffer before MMU so we can mark the region NC */
 	fb_info_t fb;
 	uint64_t fb_phys = 0;
 	if (board_fb_alloc(&fb) == 0) {
@@ -52,20 +53,21 @@ void kernel_main(void)
 
 	mmu_init();
 
+	kprintf("[ranix] Ranix\n");
+	if (fdt_ok == 0)
+		kprintf("[ranix] %s, %d cores\n", fi->model, (int)fi->num_cpus);
+	else
+		kprintf("[ranix] %s\n", cfg->name);
+
+	setup_physical_memory(fb_phys, ram_size);
+	heap_init();
+
+	/* framebuffer TTY needs kmalloc — init after heap */
 	if (fb_phys) {
 		fb_tty_init(&fb);
 		kprintf_set_fb();
 	}
 
-	kprintf("[ranix] Ranix\n");
-	if (fdt_ok == 0) {
-		kprintf("[ranix] %s, %d cores\n", fi->model, (int)fi->num_cpus);
-	} else {
-		kprintf("[ranix] %s\n", cfg->name);
-	}
-
-	setup_physical_memory(fb_phys, ram_size);
-	heap_init();
 	irq_init();
 	board_irq_init();
 
