@@ -19,5 +19,5 @@ void irq_handle(uint32_t irq) {
     if (irq < MAX_IRQS && handlers[irq])
         handlers[irq]();
     else
-        kprintf("[IRQ] Unhandled: %d\n", irq);
+        kprintf("[  irq] unhandled #%d\n", irq);
 }
