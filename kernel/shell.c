@@ -236,6 +236,7 @@ void shell_poll(void)
             execute(cmd_buf);
             cmd_len = 0;
             kprintf(PROMPT);
+            kprintf_flush();
         } else if (c == 127 || c == '\b') {
             if (cmd_len > 0) {
                 cmd_len--;
