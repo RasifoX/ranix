@@ -1,4 +1,5 @@
 #include <drivers/serial/uart.h>
+#include <kernel/hal.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/tty/fb_tty.h>
@@ -72,8 +73,10 @@ void kprintf_flush(void)
 
 void kpanic(const char *msg)
 {
-	_puts("\n[RANIX PANIC] ");
+	irq_disable();
+	_puts("\n[PANIC] ");
 	_puts(msg);
-	_puts("\n");
-	while (1);
+	_puts("\n--- halted ---\n");
+	for (;;)
+		arch_halt();
 }
