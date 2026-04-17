@@ -224,7 +224,7 @@ int fdt_init(void *dtb_addr)
 
     fdt_header_t *hdr = (fdt_header_t *)dtb_addr;
     if (be32(&hdr->magic) != FDT_MAGIC) {
-        kprintf("[FDT] bad magic: %x\n", be32(&hdr->magic));
+        kprintf("[  fdt] bad magic: %x\n", be32(&hdr->magic));
         return -1;
     }
 
@@ -233,12 +233,12 @@ int fdt_init(void *dtb_addr)
 
     parse_info();
 
-    kprintf("[FDT] model: %s\n", _info.model);
-    kprintf("[FDT] RAM: %x - %x (%d MB)\n",
+    kprintf("[  fdt] model: %s\n", _info.model);
+    kprintf("[  fdt] RAM: %x - %x (%d MB)\n",
             (unsigned int)_info.mem_base,
             (unsigned int)(_info.mem_base + _info.mem_size),
             (int)(_info.mem_size >> 20));
-    kprintf("[FDT] CPUs: %d\n", (int)_info.num_cpus);
+    kprintf("[  fdt] CPUs: %d\n", (int)_info.num_cpus);
 
     return 0;
 }
