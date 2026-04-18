@@ -33,11 +33,11 @@ void exc_dispatch(arch_context_t *ctx)
 {
 	kprintf("\n--- kernel fault ---\n");
 	kprintf("type:  #%d %s\n", (int)ctx->vector, exc_name(ctx->vector));
-	kprintf("RIP:   0x%x\n", (unsigned int)ctx->rip);
-	kprintf("ERR:   0x%x\n", (unsigned int)ctx->error_code);
+	kprintf("RIP:   %x\n", (unsigned int)ctx->rip);
+	kprintf("ERR:   %x\n", (unsigned int)ctx->error_code);
 	if (ctx->vector == 14)
-		kprintf("CR2:   0x%x\n", (unsigned int)read_cr2());
-	kprintf("RFLAGS:0x%x\n", (unsigned int)ctx->rflags);
-	kprintf("RSP:   0x%x\n", (unsigned int)ctx->rsp);
+		kprintf("CR2:   %x\n", (unsigned int)read_cr2());
+	kprintf("RFLAGS:%x\n", (unsigned int)ctx->rflags);
+	kprintf("RSP:   %x\n", (unsigned int)ctx->rsp);
 	kpanic("unhandled exception");
 }

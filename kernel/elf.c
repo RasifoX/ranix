@@ -72,6 +72,19 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out)
 			(void)page_off; (void)seg_off; (void)data_start;
 
 			vm_map(vm, va, (uint64_t)page, vmflags);
+
+#if defined(__aarch64__)
+			/* D-cache → PoC flush + I-cache invalidate so EL0 instruction
+			 * fetch sees the code we just wrote via memcpy. Without this,
+			 * dirty D-cache lines may not reach L2 before the I-cache
+			 * tries to fetch them at the user VA after eret. */
+			{
+				uintptr_t p = (uintptr_t)page;
+				for (uintptr_t l = p; l < p + PAGE_SIZE; l += 64)
+					__asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
+				__asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory");
+			}
+#endif
 		}
 	}
 

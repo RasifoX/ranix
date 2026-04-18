@@ -13,11 +13,12 @@
 #include <kernel/vfs.h>
 
 extern char     __bss_end;
+extern char     __stack_top;
 extern uint64_t _dtb_ptr;
 
 static void setup_physical_memory(uint64_t fb_phys, uint64_t ram_limit)
 {
-	uint64_t start = ((uint64_t)&__bss_end + 15) & ~15ULL;
+	uint64_t start = ((uint64_t)&__stack_top + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 	uint64_t end   = fb_phys && fb_phys > start && fb_phys < ram_limit
 	                 ? fb_phys : ram_limit;
 	uint64_t size  = end - start;
@@ -43,7 +44,7 @@ void kernel_main(void)
 	mmu_set_ram_limit(ram_size);
 
 	/* allocate framebuffer before MMU so we can mark the region NC */
-	fb_info_t fb;
+	static fb_info_t fb;
 	uint64_t fb_phys = 0;
 	if (board_fb_alloc(&fb) == 0) {
 		uint64_t fb_start = (uint64_t)fb.fb & ~0x1FFFFFULL;
