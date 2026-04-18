@@ -37,9 +37,22 @@ typedef struct {
 #define CTX_SYSCALL_RET(ctx, v) ((ctx)->rax = (uint64_t)(long)(v))
 
 /* Linux x86_64 syscall numbers */
-#define SYS_ARCH_READ    0
-#define SYS_ARCH_WRITE   1
-#define SYS_ARCH_EXIT   60
-#define SYS_ARCH_GETPID 39
+#define SYS_ARCH_READ          0
+#define SYS_ARCH_WRITE         1
+#define SYS_ARCH_OPEN          2
+#define SYS_ARCH_CLOSE         3
+#define SYS_ARCH_FSTAT         5
+#define SYS_ARCH_LSEEK         8
+#define SYS_ARCH_BRK          12
+#define SYS_ARCH_IOCTL        16
+#define SYS_ARCH_GETPID       39
+#define SYS_ARCH_EXIT         60
+#define SYS_ARCH_MKDIR        83
+#define SYS_ARCH_UNLINK       87
+#define SYS_ARCH_GETDENTS64  217
+#define SYS_ARCH_OPENAT      257
+#define SYS_ARCH_NEWFSTATAT  262
+#define SYS_ARCH_UNLINKAT    263
+#define SYS_ARCH_MKDIRAT     258
 
 #endif

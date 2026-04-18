@@ -6,13 +6,18 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
-
 static process_t *proctab[PROC_MAX];
 static process_t  idle_proc;
+static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 static process_t *current   = NULL;
 
 /* ── scheduler ───────────────────────────────────────────── */
+
+static void idle_loop(void)
+{
+	while (1) arch_halt();
+}
 
 void sched_init(void)
 {
@@ -23,8 +28,15 @@ void sched_init(void)
 	p->ppid  = 0;
 	p->uid   = 0;
 	p->gid   = 0;
+	p->entry = idle_loop;
 	p->next  = p;
+	p->kstack = idle_kstack;
 	memcpy(p->name, "idle", 5);
+
+	uint8_t *sp_top = idle_kstack + KSTACK_SIZE;
+	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
+	arch_context_init(ctx, idle_loop, (uint64_t)sp_top);
+	p->ctx = ctx;
 
 	proctab[0] = p;
 	current    = p;
@@ -66,15 +78,14 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	current->next = p;
 
 	proctab[proc_cnt++] = p;
-	kprintf("[sched] proc %d '%s'\n", (int)p->pid, p->name);
 	return p->pid;
 }
 
 /* user address space layout */
 /* User space lives above the kernel's 1GB identity map (0-0x40000000).
  * On x86_64: above 1GB boot page tables. On aarch64: above L1[3] device. */
-#define USER_CODE_BASE   0x100000000UL  /* 4 GB */
-#define USER_STACK_TOP   0x100200000UL  /* 4 GB + 2 MB */
+#define USER_CODE_BASE   0x400000UL     /* 4 MB — Linux'un kullandığı adres */
+#define USER_STACK_TOP   0x800000UL
 #define USER_STACK_PAGES 2
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
@@ -124,16 +135,12 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 	arch_context_init_user(ctx, entry, USER_STACK_TOP);
 	p->ctx = ctx;
-
 	/* fd table — stdin/stdout/stderr as NULL for now */
 	p->fds = fd_table_create();
 
 	p->next = current->next;
 	current->next = p;
 	proctab[proc_cnt++] = p;
-
-	kprintf("[sched] exec '%s' pid=%d entry=%x\n",
-	        p->name, (int)p->pid, (unsigned int)entry);
 	return p->pid;
 
 fail:
@@ -147,22 +154,39 @@ process_t *proc_find(pid_t pid)
 	return proctab[pid];
 }
 
+void proc_wait(pid_t pid)
+{
+	process_t *p = proc_find(pid);
+	while (p && p->state != PROC_DEAD)
+		arch_yield();
+}
+
 void schedule(void)
 {
 	process_t *prev = current;
-	process_t *next = prev->next;
 
+	if (prev->state == PROC_RUNNING)
+		prev->state = PROC_READY;
+
+	process_t *next = prev->next;
 	while (next != prev) {
-		if (next->state == PROC_READY || next->state == PROC_RUNNING)
+		if (next->state == PROC_READY)
 			break;
 		next = next->next;
 	}
 
-	if (next == prev || next->state != PROC_READY)
-		return;
-
-	if (prev->state == PROC_RUNNING)
-		prev->state = PROC_READY;
+	if (next == prev || next->state != PROC_READY) {
+		/* nothing ready — fall back to idle */
+		if (prev->state == PROC_READY && prev != &idle_proc) {
+			next = &idle_proc;
+		} else if (prev == &idle_proc) {
+			prev->state = PROC_RUNNING;
+			return;
+		} else {
+			/* prev dead/sleeping and no ready task — go idle */
+			next = &idle_proc;
+		}
+	}
 
 	next->state = PROC_RUNNING;
 	current     = next;
@@ -170,7 +194,11 @@ void schedule(void)
 
 void yield(void)      { arch_yield(); }
 void task_sleep(void) { current->state = PROC_SLEEPING; arch_yield(); }
-void task_exit(void)  { current->state = PROC_DEAD;     arch_yield(); }
+void task_exit(void)
+{
+	current->state = PROC_DEAD;
+	arch_yield();
+}
 
 void task_wake(process_t *p)
 {

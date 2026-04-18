@@ -2,11 +2,9 @@
 #include <kernel/proc.h>
 #include <kernel/vfs.h>
 #include <kernel/kprintf.h>
-
 static long sys_write(int fd, const void *buf, size_t len)
 {
 	if (fd == 1 || fd == 2) {
-		/* stdout/stderr — write directly to UART + framebuffer */
 		const char *p = buf;
 		for (size_t i = 0; i < len; i++)
 			kprintf("%c", p[i]);
