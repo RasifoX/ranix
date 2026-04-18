@@ -4,7 +4,7 @@ enable_mmu:
     ldr x1, =0x000000000044FF00
     msr mair_el1, x1
 
-    ldr x1, =0x5B510019
+    ldr x1, =0x5B513519
     msr tcr_el1, x1
     isb
 

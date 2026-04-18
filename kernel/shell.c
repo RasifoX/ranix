@@ -52,16 +52,16 @@ static const uint8_t test_elf[] = {
     0x26,0,0,0, 0,0,0,0,        /* memsz  = 38 */
     0x00,0x10,0,0, 0,0,0,0,     /* align = 0x1000 */
 
-    /* Code + data at offset 120 (vaddr 0x400000) */
-    /* mov x8, #64  (SYS_WRITE) */ 0x08,0x08,0x80,0xD2,
-    /* mov x0, #1   (fd=1)      */ 0x20,0x00,0x80,0xD2,
-    /* adr x1, +24  (&msg)      */ 0xC1,0x00,0x00,0x10,
-    /* mov x2, #6   (len)       */ 0xC2,0x00,0x80,0xD2,
-    /* svc #1                   */ 0x21,0x00,0x00,0xD4,
-    /* mov x8, #93  (SYS_EXIT)  */ 0xA8,0x0B,0x80,0xD2,
-    /* mov x0, #0               */ 0x00,0x00,0x80,0xD2,
-    /* svc #1                   */ 0x21,0x00,0x00,0xD4,
-    /* msg: "hello\n"           */ 'h','e','l','l','o','\n',
+   /* svc #0 = 0x01,0x00,0x00,0xD4 */
+/* mov x8, #64  */ 0x08,0x08,0x80,0xD2,
+/* mov x0, #1   */ 0x20,0x00,0x80,0xD2,
+/* adr x1, +24  */ 0xC1,0x00,0x00,0x10,
+/* mov x2, #6   */ 0xC2,0x00,0x80,0xD2,
+/* svc #1       */ 0x21,0x00,0x00,0xD4,
+/* mov x8, #93  */ 0xA8,0x0B,0x80,0xD2,
+/* mov x0, #0   */ 0x00,0x00,0x80,0xD2,
+/* svc #1       */ 0x21,0x00,0x00,0xD4,  
+/* "hello\n"    */ 'h','e','l','l','o','\n',
 };
 #elif defined(__x86_64__)
 static const uint8_t test_elf[] = {
@@ -98,10 +98,10 @@ static const uint8_t test_elf[] = {
     /* mov $1, %rdi          */ 0x48,0xC7,0xC7,0x01,0,0,0,
     /* lea 0x15(%rip), %rsi  */ 0x48,0x8D,0x35,0x15,0,0,0,
     /* mov $6, %rdx          */ 0x48,0xC7,0xC2,0x06,0,0,0,
-    /* int $0x80             */ 0xCD,0x80,
+    /* syscall               */ 0x0F,0x05,
     /* mov $60, %rax         */ 0x48,0xC7,0xC0,0x3C,0,0,0,
     /* xor %rdi, %rdi        */ 0x48,0x31,0xFF,
-    /* int $0x80             */ 0xCD,0x80,
+    /* syscall               */ 0x0F,0x05,
     /* msg: "hello\n"        */ 'h','e','l','l','o','\n',
 };
 #endif
@@ -211,8 +211,10 @@ static void execute(const char *line)
         cmd_dtb();
     else if (strcmp(line, "fault") == 0)
         cmd_fault();
-    else if (strcmp(line, "hello") == 0)
-        proc_exec("hello", test_elf, sizeof(test_elf));
+    else if (strcmp(line, "hello") == 0) {
+        pid_t pid = proc_exec("hello", test_elf, sizeof(test_elf));
+        if (pid >= 0) proc_wait(pid);
+    }
     else
         kprintf("Unknown command: %s\n", line);
 }

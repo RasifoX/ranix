@@ -22,7 +22,6 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 
 void arch_set_user_kstack(uint64_t kstack_top)
 {
-	/* On aarch64 EL0→EL1 exceptions land on SP_EL1.
-	 * Update it so each user process gets its own kernel stack. */
-	__asm__ volatile("msr sp_el1, %0; isb" :: "r"(kstack_top));
+	(void)kstack_top;
+	/* SP_EL1 is updated in restore_trapframe before every eret. */
 }

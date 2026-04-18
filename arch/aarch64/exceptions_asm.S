@@ -26,10 +26,10 @@
 	stp x26, x27, [sp, #208]
 	stp x28, x29, [sp, #224]
 	str x30,      [sp, #240]
-	add x0, sp, #TF_SIZE
+	mrs x0, sp_el0
+	str x0, [sp, #248]
 	mrs x1, elr_el1
 	mrs x2, spsr_el1
-	str x0, [sp, #248]
 	str x1, [sp, #256]
 	str x2, [sp, #264]
 .endm
@@ -40,11 +40,13 @@
 	ldr x2, [sp, #264]
 	msr elr_el1, x1
 	msr spsr_el1, x2
-	ldp x0,  x1,  [sp, #0]
-	ldp x2,  x3,  [sp, #16]
-	ldp x4,  x5,  [sp, #32]
-	ldp x6,  x7,  [sp, #48]
-	ldp x8,  x9,  [sp, #64]
+	ldr x1, [sp, #248]
+	msr sp_el0, x1
+	ldr  x1,      [sp, #8]    /* load x1..x30 first, restore x0 last */
+	ldp  x2,  x3, [sp, #16]
+	ldp  x4,  x5, [sp, #32]
+	ldp  x6,  x7, [sp, #48]
+	ldp  x8,  x9, [sp, #64]
 	ldp x10, x11, [sp, #80]
 	ldp x12, x13, [sp, #96]
 	ldp x14, x15, [sp, #112]
@@ -56,7 +58,9 @@
 	ldp x26, x27, [sp, #208]
 	ldp x28, x29, [sp, #224]
 	ldr x30,      [sp, #240]
-	add sp, sp, #TF_SIZE
+	add sp, sp, #TF_SIZE       /* sp = SP_EL1 = kstack_top (EL1h alias) */
+	sub x0, sp, #TF_SIZE       /* x0 = frame base */
+	ldr x0, [x0]               /* restore original x0 */
 .endm
 
 .section ".vectors", "ax"
@@ -78,7 +82,7 @@ exception_vectors:
 	.balign 128
 	b irq_handler
 	.balign 128
-	b default_handler
+	b irq_handler
 	.balign 128
 	b default_handler
 
@@ -88,7 +92,7 @@ exception_vectors:
 	.balign 128
 	b irq_handler
 	.balign 128
-	b default_handler
+	b irq_handler
 	.balign 128
 	b default_handler
 
@@ -150,7 +154,6 @@ sync_handler:
 	eret
 
 .syscall:
-	/* SVC #1: syscall from user */
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
@@ -165,4 +168,5 @@ sync_handler:
 	b    .
 
 default_handler:
+	dbg_char 'D'
 	b default_handler
