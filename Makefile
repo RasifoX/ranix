@@ -103,14 +103,8 @@ all: userspace $(TARGET)
 
 userspace: userspace/hello_elf.h
 
-ifeq ($(ARCH),x86_64)
-userspace/hello: userspace/hello_x86_64.asm
-	nasm -f elf64 $< -o /tmp/hello_x86_64.o
-	ld -static -nostdlib -m elf_x86_64 /tmp/hello_x86_64.o -o $@
-else
 userspace/hello: userspace/hello.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-endif
 
 userspace/hello_elf.h: userspace/hello
 	xxd -i $< | \
