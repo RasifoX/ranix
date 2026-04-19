@@ -317,6 +317,24 @@ int vfs_mkdir(const char *path, mode_t mode)
 	return 0;
 }
 
+int vfs_unlink(const char *path)
+{
+	const char *slash = path + strlen(path) - 1;
+	while (slash > path && *slash != '/') slash--;
+
+	char dir_path[256];
+	int dlen = (int)(slash - path);
+	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
+	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+
+	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink)
+		return -1;
+
+	const char *fname = slash + 1;
+	return parent->inode->iops->unlink(parent->inode, fname);
+}
+
 /* write a file from kernel data without going through the fd table */
 int vfs_kernel_install(const char *path, const void *data, size_t len)
 {

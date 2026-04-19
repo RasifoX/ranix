@@ -138,7 +138,9 @@ ssize_t    vfs_read(int fd, void *buf, size_t len);
 ssize_t    vfs_write(int fd, const void *buf, size_t len);
 off_t      vfs_seek(int fd, off_t off, int whence);
 int        vfs_mkdir(const char *path, mode_t mode);
+int        vfs_unlink(const char *path);
 int        vfs_kernel_install(const char *path, const void *data, size_t len);
+
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 
