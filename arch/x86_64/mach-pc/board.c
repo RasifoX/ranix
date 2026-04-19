@@ -15,12 +15,9 @@ static board_config_t config = {
 	.fb_height = 0,
 };
 
-extern void arch_syscall_init(void);
-
 void board_early_init(void)
 {
 	uart16550_init();
-	arch_syscall_init();
 }
 
 int board_fb_alloc(fb_info_t *out)

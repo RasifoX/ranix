@@ -1,12 +1,17 @@
+.arch armv8-a+fp+simd
+
 /*
- * arch_context_t layout (272 bytes, fixed — offsets hardcoded below):
+ * arch_context_t layout (792 bytes):
  *   0   x0-x30  (248 bytes)
  *   248 sp
  *   256 elr_el1
  *   264 spsr_el1
+ *   272 q0-q31  (512 bytes)
+ *   784 fpsr
+ *   788 fpcr
  */
 
-#define TF_SIZE 272
+#define TF_SIZE 792
 
 .macro save_trapframe
 	sub sp, sp, #TF_SIZE
@@ -32,10 +37,53 @@
 	mrs x2, spsr_el1
 	str x1, [sp, #256]
 	str x2, [sp, #264]
+	/* q0-q31 */
+	stp q0,  q1,  [sp, #272]
+	stp q2,  q3,  [sp, #304]
+	stp q4,  q5,  [sp, #336]
+	stp q6,  q7,  [sp, #368]
+	stp q8,  q9,  [sp, #400]
+	stp q10, q11, [sp, #432]
+	stp q12, q13, [sp, #464]
+	stp q14, q15, [sp, #496]
+	stp q16, q17, [sp, #528]
+	stp q18, q19, [sp, #560]
+	stp q20, q21, [sp, #592]
+	stp q22, q23, [sp, #624]
+	stp q24, q25, [sp, #656]
+	stp q26, q27, [sp, #688]
+	stp q28, q29, [sp, #720]
+	stp q30, q31, [sp, #752]
+	mrs x0, fpsr
+	mrs x1, fpcr
+	str w0, [sp, #784]
+	str w1, [sp, #788]
 .endm
 
 .macro restore_trapframe
 	mov sp, x0
+	/* q0-q31 */
+	ldp q0,  q1,  [sp, #272]
+	ldp q2,  q3,  [sp, #304]
+	ldp q4,  q5,  [sp, #336]
+	ldp q6,  q7,  [sp, #368]
+	ldp q8,  q9,  [sp, #400]
+	ldp q10, q11, [sp, #432]
+	ldp q12, q13, [sp, #464]
+	ldp q14, q15, [sp, #496]
+	ldp q16, q17, [sp, #528]
+	ldp q18, q19, [sp, #560]
+	ldp q20, q21, [sp, #592]
+	ldp q22, q23, [sp, #624]
+	ldp q24, q25, [sp, #656]
+	ldp q26, q27, [sp, #688]
+	ldp q28, q29, [sp, #720]
+	ldp q30, q31, [sp, #752]
+	ldr w1, [sp, #784]
+	ldr w2, [sp, #788]
+	msr fpsr, x1
+	msr fpcr, x2
+	/* GPRs */
 	ldr x1, [sp, #256]
 	ldr x2, [sp, #264]
 	msr elr_el1, x1
