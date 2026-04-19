@@ -12,6 +12,8 @@ static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 static process_t *current   = NULL;
 
+int need_resched = 0;
+
 /* ── scheduler ───────────────────────────────────────────── */
 
 static void idle_loop(void)
@@ -68,6 +70,8 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->kstack = buddy_alloc(1);   /* 2 pages = 8 KB */
 	if (!p->kstack) { buddy_free((uint64_t)p, 0); return -1; }
 
+	p->fds = fd_table_create();
+
 	uint8_t *sp_top = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
 	arch_context_init(ctx, fn, (uint64_t)sp_top);
@@ -119,8 +123,9 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		goto fail;
 	}
 
-	p->brk       = load_end;
-	p->mmap_next = USER_MMAP_BASE;
+	p->brk          = load_end;
+	p->mmap_next    = USER_MMAP_BASE;
+	p->vfork_parent = -1;
 
 	/* allocate and map user stack */
 	for (int i = 0; i < USER_STACK_PAGES; i++) {
@@ -151,6 +156,49 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 fail:
 	buddy_free((uint64_t)p, 0);
 	return -1;
+}
+
+pid_t proc_vfork(void)
+{
+	if (proc_cnt >= PROC_MAX) return -1;
+
+	process_t *parent = current;
+
+	process_t *child = buddy_alloc(0);
+	if (!child) return -1;
+	memset(child, 0, sizeof(*child));
+
+	child->pid          = proc_cnt;
+	child->ppid         = parent->pid;
+	child->state        = PROC_READY;
+	child->uid          = parent->uid;
+	child->gid          = parent->gid;
+	child->vm           = parent->vm;   /* shared — child will replace on execve */
+	child->brk          = parent->brk;
+	child->mmap_next    = parent->mmap_next;
+	child->vfork_parent = parent->pid;
+	child->fds          = fd_table_create();
+	memcpy(child->name, parent->name, PROC_NAME_MAX);
+
+	child->kstack = buddy_alloc(1);
+	if (!child->kstack) { buddy_free((uint64_t)child, 0); return -1; }
+
+	/* copy parent's saved context; child returns 0 from vfork */
+	uint8_t *ksp = child->kstack + KSTACK_SIZE;
+	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
+	CTX_SYSCALL_RET(cctx, 0);
+	child->ctx = cctx;
+
+	child->next    = parent->next;
+	parent->next   = child;
+	proctab[proc_cnt++] = child;
+
+	/* suspend parent until child calls execve or exits */
+	parent->state = PROC_SLEEPING;
+	need_resched  = 1;   /* asm syscall path must schedule before eret */
+
+	return child->pid;
 }
 
 process_t *proc_find(pid_t pid)

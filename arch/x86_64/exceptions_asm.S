@@ -128,8 +128,16 @@ syscall_entry:
 	mov  %r15, 16(%rax)
 	mov  %rsp, %rdi
 	call syscall_handle
+	/* reschedule if need_resched set (e.g. after vfork) */
+	movl need_resched(%rip), %eax
+	testl %eax, %eax
+	jz   .syscall_ret
+	movl $0, need_resched(%rip)
+	call schedule
+	call vm_activate
 	call sched_get_current_ctx
 	mov  %rax, %rsp
+.syscall_ret:
 	restore_context
 	add  $16, %rsp
 	iretq

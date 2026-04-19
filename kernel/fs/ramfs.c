@@ -31,6 +31,7 @@ typedef struct {
 } ramfs_dir_t;
 
 static uint64_t next_ino = 1;
+static vfs_iops_t ramfs_iops;   /* forward declaration */
 
 static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 {
@@ -166,6 +167,7 @@ static int ramfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	if (!nrd) { buddy_free((uint64_t)in, 0); return -1; }
 	memset(nrd, 0, sizeof(*nrd));
 	in->priv = nrd;
+	in->iops = &ramfs_iops;   /* subdir must inherit iops */
 
 	ramfs_entry_t *ent = buddy_alloc(0);
 	if (!ent) { buddy_free((uint64_t)nrd, 0); buddy_free((uint64_t)in, 0); return -1; }

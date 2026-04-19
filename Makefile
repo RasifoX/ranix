@@ -70,6 +70,7 @@ endif
 
 SRCS_KERNEL = \
     kernel/main.c \
+    kernel/initrd.c \
     kernel/driver.c \
     kernel/fdt.c \
     kernel/irq.c \
@@ -101,7 +102,7 @@ OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 
 all: userspace $(TARGET)
 
-userspace: userspace/hello_elf.h
+userspace: userspace/hello_elf.h userspace/sh_elf.h
 
 userspace/hello: userspace/hello.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
@@ -110,6 +111,14 @@ userspace/hello_elf.h: userspace/hello
 	xxd -i $< | \
 	  sed 's/unsigned char .*\[\]/static const uint8_t hello_musl_elf[]/' | \
 	  sed 's/unsigned int .*_len/static const unsigned int hello_musl_elf_len/' > $@
+
+userspace/sh: userspace/sh.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
+userspace/sh_elf.h: userspace/sh
+	xxd -i $< | \
+	  sed 's/unsigned char .*\[\]/static const uint8_t sh_elf[]/' | \
+	  sed 's/unsigned int .*_len/static const unsigned int sh_elf_len/' > $@
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)

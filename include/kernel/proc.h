@@ -48,6 +48,9 @@ typedef struct process {
 
 	/* ── virtual memory regions ──────────────── */
 	vma_t          *vmas;
+
+	/* ── vfork ───────────────────────────────── */
+	pid_t           vfork_parent;  /* -1 if not a vfork child */
 } process_t;
 
 /* scheduler */
@@ -65,8 +68,12 @@ arch_context_t *sched_get_current_ctx(void);
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
+pid_t      proc_vfork(void);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);
+
+/* set by sys_vfork so the asm syscall path reschedules after handler */
+extern int need_resched;
 
 /* legacy alias — keeps old callers working */
 typedef process_t task_t;

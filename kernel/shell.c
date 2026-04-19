@@ -7,6 +7,8 @@
 #include <kernel/fdt.h>
 #include <drivers/serial/uart.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/heap.h>
+#include <kernel/vfs.h>
 #include "userspace/hello_elf.h"
 
 #define CMD_MAX 256
@@ -27,7 +29,8 @@ static void cmd_help(void)
     kprintf("ps       - list tasks\n");
     kprintf("dtb      - device tree info\n");
     kprintf("fault    - trigger test fault\n");
-    kprintf("hello    - run test user process\n");
+    kprintf("hello    - run hello binary\n");
+    kprintf("run <path> - run ELF from VFS\n");
 }
 
 static void cmd_fault(void)
@@ -123,6 +126,26 @@ static void execute(const char *line)
     else if (strcmp(line, "hello") == 0) {
         pid_t pid = proc_exec("hello", hello_musl_elf, hello_musl_elf_len);
         if (pid >= 0) proc_wait(pid);
+    }
+    else if (strncmp(line, "run ", 4) == 0) {
+        /* run /bin/foo — load ELF from VFS */
+        const char *path = line + 4;
+        vfs_stat_t st = {0};
+        if (vfs_stat(path, &st) != 0 || st.size == 0) {
+            kprintf("run: not found: %s\n", path);
+        } else {
+            uint8_t *buf = kmalloc(st.size);
+            if (buf) {
+                int fd = vfs_open(path, O_RDONLY, 0);
+                if (fd >= 0) {
+                    vfs_read(fd, buf, st.size);
+                    vfs_close(fd);
+                    pid_t pid = proc_exec(path, buf, st.size);
+                    if (pid >= 0) proc_wait(pid);
+                }
+                kfree(buf);
+            }
+        }
     }
     else
         kprintf("Unknown command: %s\n", line);
