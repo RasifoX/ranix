@@ -206,6 +206,30 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	return (long)va;
 }
 
+#if defined(__x86_64__)
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
+static long sys_arch_prctl(int code, uint64_t addr)
+{
+	if (code == ARCH_SET_FS) {
+		__asm__ volatile("wrmsr"
+			:: "c"(0xC0000100U),
+			   "a"((uint32_t)addr),
+			   "d"((uint32_t)(addr >> 32)));
+		return 0;
+	}
+	if (code == ARCH_GET_FS) {
+		uint32_t lo, hi;
+		__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100U));
+		*(uint64_t *)addr = ((uint64_t)hi << 32) | lo;
+		return 0;
+	}
+	return -22;
+}
+#endif
+
 static long sys_munmap(uint64_t addr, size_t len)
 {
 	process_t *p  = task_current();
@@ -249,6 +273,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_RT_SIGACTION:     ret = 0; break;
 	case SYS_ARCH_RT_SIGPROCMASK:   ret = 0; break;
 	case SYS_ARCH_IOCTL:            ret = -25; break;   /* -ENOTTY */
+#if defined(SYS_ARCH_ARCH_PRCTL)
+	case SYS_ARCH_ARCH_PRCTL:      ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
+#endif
 	default:
 		kprintf("[syscall] unknown #%ld\n", n);
 		break;

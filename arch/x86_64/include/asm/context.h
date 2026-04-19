@@ -61,5 +61,6 @@ typedef struct {
 #define SYS_ARCH_NEWFSTATAT  262
 #define SYS_ARCH_UNLINKAT    263
 #define SYS_ARCH_MKDIRAT     258
+#define SYS_ARCH_ARCH_PRCTL  158
 
 #endif
