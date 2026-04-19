@@ -65,7 +65,8 @@ else ifeq ($(ARCH),x86_64)
     SRCS_DRIVERS = \
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \
-        drivers/irqchip/pit/pit.c
+        drivers/irqchip/pit/pit.c \
+        drivers/input/ps2/ps2.c
 endif
 
 SRCS_KERNEL = \

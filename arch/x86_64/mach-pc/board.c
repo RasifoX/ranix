@@ -26,6 +26,8 @@ int board_fb_alloc(fb_info_t *out)
 	return -1;
 }
 
+#include <drivers/input/ps2.h>
+
 void board_irq_init(void)
 {
 	gdt_init();
@@ -33,6 +35,7 @@ void board_irq_init(void)
 	pic8259_init();
 	irq_register(0x20, pit_handler);
 	pit_init(100);
+	ps2_kbd_init();
 }
 
 void board_drivers_register(void)
