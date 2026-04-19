@@ -22,6 +22,14 @@ static board_config_t config = {
 
 void board_early_init(void)
 {
+	/* enable FP/SIMD at EL0 and EL1 (CPACR_EL1.FPEN = 0b11) */
+	__asm__ volatile(
+		"mrs x0, cpacr_el1\n"
+		"orr x0, x0, #(3 << 20)\n"
+		"msr cpacr_el1, x0\n"
+		"isb\n"
+		::: "x0"
+	);
 	uart_init();
 }
 

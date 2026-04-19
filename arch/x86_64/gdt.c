@@ -47,9 +47,12 @@ static struct {
 static struct tss64 tss;
 static struct gdtr  gdtr;
 
+uint64_t current_kstack_top = 0;
+
 void tss_set_rsp0(uint64_t rsp0)
 {
 	tss.rsp0 = rsp0;
+	current_kstack_top = rsp0;
 }
 
 void gdt_init(void)
