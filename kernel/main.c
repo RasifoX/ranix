@@ -54,6 +54,7 @@ void kernel_main(void)
 	}
 
 	mmu_init();
+	arch_cpu_init();
 
 	kprintf("[ranix] Ranix\n");
 	if (fdt_ok == 0)

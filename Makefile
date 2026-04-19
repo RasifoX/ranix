@@ -134,12 +134,12 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso
+	rm -rf $(BUILD_DIR) ranix.iso userspace/hello userspace/sh userspace/*_elf.h
 
 qemu: $(TARGET)
 	$(QEMU_CMD) -nographic -kernel $(TARGET)
 
-iso: $(TARGET)
+iso: userspace $(TARGET)
 	@mkdir -p iso/boot/grub
 	@cp $(TARGET) iso/boot/ranix.elf
 	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg

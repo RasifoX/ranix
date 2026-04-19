@@ -9,12 +9,20 @@
  *   248 sp
  *   256 elr
  *   264 spsr
+ *   272 q0-q31 (32 * 16 bytes = 512 bytes)
+ *   784 fpsr (4 bytes)
+ *   788 fpcr (4 bytes)
+ *   total size: 792 bytes (aligned to 16)
  */
 typedef struct {
 	uint64_t regs[31];
 	uint64_t sp;
 	uint64_t elr;
 	uint64_t spsr;
+	uint64_t qregs[64]; /* 32 * 128-bit registers as 64 * 64-bit */
+	uint32_t fpsr;
+	uint32_t fpcr;
+	uint32_t _padding;  /* align to 16 bytes */
 } arch_context_t;
 
 #define ARCH_SPSR_KERNEL_TASK  0x00000005UL  /* EL1h, DAIF=0 */
