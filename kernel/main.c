@@ -26,8 +26,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t ram_limit)
 	pmm_init(start, size);
 	pmm_free_region(start, size);
 
-	kprintf("[  mem] %x-%x, %d MB\n",
-	        (unsigned int)start, (unsigned int)end, (int)(size >> 20));
+	kprintf("[  mem] 0x%lx-0x%lx, %d MB\n", start, end, (int)(size >> 20));
 }
 
 void kernel_main(void)

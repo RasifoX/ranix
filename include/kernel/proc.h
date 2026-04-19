@@ -36,6 +36,8 @@ typedef struct process {
 	vm_space_t     *vm;
 
 	/* ── process metadata ────────────────────── */
+	uint64_t        brk;
+	uint64_t        mmap_next;
 	pid_t           ppid;
 	uid_t           uid;
 	gid_t           gid;

@@ -6,8 +6,8 @@
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
-#define va_end(v) __builtin_va_end(v)
-#define va_arg(v, l) __builtin_va_arg(v, l)
+#define va_end(v)      __builtin_va_end(v)
+#define va_arg(v, l)   __builtin_va_arg(v, l)
 
 static int fb_ready = 0;
 
@@ -28,111 +28,80 @@ static void _puts(const char *s)
         _putc(*s++);
 }
 
-static void print_uint(unsigned int n, int base)
+static void fmt_uint(uint64_t n, int base, int width, char pad, int upper)
 {
-    char buf[32];
-    int i = 0;
+    char buf[64];
+    int  i = 0;
+    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+
     if (n == 0)
-    {
-        _putc('0');
-        return;
-    }
-    while (n)
-    {
-        int r = n % base;
-        buf[i++] = r < 10 ? '0' + r : 'a' + r - 10;
-        n /= base;
-    }
+        buf[i++] = '0';
+    else
+        while (n) { buf[i++] = digits[n % (unsigned)base]; n /= (unsigned)base; }
+
+    while (i < width)
+        buf[i++] = pad;
+
     while (i--)
         _putc(buf[i]);
-}
-
-static void print_uint_padded(unsigned int n, int base, int width)
-{
-    char buf[32];
-    int i = 0;
-    if (n == 0 && width == 0) { _putc('0'); return; }
-    while (n) {
-        int r = n % base;
-        buf[i++] = r < 10 ? '0' + r : 'a' + r - 10;
-        n /= base;
-    }
-    /* zero-pad to width */
-    while (i < width) buf[i++] = '0';
-    while (i--) _putc(buf[i]);
 }
 
 void kprintf(const char *fmt, ...)
 {
     uint64_t flags = irq_save();
-
     va_list args;
     va_start(args, fmt);
-    while (*fmt)
-    {
-        if (*fmt != '%')
-        {
-            _putc(*fmt++);
-            continue;
-        }
+
+    while (*fmt) {
+        if (*fmt != '%') { _putc(*fmt++); continue; }
         fmt++;
-        switch (*fmt)
-        {
-        case 'd':
-        {
-            int v = va_arg(args, int);
-            if (v < 0)
-            {
-                _putc('-');
-                print_uint((unsigned int)(-v), 10);
-            }
-            else
-                print_uint((unsigned int)v, 10);
+
+        char pad = ' ';
+        if (*fmt == '0') { pad = '0'; fmt++; }
+
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+
+        int lng = 0;
+        while (*fmt == 'l') { lng++; fmt++; }
+        if (*fmt == 'z') { lng = 1; fmt++; }
+
+        switch (*fmt) {
+        case 'd': case 'i': {
+            int64_t v = lng ? (int64_t)va_arg(args, long) : (int64_t)va_arg(args, int);
+            if (v < 0) { _putc('-'); fmt_uint((uint64_t)-v, 10, width, pad, 0); }
+            else        fmt_uint((uint64_t)v,  10, width, pad, 0);
             break;
         }
+        case 'u':
+            fmt_uint(lng ? va_arg(args, unsigned long) : (uint64_t)va_arg(args, unsigned int),
+                     10, width, pad, 0);
+            break;
         case 'x':
-        {
-            unsigned int v = va_arg(args, unsigned int);
+            fmt_uint(lng ? va_arg(args, unsigned long) : (uint64_t)va_arg(args, unsigned int),
+                     16, width, pad, 0);
+            break;
+        case 'X':
+            fmt_uint(lng ? va_arg(args, unsigned long) : (uint64_t)va_arg(args, unsigned int),
+                     16, width, pad, 1);
+            break;
+        case 'p': {
+            uint64_t v = va_arg(args, unsigned long);
             _puts("0x");
-            print_uint(v, 16);
+            fmt_uint(v, 16, 16, '0', 0);
             break;
         }
-        case 'l':
-        {
-            fmt++;
-            if (*fmt == 'x') {
-                unsigned long v = va_arg(args, unsigned long);
-                /* no "0x" here — caller adds it in the format string */
-                unsigned int hi = (unsigned int)(v >> 32);
-                unsigned int lo = (unsigned int)(v & 0xFFFFFFFF);
-                if (hi) {
-                    print_uint_padded(hi, 16, 0);   /* upper, no padding */
-                    print_uint_padded(lo, 16, 8);   /* lower, always 8 digits */
-                } else {
-                    print_uint_padded(lo, 16, 0);   /* fits in 32 bits */
-                }
-            }
+        case 's': {
+            const char *s = va_arg(args, const char *);
+            _puts(s ? s : "(null)");
             break;
         }
-        case 'p':
-        {
-            unsigned long v = va_arg(args, unsigned long);
-            _puts("0x");
-            unsigned int hi = (unsigned int)(v >> 32);
-            unsigned int lo = (unsigned int)(v & 0xFFFFFFFF);
-            if (hi) {
-                print_uint_padded(hi, 16, 0);
-                print_uint_padded(lo, 16, 8);
-            } else {
-                print_uint_padded(lo, 16, 0);
-            }
-            break;
-        }
-        case 's':
-            _puts(va_arg(args, const char *));
-            break;
         case 'c':
             _putc((char)va_arg(args, int));
+            break;
+        case '%':
+            _putc('%');
             break;
         default:
             _putc('%');
@@ -141,8 +110,8 @@ void kprintf(const char *fmt, ...)
         }
         fmt++;
     }
-    va_end(args);
 
+    va_end(args);
     irq_restore(flags);
 }
 

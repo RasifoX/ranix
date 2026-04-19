@@ -49,8 +49,7 @@
         kprintf("type:  %s\n", ec_name(ec));
         kprintf("ELR:   0x%lx\n", elr);
         kprintf("FAR:   0x%lx\n", far);
-        kprintf("ESR:   %x  (EC=%x ISS=%x)\n",
-                (unsigned int)esr, (unsigned int)ec, (unsigned int)iss);
+        kprintf("ESR:   0x%lx  (EC=0x%x ISS=0x%x)\n", esr, ec, iss);
 
         kpanic("unhandled exception");
     }
