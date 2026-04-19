@@ -50,6 +50,6 @@ typedef struct {
 #define ELF_PF_W  0x2
 #define ELF_PF_R  0x4
 
-int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out);
+int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out, uint64_t *load_end_out);
 
 #endif

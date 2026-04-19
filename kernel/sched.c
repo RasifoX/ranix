@@ -84,9 +84,10 @@ pid_t proc_create(const char *name, void (*fn)(void))
 /* user address space layout */
 /* User space lives above the kernel's 1GB identity map (0-0x40000000).
  * On x86_64: above 1GB boot page tables. On aarch64: above L1[3] device. */
-#define USER_CODE_BASE   0x400000UL     /* 4 MB — Linux'un kullandığı adres */
+#define USER_CODE_BASE   0x400000UL
 #define USER_STACK_TOP   0x800000UL
 #define USER_STACK_PAGES 2
+#define USER_MMAP_BASE   0x10000000UL
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
@@ -112,11 +113,14 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	if (!p->vm) goto fail;
 
 	/* load ELF into address space */
-	uint64_t entry;
-	if (elf_load(p->vm, elf_data, elf_len, &entry) != 0) {
+	uint64_t entry, load_end = 0;
+	if (elf_load(p->vm, elf_data, elf_len, &entry, &load_end) != 0) {
 		kprintf("[sched] elf_load failed\n");
 		goto fail;
 	}
+
+	p->brk       = load_end;
+	p->mmap_next = USER_MMAP_BASE;
 
 	/* allocate and map user stack */
 	for (int i = 0; i < USER_STACK_PAGES; i++) {

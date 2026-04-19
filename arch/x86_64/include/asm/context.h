@@ -39,6 +39,7 @@ typedef struct {
 /* Linux x86_64 syscall numbers */
 #define SYS_ARCH_READ          0
 #define SYS_ARCH_WRITE         1
+#define SYS_ARCH_WRITEV       20
 #define SYS_ARCH_OPEN          2
 #define SYS_ARCH_CLOSE         3
 #define SYS_ARCH_FSTAT         5
@@ -47,6 +48,12 @@ typedef struct {
 #define SYS_ARCH_IOCTL        16
 #define SYS_ARCH_GETPID       39
 #define SYS_ARCH_EXIT         60
+#define SYS_ARCH_EXIT_GROUP   231
+#define SYS_ARCH_SET_TID_ADDR 218
+#define SYS_ARCH_MMAP           9
+#define SYS_ARCH_MUNMAP        11
+#define SYS_ARCH_RT_SIGACTION   13
+#define SYS_ARCH_RT_SIGPROCMASK 14
 #define SYS_ARCH_MKDIR        83
 #define SYS_ARCH_UNLINK       87
 #define SYS_ARCH_GETDENTS64  217

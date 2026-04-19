@@ -1,6 +1,9 @@
 ARCH  ?= aarch64
 BOARD ?= raspi4
 
+MUSL_CC_AARCH64 ?= $(HOME)/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+MUSL_CC_X86_64  ?= $(HOME)/opt/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
+
 CC  = clang --target=$(ARCH)-none-elf
 AS  = clang --target=$(ARCH)-none-elf
 LD  = ld.lld
@@ -88,9 +91,19 @@ LDFLAGS = -nostdlib
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
 OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean qemu image
+.PHONY: all clean qemu image userspace
 
-all: $(TARGET)
+all: userspace $(TARGET)
+
+userspace: userspace/hello_elf.h
+
+userspace/hello: userspace/hello.c
+	$(MUSL_CC_AARCH64) -static -no-pie -O2 -o $@ $<
+
+userspace/hello_elf.h: userspace/hello
+	xxd -i $< | \
+	  sed 's/unsigned char .*\[\]/static const uint8_t hello_musl_elf[]/' | \
+	  sed 's/unsigned int .*_len/static const unsigned int hello_musl_elf_len/' > $@
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
