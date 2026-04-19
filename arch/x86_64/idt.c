@@ -41,7 +41,14 @@ extern void exc_stub_12(void); extern void exc_stub_13(void);
 extern void exc_stub_14(void); extern void exc_stub_15(void);
 extern void exc_stub_16(void); extern void exc_stub_17(void);
 extern void exc_stub_18(void); extern void exc_stub_19(void);
-extern void irq_stub_0(void);
+extern void irq_stub_20(void); extern void irq_stub_21(void);
+extern void irq_stub_22(void); extern void irq_stub_23(void);
+extern void irq_stub_24(void); extern void irq_stub_25(void);
+extern void irq_stub_26(void); extern void irq_stub_27(void);
+extern void irq_stub_28(void); extern void irq_stub_29(void);
+extern void irq_stub_2a(void); extern void irq_stub_2b(void);
+extern void irq_stub_2c(void); extern void irq_stub_2d(void);
+extern void irq_stub_2e(void); extern void irq_stub_2f(void);
 extern void irq_stub_yield(void);
 extern void irq_stub_syscall(void);
 
@@ -58,7 +65,17 @@ void idt_init(void)
 	for (int i = 0; i < 20; i++)
 		idt_set_gate(i, exc_stubs[i], 0x8E);  /* present, ring0, interrupt gate */
 
-	idt_set_gate(VEC_TIMER,   irq_stub_0,       0x8E);
+	/* hardware IRQs from PIC */
+	static void *irq_stubs[16] = {
+		irq_stub_20, irq_stub_21, irq_stub_22, irq_stub_23,
+		irq_stub_24, irq_stub_25, irq_stub_26, irq_stub_27,
+		irq_stub_28, irq_stub_29, irq_stub_2a, irq_stub_2b,
+		irq_stub_2c, irq_stub_2d, irq_stub_2e, irq_stub_2f,
+	};
+
+	for (int i = 0; i < 16; i++)
+		idt_set_gate(0x20 + i, irq_stubs[i], 0x8E);
+
 	idt_set_gate(VEC_YIELD,   irq_stub_yield,   0xEE);
 	idt_set_gate(VEC_SYSCALL, irq_stub_syscall, 0xEE);
 

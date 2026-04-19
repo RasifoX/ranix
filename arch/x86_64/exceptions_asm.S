@@ -74,16 +74,18 @@ common_exc:
 	add $16, %rsp
 	iretq
 
-.global irq_stub_0
-irq_stub_0:
-	push $0
-	push $0x20
+/* common helper for hardware IRQs (PIC 0x20-0x2F) */
+common_irq:
 	save_context
 	mov  %rsp, %r15
 	call task_current
 	mov  %r15, 16(%rax)    /* task->ctx = rsp */
-	mov  $0x20, %edi
+	
+	/* get vector number from the stack (arch_context_t.vector) */
+	/* offset = 512 (fxsave) + 120 (GPRs) = 632 */
+	movq 632(%rsp), %rdi
 	call irq_dispatch
+	
 	call schedule
 	call vm_activate
 	call sched_get_current_ctx
@@ -91,6 +93,19 @@ irq_stub_0:
 	restore_context
 	add  $16, %rsp
 	iretq
+
+.macro irq_stub vec
+.global irq_stub_\vec
+irq_stub_\vec:
+	push $0
+	push $0x\vec
+	jmp  common_irq
+.endm
+
+irq_stub 20; irq_stub 21; irq_stub 22; irq_stub 23
+irq_stub 24; irq_stub 25; irq_stub 26; irq_stub 27
+irq_stub 28; irq_stub 29; irq_stub 2a; irq_stub 2b
+irq_stub 2c; irq_stub 2d; irq_stub 2e; irq_stub 2f
 
 .global irq_stub_syscall
 irq_stub_syscall:
