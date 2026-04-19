@@ -25,6 +25,19 @@ vm_space_t *vm_create(void)
 
 	vs->root = alloc_table();
 	memcpy(vs->root, kernel_l1, PT_ENTRIES * sizeof(uint64_t));
+
+	/* give each process a private copy of every L2 table referenced
+	 * from the kernel L1, so vm_map can safely split blocks without
+	 * affecting the kernel or other processes */
+	for (int i = 0; i < PT_ENTRIES; i++) {
+		if ((vs->root[i] & 3) == 3) {
+			uint64_t *orig = (uint64_t *)(vs->root[i] & ~0xFFFUL);
+			uint64_t *priv = alloc_table();
+			memcpy(priv, orig, PT_ENTRIES * sizeof(uint64_t));
+			vs->root[i] = (uint64_t)priv | PTE_TABLE | PTE_VALID;
+		}
+	}
+
 	return vs;
 }
 
@@ -54,7 +67,19 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 
 	uint64_t *l3;
 	if (l2[l2i] & PTE_VALID) {
-		if ((l2[l2i] & 3) != 3) return -1;
+		if ((l2[l2i] & 3) != 3) {
+			/* 2MB L2 block — split into 512 4KB L3 pages */
+			uint64_t blk  = l2[l2i];
+			uint64_t base = blk & ~0x1FFFFFUL;
+			uint64_t attr = (blk & 0xFFCUL) | PTE_VALID | (1UL << 1);
+			l3 = alloc_table();
+			for (int j = 0; j < PT_ENTRIES; j++)
+				l3[j] = (base + (uint64_t)j * PAGE_SIZE) | attr;
+			l2[l2i] = (uint64_t)l3 | L12_TABLE;
+			uint64_t va2m = vaddr & ~0x1FFFFFUL;
+			__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
+			                 :: "r"(va2m >> 12) : "memory");
+		}
 		l3 = (uint64_t *)(l2[l2i] & ~0xFFFUL);
 	} else {
 		l3 = alloc_table();

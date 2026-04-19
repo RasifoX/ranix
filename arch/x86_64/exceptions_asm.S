@@ -104,6 +104,36 @@ irq_stub_syscall:
 	add  $16, %rsp
 	iretq
 
+/* syscall instruction entry: RAX=nr, RCX=user_rip, R11=user_rflags, RSP=user_rsp */
+.section .data
+.align 8
+_syscall_usp: .quad 0
+
+.section .text
+.global syscall_entry
+syscall_entry:
+	movq %rsp, _syscall_usp(%rip)
+	movq current_kstack_top(%rip), %rsp
+	/* build iret-compatible frame */
+	pushq $0x23                    /* ss  = GDT_USER_DATA */
+	pushq _syscall_usp(%rip)       /* rsp = user RSP */
+	pushq %r11                     /* rflags */
+	pushq $0x1B                    /* cs  = GDT_USER_CODE */
+	pushq %rcx                     /* rip = return address */
+	pushq $0                       /* error_code */
+	pushq $0x80                    /* vector */
+	save_context
+	mov  %rsp, %r15
+	call task_current
+	mov  %r15, 16(%rax)
+	mov  %rsp, %rdi
+	call syscall_handle
+	call sched_get_current_ctx
+	mov  %rax, %rsp
+	restore_context
+	add  $16, %rsp
+	iretq
+
 .global irq_stub_yield
 irq_stub_yield:
 	push $0
