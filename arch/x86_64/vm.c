@@ -27,6 +27,25 @@ vm_space_t *vm_create(void)
 
 	vs->root = alloc_table();
 	memcpy(vs->root, pml4, PT_ENTRIES * sizeof(uint64_t));
+
+	/* Deep-copy PDPT and PD so user mappings don't corrupt shared kernel tables.
+	 * All kernel + user addresses fall under PML4[0] → PDPT[0] → PD[0..511].
+	 * Without private copies, vm_map modifies the kernel's shared PD, breaking
+	 * other processes' code mappings when a new process is exec'd at 0x400000. */
+	if (vs->root[0] & PTE_P) {
+		uint64_t *kpdpt = (uint64_t *)(vs->root[0] & ~0xFFFUL);
+		uint64_t *pdpt  = alloc_table();
+		memcpy(pdpt, kpdpt, PT_ENTRIES * sizeof(uint64_t));
+		vs->root[0] = (uint64_t)pdpt | (vs->root[0] & 0xFFFUL);
+
+		if (pdpt[0] & PTE_P) {
+			uint64_t *kpd = (uint64_t *)(pdpt[0] & ~0xFFFUL);
+			uint64_t *pd  = alloc_table();
+			memcpy(pd, kpd, PT_ENTRIES * sizeof(uint64_t));
+			pdpt[0] = (uint64_t)pd | (pdpt[0] & 0xFFFUL);
+		}
+	}
+
 	return vs;
 }
 
