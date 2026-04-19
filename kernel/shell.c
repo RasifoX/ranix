@@ -7,6 +7,7 @@
 #include <kernel/fdt.h>
 #include <drivers/serial/uart.h>
 #include <kernel/mm/pmm.h>
+#include "userspace/hello_elf.h"
 
 #define CMD_MAX 256
 #define PROMPT  "ranix> "
@@ -14,97 +15,6 @@
 static char cmd_buf[CMD_MAX];
 static int  cmd_len;
 
-/*
- * Minimal ELF64 test binaries — hand-assembled.
- * Both do: sys_write(1, "hello\n", 6)  then  sys_exit(0).
- *
- * aarch64: SVC #1, syscall nr in x8  (Linux aarch64 ABI)
- * x86_64:  INT 0x80, syscall nr in rax (Linux x86_64 ABI)
- */
-
-#if defined(__aarch64__)
-static const uint8_t test_elf[] = {
-    /* ELF header (64 bytes) */
-    0x7F,'E','L','F',           /* magic */
-    2, 1, 1, 0,                 /* class64, LSB, ver1, ELFOSABI_NONE */
-    0,0,0,0, 0,0,0,0,           /* pad */
-    2,0,                        /* ET_EXEC */
-    0xB7,0,                     /* EM_AARCH64 = 183 */
-    1,0,0,0,                    /* version */
-    0x00,0x00,0x00,0x00, 0x01,0,0,0,  /* entry = 0x100000000 */
-    0x40,0,0,0, 0,0,0,0,        /* phoff = 64 */
-    0,0,0,0, 0,0,0,0,           /* shoff = 0 */
-    0,0,0,0,                    /* flags */
-    0x40,0,                     /* ehsize = 64 */
-    0x38,0,                     /* phentsize = 56 */
-    1,0,                        /* phnum = 1 */
-    0x40,0,                     /* shentsize = 64 */
-    0,0,                        /* shnum = 0 */
-    0,0,                        /* shstrndx = 0 */
-
-    /* Program header (56 bytes, offset 64) */
-    1,0,0,0,                    /* PT_LOAD */
-    5,0,0,0,                    /* PF_R|PF_X */
-    0x78,0,0,0, 0,0,0,0,        /* offset = 120 (= 64+56) */
-    0x00,0x00,0x00,0x00, 0x01,0,0,0, /* vaddr = 0x100000000 */
-    0x00,0x00,0x00,0x00, 0x01,0,0,0, /* paddr = 0x100000000 */
-    0x26,0,0,0, 0,0,0,0,        /* filesz = 38 */
-    0x26,0,0,0, 0,0,0,0,        /* memsz  = 38 */
-    0x00,0x10,0,0, 0,0,0,0,     /* align = 0x1000 */
-
-   /* svc #0 = 0x01,0x00,0x00,0xD4 */
-/* mov x8, #64  */ 0x08,0x08,0x80,0xD2,
-/* mov x0, #1   */ 0x20,0x00,0x80,0xD2,
-/* adr x1, +24  */ 0xC1,0x00,0x00,0x10,
-/* mov x2, #6   */ 0xC2,0x00,0x80,0xD2,
-/* svc #1       */ 0x21,0x00,0x00,0xD4,
-/* mov x8, #93  */ 0xA8,0x0B,0x80,0xD2,
-/* mov x0, #0   */ 0x00,0x00,0x80,0xD2,
-/* svc #1       */ 0x21,0x00,0x00,0xD4,  
-/* "hello\n"    */ 'h','e','l','l','o','\n',
-};
-#elif defined(__x86_64__)
-static const uint8_t test_elf[] = {
-    /* ELF header (64 bytes) */
-    0x7F,'E','L','F',
-    2, 1, 1, 0,
-    0,0,0,0, 0,0,0,0,
-    2,0,
-    0x3E,0,                     /* EM_X86_64 = 62 */
-    1,0,0,0,
-    0x00,0x00,0x00,0x00, 0x01,0,0,0,  /* entry = 0x100000000 */
-    0x40,0,0,0, 0,0,0,0,
-    0,0,0,0, 0,0,0,0,
-    0,0,0,0,
-    0x40,0,
-    0x38,0,
-    1,0,
-    0x40,0,
-    0,0,
-    0,0,
-
-    /* Program header */
-    1,0,0,0,
-    5,0,0,0,
-    0x78,0,0,0, 0,0,0,0,        /* offset = 120 */
-    0x00,0x00,0x00,0x00, 0x01,0,0,0,
-    0x00,0x00,0x00,0x00, 0x01,0,0,0,
-    0x30,0,0,0, 0,0,0,0,        /* filesz = 48 */
-    0x30,0,0,0, 0,0,0,0,
-    0x00,0x10,0,0, 0,0,0,0,
-
-    /* Code at offset 120 (vaddr 0x400000) */
-    /* mov $1, %rax          */ 0x48,0xC7,0xC0,0x01,0,0,0,
-    /* mov $1, %rdi          */ 0x48,0xC7,0xC7,0x01,0,0,0,
-    /* lea 0x15(%rip), %rsi  */ 0x48,0x8D,0x35,0x15,0,0,0,
-    /* mov $6, %rdx          */ 0x48,0xC7,0xC2,0x06,0,0,0,
-    /* syscall               */ 0x0F,0x05,
-    /* mov $60, %rax         */ 0x48,0xC7,0xC0,0x3C,0,0,0,
-    /* xor %rdi, %rdi        */ 0x48,0x31,0xFF,
-    /* syscall               */ 0x0F,0x05,
-    /* msg: "hello\n"        */ 'h','e','l','l','o','\n',
-};
-#endif
 
 static void cmd_help(void)
 {
@@ -184,8 +94,7 @@ static void cmd_dtb(void)
     kprintf("Compat: %s\n", fi->compatible);
     kprintf("RAM:    %d MB\n", (int)(fi->mem_size >> 20));
     kprintf("CPUs:   %d\n", (int)fi->num_cpus);
-    kprintf("DTB at: %x (%d bytes)\n",
-            (unsigned int)(uint64_t)fdt_get_base(), (int)fdt_get_size());
+    kprintf("DTB at: 0x%lx (%d bytes)\n", (uint64_t)fdt_get_base(), (int)fdt_get_size());
 }
 
 static void execute(const char *line)
@@ -212,7 +121,7 @@ static void execute(const char *line)
     else if (strcmp(line, "fault") == 0)
         cmd_fault();
     else if (strcmp(line, "hello") == 0) {
-        pid_t pid = proc_exec("hello", test_elf, sizeof(test_elf));
+        pid_t pid = proc_exec("hello", hello_musl_elf, hello_musl_elf_len);
         if (pid >= 0) proc_wait(pid);
     }
     else

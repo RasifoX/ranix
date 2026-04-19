@@ -133,8 +133,8 @@ int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
     out->fb      = (void *)(u64)(fb_bus_addr & 0x3FFFFFFFU);
     out->fb_size = fb_size;
 
-    kprintf("[  mem] fb: %dx%d, pitch %d, addr %x\n",
-            width, height, pitch, (u32)(u64)out->fb);
+    kprintf("[  mem] fb: %dx%d, pitch %d, addr 0x%lx\n",
+            width, height, pitch, (uint64_t)out->fb);
 
     return 0;
 }

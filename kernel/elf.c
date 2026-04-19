@@ -4,7 +4,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
-int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out)
+int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out, uint64_t *load_end_out)
 {
 	if (len < sizeof(elf64_hdr_t)) return -1;
 
@@ -25,6 +25,7 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out)
 	if (hdr->phoff == 0 || hdr->phnum == 0) return -1;
 
 	const uint8_t *bytes = data;
+	uint64_t load_end = 0;
 
 	for (uint16_t i = 0; i < hdr->phnum; i++) {
 		if (hdr->phoff + (i + 1) * sizeof(elf64_phdr_t) > len) return -1;
@@ -33,6 +34,9 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out)
 			(const elf64_phdr_t *)(bytes + hdr->phoff + i * sizeof(elf64_phdr_t));
 
 		if (ph->type != PT_LOAD || ph->memsz == 0) continue;
+
+		uint64_t seg_end = (ph->vaddr + ph->memsz + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+		if (seg_end > load_end) load_end = seg_end;
 
 		if (ph->offset + ph->filesz > len) return -1;
 
@@ -89,5 +93,6 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out)
 	}
 
 	*entry_out = hdr->entry;
+	if (load_end_out) *load_end_out = load_end;
 	return 0;
 }
