@@ -58,6 +58,8 @@ static void kbd_irq_handler(void)
     }
 }
 
+#include <drivers/irqchip/irqchip.h>
+
 void ps2_kbd_init(void)
 {
     /* Clear current buffer on controller */
@@ -67,6 +69,7 @@ void ps2_kbd_init(void)
 
     /* PIC IRQ 1 is mapped to interrupt 0x21 */
     irq_register(0x21, kbd_irq_handler);
+    irqchip_enable_irq(0x21);
 }
 
 int ps2_kbd_has_data(void)
