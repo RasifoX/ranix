@@ -159,10 +159,25 @@ void shell_init(void)
     kprintf_flush();
 }
 
+#ifdef __x86_64__
+#include <drivers/input/ps2.h>
+#endif
+
 void shell_poll(void)
 {
-    while (uart_has_data()) {
-        char c = uart_getc();
+    while (1) {
+        char c = 0;
+        if (uart_has_data()) {
+            c = uart_getc();
+        }
+#ifdef __x86_64__
+        else if (ps2_kbd_has_data()) {
+            c = ps2_kbd_getc();
+        }
+#endif
+        else {
+            break;
+        }
 
         if (c == '\r' || c == '\n') {
             kprintf("\n");
