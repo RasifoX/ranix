@@ -21,9 +21,13 @@
 	push %r13
 	push %r14
 	push %r15
+	sub  $512, %rsp
+	fxsave (%rsp)
 .endm
 
 .macro restore_context
+	fxrstor (%rsp)
+	add  $512, %rsp
 	pop %r15
 	pop %r14
 	pop %r13

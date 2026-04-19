@@ -4,6 +4,16 @@
 void arch_halt(void)  { __asm__ volatile("wfi"); }
 void arch_yield(void) { __asm__ volatile("svc #0"); }
 
+void arch_cpu_init(void)
+{
+	/* enable FP/SIMD access */
+	uint64_t cpacr;
+	__asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
+	cpacr |= (0x3ULL << 20);
+	__asm__ volatile("msr cpacr_el1, %0" :: "r"(cpacr));
+	__asm__ volatile("isb");
+}
+
 void arch_context_init(arch_context_t *ctx, void (*entry)(void), uint64_t stack_top)
 {
 	memset(ctx, 0, sizeof(*ctx));

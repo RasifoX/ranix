@@ -12,7 +12,7 @@ void arch_set_user_kstack(uint64_t kstack_top)
 void arch_halt(void)  { __asm__ volatile("hlt"); }
 void arch_yield(void) { __asm__ volatile("int $0x40"); }
 
-void arch_syscall_init(void)
+static void arch_syscall_init(void)
 {
 	/* EFER.SCE — enable syscall/sysret */
 	__asm__ volatile(
@@ -55,6 +55,23 @@ void arch_syscall_init(void)
 		"wrmsr\n"
 		::: "eax", "ecx", "edx"
 	);
+}
+
+void arch_cpu_init(void)
+{
+	/* enable SSE and FXSAVE */
+	uint64_t cr0, cr4;
+	__asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+	cr0 &= ~(1ULL << 2); /* clear EM (Emulation) */
+	cr0 |= (1ULL << 1);  /* set MP (Monitor Coprocessor) */
+	__asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
+
+	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+	cr4 |= (1ULL << 9);  /* set OSFXSR (FXSAVE/FXRSTOR support) */
+	cr4 |= (1ULL << 10); /* set OSXMMEXCPT (SIMD exceptions) */
+	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+
+	arch_syscall_init();
 }
 
 void arch_context_init(arch_context_t *ctx, void (*entry)(void), uint64_t stack_top)

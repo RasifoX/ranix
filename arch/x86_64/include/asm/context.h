@@ -8,13 +8,15 @@
  * Hardware (CPU) pushes ss/rsp/rflags/cs/rip automatically.
  * We push the rest plus a vector number and error code slot.
  *
- *   offset 0   : r15-r8, rbp, rdi, rsi, rdx, rcx, rbx, rax  (15 * 8)
- *   offset 120 : vector
- *   offset 128 : error_code
- *   offset 136 : rip, cs, rflags, rsp, ss  (CPU-pushed, 5 * 8)
- *   total      : 176 bytes
+ *   offset 0   : fxsave area (512 bytes, 16-byte aligned)
+ *   offset 512 : r15-r8, rbp, rdi, rsi, rdx, rcx, rbx, rax  (15 * 8)
+ *   offset 632 : vector
+ *   offset 640 : error_code
+ *   offset 648 : rip, cs, rflags, rsp, ss  (CPU-pushed, 5 * 8)
+ *   total      : 688 bytes
  */
 typedef struct {
+	uint8_t  fxsave[512] __attribute__((aligned(16)));
 	uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
 	uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
 	uint64_t vector;
