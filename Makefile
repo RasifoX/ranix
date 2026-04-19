@@ -4,6 +4,12 @@ BOARD ?= raspi4
 MUSL_CC_AARCH64 ?= $(HOME)/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
 MUSL_CC_X86_64  ?= $(HOME)/opt/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
 
+ifeq ($(ARCH),aarch64)
+    MUSL_CC = $(MUSL_CC_AARCH64)
+else ifeq ($(ARCH),x86_64)
+    MUSL_CC = $(MUSL_CC_X86_64)
+endif
+
 CC  = clang --target=$(ARCH)-none-elf
 AS  = clang --target=$(ARCH)-none-elf
 LD  = ld.lld
@@ -97,8 +103,14 @@ all: userspace $(TARGET)
 
 userspace: userspace/hello_elf.h
 
+ifeq ($(ARCH),x86_64)
+userspace/hello: userspace/hello_x86_64.asm
+	nasm -f elf64 $< -o /tmp/hello_x86_64.o
+	ld -static -nostdlib -m elf_x86_64 /tmp/hello_x86_64.o -o $@
+else
 userspace/hello: userspace/hello.c
-	$(MUSL_CC_AARCH64) -static -no-pie -O2 -o $@ $<
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+endif
 
 userspace/hello_elf.h: userspace/hello
 	xxd -i $< | \

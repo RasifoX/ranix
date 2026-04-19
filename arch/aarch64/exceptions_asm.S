@@ -139,26 +139,28 @@ sync_handler:
 	cmp  x1, #0x15
 	b.ne .sync_fault
 
-	/* EC=0x15: SVC — check immediate (ISS = esr[15:0]) */
-	and  x2, x0, #0xFFFF
-	cbnz x2, .syscall
+	/* EC=0x15: SVC — from EL0 (user syscall) or EL1 (kernel yield)? */
+	mrs  x2, spsr_el1
+	tst  x2, #0xF            /* M[3:0]: 0 = EL0t, non-zero = EL1 */
+	b.ne .yield
 
-	/* SVC #0: yield */
+	/* EL0: Linux svc #0 with syscall nr in x8 */
+	bl   task_current
+	mov  x1, sp
+	str  x1, [x0, #16]
+	mov  x0, sp
+	bl   syscall_handle
+	bl   sched_get_current_ctx
+	restore_trapframe
+	eret
+
+.yield:
+	/* EL1: svc #0 from kernel task — reschedule */
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
 	bl   schedule
 	bl   vm_activate
-	bl   sched_get_current_ctx
-	restore_trapframe
-	eret
-
-.syscall:
-	bl   task_current
-	mov  x1, sp
-	str  x1, [x0, #16]
-	mov  x0, sp              /* arg: arch_context_t* */
-	bl   syscall_handle
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret

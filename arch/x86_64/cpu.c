@@ -2,6 +2,8 @@
 #include <kernel/lib/string.h>
 #include <asm/gdt.h>
 
+extern void syscall_entry(void);
+
 void arch_set_user_kstack(uint64_t kstack_top)
 {
 	tss_set_rsp0(kstack_top);
@@ -9,6 +11,51 @@ void arch_set_user_kstack(uint64_t kstack_top)
 
 void arch_halt(void)  { __asm__ volatile("hlt"); }
 void arch_yield(void) { __asm__ volatile("int $0x40"); }
+
+void arch_syscall_init(void)
+{
+	/* EFER.SCE — enable syscall/sysret */
+	__asm__ volatile(
+		"movl $0xC0000080, %%ecx\n"
+		"rdmsr\n"
+		"orl  $1, %%eax\n"
+		"wrmsr\n"
+		::: "eax", "ecx", "edx"
+	);
+
+	/* STAR[47:32]=kernel CS (0x08), STAR[63:48]=user CS base (0x18)
+	 * sysret: CS = STAR[63:48]|3 = 0x1B, SS = STAR[63:48]+8|3 = 0x23 */
+	uint64_t star = (0x18ULL << 48) | (0x08ULL << 32);
+	__asm__ volatile(
+		"movl $0xC0000081, %%ecx\n"
+		"movl %%eax, %%eax\n"
+		"movq %0, %%rax\n"
+		"movq %%rax, %%rdx\n"
+		"shrq $32, %%rdx\n"
+		"wrmsr\n"
+		:: "r"(star) : "rax", "ecx", "edx"
+	);
+
+	/* LSTAR — syscall entry address */
+	uint64_t lstar = (uint64_t)syscall_entry;
+	__asm__ volatile(
+		"movl $0xC0000082, %%ecx\n"
+		"movq %0, %%rax\n"
+		"movq %%rax, %%rdx\n"
+		"shrq $32, %%rdx\n"
+		"wrmsr\n"
+		:: "r"(lstar) : "rax", "ecx", "edx"
+	);
+
+	/* SFMASK — clear IF on syscall entry */
+	__asm__ volatile(
+		"movl $0xC0000084, %%ecx\n"
+		"movl $0x200, %%eax\n"
+		"xorl %%edx, %%edx\n"
+		"wrmsr\n"
+		::: "eax", "ecx", "edx"
+	);
+}
 
 void arch_context_init(arch_context_t *ctx, void (*entry)(void), uint64_t stack_top)
 {

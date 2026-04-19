@@ -41,8 +41,19 @@ void vm_destroy(vm_space_t *vs)
 static uint64_t *get_or_alloc(uint64_t *table, uint64_t idx, uint64_t eflags)
 {
 	if (table[idx] & PTE_P) {
-		if (table[idx] & PTE_PS) return 0;  /* huge page */
-		/* propagate flags (e.g. PTE_U) that the existing entry may lack */
+		if (table[idx] & PTE_PS) {
+			/* split 2MB huge page into 512 4KB pages */
+			uint64_t base = table[idx] & ~0x1FFFFFUL;
+			uint64_t attr = table[idx] & (PTE_P | PTE_W);
+			uint64_t *pt  = alloc_table();
+			for (int j = 0; j < PT_ENTRIES; j++)
+				pt[j] = (base + (uint64_t)j * 0x1000) | attr;
+			table[idx] = (uint64_t)pt | PTE_P | PTE_W | PTE_U;
+			/* flush TLB — whole CR3 reload since we're changing a huge entry */
+			__asm__ volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
+			return pt;
+		}
+		/* propagate PTE_U flag to intermediate tables */
 		table[idx] |= eflags & PTE_U;
 		return (uint64_t *)(table[idx] & ~0xFFFUL);
 	}

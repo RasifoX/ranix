@@ -137,7 +137,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	uint8_t *ksp = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	arch_context_init_user(ctx, entry, USER_STACK_TOP);
+	/* put SP below the stack top so _start's read of argc at [SP] is mapped */
+	arch_context_init_user(ctx, entry, USER_STACK_TOP - 64);
 	p->ctx = ctx;
 	/* fd table — stdin/stdout/stderr as NULL for now */
 	p->fds = fd_table_create();
