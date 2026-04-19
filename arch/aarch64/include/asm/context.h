@@ -61,5 +61,7 @@ typedef struct {
 #define SYS_ARCH_VFORK          190
 #define SYS_ARCH_EXECVE         221
 #define SYS_ARCH_WAIT4          260
+#define SYS_ARCH_MPROTECT      226
+#define SYS_ARCH_PRLIMIT64     261
 
 #endif

@@ -350,6 +350,32 @@ static long sys_munmap(uint64_t addr, size_t len)
 	return 0;
 }
 
+static long sys_mprotect(uint64_t addr, size_t len, int prot)
+{
+	(void)addr; (void)len; (void)prot;
+	return 0;
+}
+
+static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
+{
+	(void)pid; (void)resource; (void)new_limit;
+	if (old_limit) {
+		uint64_t limits[2] = { 8192 * 1024, 8192 * 1024 }; /* 8MB stack limit */
+		memcpy(old_limit, limits, 16);
+	}
+	return 0;
+}
+
+static long sys_mkdir(const char *path, mode_t mode)
+{
+	return vfs_mkdir(path, mode);
+}
+
+static long sys_unlink(const char *path)
+{
+	return vfs_unlink(path);
+}
+
 /* ── dispatcher ──────────────────────────────────────────── */
 
 void syscall_handle(arch_context_t *ctx)
@@ -379,7 +405,21 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2,
 	                                             (int)arg3, 0, 0); break;
 	case SYS_ARCH_MUNMAP:        ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
+	case SYS_ARCH_MPROTECT:      ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
+	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;
+#if defined(SYS_ARCH_MKDIR)
+	case SYS_ARCH_MKDIR:         ret = sys_mkdir((const char*)arg0, (mode_t)arg1); break;
+#endif
+#if defined(SYS_ARCH_MKDIRAT)
+	case SYS_ARCH_MKDIRAT:       ret = sys_mkdir((const char*)arg1, (mode_t)arg2); break;
+#endif
+#if defined(SYS_ARCH_UNLINK)
+	case SYS_ARCH_UNLINK:        ret = sys_unlink((const char*)arg0); break;
+#endif
+#if defined(SYS_ARCH_UNLINKAT)
+	case SYS_ARCH_UNLINKAT:      ret = sys_unlink((const char*)arg1); break;
+#endif
 	case SYS_ARCH_RT_SIGACTION:     ret = 0; break;
 	case SYS_ARCH_RT_SIGPROCMASK:   ret = 0; break;
 	case SYS_ARCH_IOCTL:            ret = -25; break;   /* -ENOTTY */
