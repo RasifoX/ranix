@@ -150,6 +150,14 @@ sync_handler:
 	str  x1, [x0, #16]
 	mov  x0, sp
 	bl   syscall_handle
+	/* reschedule if need_resched set (e.g. after vfork) */
+	adrp x19, need_resched
+	ldr  w20, [x19, :lo12:need_resched]
+	cbz  w20, .syscall_ret
+	str  wzr, [x19, :lo12:need_resched]
+	bl   schedule
+	bl   vm_activate
+.syscall_ret:
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret

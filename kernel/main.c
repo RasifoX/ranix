@@ -9,6 +9,8 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/proc.h>
 #include <kernel/shell.h>
+
+extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
 #include <kernel/vfs.h>
 
@@ -76,6 +78,7 @@ void kernel_main(void)
 	vfs_mkdir("/dev",  0755);
 	vfs_mkdir("/proc", 0555);
 	vfs_mkdir("/tmp",  0777);
+	initrd_init();
 
 	kprintf("[ranix] ready\n");
 	sched_init();
