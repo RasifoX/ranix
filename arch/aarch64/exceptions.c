@@ -1,5 +1,6 @@
     #include <arch/aarch64/exceptions.h>
     #include <kernel/kprintf.h>
+    #include <kernel/proc.h>
 
     extern void exception_vectors(void);
 
@@ -35,7 +36,7 @@
         }
     }
 
-    void sync_dispatch(void)
+    void sync_dispatch(arch_context_t *tf)
     {
         uint64_t esr, elr, far;
         __asm__ volatile("mrs %0, esr_el1"  : "=r"(esr));
@@ -45,11 +46,18 @@
         uint32_t ec  = (uint32_t)(esr >> 26) & 0x3F;
         uint32_t iss = (uint32_t)(esr & 0x1FFFFFF);
 
-        kprintf("\n--- kernel fault ---\n");
+        process_t *p = task_current();
+
+        kprintf("\n--- fault: pid=%d (%s) ---\n",
+                (int)p->pid, p->name);
         kprintf("type:  %s\n", ec_name(ec));
         kprintf("ELR:   0x%lx\n", elr);
         kprintf("FAR:   0x%lx\n", far);
         kprintf("ESR:   0x%lx  (EC=0x%x ISS=0x%x)\n", esr, ec, iss);
+        kprintf("x0=%lx x1=%lx x2=%lx x3=%lx\n",
+                tf->regs[0], tf->regs[1], tf->regs[2], tf->regs[3]);
+        kprintf("x29(fp)=%lx x30(lr)=%lx sp=%lx\n",
+                tf->regs[29], tf->regs[30], tf->sp);
 
         kpanic("unhandled exception");
     }
