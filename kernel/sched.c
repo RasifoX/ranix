@@ -259,7 +259,10 @@ void task_wake(process_t *p)
 		p->state = PROC_READY;
 }
 
-arch_context_t *sched_get_current_ctx(void) { return current->ctx; }
+arch_context_t *sched_get_current_ctx(void)
+{
+	return current->ctx;
+}
 
 process_t *task_current(void) { return current; }
 int        task_count(void)   { return proc_cnt; }

@@ -171,7 +171,15 @@ irq_handler:
 	bl   task_current
 	mov  x19, x0
 	mov  x20, sp
+	ldr  x21, [sp, #264]    /* saved spsr_el1 */
+	and  x21, x21, #0xF     /* M[3:0]: 0=EL0t, 4=EL1t, 5=EL1h */
+	cbz  x21, .irq_ctx_save         /* interrupted from EL0 → always save */
+	ldr  x21, [x19, #304]   /* task->vm (offset fixed in proc.h) */
+	cbz  x21, .irq_ctx_save         /* kernel task (vm=NULL) → save so EL1 resumes */
+	b    .irq_skip_ctx_save         /* user task in EL1 syscall → keep EL0 ctx */
+.irq_ctx_save:
 	str  x20, [x19, #16]    /* task->ctx = sp */
+.irq_skip_ctx_save:
 	mov  w0, #0
 	bl   irq_dispatch
 	bl   schedule
@@ -222,6 +230,7 @@ sync_handler:
 	eret
 
 .sync_fault:
+	mov  x0, sp       /* pass trapframe pointer */
 	bl   sync_dispatch
 	b    .
 

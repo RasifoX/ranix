@@ -235,7 +235,6 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
 	(void)argv; (void)envp;
-
 	/* read file from VFS */
 	vfs_stat_t st = {0};
 	if (vfs_stat(path, &st) != 0) return -2;   /* ENOENT */
@@ -424,6 +423,21 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_RT_SIGPROCMASK:   ret = 0; break;
 	case SYS_ARCH_IOCTL:            ret = -25; break;   /* -ENOTTY */
 	case SYS_ARCH_VFORK:            ret = sys_vfork(); break;
+#if defined(SYS_ARCH_CLONE)
+	case SYS_ARCH_CLONE: {
+		/*
+		 * musl vfork() → clone(SIGCHLD, 0): no CLONE_VM/CLONE_VFORK.
+		 * Treat fork-like clones (no CLONE_THREAD) as vfork: safe because
+		 * the child immediately execve's and the parent blocks in waitpid.
+		 */
+		uint64_t flags = (uint64_t)arg0;
+		if (flags & 0x10000) /* CLONE_THREAD — not supported */
+			ret = -38;
+		else
+			ret = sys_vfork();
+		break;
+	}
+#endif
 	case SYS_ARCH_EXECVE:           ret = sys_execve((const char*)arg0,
 	                                    (char * const *)arg1,
 	                                    (char * const *)arg2); break;
@@ -438,4 +452,5 @@ void syscall_handle(arch_context_t *ctx)
 	}
 
 	CTX_SYSCALL_RET(ctx, ret);
+	task_current()->ctx = ctx;
 }
