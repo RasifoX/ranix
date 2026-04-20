@@ -51,6 +51,7 @@ typedef struct process {
 
 	/* ── vfork ───────────────────────────────── */
 	pid_t           vfork_parent;  /* -1 if not a vfork child */
+	int             reaped;        /* 1 if waitpid has already returned this child */
 } process_t;
 
 /* scheduler */

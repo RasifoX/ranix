@@ -203,7 +203,22 @@ void shell_task(void)
 {
     shell_init();
     while (1) {
-        shell_poll();
+        /* Check if any userspace process is alive. 
+         * Userspace processes have a non-NULL vm pointer. */
+        int userspace_active = 0;
+        int n = task_count();
+        for (int i = 0; i < n; i++) {
+            task_t *t = task_get(i);
+            if (t && t->vm && t->state != PROC_DEAD) {
+                userspace_active = 1;
+                break;
+            }
+        }
+
+        /* Only poll if no userspace shell or app is active */
+        if (!userspace_active) {
+            shell_poll();
+        }
         yield();
     }
 }

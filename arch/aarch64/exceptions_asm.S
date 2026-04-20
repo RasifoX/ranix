@@ -1,7 +1,7 @@
 .arch armv8-a+fp+simd
 
 /*
- * arch_context_t layout (792 bytes):
+ * arch_context_t layout (800 bytes for 16-byte alignment):
  *   0   x0-x30  (248 bytes)
  *   248 sp
  *   256 elr_el1
@@ -9,9 +9,10 @@
  *   272 q0-q31  (512 bytes)
  *   784 fpsr
  *   788 fpcr
+ *   792 padding (8 bytes)
  */
 
-#define TF_SIZE 792
+#define TF_SIZE 800
 
 .macro save_trapframe
 	sub sp, sp, #TF_SIZE
@@ -83,14 +84,19 @@
 	ldr w2, [sp, #788]
 	msr fpsr, x1
 	msr fpcr, x2
-	/* GPRs */
+	/* control regs */
 	ldr x1, [sp, #256]
 	ldr x2, [sp, #264]
 	msr elr_el1, x1
 	msr spsr_el1, x2
-	ldr x1, [sp, #248]
-	msr sp_el0, x1
-	ldr  x1,      [sp, #8]    /* load x1..x30 first, restore x0 last */
+
+	tst  x2, #0xF
+	b.ne .Lres_el1_\@
+
+	/* returning to EL0 */
+	ldr  x1, [sp, #248]
+	msr  sp_el0, x1
+	ldr  x1,      [sp, #8]
 	ldp  x2,  x3, [sp, #16]
 	ldp  x4,  x5, [sp, #32]
 	ldp  x6,  x7, [sp, #48]
@@ -106,16 +112,39 @@
 	ldp x26, x27, [sp, #208]
 	ldp x28, x29, [sp, #224]
 	ldr x30,      [sp, #240]
-	add sp, sp, #TF_SIZE       /* sp = SP_EL1 = kstack_top (EL1h alias) */
-	sub x0, sp, #TF_SIZE       /* x0 = frame base */
-	ldr x0, [x0]               /* restore original x0 */
+	ldr  x0, [sp, #0]
+	add  sp, sp, #TF_SIZE
+	eret
+
+.Lres_el1_\@:
+	/* returning to EL1 */
+	ldr  x1,      [sp, #8]
+	ldp  x2,  x3, [sp, #16]
+	ldp  x4,  x5, [sp, #32]
+	ldp  x6,  x7, [sp, #48]
+	ldp  x8,  x9, [sp, #64]
+	ldp x10, x11, [sp, #80]
+	ldp x12, x13, [sp, #96]
+	ldp x14, x15, [sp, #112]
+	ldp x16, x17, [sp, #128]
+	ldp x18, x19, [sp, #144]
+	ldp x20, x21, [sp, #160]
+	ldp x22, x23, [sp, #176]
+	ldp x24, x25, [sp, #192]
+	ldp x26, x27, [sp, #208]
+	ldp x28, x29, [sp, #224]
+	ldr x30,      [sp, #240]
+	mov  x0, sp
+	add  sp, x0, #TF_SIZE
+	ldr  x0, [x0, #0]
+	eret
 .endm
 
 .section ".vectors", "ax"
 .balign 2048
 .global exception_vectors
 exception_vectors:
-	/* EL1t — unused, we always run on SP_EL1 */
+	/* EL1t — unused */
 	b sync_handler
 	.balign 128
 	b irq_handler
@@ -124,7 +153,7 @@ exception_vectors:
 	.balign 128
 	b default_handler
 
-	/* EL1h — active exception level */
+	/* EL1h */
 	.balign 128
 	b sync_handler
 	.balign 128
@@ -144,7 +173,7 @@ exception_vectors:
 	.balign 128
 	b default_handler
 
-	/* EL0 32-bit — not used */
+	/* EL0 32-bit */
 	.balign 128
 	b default_handler
 	.balign 128
@@ -153,33 +182,13 @@ exception_vectors:
 	b default_handler
 	.balign 128
 	b default_handler
-
-/* emergency UART putc without touching the stack */
-.macro dbg_char ch
-	movz x15, #0x1000
-	movk x15, #0xFE20, lsl #16
-	mov  x16, #\ch
-.Lwait_\@:
-	ldr  x17, [x15, #0x18]
-	tbnz x17, #5, .Lwait_\@
-	str  x16, [x15]
-.endm
 
 .global irq_handler
 irq_handler:
 	save_trapframe
 	bl   task_current
-	mov  x19, x0
-	mov  x20, sp
-	ldr  x21, [sp, #264]    /* saved spsr_el1 */
-	and  x21, x21, #0xF     /* M[3:0]: 0=EL0t, 4=EL1t, 5=EL1h */
-	cbz  x21, .irq_ctx_save         /* interrupted from EL0 → always save */
-	ldr  x21, [x19, #304]   /* task->vm (offset fixed in proc.h) */
-	cbz  x21, .irq_ctx_save         /* kernel task (vm=NULL) → save so EL1 resumes */
-	b    .irq_skip_ctx_save         /* user task in EL1 syscall → keep EL0 ctx */
-.irq_ctx_save:
-	str  x20, [x19, #16]    /* task->ctx = sp */
-.irq_skip_ctx_save:
+	mov  x1, sp
+	str  x1, [x0, #16]    /* task->ctx = sp */
 	mov  w0, #0
 	bl   irq_dispatch
 	bl   schedule
@@ -191,35 +200,35 @@ irq_handler:
 sync_handler:
 	save_trapframe
 	mrs  x0, esr_el1
-	ubfx x1, x0, #26, #6   /* EC = esr[31:26] */
+	ubfx x1, x0, #26, #6
 	cmp  x1, #0x15
 	b.ne .sync_fault
 
-	/* EC=0x15: SVC — from EL0 (user syscall) or EL1 (kernel yield)? */
 	mrs  x2, spsr_el1
-	tst  x2, #0xF            /* M[3:0]: 0 = EL0t, non-zero = EL1 */
+	tst  x2, #0xF
 	b.ne .yield
 
-	/* EL0: Linux svc #0 with syscall nr in x8 */
+	/* EL0 syscall */
 	bl   task_current
 	mov  x1, sp
-	str  x1, [x0, #16]
+	str  x1, [x0, #16]    /* Save context ALWAYS before syscall */
 	mov  x0, sp
 	bl   syscall_handle
-	/* reschedule if need_resched set (e.g. after vfork) */
+
+	/* Check for reschedule */
 	adrp x19, need_resched
 	ldr  w20, [x19, :lo12:need_resched]
 	cbz  w20, .syscall_ret
 	str  wzr, [x19, :lo12:need_resched]
 	bl   schedule
 	bl   vm_activate
+
 .syscall_ret:
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret
 
 .yield:
-	/* EL1: svc #0 from kernel task — reschedule */
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
@@ -230,10 +239,9 @@ sync_handler:
 	eret
 
 .sync_fault:
-	mov  x0, sp       /* pass trapframe pointer */
+	mov  x0, sp
 	bl   sync_dispatch
 	b    .
 
 default_handler:
-	dbg_char 'D'
 	b default_handler
