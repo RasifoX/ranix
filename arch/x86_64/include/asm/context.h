@@ -57,6 +57,7 @@ typedef struct {
 #define SYS_ARCH_RT_SIGACTION   13
 #define SYS_ARCH_RT_SIGPROCMASK 14
 #define SYS_ARCH_VFORK          58
+#define SYS_ARCH_CLONE          56
 #define SYS_ARCH_EXECVE         59
 #define SYS_ARCH_WAIT4          61
 #define SYS_ARCH_MKDIR        83

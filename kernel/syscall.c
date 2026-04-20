@@ -24,7 +24,7 @@
 #define PROT_WRITE 0x2
 #define PROT_EXEC  0x4
 
-/* Linux ABI stat struct — must match kernel uapi exactly */
+/* Linux ABI stat struct */
 typedef struct {
 	uint64_t st_dev;
 	uint64_t st_ino;
@@ -60,6 +60,7 @@ static long sys_write(int fd, const void *buf, size_t len)
 		const char *p = buf;
 		for (size_t i = 0; i < len; i++)
 			kprintf("%c", p[i]);
+		kprintf_flush();
 		return (long)len;
 	}
 	return vfs_write(fd, buf, len);
@@ -71,6 +72,7 @@ static long sys_read(int fd, void *buf, size_t len)
 		char *p = buf;
 		size_t i = 0;
 		while (i < len) {
+			while (!uart_has_data()) arch_yield();
 			char c = uart_getc();
 			if (c == '\r') c = '\n';
 			if (c == 127 || c == '\b') {
@@ -102,43 +104,43 @@ static long sys_writev(int fd, const iovec_t *iov, int cnt)
 static long sys_open(const char *path, int flags, mode_t mode)
 {
 	long fd = vfs_open(path, flags, mode);
-	return fd < 0 ? -2 : fd;   /* -ENOENT */
+	return fd < 0 ? -2 : fd;
 }
 
 static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 {
-	(void)dirfd;   /* only absolute paths / AT_FDCWD supported */
+	(void)dirfd;
 	return sys_open(path, flags, mode);
 }
 
 static long sys_close(int fd)
 {
-	if (fd < 3) return 0;   /* don't close stdin/stdout/stderr */
-	return vfs_close(fd) == 0 ? 0 : -9;   /* -EBADF */
+	if (fd < 3) return 0;
+	return vfs_close(fd) == 0 ? 0 : -9;
 }
 
 static long sys_lseek(int fd, off_t off, int whence)
 {
 	off_t r = vfs_seek(fd, off, whence);
-	return r < 0 ? -29 : (long)r;   /* -ESPIPE on error */
+	return r < 0 ? -29 : (long)r;
 }
 
 static long sys_fstat(int fd, linux_stat_t *st)
 {
-	if (!st) return -14;   /* -EFAULT */
+	if (!st) return -14;
 	memset(st, 0, sizeof(*st));
 
 	if (fd >= 0 && fd <= 2) {
-		st->st_mode     = 0x2190;   /* S_IFCHR | 0110 — char dev */
+		st->st_mode     = 0x2190;
 		st->st_nlink    = 1;
-		st->st_rdev     = 0x0501;   /* major 5, minor 1 — /dev/console */
+		st->st_rdev     = 0x0501;
 		st->st_blksize  = 1024;
 		return 0;
 	}
 
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f) return -9;   /* -EBADF */
+	if (!f) return -9;
 
 	vfs_stat_t vs = {0};
 	if (f->inode->iops && f->inode->iops->stat)
@@ -171,22 +173,14 @@ static long sys_getpid(void)
 static long sys_brk(uint64_t addr)
 {
 	process_t *p = task_current();
-
-	if (addr == 0 || addr <= p->brk)
-		return (long)p->brk;
-
+	if (addr == 0 || addr <= p->brk) return (long)p->brk;
 	uint64_t new_brk = (addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
 	for (uint64_t va = p->brk; va < new_brk; va += PAGE_SIZE) {
 		void *page = buddy_alloc(0);
 		if (!page) return (long)p->brk;
 		memset(page, 0, PAGE_SIZE);
-		if (vm_map(p->vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE) != 0) {
-			buddy_free((uint64_t)page, 0);
-			return (long)p->brk;
-		}
+		vm_map(p->vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE);
 	}
-
 	p->brk = new_brk;
 	return (long)new_brk;
 }
@@ -194,40 +188,26 @@ static long sys_brk(uint64_t addr)
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
 	(void)fd; (void)off;
-
-	if (!(flags & MAP_ANONYMOUS)) return -38;   /* -ENOSYS: file-backed not yet */
-	if (len == 0)                 return -22;   /* -EINVAL */
-
+	if (!(flags & MAP_ANONYMOUS)) return -38;
+	if (len == 0)                 return -22;
 	process_t *p = task_current();
 	len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
 	uint64_t va;
-	if ((flags & MAP_FIXED) && addr)
-		va = addr & ~(PAGE_SIZE - 1);
-	else {
-		va = p->mmap_next;
-		p->mmap_next += len;
-	}
-
+	if ((flags & MAP_FIXED) && addr) va = addr & ~(PAGE_SIZE - 1);
+	else { va = p->mmap_next; p->mmap_next += len; }
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
 	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
-
 	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 		void *pg = buddy_alloc(0);
-		if (!pg) return -12;   /* -ENOMEM */
+		if (!pg) return -12;
 		memset(pg, 0, PAGE_SIZE);
-		if (vm_map(p->vm, v, (uint64_t)pg, vmflags) != 0) {
-			buddy_free((uint64_t)pg, 0);
-			return -12;
-		}
+		vm_map(p->vm, v, (uint64_t)pg, vmflags);
 	}
-
 	return (long)va;
 }
 
-#define USER_CODE_BASE_   0x400000UL
 #define USER_STACK_TOP_   0x800000UL
 #define USER_STACK_PAGES_ 2
 #define USER_MMAP_BASE_   0x10000000UL
@@ -235,43 +215,63 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
 	(void)argv; (void)envp;
+	if (!path) return -14;
+
+	process_t *p = task_current();
+
+	/* copy path to kernel buffer */
+	char kpath[PROC_NAME_MAX];
+	int i = 0;
+	while (i < PROC_NAME_MAX - 1 && path[i]) {
+		kpath[i] = path[i];
+		i++;
+	}
+	kpath[i] = '\0';
+
 	/* read file from VFS */
 	vfs_stat_t st = {0};
-	if (vfs_stat(path, &st) != 0) return -2;   /* ENOENT */
+	if (vfs_stat(kpath, &st) != 0) return -2;
 	if (st.size == 0)             return -2;
 
 	uint8_t *buf = kmalloc(st.size);
-	if (!buf) return -12;   /* ENOMEM */
+	if (!buf) return -12;
 
-	int fd = vfs_open(path, O_RDONLY, 0);
+	int fd = vfs_open(kpath, O_RDONLY, 0);
 	if (fd < 0) { kfree(buf); return -2; }
-
-	ssize_t n = vfs_read(fd, buf, st.size);
+	vfs_read(fd, buf, st.size);
 	vfs_close(fd);
-	if (n <= 0) { kfree(buf); return -2; }
 
 	/* build new address space */
 	vm_space_t *new_vm = vm_create();
 	if (!new_vm) { kfree(buf); return -12; }
 
 	uint64_t entry = 0, load_end = 0;
-	if (elf_load(new_vm, buf, (size_t)n, &entry, &load_end) != 0) {
+	if (elf_load(new_vm, buf, (size_t)st.size, &entry, &load_end) != 0) {
 		kfree(buf);
 		vm_destroy(new_vm);
-		return -8;   /* ENOEXEC */
+		return -8;
 	}
 	kfree(buf);
 
 	/* map user stack */
-	for (int i = 0; i < USER_STACK_PAGES_; i++) {
+	for (int j = 0; j < USER_STACK_PAGES_; j++) {
 		void *pg = buddy_alloc(0);
 		if (!pg) { vm_destroy(new_vm); return -12; }
 		memset(pg, 0, PAGE_SIZE);
-		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - i) * PAGE_SIZE;
+		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
 		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
 	}
 
-	process_t *p = task_current();
+	/* update process name */
+	const char *last_slash = kpath;
+	for (int j = 0; kpath[j]; j++) if (kpath[j] == '/') last_slash = kpath + j + 1;
+	
+	int nlen = 0;
+	while (last_slash[nlen] && nlen < PROC_NAME_MAX - 1) {
+		p->name[nlen] = last_slash[nlen];
+		nlen++;
+	}
+	p->name[nlen] = '\0';
 
 	/* switch to new address space */
 	p->vm        = new_vm;
@@ -279,60 +279,70 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	p->mmap_next = USER_MMAP_BASE_;
 	arch_vm_switch((uint64_t)new_vm->root);
 
-	/* reinitialise the live kernel-stack context frame in place */
+	/* reinitialise context frame */
 	arch_context_init_user(p->ctx, entry, USER_STACK_TOP_ - 64);
 
-	/* reset arch TLS register so new process starts clean */
+	/* reset TLS */
 #if defined(__aarch64__)
 	__asm__ volatile("msr tpidr_el0, xzr");
 #elif defined(__x86_64__)
 	__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"(0U), "d"(0U));
 #endif
 
-	/* wake vfork parent */
-	if (p->vfork_parent >= 0) {
-		process_t *pp = proc_find((pid_t)p->vfork_parent);
-		if (pp) task_wake(pp);
-		p->vfork_parent = -1;
-	}
-
-	return 0;   /* overwritten by arch_context_init_user zeroing x0/rax */
+	return 0;
 }
 
 static long sys_vfork(void)
 {
-	return (long)proc_vfork();   /* sets need_resched, suspends parent */
+	return (long)proc_vfork();
 }
 
 static long sys_waitpid(pid_t pid, int *status, int flags)
 {
 	(void)flags;
+	process_t *p = task_current();
+
+	if (pid == -1) {
+		while (1) {
+			process_t *child = NULL;
+			int any_alive = 0;
+			int count = task_count();
+			for (int i = 0; i < count; i++) {
+				process_t *c = task_get(i);
+				if (c && c->ppid == p->pid) {
+					if (c->state == PROC_DEAD && !c->reaped) { child = c; break; }
+					if (c->state != PROC_DEAD) any_alive = 1;
+				}
+			}
+			if (child) {
+				child->reaped = 1;
+				if (status && (uint64_t)status > 0x1000)
+					*status = (child->exit_code & 0xFF) << 8;
+				return (long)child->pid;
+			}
+			if (!any_alive) return -10;
+			task_sleep();
+		}
+	}
+
 	process_t *child = proc_find(pid);
-	if (!child) return -10;   /* ECHILD */
+	if (!child || child->ppid != p->pid) return -10;
+
 	while (child->state != PROC_DEAD)
-		arch_yield();
-	if (status) *status = (child->exit_code & 0xFF) << 8;
+		task_sleep();
+
+	child->reaped = 1;
+	if (status && (uint64_t)status > 0x1000)
+		*status = (child->exit_code & 0xFF) << 8;
 	return (long)pid;
 }
 
 #if defined(__x86_64__)
-#define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
-#define ARCH_GET_FS 0x1003
-#define ARCH_GET_GS 0x1004
 static long sys_arch_prctl(int code, uint64_t addr)
 {
 	if (code == ARCH_SET_FS) {
-		__asm__ volatile("wrmsr"
-			:: "c"(0xC0000100U),
-			   "a"((uint32_t)addr),
-			   "d"((uint32_t)(addr >> 32)));
-		return 0;
-	}
-	if (code == ARCH_GET_FS) {
-		uint32_t lo, hi;
-		__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100U));
-		*(uint64_t *)addr = ((uint64_t)hi << 32) | lo;
+		__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
 		return 0;
 	}
 	return -22;
@@ -349,33 +359,14 @@ static long sys_munmap(uint64_t addr, size_t len)
 	return 0;
 }
 
-static long sys_mprotect(uint64_t addr, size_t len, int prot)
-{
-	(void)addr; (void)len; (void)prot;
-	return 0;
-}
-
+static long sys_mprotect(uint64_t addr, size_t len, int prot) { (void)addr; (void)len; (void)prot; return 0; }
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
-	(void)pid; (void)resource; (void)new_limit;
-	if (old_limit) {
-		uint64_t limits[2] = { 8192 * 1024, 8192 * 1024 }; /* 8MB stack limit */
-		memcpy(old_limit, limits, 16);
-	}
+	if (old_limit) { uint64_t limits[2] = { 8192 * 1024, 8192 * 1024 }; memcpy(old_limit, limits, 16); }
 	return 0;
 }
-
-static long sys_mkdir(const char *path, mode_t mode)
-{
-	return vfs_mkdir(path, mode);
-}
-
-static long sys_unlink(const char *path)
-{
-	return vfs_unlink(path);
-}
-
-/* ── dispatcher ──────────────────────────────────────────── */
+static long sys_mkdir(const char *path, mode_t mode) { return vfs_mkdir(path, mode); }
+static long sys_unlink(const char *path) { return vfs_unlink(path); }
 
 void syscall_handle(arch_context_t *ctx)
 {
@@ -384,15 +375,12 @@ void syscall_handle(arch_context_t *ctx)
 	long arg1 = (long)CTX_SYSCALL_ARG1(ctx);
 	long arg2 = (long)CTX_SYSCALL_ARG2(ctx);
 	long arg3 = (long)CTX_SYSCALL_ARG3(ctx);
-	long ret  = -38;   /* -ENOSYS default */
+	long ret  = -38;
 
 	switch (n) {
 	case SYS_ARCH_READ:          ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_WRITE:         ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_WRITEV:        ret = sys_writev((int)arg0, (iovec_t*)arg1, (int)arg2); break;
-#if defined(SYS_ARCH_OPEN)
-	case SYS_ARCH_OPEN:          ret = sys_open((const char*)arg0, (int)arg1, (mode_t)arg2); break;
-#endif
 	case SYS_ARCH_OPENAT:        ret = sys_openat((int)arg0, (const char*)arg1, (int)arg2, (mode_t)arg3); break;
 	case SYS_ARCH_CLOSE:         ret = sys_close((int)arg0); break;
 	case SYS_ARCH_LSEEK:         ret = sys_lseek((int)arg0, (off_t)arg1, (int)arg2); break;
@@ -401,49 +389,21 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EXIT_GROUP:    ret = sys_exit((int)arg0); break;
 	case SYS_ARCH_GETPID:        ret = sys_getpid(); break;
 	case SYS_ARCH_BRK:           ret = sys_brk((uint64_t)arg0); break;
-	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2,
-	                                             (int)arg3, 0, 0); break;
+	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
 	case SYS_ARCH_MUNMAP:        ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MPROTECT:      ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;
-#if defined(SYS_ARCH_MKDIR)
-	case SYS_ARCH_MKDIR:         ret = sys_mkdir((const char*)arg0, (mode_t)arg1); break;
-#endif
-#if defined(SYS_ARCH_MKDIRAT)
-	case SYS_ARCH_MKDIRAT:       ret = sys_mkdir((const char*)arg1, (mode_t)arg2); break;
-#endif
-#if defined(SYS_ARCH_UNLINK)
-	case SYS_ARCH_UNLINK:        ret = sys_unlink((const char*)arg0); break;
-#endif
-#if defined(SYS_ARCH_UNLINKAT)
-	case SYS_ARCH_UNLINKAT:      ret = sys_unlink((const char*)arg1); break;
-#endif
-	case SYS_ARCH_RT_SIGACTION:     ret = 0; break;
-	case SYS_ARCH_RT_SIGPROCMASK:   ret = 0; break;
-	case SYS_ARCH_IOCTL:            ret = -25; break;   /* -ENOTTY */
 	case SYS_ARCH_VFORK:            ret = sys_vfork(); break;
-#if defined(SYS_ARCH_CLONE)
 	case SYS_ARCH_CLONE: {
-		/*
-		 * musl vfork() → clone(SIGCHLD, 0): no CLONE_VM/CLONE_VFORK.
-		 * Treat fork-like clones (no CLONE_THREAD) as vfork: safe because
-		 * the child immediately execve's and the parent blocks in waitpid.
-		 */
 		uint64_t flags = (uint64_t)arg0;
-		if (flags & 0x10000) /* CLONE_THREAD — not supported */
-			ret = -38;
-		else
-			ret = sys_vfork();
+		if (flags & 0x10000) ret = -38;
+		else ret = sys_vfork();
 		break;
 	}
-#endif
-	case SYS_ARCH_EXECVE:           ret = sys_execve((const char*)arg0,
-	                                    (char * const *)arg1,
-	                                    (char * const *)arg2); break;
-	case SYS_ARCH_WAIT4:            ret = sys_waitpid((pid_t)arg0,
-	                                    (int*)arg1, (int)arg2); break;
-#if defined(SYS_ARCH_ARCH_PRCTL)
+	case SYS_ARCH_EXECVE:           ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
+	case SYS_ARCH_WAIT4:            ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
+#if defined(__x86_64__)
 	case SYS_ARCH_ARCH_PRCTL:      ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
 #endif
 	default:
