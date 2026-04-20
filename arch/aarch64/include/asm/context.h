@@ -22,7 +22,7 @@ typedef struct {
 	uint64_t qregs[64]; /* 32 * 128-bit registers as 64 * 64-bit */
 	uint32_t fpsr;
 	uint32_t fpcr;
-	uint32_t _padding;  /* align to 16 bytes */
+	uint64_t _padding_16; /* padding to reach 800 bytes (16-byte aligned) */
 } arch_context_t;
 
 #define ARCH_SPSR_KERNEL_TASK  0x00000005UL  /* EL1h, DAIF=0 */

@@ -126,6 +126,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->brk          = load_end;
 	p->mmap_next    = USER_MMAP_BASE;
 	p->vfork_parent = -1;
+	p->reaped       = 0;
 
 	/* allocate and map user stack */
 	for (int i = 0; i < USER_STACK_PAGES; i++) {
@@ -177,6 +178,7 @@ pid_t proc_vfork(void)
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = parent->pid;
+	child->reaped       = 0;
 	child->fds          = fd_table_create();
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
 
@@ -194,10 +196,19 @@ pid_t proc_vfork(void)
 	parent->next   = child;
 	proctab[proc_cnt++] = child;
 
+	/* 
+	 * CRITICAL: Set the return value (x0) in the parent's trapframe NOW.
+	 * The parent is about to be suspended. If a switch occurs before the 
+	 * syscall handler finishes, we must ensure it has the correct PID.
+	 */
+	if (parent->ctx) {
+		CTX_SYSCALL_RET(parent->ctx, child->pid);
+	}
+
 	/* suspend parent until child calls execve or exits */
 	parent->state = PROC_SLEEPING;
-	need_resched  = 1;   /* asm syscall path must schedule before eret */
-
+	need_resched  = 1;
+	
 	return child->pid;
 }
 
@@ -211,7 +222,7 @@ void proc_wait(pid_t pid)
 {
 	process_t *p = proc_find(pid);
 	while (p && p->state != PROC_DEAD)
-		arch_yield();
+		task_sleep();
 }
 
 void schedule(void)
@@ -249,7 +260,20 @@ void yield(void)      { arch_yield(); }
 void task_sleep(void) { current->state = PROC_SLEEPING; arch_yield(); }
 void task_exit(void)
 {
-	current->state = PROC_DEAD;
+	process_t *p = current;
+	p->state = PROC_DEAD;
+
+	/* wake vfork parent */
+	if (p->vfork_parent >= 0) {
+		process_t *pp = proc_find((pid_t)p->vfork_parent);
+		if (pp) task_wake(pp);
+		p->vfork_parent = -1;
+	}
+
+	/* wake regular parent */
+	process_t *parent = proc_find((pid_t)p->ppid);
+	if (parent) task_wake(parent);
+
 	arch_yield();
 }
 

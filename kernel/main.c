@@ -83,10 +83,34 @@ void kernel_main(void)
 
 	kprintf("[ranix] ready\n");
 	sched_init();
-	irq_enable();
+	
+	/* idle process needs an fd table to use VFS during boot */
+	process_t *idle = task_current();
+	if (!idle->fds) idle->fds = fd_table_create();
 
+	irq_enable();
 	board_drivers_register();
-	task_create("shell", shell_task);
+
+	/* Start userspace shell as the primary task */
+	vfs_stat_t st = {0};
+	if (vfs_stat("/bin/sh", &st) == 0 && st.size > 0) {
+		uint8_t *buf = kmalloc(st.size);
+		if (buf) {
+			int fd = vfs_open("/bin/sh", O_RDONLY, 0);
+			if (fd >= 0) {
+				vfs_read(fd, buf, st.size);
+				vfs_close(fd);
+				kprintf("[boot] launching /bin/sh...\n");
+				proc_exec("sh", buf, st.size);
+			} else {
+				kprintf("[boot] vfs_open /bin/sh failed\n");
+			}
+			kfree(buf);
+		}
+	} else {
+		kprintf("[boot] /bin/sh not found in initrd, falling back to kshell\n");
+		task_create("shell", shell_task);
+	}
 
 	while (1)
 		arch_halt();
