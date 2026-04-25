@@ -20,7 +20,7 @@ TARGET    = $(BUILD_DIR)/ranix.elf
 INCLUDES = -Iinclude -Idrivers -I. -Iarch/$(ARCH)/include
 
 ifeq ($(ARCH),aarch64)
-    ARCH_CFLAGS = -mgeneral-regs-only
+    ARCH_CFLAGS = -mgeneral-regs-only -mcmodel=large
     ifeq ($(BOARD),raspi4)
         MACH_DIR    = arch/aarch64/mach-bcm2711
         LINKER      = arch/aarch64/linker_raspi4.ld
