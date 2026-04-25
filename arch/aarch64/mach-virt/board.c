@@ -1,8 +1,11 @@
 #include <drivers/serial/pl011.h>
 #include <drivers/irqchip/irqchip.h>
 #include <drivers/irqchip/arm_timer.h>
+#include <drivers/serial/uart.h>
 #include <kernel/board.h>
 #include <kernel/irq.h>
+#include <kernel/mm/vm.h>
+#include <asm/mmu.h>
 
 static board_config_t config = {
 	.name          = "QEMU virt",
@@ -17,6 +20,16 @@ static board_config_t config = {
 
 void board_early_init(void)
 {
+	/* enable FP/SIMD at EL0 and EL1 */
+	__asm__ volatile(
+		"mrs x0, cpacr_el1\n"
+		"orr x0, x0, #(3 << 20)\n"
+		"msr cpacr_el1, x0\n"
+		"isb\n"
+		::: "x0"
+	);
+
+	config.uart_base = PHYS_TO_VIRT(config.uart_base);
 	uart_init();
 }
 
@@ -28,6 +41,8 @@ int board_fb_alloc(fb_info_t *out)
 
 void board_irq_init(void)
 {
+	config.gic_dist_base = (uint64_t)ioremap(config.gic_dist_base, 0x1000, VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
+	config.gic_cpu_base  = (uint64_t)ioremap(config.gic_cpu_base,  0x2000, VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
 	irqchip_init(config.gic_dist_base, config.gic_cpu_base);
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);

@@ -8,7 +8,7 @@
 #define PAGE_SIZE 4096
 #endif
 
-void pmm_init(uint64_t mem_start, uint64_t mem_size);
+uint64_t pmm_init(uint64_t mem_start, uint64_t mem_limit);
 void pmm_free_region(uint64_t addr, uint64_t size);
 void *pmm_alloc(void);
 void pmm_free(void *page);
