@@ -84,6 +84,7 @@ SRCS_KERNEL = \
     kernel/syscall.c \
     kernel/vfs.c \
     kernel/fs/ramfs.c \
+    kernel/fs/pipe.c \
     kernel/mm/buddy.c \
     kernel/mm/vm.c \
     kernel/mm/pmm.c \

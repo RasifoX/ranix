@@ -56,6 +56,7 @@ typedef struct {
 #define SYS_ARCH_MUNMAP        11
 #define SYS_ARCH_RT_SIGACTION   13
 #define SYS_ARCH_RT_SIGPROCMASK 14
+#define SYS_ARCH_PIPE2         293
 #define SYS_ARCH_VFORK          58
 #define SYS_ARCH_CLONE          56
 #define SYS_ARCH_FORK           57

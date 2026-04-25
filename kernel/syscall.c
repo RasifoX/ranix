@@ -301,6 +301,15 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	return 0;
 }
 
+static long sys_pipe2(int *pipefd, int flags)
+{
+	(void)flags;
+	int kfds[2];
+	if (vfs_pipe(kfds) != 0) return -1;
+	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
+	return 0;
+}
+
 static long sys_fork(void)
 {
 	return (long)proc_fork();
@@ -405,6 +414,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_BRK:           ret = sys_brk((uint64_t)arg0); break;
 	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
 	case SYS_ARCH_MUNMAP:        ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
+	case SYS_ARCH_PIPE2:         ret = sys_pipe2((int*)arg0, (int)arg1); break;
 	case SYS_ARCH_MPROTECT:      ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;

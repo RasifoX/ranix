@@ -56,6 +56,7 @@ typedef struct {
 #define SYS_ARCH_BRK         214
 #define SYS_ARCH_MMAP        222
 #define SYS_ARCH_MUNMAP      215
+#define SYS_ARCH_PIPE2         198
 #define SYS_ARCH_RT_SIGACTION   134
 #define SYS_ARCH_RT_SIGPROCMASK 135
 #define SYS_ARCH_CLONE          220
