@@ -27,4 +27,5 @@ SECTIONS
     . = ALIGN(16);
     . += 16384;
     __stack_top = .;
+    __kernel_phys_end = __stack_top;
 }

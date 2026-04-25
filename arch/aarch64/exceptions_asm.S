@@ -211,7 +211,7 @@ sync_handler:
 	/* EL0 syscall */
 	bl   task_current
 	mov  x1, sp
-	str  x1, [x0, #16]    /* Save context ALWAYS before syscall */
+	str  x1, [x0, #16]
 	mov  x0, sp
 	bl   syscall_handle
 

@@ -14,11 +14,11 @@ void vm_set_kernel_pt(uint64_t phys)
 
 void vm_activate(void)
 {
-    task_t *t = task_current();
-    if (t->vm) {
-        arch_set_user_kstack((uint64_t)t->kstack + KSTACK_SIZE);
-        arch_vm_switch((uint64_t)t->vm->root);
-    } else if (kernel_pt_phys) {
-        arch_vm_switch(kernel_pt_phys);
-    }
+	task_t *t = task_current();
+	if (t->vm) {
+		arch_set_user_kstack((uint64_t)t->kstack + KSTACK_SIZE);
+		arch_vm_switch((uint64_t)t->vm->root);
+	} else if (kernel_pt_phys) {
+		arch_vm_switch(kernel_pt_phys);
+	}
 }

@@ -76,7 +76,6 @@ void       proc_wait(pid_t pid);
 /* set by sys_vfork so the asm syscall path reschedules after handler */
 extern int need_resched;
 
-/* legacy alias — keeps old callers working */
 typedef process_t task_t;
 #define task_create(name, fn)  proc_create(name, fn)
 #define TASK_MAX    PROC_MAX
