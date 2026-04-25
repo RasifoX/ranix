@@ -45,7 +45,9 @@ ifeq ($(ARCH),aarch64)
         drivers/tty/serial/pl011/pl011.c \
         drivers/irqchip/gic400/gic400.c \
         drivers/irqchip/arm-timer/arm_timer.c \
-        drivers/mailbox/bcm2711_mbox.c
+        drivers/mailbox/bcm2711_mbox.c \
+        drivers/block/sdhost_pi4.c \
+        drivers/block/virtio_blk.c
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
@@ -58,7 +60,7 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/mmu.c \
         arch/x86_64/vm.c \
         arch/x86_64/exceptions.c \
-        arch/x86_64/mach-pc/board.c
+        arch/x86_64/mach-pc/board.c \
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
         arch/x86_64/exceptions_asm.S
@@ -66,7 +68,8 @@ else ifeq ($(ARCH),x86_64)
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \
         drivers/irqchip/pit/pit.c \
-        drivers/input/ps2/ps2.c
+        drivers/input/ps2/ps2.c \
+        drivers/block/virtio_blk.c
 endif
 
 SRCS_KERNEL = \
@@ -85,6 +88,7 @@ SRCS_KERNEL = \
     kernel/vfs.c \
     kernel/fs/ramfs.c \
     kernel/fs/pipe.c \
+    kernel/block.c \
     kernel/mm/buddy.c \
     kernel/mm/vm.c \
     kernel/mm/pmm.c \

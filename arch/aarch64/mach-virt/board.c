@@ -49,10 +49,13 @@ void board_irq_init(void)
 	timer_init(100);
 }
 
+#include <drivers/block/sdcard.h>
+
 void board_drivers_register(void)
 {
 	pl011_register();
 	timer_register();
+	virtio_blk_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }

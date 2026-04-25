@@ -15,6 +15,7 @@ static board_config_t config = {
 	.fb_height = 0,
 };
 
+
 void board_early_init(void)
 {
 	uart16550_init();
@@ -38,10 +39,13 @@ void board_irq_init(void)
 	ps2_kbd_init();
 }
 
+#include <drivers/block/sdcard.h>
+
 void board_drivers_register(void)
 {
 	uart16550_register();
 	pit_register();
+	virtio_blk_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }
