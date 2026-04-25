@@ -10,6 +10,18 @@
 #define PROC_NAME_MAX  256
 #define KSTACK_SIZE    8192
 
+#define NSIG           64
+#define SIGKILL        9
+#define SIGTERM        15
+#define SIGCHLD        17
+
+typedef struct {
+	void (*sa_handler)(int);
+	uint64_t sa_mask;
+	int      sa_flags;
+	void (*sa_restorer)(void);
+} sigaction_t;
+
 typedef enum {
 	PROC_RUNNING  = 0,
 	PROC_READY    = 1,
@@ -38,6 +50,11 @@ typedef struct process {
 	/* ── scheduling ──────────────────────────── */
 	int             ticks_remaining;
 
+	/* ── signals ─────────────────────────────── */
+	uint64_t        sig_pending;
+	uint64_t        sig_mask;
+	sigaction_t     sig_actions[NSIG];
+
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
 	uint64_t        mmap_next;
@@ -65,6 +82,8 @@ void       schedule(void);
 void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);
+void       task_signal(process_t *p, int sig);
+void       signal_dispatch(arch_context_t *tf);
 void       task_exit(void);
 
 process_t *task_current(void);

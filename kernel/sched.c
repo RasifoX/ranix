@@ -409,9 +409,13 @@ void task_exit(void)
 	}
 
 	process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
-	if (parent && parent->state == PROC_SLEEPING) {
-		parent->state = PROC_READY;
-		need_resched = 1;
+	if (parent) {
+		if (parent->state == PROC_SLEEPING) {
+			parent->state = PROC_READY;
+			need_resched = 1;
+		}
+		/* Send SIGCHLD to parent */
+		parent->sig_pending |= (1UL << (SIGCHLD - 1));
 	}
 
 	spin_unlock_irq(&sched_lock, f);
@@ -426,6 +430,45 @@ void task_wake(process_t *p)
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
+}
+
+void task_signal(process_t *p, int sig)
+{
+	if (!p || sig <= 0 || sig > NSIG) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	p->sig_pending |= (1UL << (sig - 1));
+	if (p->state == PROC_SLEEPING) {
+		p->state = PROC_READY;
+		need_resched = 1;
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
+void signal_dispatch(arch_context_t *tf)
+{
+	(void)tf;
+	process_t *p = task_current();
+	if (!p) return;
+
+	uint64_t mask = p->sig_pending & ~p->sig_mask;
+	if (!mask) return;
+
+	/* Pick first signal */
+	int sig = 0;
+	for (int i = 0; i < NSIG; i++) {
+		if (mask & (1UL << i)) {
+			sig = i + 1;
+			break;
+		}
+	}
+
+	if (sig == SIGKILL) {
+		p->sig_pending &= ~(1UL << (sig - 1));
+		task_exit();
+	}
+
+	/* TODO: Implement user-mode signal handler jumping. 
+	 * For now, only SIGKILL is handled. */
 }
 
 arch_context_t *sched_get_current_ctx(void)
