@@ -3,6 +3,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/sync.h>
 
 typedef struct block {
   size_t size;
@@ -13,9 +14,11 @@ typedef struct block {
 #define HEADER_SIZE sizeof(block_t)
 
 static block_t *heap_head = NULL;
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 static block_t *heap_grow(void) {
   block_t *blk = (block_t *)pmm_alloc();
+  if (!blk) return NULL;
   blk->size = PAGE_SIZE - HEADER_SIZE;
   blk->free = 1;
   blk->next = NULL;
@@ -31,15 +34,24 @@ void *kmalloc(size_t size) {
     return NULL;
   size = (size + 7) & ~7;
 
+  uint64_t f = spin_lock_irq(&heap_lock);
+
   if (size > PAGE_SIZE - HEADER_SIZE) {
     int ord = 0;
     while (((size_t)PAGE_SIZE << ord) < size + HEADER_SIZE) ord++;
-    if (ord >= BUDDY_MAX_ORDER) return NULL;
+    if (ord >= BUDDY_MAX_ORDER) {
+      spin_unlock_irq(&heap_lock, f);
+      return NULL;
+    }
     block_t *blk = (block_t *)buddy_alloc(ord);
-    if (!blk) return NULL;
+    if (!blk) {
+      spin_unlock_irq(&heap_lock, f);
+      return NULL;
+    }
     blk->size = ord;
     blk->free = 2;
     blk->next = NULL;
+    spin_unlock_irq(&heap_lock, f);
     return (void *)((uint8_t *)blk + HEADER_SIZE);
   }
 
@@ -55,6 +67,7 @@ void *kmalloc(size_t size) {
         cur->next = new;
       }
       cur->free = 0;
+      spin_unlock_irq(&heap_lock, f);
       return (void *)((uint8_t *)cur + HEADER_SIZE);
     }
     if (!cur->next) {
@@ -62,6 +75,7 @@ void *kmalloc(size_t size) {
     }
     cur = cur->next;
   }
+  spin_unlock_irq(&heap_lock, f);
   kpanic("kmalloc: heap exhausted");
   return NULL;
 }
@@ -69,9 +83,13 @@ void *kmalloc(size_t size) {
 void kfree(void *ptr) {
   if (!ptr)
     return;
+
+  uint64_t f = spin_lock_irq(&heap_lock);
+
   block_t *blk = (block_t *)((uint8_t *)ptr - HEADER_SIZE);
   if (blk->free == 2) {
     buddy_free((uint64_t)blk, (int)blk->size);
+    spin_unlock_irq(&heap_lock, f);
     return;
   }
   blk->free = 1;
@@ -84,5 +102,6 @@ void kfree(void *ptr) {
       cur = cur->next;
     }
   }
+  spin_unlock_irq(&heap_lock, f);
 }
 
