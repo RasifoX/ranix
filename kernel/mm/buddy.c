@@ -1,6 +1,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <asm/mmu.h>
 
@@ -11,6 +12,8 @@ static uint8_t     *blk_order; /* order of the free/alloc block at this page */
 static uint8_t     *free_bm;
 static uint64_t    _base;
 static uint64_t    _npages;
+
+static spinlock_t buddy_lock = SPINLOCK_INIT;
 
 page_t *mem_map = NULL;
 
@@ -23,14 +26,18 @@ static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
 page_t *paddr_to_page(uint64_t p)
 {
+	/* No lock needed for simple map access usually, but for safety: */
+	uint64_t f = spin_lock_irq(&buddy_lock);
 	uint64_t idx = p >> PAGE_SHIFT;
-	if (idx >= _npages) return NULL;
-	return &mem_map[idx];
+	page_t *res = (idx >= _npages) ? NULL : &mem_map[idx];
+	spin_unlock_irq(&buddy_lock, f);
+	return res;
 }
 
 uint64_t page_to_paddr(page_t *page)
 {
 	if (!page) return 0;
+	/* simple pointer math, no lock needed */
 	return (uint64_t)(page - mem_map) << PAGE_SHIFT;
 }
 
@@ -64,13 +71,14 @@ static void list_remove(int ord, uint64_t addr)
 
 void buddy_free(uint64_t addr, int ord)
 {
+	uint64_t f = spin_lock_irq(&buddy_lock);
 	uint64_t p = pidx(addr);
 	
 	/* Reset refcounts for the freed block */
 	uint64_t npg = 1ul << ord;
 	for (uint64_t i = 0; i < npg; i++) {
-		page_t *pg = paddr_to_page(addr + (i << PAGE_SHIFT));
-		if (pg) pg->refcount = 0;
+		uint64_t idx = (addr + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
+		if (idx < _npages) mem_map[idx].refcount = 0;
 	}
 
 	while (ord < BUDDY_MAX_ORDER - 1) {
@@ -86,15 +94,19 @@ void buddy_free(uint64_t addr, int ord)
 	bm_set(p);
 	blk_order[p] = (uint8_t)ord;
 	push(ord, paddr(p));
+	spin_unlock_irq(&buddy_lock, f);
 }
 
 void *buddy_alloc(int ord)
 {
+	uint64_t f = spin_lock_irq(&buddy_lock);
 	int o = ord;
 	while (o < BUDDY_MAX_ORDER && !free_list[o])
 		o++;
-	if (o >= BUDDY_MAX_ORDER)
+	if (o >= BUDDY_MAX_ORDER) {
+		spin_unlock_irq(&buddy_lock, f);
 		return 0;
+	}
 
 	uint64_t addr = pop(o);
 	uint64_t p    = pidx(addr);
@@ -113,13 +125,14 @@ void *buddy_alloc(int ord)
 	/* Initialize refcounts for allocated block */
 	uint64_t npg = 1ul << ord;
 	for (uint64_t i = 0; i < npg; i++) {
-		page_t *pg = paddr_to_page(addr + (i << PAGE_SHIFT));
-		if (pg) {
-			pg->refcount = 1;
-			pg->flags = 0;
+		uint64_t idx = (addr + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
+		if (idx < _npages) {
+			mem_map[idx].refcount = 1;
+			mem_map[idx].flags = 0;
 		}
 	}
 
+	spin_unlock_irq(&buddy_lock, f);
 	return (void *)addr;
 }
 
@@ -143,6 +156,7 @@ void buddy_add_region(uint64_t addr, uint64_t size)
 
 uint64_t buddy_init(uint64_t base, uint64_t limit)
 {
+	/* buddy_init is called early during boot, so no lock needed yet */
 	uint64_t total_pages = limit >> PAGE_SHIFT;
 
 	uint64_t blk_order_sz = total_pages * sizeof(uint8_t);
