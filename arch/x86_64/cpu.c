@@ -24,6 +24,7 @@ cpu_context_t *arch_get_cpu_ctx(void)
 
 static void arch_syscall_init(void)
 {
+	early_cpu_ctx.self    = &early_cpu_ctx;
 	early_cpu_ctx.current = NULL;
 	early_cpu_ctx.cpu_id  = 0;
 	early_cpu_ctx.magic   = 0xCAFEBABE;

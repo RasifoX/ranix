@@ -1,6 +1,7 @@
 #include <kernel/sync.h>
 #include <kernel/irq.h>
 #include <kernel/sched.h>
+#include <kernel/hal.h>
 
 /* arch_spin_trylock: attempt to atomically set locked 0→1.
  * Returns 1 on success, 0 if already locked. */
@@ -85,4 +86,36 @@ void mutex_unlock(mutex_t *m)
 	m->locked = 0;
 	m->owner  = 0;
 	spin_unlock_irq(&m->guard, f);
+}
+
+void wait_queue_init(wait_queue_t *q)
+{
+	q->lock = (spinlock_t)SPINLOCK_INIT;
+	q->tasks = NULL;
+}
+
+void sleep_on(wait_queue_t *q)
+{
+	process_t *curr = task_current();
+	if (!curr || curr->pid == 0) return; /* idle cannot sleep */
+
+	uint64_t f = spin_lock_irq(&q->lock);
+	curr->state = PROC_SLEEPING;
+	curr->wait_next = q->tasks;
+	q->tasks = curr;
+	spin_unlock_irq(&q->lock, f);
+
+	arch_yield();
+}
+
+void wake_up(wait_queue_t *q)
+{
+	uint64_t f = spin_lock_irq(&q->lock);
+	process_t *p = q->tasks;
+	while (p) {
+		task_wake(p);
+		p = p->wait_next;
+	}
+	q->tasks = NULL;
+	spin_unlock_irq(&q->lock, f);
 }
