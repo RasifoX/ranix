@@ -73,6 +73,7 @@ arch_context_t *sched_get_current_ctx(void);
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
+pid_t      proc_fork(void);
 pid_t      proc_vfork(void);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);

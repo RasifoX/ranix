@@ -1,5 +1,6 @@
 #include <kernel/mm/vm.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -117,7 +118,101 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 }
 
+uint64_t arch_vm_get_paddr(uint64_t *pml4, uint64_t vaddr)
+{
+	uint64_t p4i = (vaddr >> 39) & 0x1FF;
+	uint64_t p3i = (vaddr >> 30) & 0x1FF;
+	uint64_t p2i = (vaddr >> 21) & 0x1FF;
+	uint64_t p1i = (vaddr >> 12) & 0x1FF;
+
+	if (!(pml4[p4i] & PTE_P)) return 0;
+	uint64_t *pdp = (uint64_t *)(pml4[p4i] & ~0xFFFUL);
+
+	if (!(pdp[p3i] & PTE_P)) return 0;
+	if (pdp[p3i] & PTE_PS) return (pdp[p3i] & ~0x3FFFFFFFUL) | (vaddr & 0x3FFFFFFFUL);
+
+	uint64_t *pd = (uint64_t *)(pdp[p3i] & ~0xFFFUL);
+	if (!(pd[p2i] & PTE_P)) return 0;
+	if (pd[p2i] & PTE_PS) return (pd[p2i] & ~0x1FFFFFUL) | (vaddr & 0x1FFFFFUL);
+
+	uint64_t *pt = (uint64_t *)(pd[p2i] & ~0xFFFUL);
+	if (!(pt[p1i] & PTE_P)) return 0;
+	return (pt[p1i] & ~0xFFFUL);
+}
+
 void arch_vm_switch(uint64_t root_phys)
 {
 	__asm__ volatile("mov %0, %%cr3" :: "r"(root_phys) : "memory");
+}
+
+vm_space_t *vm_copy(vm_space_t *vs)
+{
+	vm_space_t *new_vs = buddy_alloc(0);
+	if (!new_vs) kpanic("vm_copy: out of memory");
+	new_vs->root = alloc_table();
+
+	uint64_t *l4_old = vs->root;
+	uint64_t *l4_new = new_vs->root;
+
+	uint64_t eflags = PTE_P | PTE_W | PTE_U;
+
+	/* Only walk user space (PML4 index 0) */
+	for (int i = 0; i < 1; i++) {
+		if (!(l4_old[i] & PTE_P)) continue;
+
+		uint64_t *l3_old = (uint64_t *)(l4_old[i] & ~0xFFFUL);
+		uint64_t *l3_new = alloc_table();
+		l4_new[i] = (uint64_t)l3_new | eflags;
+
+		for (int j = 0; j < 512; j++) {
+			if (!(l3_old[j] & PTE_P)) continue;
+			if (l3_old[j] & PTE_PS) {
+				/* 1GB huge page - just copy for now (no COW support) */
+				l3_new[j] = l3_old[j];
+				continue;
+			}
+
+			uint64_t *l2_old = (uint64_t *)(l3_old[j] & ~0xFFFUL);
+			uint64_t *l2_new = alloc_table();
+			l3_new[j] = (uint64_t)l2_new | eflags;
+
+			for (int k = 0; k < 512; k++) {
+				if (!(l2_old[k] & PTE_P)) continue;
+				if (l2_old[k] & PTE_PS) {
+					/* 2MB huge page */
+					uint64_t entry = l2_old[k];
+					if (entry & PTE_U) {
+						entry &= ~PTE_W; /* Mark RO */
+						l2_old[k] = entry;
+						uint64_t pa = entry & ~0x1FFFFFUL;
+						for (int l = 0; l < 512; l++)
+							pmm_hold((void *)(pa + (uint64_t)l * PAGE_SIZE));
+					}
+					l2_new[k] = entry;
+					continue;
+				}
+
+				uint64_t *l1_old = (uint64_t *)(l2_old[k] & ~0xFFFUL);
+				uint64_t *l1_new = alloc_table();
+				l2_new[k] = (uint64_t)l1_new | eflags;
+
+				for (int l = 0; l < 512; l++) {
+					if (!(l1_old[l] & PTE_P)) continue;
+					uint64_t entry = l1_old[l];
+					if (entry & PTE_U) {
+						entry &= ~PTE_W; /* Mark RO */
+						l1_old[l] = entry;
+						pmm_hold((void *)(entry & ~0xFFFUL));
+					}
+					l1_new[l] = entry;
+				}
+			}
+		}
+	}
+
+	/* Reload CR3 to flush TLB on parent */
+	uint64_t cr3;
+	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+
+	return new_vs;
 }

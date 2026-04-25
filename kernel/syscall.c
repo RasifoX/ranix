@@ -292,6 +292,11 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	return 0;
 }
 
+static long sys_fork(void)
+{
+	return (long)proc_fork();
+}
+
 static long sys_vfork(void)
 {
 	return (long)proc_vfork();
@@ -395,10 +400,16 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;
 	case SYS_ARCH_VFORK:            ret = sys_vfork(); break;
+#ifdef SYS_ARCH_FORK
+	case SYS_ARCH_FORK:             ret = sys_fork(); break;
+#endif
 	case SYS_ARCH_CLONE: {
 		uint64_t flags = (uint64_t)arg0;
-		if (flags & 0x10000) ret = -38;
-		else ret = sys_vfork();
+		if (flags & 0x4000) { /* CLONE_VFORK */
+			ret = sys_vfork();
+		} else {
+			ret = sys_fork();
+		}
 		break;
 	}
 	case SYS_ARCH_EXECVE:           ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;

@@ -154,9 +154,30 @@ void fd_table_destroy(fd_table_t *t)
 {
 	if (!t) return;
 	for (int i = 0; i < FD_MAX; i++) {
-		if (t->files[i]) vfs_close(i);
+		if (t->files[i]) {
+			vfs_file_t *f = t->files[i];
+			if (--f->refcount == 0) {
+				if (f->inode->fops->close) f->inode->fops->close(f);
+				buddy_free((uint64_t)f, 0);
+			}
+		}
 	}
 	buddy_free((uint64_t)t, 0);
+}
+
+fd_table_t *fd_table_copy(fd_table_t *old)
+{
+	if (!old) return NULL;
+	fd_table_t *new = fd_table_create();
+	if (!new) return NULL;
+	for (int i = 0; i < FD_MAX; i++) {
+		if (old->files[i]) {
+			new->files[i] = old->files[i];
+			new->files[i]->refcount++;
+			new->bitmap |= (1ULL << i);
+		}
+	}
+	return new;
 }
 
 int fd_alloc(fd_table_t *t, vfs_file_t *f)
@@ -165,6 +186,7 @@ int fd_alloc(fd_table_t *t, vfs_file_t *f)
 		if (!(t->bitmap & (1ULL << i))) {
 			t->files[i]  = f;
 			t->bitmap   |= (1ULL << i);
+			f->refcount++;
 			return i;
 		}
 	}
@@ -233,7 +255,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	memset(f, 0, sizeof(*f));
 	f->inode    = inode;
 	f->flags    = flags;
-	f->refcount = 1;
+	f->refcount = 0; /* incremented by fd_alloc */
 
 	if (inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
 		buddy_free((uint64_t)f, 0);
@@ -251,11 +273,12 @@ int vfs_close(int fd)
 	vfs_file_t *f = fd_get(p->fds, fd);
 	if (!f) return -1;
 
-	if (f->inode->fops->close)
-		f->inode->fops->close(f);
-
 	fd_free(p->fds, fd);
-	buddy_free((uint64_t)f, 0);
+	if (--f->refcount == 0) {
+		if (f->inode->fops->close)
+			f->inode->fops->close(f);
+		buddy_free((uint64_t)f, 0);
+	}
 	return 0;
 }
 
