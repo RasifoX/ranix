@@ -58,6 +58,7 @@ typedef struct process {
 } process_t;
 
 /* scheduler */
+/* scheduler */
 void       sched_init(void);
 void       sched_tick(void);
 void       schedule(void);
@@ -65,10 +66,12 @@ void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);
 void       task_exit(void);
-process_t *task_current(void);
+
+#include <kernel/hal.h>
+static inline process_t *task_current(void) { return arch_get_cpu_ctx()->current; }
+
 int        task_count(void);
 process_t *task_get(int index);
-arch_context_t *sched_get_current_ctx(void);
 
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));

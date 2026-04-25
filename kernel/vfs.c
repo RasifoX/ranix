@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -11,9 +12,11 @@ static vfs_mount_t  mounts[MOUNT_MAX];
 static int          mount_cnt = 0;
 static vfs_dentry_t *root_dentry = NULL;
 
+static spinlock_t vfs_lock = SPINLOCK_INIT;
+
 /* ── dentry pool ─────────────────────────────────────────── */
 
-vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
+static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
 {
 	vfs_dentry_t *d = buddy_alloc(0);
 	if (!d) return NULL;
@@ -37,12 +40,27 @@ vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inod
 	return d;
 }
 
+vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
+{
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	vfs_dentry_t *d = _dentry_create(parent, name, inode);
+	spin_unlock_irq(&vfs_lock, f);
+	return d;
+}
+
 /* ── path resolution ─────────────────────────────────────── */
 
 vfs_dentry_t *vfs_dentry_resolve(const char *path)
 {
-	if (!path || path[0] != '/') return NULL;
-	if (!root_dentry) return NULL;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	if (!path || path[0] != '/') {
+		spin_unlock_irq(&vfs_lock, f);
+		return NULL;
+	}
+	if (!root_dentry) {
+		spin_unlock_irq(&vfs_lock, f);
+		return NULL;
+	}
 
 	vfs_dentry_t *d = root_dentry;
 	const char   *p = path + 1;
@@ -69,23 +87,32 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 
 		if (!child) {
 			/* ask the inode */
-			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup)
+			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
+				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
+			}
 			vfs_inode_t *in = d->inode->iops->lookup(d->inode, p);
-			if (!in) return NULL;
+			if (!in) {
+				spin_unlock_irq(&vfs_lock, f);
+				return NULL;
+			}
 			/* cache the result */
 			char tmp[256];
 			int i = 0;
 			while (i < 255 && p[i] && p[i] != '/') { tmp[i] = p[i]; i++; }
 			tmp[i] = '\0';
-			child = vfs_dentry_create(d, tmp, in);
-			if (!child) return NULL;
+			child = _dentry_create(d, tmp, in);
+			if (!child) {
+				spin_unlock_irq(&vfs_lock, f);
+				return NULL;
+			}
 		}
 
 		d = child;
 		p = end;
 	}
 
+	spin_unlock_irq(&vfs_lock, f);
 	return d;
 }
 
@@ -101,15 +128,24 @@ static int          fstype_cnt = 0;
 
 void vfs_register_fs(const char *name, int (*fill)(vfs_mount_t *, void *))
 {
-	if (fstype_cnt >= 8) return;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	if (fstype_cnt >= 8) {
+		spin_unlock_irq(&vfs_lock, f);
+		return;
+	}
 	fstypes[fstype_cnt].name = name;
 	fstypes[fstype_cnt].fill = fill;
 	fstype_cnt++;
+	spin_unlock_irq(&vfs_lock, f);
 }
 
 int vfs_mount(const char *path, const char *fstype, void *data)
 {
-	if (mount_cnt >= MOUNT_MAX) return -1;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	if (mount_cnt >= MOUNT_MAX) {
+		spin_unlock_irq(&vfs_lock, f);
+		return -1;
+	}
 
 	int (*fill)(vfs_mount_t *, void *) = NULL;
 	for (int i = 0; i < fstype_cnt; i++) {
@@ -118,25 +154,38 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 			break;
 		}
 	}
-	if (!fill) return -1;
+	if (!fill) {
+		spin_unlock_irq(&vfs_lock, f);
+		return -1;
+	}
 
 	vfs_mount_t *mnt = &mounts[mount_cnt];
 	mnt->fstype = fstype;
 	mnt->priv   = data;
 
+	/* Release lock during fill() as it might call other VFS functions */
+	spin_unlock_irq(&vfs_lock, f);
 	if (fill(mnt, data) != 0) return -1;
+	f = spin_lock_irq(&vfs_lock);
 
 	if (strcmp(path, "/") == 0) {
 		root_dentry = mnt->root;
 	} else {
+		/* unlock to resolve path */
+		spin_unlock_irq(&vfs_lock, f);
 		vfs_dentry_t *mp = vfs_dentry_resolve(path);
-		if (!mp) return -1;
+		f = spin_lock_irq(&vfs_lock);
+		if (!mp) {
+			spin_unlock_irq(&vfs_lock, f);
+			return -1;
+		}
 		mnt->mountpoint = mp;
 		/* replace mountpoint's inode with fs root inode */
 		mp->inode = mnt->root->inode;
 	}
 
 	mount_cnt++;
+	spin_unlock_irq(&vfs_lock, f);
 	return 0;
 }
 
