@@ -12,6 +12,7 @@ typedef enum {
     DRIVER_TYPE_IRQCHIP,
     DRIVER_TYPE_TIMER,
     DRIVER_TYPE_MAILBOX,
+    DRIVER_TYPE_BLOCK,
     DRIVER_TYPE_OTHER
 } driver_type_t;
 

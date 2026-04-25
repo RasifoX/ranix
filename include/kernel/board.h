@@ -11,6 +11,7 @@ typedef struct {
 	uint64_t    gic_cpu_base;
 	uint64_t    local_base;
 	uint64_t    mbox_base;
+	uint64_t    sd_base;
 	uint32_t    bus_offset;
 	uint64_t    mem_base;
 	uint64_t    mem_size;

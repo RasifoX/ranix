@@ -14,6 +14,7 @@ static board_config_t config = {
 	.gic_cpu_base  = 0xFF842000UL,
 	.local_base    = 0xFF800000UL,
 	.mbox_base     = 0xFE00B880UL,
+	.sd_base       = 0xFE340000UL,
 	.bus_offset    = 0xC0000000U,
 	.mem_base      = 0x00000000UL,
 	.mem_size      = 0x3C000000UL,
@@ -66,9 +67,12 @@ void board_irq_init(void)
 	timer_init(100);
 }
 
+#include <drivers/block/sdcard.h>
+
 void board_drivers_register(void)
 {
 	/* already initialized early */
+	pi4_sd_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }
