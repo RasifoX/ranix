@@ -202,7 +202,10 @@ irq_handler:
 	bl   vm_activate
 
 .irq_ret:
+	mov  x0, sp
+	bl   signal_dispatch
 	bl   sched_get_current_ctx
+	mov  sp, x0
 	restore_trapframe
 	eret
 
@@ -233,7 +236,10 @@ sync_handler:
 	bl   vm_activate
 
 .syscall_ret:
+	mov  x0, sp
+	bl   signal_dispatch
 	bl   sched_get_current_ctx
+	mov  sp, x0
 	restore_trapframe
 	eret
 
@@ -243,7 +249,10 @@ sync_handler:
 	str  x1, [x0, #16]
 	bl   schedule
 	bl   vm_activate
+	mov  x0, sp
+	bl   signal_dispatch
 	bl   sched_get_current_ctx
+	mov  sp, x0
 	restore_trapframe
 	eret
 

@@ -301,6 +301,54 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	return 0;
 }
 
+static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldact, size_t sigsetsize)
+{
+	if (sig <= 0 || sig > NSIG || sigsetsize != 8) return -22;
+	if (sig == SIGKILL) return -22;
+
+	process_t *p = task_current();
+	if (oldact) {
+		if (copy_to_user(oldact, &p->sig_actions[sig - 1], sizeof(sigaction_t)) != 0)
+			return -14;
+	}
+	if (act) {
+		if (copy_from_user(&p->sig_actions[sig - 1], act, sizeof(sigaction_t)) != 0)
+			return -14;
+	}
+	return 0;
+}
+
+static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize)
+{
+	if (sigsetsize != 8) return -22;
+	process_t *p = task_current();
+	if (oldset) {
+		if (copy_to_user(oldset, &p->sig_mask, sizeof(uint64_t)) != 0)
+			return -14;
+	}
+	if (set) {
+		uint64_t new_set;
+		if (copy_from_user(&new_set, set, sizeof(uint64_t)) != 0)
+			return -14;
+		
+		if (how == 0) p->sig_mask = new_set;      /* SIG_BLOCK */
+		else if (how == 1) p->sig_mask |= new_set;
+		else if (how == 2) p->sig_mask &= ~new_set;
+		else return -22;
+		
+		p->sig_mask &= ~(1UL << (SIGKILL - 1));
+	}
+	return 0;
+}
+
+static long sys_kill(pid_t pid, int sig)
+{
+	process_t *p = proc_find(pid);
+	if (!p) return -3; /* ESRCH */
+	task_signal(p, sig);
+	return 0;
+}
+
 static long sys_pipe2(int *pipefd, int flags)
 {
 	(void)flags;
@@ -415,6 +463,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
 	case SYS_ARCH_MUNMAP:        ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_PIPE2:         ret = sys_pipe2((int*)arg0, (int)arg1); break;
+	case SYS_ARCH_KILL:          ret = sys_kill((pid_t)arg0, (int)arg1); break;
+	case SYS_ARCH_RT_SIGACTION:   ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
+	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_MPROTECT:      ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;

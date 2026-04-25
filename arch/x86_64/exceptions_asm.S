@@ -96,6 +96,8 @@ common_irq:
 	call vm_activate
 
 .irq_ret:
+	mov  %rsp, %rdi
+	call signal_dispatch
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context
@@ -125,6 +127,10 @@ irq_stub_syscall:
 	mov  %r15, 16(%rax)
 	mov  %rsp, %rdi         /* arg: arch_context_t* */
 	call syscall_handle
+	
+	mov  %rsp, %rdi
+	call signal_dispatch
+
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context
@@ -165,6 +171,8 @@ syscall_entry:
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 .syscall_ret:
+	mov  %rsp, %rdi
+	call signal_dispatch
 	restore_context
 	add  $16, %rsp
 	iretq
@@ -179,6 +187,10 @@ irq_stub_yield:
 	mov  %r15, 16(%rax)
 	call schedule
 	call vm_activate
+
+	mov  %rsp, %rdi
+	call signal_dispatch
+
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context
