@@ -61,6 +61,7 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/vm.c \
         arch/x86_64/exceptions.c \
         arch/x86_64/mach-pc/board.c \
+        arch/x86_64/multiboot2.c
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
         arch/x86_64/exceptions_asm.S
