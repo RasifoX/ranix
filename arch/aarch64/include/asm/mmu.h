@@ -1,6 +1,10 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
+#define VIRT_OFFSET     0xFFFFFF8000000000UL
+#define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
+#define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
+
 /* MAIR indices — must match mmu_asm.S enable_mmu() setup */
 #define MT_DEVICE_nGnRnE  0x0
 #define MT_NORMAL         0x1

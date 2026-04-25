@@ -14,13 +14,12 @@ extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
 #include <kernel/vfs.h>
 
-extern char     __bss_end;
-extern char     __stack_top;
+extern char     __kernel_phys_end;
 extern uint64_t _dtb_ptr;
 
 static void setup_physical_memory(uint64_t fb_phys, uint64_t ram_limit)
 {
-	uint64_t start = ((uint64_t)&__stack_top + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 	uint64_t end   = fb_phys && fb_phys > start && fb_phys < ram_limit
 	                 ? fb_phys : ram_limit;
 	uint64_t size  = end - start;
@@ -39,10 +38,10 @@ void kernel_main(void)
 	int fdt_ok = fdt_init((void *)_dtb_ptr);
 	fdt_info_t *fi = fdt_get_info();
 
-	uint64_t ram_size = (fdt_ok == 0 && fi->mem_size > 0)
-	                    ? fi->mem_size : cfg->mem_size;
+	uint64_t ram_base = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_base : cfg->mem_base;
+	uint64_t ram_size = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_size : cfg->mem_size;
 	if (ram_size > 0x40000000ULL) ram_size = 0x40000000ULL;
-	mmu_set_ram_limit(ram_size);
+	mmu_set_ram_limit(ram_base + ram_size);
 
 	/* allocate framebuffer before MMU so we can mark the region NC */
 	static fb_info_t fb;
@@ -62,7 +61,7 @@ void kernel_main(void)
 	else
 		kprintf("[ranix] %s\n", cfg->name);
 
-	setup_physical_memory(fb_phys, ram_size);
+	setup_physical_memory(fb_phys, ram_base + ram_size);
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */

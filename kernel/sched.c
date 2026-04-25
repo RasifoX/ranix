@@ -196,11 +196,6 @@ pid_t proc_vfork(void)
 	parent->next   = child;
 	proctab[proc_cnt++] = child;
 
-	/* 
-	 * CRITICAL: Set the return value (x0) in the parent's trapframe NOW.
-	 * The parent is about to be suspended. If a switch occurs before the 
-	 * syscall handler finishes, we must ensure it has the correct PID.
-	 */
 	if (parent->ctx) {
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
 	}
@@ -263,14 +258,12 @@ void task_exit(void)
 	process_t *p = current;
 	p->state = PROC_DEAD;
 
-	/* wake vfork parent */
 	if (p->vfork_parent >= 0) {
 		process_t *pp = proc_find((pid_t)p->vfork_parent);
 		if (pp) task_wake(pp);
 		p->vfork_parent = -1;
 	}
 
-	/* wake regular parent */
 	process_t *parent = proc_find((pid_t)p->ppid);
 	if (parent) task_wake(parent);
 
