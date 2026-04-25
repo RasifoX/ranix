@@ -86,8 +86,16 @@ common_irq:
 	movq 632(%rsp), %rdi
 	call irq_dispatch
 	
+	/* Check for reschedule */
+	movl need_resched(%rip), %eax
+	test %eax, %eax
+	jz .irq_ret
+	movl $0, need_resched(%rip)
+
 	call schedule
 	call vm_activate
+
+.irq_ret:
 	call sched_get_current_ctx
 	mov  %rax, %rsp
 	restore_context
