@@ -20,6 +20,9 @@ _start:
 	cli
 	mov  $boot_stack32_top, %esp
 
+	/* Save Multiboot2 info pointer */
+	mov  %ebx, _dtb_ptr
+
 	/* zero .bss.boot (page tables, boot stack) */
 	mov  $__bss_boot_start, %edi
 	mov  $__bss_boot_end,   %ecx
@@ -123,6 +126,9 @@ boot_stack32_top:
 
 .section ".data.boot", "aw"
 .balign 8
+.global _dtb_ptr
+_dtb_ptr: .quad 0
+
 .global gdt32
 gdt32:
 	.quad 0
@@ -137,5 +143,3 @@ gdt32_ptr:
 
 .section ".data"
 .balign 8
-.global _dtb_ptr
-_dtb_ptr: .quad 0

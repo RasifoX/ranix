@@ -15,9 +15,12 @@ static board_config_t config = {
 	.fb_height = 0,
 };
 
+extern uint64_t _dtb_ptr;
+void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out);
 
 void board_early_init(void)
 {
+	multiboot2_parse(_dtb_ptr, &config.mem_size);
 	uart16550_init();
 }
 
