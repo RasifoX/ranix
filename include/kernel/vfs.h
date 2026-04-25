@@ -152,6 +152,9 @@ int         fd_alloc(fd_table_t *t, vfs_file_t *f);
 void        fd_free(fd_table_t *t, int fd);
 vfs_file_t *fd_get(fd_table_t *t, int fd);
 
+/* pipe IPC */
+int vfs_pipe(int pipefd[2]);
+
 /* internal: dentry ops */
 vfs_dentry_t *vfs_dentry_resolve(const char *path);
 vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode);
