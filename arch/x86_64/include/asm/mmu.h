@@ -1,6 +1,10 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
+#define VIRT_OFFSET     0xFFFFFFFF80000000UL
+#define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
+#define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
+
 #define PTE_VALID   (1UL << 0)   /* present */
 #define PTE_WRITE   (1UL << 1)
 #define PTE_USER    (1UL << 2)
