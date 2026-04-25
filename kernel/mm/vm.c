@@ -2,6 +2,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/sync.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -17,6 +18,8 @@ static uint64_t ioremap_vaddr = 0xFFFFFFC000000000UL;
 #else
 static uint64_t ioremap_vaddr = 0xFFFFFFFFC0000000UL;
 #endif
+
+static spinlock_t vm_lock = SPINLOCK_INIT;
 
 void vm_set_kernel_pt(uint64_t phys)
 {
@@ -35,8 +38,10 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
 	uint64_t offset       = phys_addr & ~PAGE_MASK;
 	uint64_t aligned_size = (size + offset + PAGE_SIZE - 1) & PAGE_MASK;
 
+	uint64_t f = spin_lock_irq(&vm_lock);
 	uint64_t vaddr = ioremap_vaddr;
 	ioremap_vaddr += aligned_size;
+	spin_unlock_irq(&vm_lock, f);
 
 	for (uint64_t i = 0; i < aligned_size; i += PAGE_SIZE) {
 		vm_map(kernel_vm_space, vaddr + i, aligned_phys + i, flags);
