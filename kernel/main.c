@@ -17,17 +17,25 @@ extern void initrd_init(void);
 extern char     __kernel_phys_end;
 extern uint64_t _dtb_ptr;
 
-static void setup_physical_memory(uint64_t fb_phys, uint64_t ram_limit)
+static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size, uint64_t ram_limit)
 {
 	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-	uint64_t end   = fb_phys && fb_phys > start && fb_phys < ram_limit
-	                 ? fb_phys : ram_limit;
-	uint64_t size  = end - start;
+	uint64_t size  = ram_limit - start;
 
-	pmm_init(start, size);
-	pmm_free_region(start, size);
+	uint64_t meta_size = pmm_init(start, ram_limit);
+	uint64_t free_start = start + meta_size;
 
-	kprintf("[  mem] 0x%lx-0x%lx, %d MB\n", start, end, (int)(size >> 20));
+	if (fb_phys && fb_phys > start && fb_phys < ram_limit) {
+		pmm_free_region(free_start, fb_phys - free_start);
+		uint64_t fb_end = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
+		if (fb_end < ram_limit) {
+			pmm_free_region(fb_end, ram_limit - fb_end);
+		}
+	} else {
+		pmm_free_region(free_start, ram_limit - free_start);
+	}
+
+	kprintf("[  mem] 0x%lx-0x%lx, %d MB\n", start, ram_limit, (int)(size >> 20));
 }
 
 void kernel_main(void)
@@ -40,16 +48,13 @@ void kernel_main(void)
 
 	uint64_t ram_base = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_base : cfg->mem_base;
 	uint64_t ram_size = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_size : cfg->mem_size;
-	if (ram_size > 0x40000000ULL) ram_size = 0x40000000ULL;
-	mmu_set_ram_limit(ram_base + ram_size);
 
-	/* allocate framebuffer before MMU so we can mark the region NC */
 	static fb_info_t fb;
 	uint64_t fb_phys = 0;
+	uint64_t fb_sz = 0;
 	if (board_fb_alloc(&fb) == 0) {
-		uint64_t fb_start = (uint64_t)fb.fb & ~0x1FFFFFULL;
-		mmu_set_fb_region(fb_start, 0x40000000ULL);
-		fb_phys = (uint64_t)fb.fb & 0x3FFFFFFFUL;
+		fb_phys = (uint64_t)fb.fb;
+		fb_sz = fb.fb_size;
 	}
 
 	mmu_init();
@@ -61,12 +66,17 @@ void kernel_main(void)
 	else
 		kprintf("[ranix] %s\n", cfg->name);
 
-	setup_physical_memory(fb_phys, ram_base + ram_size);
+	setup_physical_memory(fb_phys, fb_sz, ram_base + ram_size);
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */
 	if (fb_phys) {
-		fb.fb = (void *)PHYS_TO_VIRT(fb.fb);
+		uint64_t va = PHYS_TO_VIRT(fb_phys);
+		uint64_t aligned_sz = (fb_sz + PAGE_SIZE - 1) & PAGE_MASK;
+		for (uint64_t i = 0; i < aligned_sz; i += PAGE_SIZE) {
+			vm_map(kernel_vm_space, va + i, fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);
+		}
+		fb.fb = (void *)va;
 		fb_tty_init(&fb);
 		kprintf_set_fb();
 	}

@@ -8,6 +8,8 @@
 #define PTE_P   (1UL << 0)
 #define PTE_W   (1UL << 1)
 #define PTE_U   (1UL << 2)
+#define PTE_PWT (1UL << 3)
+#define PTE_PCD (1UL << 4)
 #define PTE_PS  (1UL << 7)
 
 extern uint64_t pml4[];
@@ -89,8 +91,10 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (!pt)  return -1;
 
 	uint64_t entry = (paddr & ~0xFFFUL) | PTE_P;
-	if (flags & VM_WRITE) entry |= PTE_W;
-	if (flags & VM_USER)  entry |= PTE_U;
+	if (flags & VM_WRITE)   entry |= PTE_W;
+	if (flags & VM_USER)    entry |= PTE_U;
+	if (flags & VM_NOCACHE) entry |= PTE_PWT | PTE_PCD;
+	if (flags & VM_DEVICE)  entry |= PTE_PWT | PTE_PCD;
 	pt[(vaddr >> 12) & 0x1FF] = entry;
 
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");

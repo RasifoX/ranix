@@ -87,6 +87,8 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	}
 
 	uint64_t attr = PTE_ATTR_NORMAL;
+	if (flags & VM_NOCACHE)     attr = PTE_ATTR_NORMAL_NC;
+	if (flags & VM_DEVICE)      attr = PTE_ATTR_DEVICE;
 	if (flags & VM_USER)        attr |= PTE_USER;
 	if (!(flags & VM_WRITE))    attr |= PTE_RO;
 
