@@ -1,4 +1,31 @@
 #include <kernel/lib/string.h>
+#include <kernel/hal.h>
+#include <asm/mmu.h>
+
+int access_ok(const void *addr, size_t n)
+{
+	uint64_t start = (uint64_t)addr;
+	uint64_t end   = start + n;
+
+	/* User space must be below the kernel virtual offset */
+	if (start >= VIRT_OFFSET || end > VIRT_OFFSET || end < start)
+		return 0;
+	return 1;
+}
+
+long copy_from_user(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(src, n)) return -1;
+	memcpy(dst, src, n);
+	return 0;
+}
+
+long copy_to_user(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(dst, n)) return -1;
+	memcpy(dst, src, n);
+	return 0;
+}
 
 void *memcpy(void *dst, const void *src, size_t n)
 {

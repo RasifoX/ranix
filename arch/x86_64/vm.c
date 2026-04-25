@@ -51,9 +51,45 @@ vm_space_t *vm_create(void)
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
-	/* TODO: walk and free PDP/PD/PT tables */
-	buddy_free((uint64_t)vs->root, 0);
-	buddy_free((uint64_t)vs, 0);
+	uint64_t *l4 = vs->root;
+
+	/* We only walk index 0 (user space) */
+	for (int i = 0; i < 1; i++) {
+		if (!(l4[i] & PTE_P)) continue;
+
+		uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l4[i] & ~0xFFFUL);
+		for (int j = 0; j < 512; j++) {
+			if (!(l3[j] & PTE_P)) continue;
+			if (l3[j] & PTE_PS) continue;
+
+			uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l3[j] & ~0xFFFUL);
+			for (int k = 0; k < 512; k++) {
+				if (!(l2[k] & PTE_P)) continue;
+				if (l2[k] & PTE_PS) {
+					if (l2[k] & PTE_U) {
+						uint64_t pa = l2[k] & ~0x1FFFFFUL;
+						for (int l = 0; l < 512; l++)
+							pmm_free((void *)(pa + (uint64_t)l * PAGE_SIZE));
+					}
+					continue;
+				}
+
+				uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l2[k] & ~0xFFFUL);
+				for (int l = 0; l < 512; l++) {
+					if (!(l1[l] & PTE_P)) continue;
+					if (l1[l] & PTE_U) {
+						pmm_free((void *)(l1[l] & ~0xFFFUL));
+					}
+				}
+				buddy_free(l2[k] & ~0xFFFUL, 0);
+			}
+			buddy_free(l3[j] & ~0xFFFUL, 0);
+		}
+		buddy_free(l4[i] & ~0xFFFUL, 0);
+	}
+
+	buddy_free((uint64_t)VIRT_TO_PHYS(l4), 0);
+	buddy_free((uint64_t)VIRT_TO_PHYS(vs), 0);
 }
 
 static uint64_t *get_or_alloc(uint64_t *table, uint64_t idx, uint64_t eflags)
