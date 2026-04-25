@@ -67,8 +67,7 @@ void       task_sleep(void);
 void       task_wake(process_t *p);
 void       task_exit(void);
 
-#include <kernel/hal.h>
-static inline process_t *task_current(void) { return arch_get_cpu_ctx()->current; }
+process_t *task_current(void);
 
 int        task_count(void);
 process_t *task_get(int index);

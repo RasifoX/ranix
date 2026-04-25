@@ -56,6 +56,8 @@ typedef struct {
 
 static long sys_write(int fd, const void *buf, size_t len)
 {
+	if (!access_ok(buf, len)) return -14;
+
 	if (fd == 0 || fd == 1 || fd == 2) {
 		const char *p = buf;
 		for (size_t i = 0; i < len; i++)
@@ -68,6 +70,8 @@ static long sys_write(int fd, const void *buf, size_t len)
 
 static long sys_read(int fd, void *buf, size_t len)
 {
+	if (!access_ok(buf, len)) return -14;
+
 	if (fd == 0) {
 		char *p = buf;
 		size_t i = 0;
@@ -91,6 +95,8 @@ static long sys_read(int fd, void *buf, size_t len)
 
 static long sys_writev(int fd, const iovec_t *iov, int cnt)
 {
+	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
 		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
@@ -103,10 +109,13 @@ static long sys_writev(int fd, const iovec_t *iov, int cnt)
 
 static long sys_open(const char *path, int flags, mode_t mode)
 {
-	long fd = vfs_open(path, flags, mode);
+	char kpath[PROC_NAME_MAX];
+	if (copy_from_user(kpath, path, PROC_NAME_MAX) != 0)
+		return -14;
+
+	long fd = vfs_open(kpath, flags, mode);
 	return fd < 0 ? -2 : fd;
 }
-
 static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 {
 	(void)dirfd;

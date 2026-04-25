@@ -45,9 +45,40 @@ vm_space_t *vm_create(void)
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
-	/* TODO: walk and free L2/L3 tables */
-	buddy_free((uint64_t)vs->root, 0);
-	buddy_free((uint64_t)vs, 0);
+	uint64_t *l1 = vs->root;
+
+	/* We only walk index 0 (user space) to avoid touching shared kernel tables */
+	for (int i = 0; i < 1; i++) {
+		if (!(l1[i] & PTE_VALID)) continue;
+		if ((l1[i] & 3) != 3) continue; /* Block mapping */
+
+		uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[i] & ~0xFFFUL);
+		for (int j = 0; j < 512; j++) {
+			if (!(l2[j] & PTE_VALID)) continue;
+			if ((l2[j] & 3) != 3) {
+				/* 2MB block */
+				if (l2[j] & PTE_USER) {
+					uint64_t pa = l2[j] & ~0x1FFFFFUL;
+					for (int k = 0; k < 512; k++)
+						pmm_free((void *)(pa + (uint64_t)k * PAGE_SIZE));
+				}
+				continue;
+			}
+
+			uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[j] & ~0xFFFUL);
+			for (int k = 0; k < 512; k++) {
+				if (!(l3[k] & PTE_VALID)) continue;
+				if (l3[k] & PTE_USER) {
+					pmm_free((void *)(l3[k] & ~0xFFFUL));
+				}
+			}
+			buddy_free(l2[j] & ~0xFFFUL, 0);
+		}
+		buddy_free(l1[i] & ~0xFFFUL, 0);
+	}
+
+	buddy_free((uint64_t)VIRT_TO_PHYS(l1), 0);
+	buddy_free((uint64_t)VIRT_TO_PHYS(vs), 0);
 }
 
 int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
