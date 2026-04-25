@@ -1,5 +1,6 @@
 #include <kernel/mm/vm.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -127,6 +128,24 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	);
 }
 
+uint64_t arch_vm_get_paddr(uint64_t *l1, uint64_t vaddr)
+{
+	uint64_t l1i = (vaddr >> 30) & 0x1FF;
+	uint64_t l2i = (vaddr >> 21) & 0x1FF;
+	uint64_t l3i = (vaddr >> 12) & 0x1FF;
+
+	if (!(l1[l1i] & PTE_VALID)) return 0;
+	if ((l1[l1i] & 3) != 3) return (l1[l1i] & ~0x3FFFFFFFUL) | (vaddr & 0x3FFFFFFFUL);
+
+	uint64_t *l2 = (uint64_t *)(l1[l1i] & ~0xFFFUL);
+	if (!(l2[l2i] & PTE_VALID)) return 0;
+	if ((l2[l2i] & 3) != 3) return (l2[l2i] & ~0x1FFFFFUL) | (vaddr & 0x1FFFFFUL);
+
+	uint64_t *l3 = (uint64_t *)(l2[l2i] & ~0xFFFUL);
+	if (!(l3[l3i] & PTE_VALID)) return 0;
+	return (l3[l3i] & ~0xFFFUL);
+}
+
 void arch_vm_switch(uint64_t root_phys)
 {
 	__asm__ volatile(
@@ -137,4 +156,69 @@ void arch_vm_switch(uint64_t root_phys)
 		"isb\n"
 		:: "r"(root_phys)
 	);
+}
+
+vm_space_t *vm_copy(vm_space_t *vs)
+{
+	vm_space_t *new_vs = buddy_alloc(0);
+	if (!new_vs) kpanic("vm_copy: out of memory");
+	new_vs->root = alloc_table();
+
+	uint64_t *l1_old = vs->root;
+	uint64_t *l1_new = new_vs->root;
+
+	/* We only copy the first 1GB (index 0) which contains user space.
+	 * Kernel-only spaces or upper 1GB blocks are managed differently. */
+	for (int i = 0; i < 1; i++) {
+		if (!(l1_old[i] & PTE_VALID)) continue;
+		if ((l1_old[i] & 3) != 3) {
+			/* Block mapping (1GB) — Not supported for user COW yet, 
+			 * just copy as is. */
+			l1_new[i] = l1_old[i];
+			continue;
+		}
+
+		uint64_t *l2_old = (uint64_t *)(l1_old[i] & ~0xFFFUL);
+		uint64_t *l2_new = alloc_table();
+		l1_new[i] = (uint64_t)l2_new | L12_TABLE;
+
+		for (int j = 0; j < 512; j++) {
+			if (!(l2_old[j] & PTE_VALID)) continue;
+			if ((l2_old[j] & 3) != 3) {
+				/* 2MB Block mapping */
+				uint64_t entry = l2_old[j];
+				if (entry & PTE_USER) {
+					entry |= PTE_RO;
+					l2_old[j] = entry;
+					/* Mark all 512 pages in this 2MB block as held.
+					 * Since our pmm_hold works on 4KB, we loop. */
+					uint64_t pa = entry & ~0x1FFFFFUL;
+					for (int k = 0; k < 512; k++)
+						pmm_hold((void *)(pa + (uint64_t)k * PAGE_SIZE));
+				}
+				l2_new[j] = entry;
+				continue;
+			}
+
+			uint64_t *l3_old = (uint64_t *)(l2_old[j] & ~0xFFFUL);
+			uint64_t *l3_new = alloc_table();
+			l2_new[j] = (uint64_t)l3_new | L12_TABLE;
+
+			for (int k = 0; k < 512; k++) {
+				if (!(l3_old[k] & PTE_VALID)) continue;
+				uint64_t entry = l3_old[k];
+				if (entry & PTE_USER) {
+					entry |= PTE_RO;
+					l3_old[k] = entry;
+					pmm_hold((void *)(entry & ~0xFFFUL));
+				}
+				l3_new[k] = entry;
+			}
+		}
+	}
+
+	/* Flush TLB to ensure RO takes effect on the parent too */
+	__asm__ volatile("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
+
+	return new_vs;
 }

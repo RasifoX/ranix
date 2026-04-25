@@ -184,6 +184,68 @@ fail:
 	return -1;
 }
 
+pid_t proc_fork(void)
+{
+	if (proc_cnt >= PROC_MAX) return -1;
+
+	process_t *parent = current;
+	process_t *child  = buddy_alloc(0);
+	if (!child) return -1;
+	memset(child, 0, sizeof(*child));
+
+	child->pid       = proc_cnt;
+	child->ppid      = parent->pid;
+	child->state     = PROC_READY;
+	child->uid       = parent->uid;
+	child->gid       = parent->gid;
+	child->brk       = parent->brk;
+	child->mmap_next = parent->mmap_next;
+	child->reaped    = 0;
+	child->vfork_parent = -1;
+
+	/* copy name */
+	int nlen = 0;
+	while (parent->name[nlen] && nlen < PROC_NAME_MAX - 3) nlen++;
+	memcpy(child->name, parent->name, nlen);
+	child->name[nlen++] = '_';
+	child->name[nlen++] = 'c';
+	child->name[nlen] = '\0';
+
+	/* clone VM and FD table */
+	child->vm = vm_copy(parent->vm);
+	if (!child->vm) goto fail;
+
+	child->fds = fd_table_copy(parent->fds);
+	if (!child->fds) goto fail;
+
+	/* kernel stack */
+	child->kstack = buddy_alloc(1);
+	if (!child->kstack) goto fail;
+
+	/* copy trapframe from parent */
+	uint8_t *ksp = child->kstack + KSTACK_SIZE;
+	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
+	
+	/* child returns 0 from fork() */
+	CTX_SYSCALL_RET(cctx, 0);
+	child->ctx = cctx;
+	child->ticks_remaining = SCHED_QUANTUM;
+
+	/* insert into scheduler ring */
+	child->next  = parent->next;
+	parent->next = child;
+
+	proctab[proc_cnt++] = child;
+	return child->pid;
+
+fail:
+	if (child->vm) vm_destroy(child->vm);
+	if (child->fds) fd_table_destroy(child->fds);
+	buddy_free((uint64_t)child, 0);
+	return -1;
+}
+
 pid_t proc_vfork(void)
 {
 	if (proc_cnt >= PROC_MAX) return -1;
