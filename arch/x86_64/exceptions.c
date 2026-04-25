@@ -2,6 +2,7 @@
 #include <asm/gdt.h>
 #include <asm/idt.h>
 #include <kernel/kprintf.h>
+#include <kernel/mm/vm.h>
 
 void exceptions_init(void)
 {
@@ -31,6 +32,13 @@ static uint64_t read_cr2(void)
 
 void exc_dispatch(arch_context_t *ctx)
 {
+	if (ctx->vector == 14) {
+		uint64_t cr2 = read_cr2();
+		int is_write = (ctx->error_code & (1 << 1)) != 0;
+		if (vm_handle_fault(cr2, is_write) == 0)
+			return;
+	}
+
 	kprintf("\n--- kernel fault ---\n");
 	kprintf("type:  #%d %s\n", (int)ctx->vector, exc_name(ctx->vector));
 	kprintf("RIP:   0x%016lx\n", ctx->rip);

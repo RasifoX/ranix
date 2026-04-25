@@ -46,6 +46,17 @@
         uint32_t ec  = (uint32_t)(esr >> 26) & 0x3F;
         uint32_t iss = (uint32_t)(esr & 0x1FFFFFF);
 
+        if (ec == 0x24 || ec == 0x25) {
+            /* Data Abort (EL0 or EL1) */
+            int is_write = (iss & (1 << 6)) != 0;
+            uint32_t dfsc = iss & 0x3F;
+            
+            if (dfsc >= 0xC && dfsc <= 0xF) { /* Permission Fault (Level 0-3) */
+                if (vm_handle_fault(far, is_write) == 0)
+                    return; /* Fixed via COW! */
+            }
+        }
+
         process_t *p = task_current();
 
         kprintf("\n--- fault: pid=%d (%s) ---\n",

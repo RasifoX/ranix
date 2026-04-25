@@ -146,6 +146,7 @@ int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 
 /* fd_table helpers */
 fd_table_t *fd_table_create(void);
+fd_table_t *fd_table_copy(fd_table_t *old);
 void        fd_table_destroy(fd_table_t *t);
 int         fd_alloc(fd_table_t *t, vfs_file_t *f);
 void        fd_free(fd_table_t *t, int fd);

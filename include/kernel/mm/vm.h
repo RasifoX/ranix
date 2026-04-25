@@ -17,6 +17,7 @@ typedef struct {
 extern vm_space_t *kernel_vm_space;
 
 vm_space_t *vm_create(void);
+vm_space_t *vm_copy(vm_space_t *vs);
 void        vm_destroy(vm_space_t *vs);
 int         vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 void        vm_unmap(vm_space_t *vs, uint64_t vaddr);
@@ -25,6 +26,7 @@ void        vm_set_kernel_pt(uint64_t phys);
 
 void        vm_init_kernel(uint64_t root_phys);
 void       *ioremap(uint64_t phys_addr, size_t size, uint32_t flags);
+int         vm_handle_fault(uint64_t vaddr, int is_write);
 
 /* arch-specific: load page table into hardware */
 void arch_vm_switch(uint64_t root_phys);
