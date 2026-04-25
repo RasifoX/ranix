@@ -5,12 +5,15 @@
 #include <kernel/irq.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/sync.h>
 #include <kernel/lib/string.h>
 static process_t *proctab[PROC_MAX];
 static process_t  idle_proc;
 static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 static process_t *current   = NULL;
+
+static spinlock_t sched_lock = SPINLOCK_INIT;
 
 volatile int need_resched = 0;
 
@@ -52,6 +55,7 @@ void sched_tick(void)
 {
 	if (!current) return;
 
+	uint64_t f = spin_lock_irq(&sched_lock);
 	if (current->pid != 0) {
 		if (--current->ticks_remaining <= 0) {
 			need_resched = 1;
@@ -67,15 +71,22 @@ void sched_tick(void)
 			p = p->next;
 		}
 	}
+	spin_unlock_irq(&sched_lock, f);
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
 {
-	if (proc_cnt >= PROC_MAX)
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (proc_cnt >= PROC_MAX) {
+		spin_unlock_irq(&sched_lock, f);
 		return -1;
+	}
 
 	process_t *p = buddy_alloc(0);
-	if (!p) return -1;
+	if (!p) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 	memset(p, 0, sizeof(*p));
 
 	p->pid   = proc_cnt;
@@ -93,7 +104,11 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 	/* kernel stack */
 	p->kstack = buddy_alloc(1);   /* 2 pages = 8 KB */
-	if (!p->kstack) { buddy_free((uint64_t)p, 0); return -1; }
+	if (!p->kstack) { 
+		spin_unlock_irq(&sched_lock, f);
+		buddy_free((uint64_t)p, 0); 
+		return -1; 
+	}
 
 	p->fds = fd_table_create();
 
@@ -107,6 +122,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	current->next = p;
 
 	proctab[proc_cnt++] = p;
+	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
 }
 
@@ -120,10 +136,17 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
-	if (proc_cnt >= PROC_MAX) return -1;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (proc_cnt >= PROC_MAX) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 
 	process_t *p = buddy_alloc(0);
-	if (!p) return -1;
+	if (!p) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 	memset(p, 0, sizeof(*p));
 
 	p->pid   = proc_cnt;
@@ -177,20 +200,30 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->next = current->next;
 	current->next = p;
 	proctab[proc_cnt++] = p;
+	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
 
 fail:
+	spin_unlock_irq(&sched_lock, f);
+	if (p->vm) vm_destroy(p->vm);
 	buddy_free((uint64_t)p, 0);
 	return -1;
 }
 
 pid_t proc_fork(void)
 {
-	if (proc_cnt >= PROC_MAX) return -1;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (proc_cnt >= PROC_MAX) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 
 	process_t *parent = current;
 	process_t *child  = buddy_alloc(0);
-	if (!child) return -1;
+	if (!child) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 	memset(child, 0, sizeof(*child));
 
 	child->pid       = proc_cnt;
@@ -237,9 +270,11 @@ pid_t proc_fork(void)
 	parent->next = child;
 
 	proctab[proc_cnt++] = child;
+	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
 
 fail:
+	spin_unlock_irq(&sched_lock, f);
 	if (child->vm) vm_destroy(child->vm);
 	if (child->fds) fd_table_destroy(child->fds);
 	buddy_free((uint64_t)child, 0);
@@ -248,12 +283,19 @@ fail:
 
 pid_t proc_vfork(void)
 {
-	if (proc_cnt >= PROC_MAX) return -1;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (proc_cnt >= PROC_MAX) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 
 	process_t *parent = current;
 
 	process_t *child = buddy_alloc(0);
-	if (!child) return -1;
+	if (!child) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
 	memset(child, 0, sizeof(*child));
 
 	child->pid          = proc_cnt;
@@ -270,7 +312,11 @@ pid_t proc_vfork(void)
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
 
 	child->kstack = buddy_alloc(1);
-	if (!child->kstack) { buddy_free((uint64_t)child, 0); return -1; }
+	if (!child->kstack) { 
+		spin_unlock_irq(&sched_lock, f);
+		buddy_free((uint64_t)child, 0); 
+		return -1; 
+	}
 
 	/* copy parent's saved context; child returns 0 from vfork */
 	uint8_t *ksp = child->kstack + KSTACK_SIZE;
@@ -290,25 +336,35 @@ pid_t proc_vfork(void)
 	/* suspend parent until child calls execve or exits */
 	parent->state = PROC_SLEEPING;
 	need_resched  = 1;
-	
+
+	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
 }
-
 process_t *proc_find(pid_t pid)
 {
-	if (pid < 0 || pid >= proc_cnt) return NULL;
-	return proctab[pid];
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	spin_unlock_irq(&sched_lock, f);
+	return p;
 }
 
 void proc_wait(pid_t pid)
 {
-	process_t *p = proc_find(pid);
-	while (p && p->state != PROC_DEAD)
+	while (1) {
+		uint64_t f = spin_lock_irq(&sched_lock);
+		process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+		if (!p || p->state == PROC_DEAD) {
+			spin_unlock_irq(&sched_lock, f);
+			break;
+		}
+		spin_unlock_irq(&sched_lock, f);
 		task_sleep();
+	}
 }
 
 void schedule(void)
 {
+	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *prev = current;
 
 	if (prev->state == PROC_RUNNING)
@@ -327,6 +383,7 @@ void schedule(void)
 			next = &idle_proc;
 		} else if (prev == &idle_proc) {
 			prev->state = PROC_RUNNING;
+			spin_unlock_irq(&sched_lock, f);
 			return;
 		} else {
 			/* prev dead/sleeping and no ready task — go idle */
@@ -337,24 +394,33 @@ void schedule(void)
 	next->state = PROC_RUNNING;
 	next->ticks_remaining = SCHED_QUANTUM;
 	current     = next;
+	spin_unlock_irq(&sched_lock, f);
 }
 
 void yield(void)      { arch_yield(); }
 void task_sleep(void) { current->state = PROC_SLEEPING; arch_yield(); }
 void task_exit(void)
 {
+	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *p = current;
 	p->state = PROC_DEAD;
 
 	if (p->vfork_parent >= 0) {
-		process_t *pp = proc_find((pid_t)p->vfork_parent);
-		if (pp) task_wake(pp);
+		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
+		if (pp && pp->state == PROC_SLEEPING) {
+			pp->state = PROC_READY;
+			need_resched = 1;
+		}
 		p->vfork_parent = -1;
 	}
 
-	process_t *parent = proc_find((pid_t)p->ppid);
-	if (parent) task_wake(parent);
+	process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
+	if (parent && parent->state == PROC_SLEEPING) {
+		parent->state = PROC_READY;
+		need_resched = 1;
+	}
 
+	spin_unlock_irq(&sched_lock, f);
 	arch_yield();
 }
 

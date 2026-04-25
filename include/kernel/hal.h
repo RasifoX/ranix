@@ -13,7 +13,22 @@ void arch_context_init(arch_context_t *ctx, void (*entry)(void), uint64_t stack_
 /* Initialize a CPU context that will drop to unprivileged mode (EL0 / ring3). */
 void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack_top);
 
+/* CPU-specific data area */
+typedef struct cpu_context {
+	struct process *current;
+	uint64_t        cpu_id;
+	uint64_t        magic;
+} cpu_context_t;
+
+/* Get the current CPU's context structure. Implemented in arch/ */
+cpu_context_t *arch_get_cpu_ctx(void);
+
 /* Update the kernel stack pointer used on privilege transitions (TSS.RSP0 / SP_EL1). */
 void arch_set_user_kstack(uint64_t kstack_top);
+
+/* Safe user memory access */
+int  access_ok(const void *addr, size_t n);
+long copy_from_user(void *dst, const void *src, size_t n);
+long copy_to_user(void *dst, const void *src, size_t n);
 
 #endif
