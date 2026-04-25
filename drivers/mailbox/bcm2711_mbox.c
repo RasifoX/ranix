@@ -34,14 +34,12 @@ int mbox_call(u8 channel, volatile u32 *msg) {
         __asm__ volatile("nop");
 
     mmio_write(MBOX_WRITE, val);
-    __asm__ volatile("dsb sy" ::: "memory");
 
     while (1) {
         while (mmio_read(MBOX_STATUS) & MBOX_EMPTY)
             __asm__ volatile("nop");
 
         u32 r = mmio_read(MBOX_READ);
-        __asm__ volatile("dsb sy" ::: "memory");
 
         if (r == val) {
             for (uintptr_t l = start; l < end; l += 64)

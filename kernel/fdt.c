@@ -217,11 +217,6 @@ int fdt_init(void *dtb_addr)
     if (!dtb_addr)
         return -1;
 
-    /* sanity: DTB must be in first 1GB of RAM */
-    uint64_t addr = (uint64_t)dtb_addr;
-    if (addr >= 0x40000000ULL)
-        return -1;
-
     fdt_header_t *hdr = (fdt_header_t *)dtb_addr;
     if (be32(&hdr->magic) != FDT_MAGIC) {
         kprintf("[  fdt] bad magic: 0x%x\n", be32(&hdr->magic));

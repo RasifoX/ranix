@@ -1,10 +1,11 @@
-#include <drivers/serial/pl011.h>
+#include <drivers/serial/uart.h>
 #include <drivers/irqchip/irqchip.h>
 #include <drivers/irqchip/arm_timer.h>
 #include <drivers/mailbox/mbox.h>
 #include <kernel/board.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 static board_config_t config = {
 	.name          = "Raspberry Pi 4",
@@ -30,11 +31,14 @@ void board_early_init(void)
 		"isb\n"
 		::: "x0"
 	);
+
+	config.uart_base = PHYS_TO_VIRT(config.uart_base);
 	uart_init();
 }
 
 int board_fb_alloc(fb_info_t *out)
 {
+	config.mbox_base = PHYS_TO_VIRT(config.mbox_base);
 	mbox_init(config.mbox_base, config.bus_offset);
 
 	u32 w = config.fb_width, h = config.fb_height;
@@ -51,16 +55,20 @@ int board_fb_alloc(fb_info_t *out)
 
 void board_irq_init(void)
 {
+	config.gic_dist_base = PHYS_TO_VIRT(config.gic_dist_base);
+	config.gic_cpu_base  = PHYS_TO_VIRT(config.gic_cpu_base);
 	irqchip_init(config.gic_dist_base, config.gic_cpu_base);
+
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
+
+	config.local_base = PHYS_TO_VIRT(config.local_base);
 	timer_init(100);
 }
 
 void board_drivers_register(void)
 {
-	pl011_register();
-	timer_register();
+	/* already initialized early */
 }
 
 board_config_t *board_get_config(void) { return &config; }

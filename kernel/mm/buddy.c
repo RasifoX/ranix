@@ -1,14 +1,13 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
-
-#define MAX_PAGES  262144  /* 1 GB / 4 KB */
+#include <asm/mmu.h>
 
 struct node { struct node *next; };
 
 static struct node *free_list[BUDDY_MAX_ORDER];
-static uint8_t     blk_order[MAX_PAGES]; /* order of the free/alloc block at this page */
-static uint8_t     free_bm[MAX_PAGES / 8];
+static uint8_t     *blk_order; /* order of the free/alloc block at this page */
+static uint8_t     *free_bm;
 static uint64_t    _base;
 static uint64_t    _npages;
 
@@ -21,24 +20,30 @@ static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
 static void push(int ord, uint64_t addr)
 {
-	struct node *n = (struct node *)addr;
+	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
 	n->next = free_list[ord];
-	free_list[ord] = n;
+	free_list[ord] = (struct node *)addr;
 }
 
 static uint64_t pop(int ord)
 {
-	struct node *n = free_list[ord];
+	uint64_t addr = (uint64_t)free_list[ord];
+	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
 	free_list[ord] = n->next;
-	return (uint64_t)n;
+	return addr;
 }
 
 static void list_remove(int ord, uint64_t addr)
 {
 	struct node **p = &free_list[ord];
-	while (*p && (uint64_t)*p != addr)
-		p = &(*p)->next;
-	if (*p) *p = (*p)->next;
+	while (*p && (uint64_t)*p != addr) {
+		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
+		p = &n->next;
+	}
+	if (*p) {
+		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
+		*p = n->next;
+	}
 }
 
 void buddy_free(uint64_t addr, int ord)
@@ -102,14 +107,28 @@ void buddy_add_region(uint64_t addr, uint64_t size)
 	}
 }
 
-void buddy_init(uint64_t base, uint64_t size)
+uint64_t buddy_init(uint64_t base, uint64_t limit)
 {
-	_base   = base;
-	_npages = size >> PAGE_SHIFT;
-	if (_npages > MAX_PAGES) _npages = MAX_PAGES;
+	uint64_t total_pages = limit >> PAGE_SHIFT;
+
+	uint64_t blk_order_sz = total_pages * sizeof(uint8_t);
+	uint64_t free_bm_sz   = (total_pages + 7) / 8;
+	uint64_t meta_sz      = blk_order_sz + free_bm_sz;
+	uint64_t meta_pages   = (meta_sz + PAGE_SIZE - 1) >> PAGE_SHIFT;
+
+	if (meta_pages >= total_pages) return 0;
+
+	blk_order = (uint8_t *)PHYS_TO_VIRT(base);
+	free_bm   = (uint8_t *)PHYS_TO_VIRT(base + blk_order_sz);
+
+	_base   = 0;
+	_npages = total_pages;
+
 	memset(free_list, 0, sizeof(free_list));
-	memset(blk_order, 0, sizeof(blk_order));
-	memset(free_bm,   0, sizeof(free_bm));
+	memset(blk_order, 0, blk_order_sz);
+	memset(free_bm,   0, free_bm_sz);
+
+	return meta_pages << PAGE_SHIFT;
 }
 
 uint64_t buddy_free_pages(void)
