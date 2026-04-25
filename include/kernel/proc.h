@@ -45,6 +45,7 @@ typedef struct process {
 	uint8_t        *kstack;       /* offset 32 */
 	char            name[PROC_NAME_MAX]; /* offset 40 */
 	struct process *next;         /* scheduler list */
+	struct process *wait_next;    /* wait queue list */
 	vm_space_t     *vm;
 
 	/* ── scheduling ──────────────────────────── */

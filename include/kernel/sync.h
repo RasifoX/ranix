@@ -35,4 +35,18 @@ typedef struct {
 void mutex_lock(mutex_t *m);
 void mutex_unlock(mutex_t *m);
 
+/*
+ * wait_queue — allows tasks to sleep until a condition is met.
+ */
+typedef struct wait_queue {
+	spinlock_t      lock;
+	struct process *tasks;   /* head of task list */
+} wait_queue_t;
+
+#define WAIT_QUEUE_INIT  { SPINLOCK_INIT, 0 }
+
+void wait_queue_init(wait_queue_t *q);
+void sleep_on(wait_queue_t *q);
+void wake_up(wait_queue_t *q);
+
 #endif

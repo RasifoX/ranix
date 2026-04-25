@@ -7,12 +7,14 @@
 #define PIPE_BUF_SIZE 4096
 
 typedef struct {
-    uint8_t    *buffer;
-    uint32_t    head;
-    uint32_t    tail;
-    uint32_t    readers;
-    uint32_t    writers;
-    spinlock_t  lock;
+    uint8_t      *buffer;
+    uint32_t      head;
+    uint32_t      tail;
+    uint32_t      readers;
+    uint32_t      writers;
+    spinlock_t    lock;
+    wait_queue_t  rd_wait;
+    wait_queue_t  wr_wait;
 } pipe_t;
 
 static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
@@ -31,7 +33,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
                 break; /* EOF */
             }
             spin_unlock_irq(&pipe->lock, f);
-            yield(); /* Wait for data */
+            sleep_on(&pipe->rd_wait);
             continue;
         }
 
@@ -41,6 +43,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
             pipe->tail = (pipe->tail + 1) % PIPE_BUF_SIZE;
         }
 
+        wake_up(&pipe->wr_wait);
         spin_unlock_irq(&pipe->lock, f);
     }
 
@@ -64,7 +67,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
         uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
         if (free == 0) {
             spin_unlock_irq(&pipe->lock, f);
-            yield(); /* Wait for space */
+            sleep_on(&pipe->wr_wait);
             continue;
         }
 
@@ -74,6 +77,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
             pipe->head = (pipe->head + 1) % PIPE_BUF_SIZE;
         }
 
+        wake_up(&pipe->rd_wait);
         spin_unlock_irq(&pipe->lock, f);
     }
 
@@ -87,6 +91,9 @@ static int pipe_close(vfs_file_t *file)
 
     if (file->flags == O_RDONLY) pipe->readers--;
     else pipe->writers--;
+
+    wake_up(&pipe->rd_wait);
+    wake_up(&pipe->wr_wait);
 
     if (pipe->readers == 0 && pipe->writers == 0) {
         buddy_free((uint64_t)pipe->buffer, 0);
@@ -115,6 +122,8 @@ int vfs_pipe(int pipefd[2])
     pipe->readers = 1;
     pipe->writers = 1;
     pipe->lock = (spinlock_t)SPINLOCK_INIT;
+    wait_queue_init(&pipe->rd_wait);
+    wait_queue_init(&pipe->wr_wait);
 
     vfs_inode_t *inode = buddy_alloc(0);
     if (!inode) {
