@@ -15,9 +15,10 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 
 /* CPU-specific data area */
 typedef struct cpu_context {
-	struct process *current;
-	uint64_t        cpu_id;
-	uint64_t        magic;
+	struct cpu_context *self;      /* pointer to this structure, must be offset 0 */
+	struct process     *current;
+	uint64_t            cpu_id;
+	uint64_t            magic;
 } cpu_context_t;
 
 /* Get the current CPU's context structure. Implemented in arch/ */
@@ -25,6 +26,10 @@ cpu_context_t *arch_get_cpu_ctx(void);
 
 /* Update the kernel stack pointer used on privilege transitions (TSS.RSP0 / SP_EL1). */
 void arch_set_user_kstack(uint64_t kstack_top);
+
+/* Safe user memory access guards */
+void arch_user_access_begin(void);
+void arch_user_access_end(void);
 
 /* Safe user memory access */
 int  access_ok(const void *addr, size_t n);
