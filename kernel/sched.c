@@ -12,7 +12,9 @@ static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 static process_t *current   = NULL;
 
-int need_resched = 0;
+volatile int need_resched = 0;
+
+#define SCHED_QUANTUM  10
 
 /* ── scheduler ───────────────────────────────────────────── */
 
@@ -33,6 +35,7 @@ void sched_init(void)
 	p->entry = idle_loop;
 	p->next  = p;
 	p->kstack = idle_kstack;
+	p->ticks_remaining = SCHED_QUANTUM;
 	memcpy(p->name, "idle", 5);
 
 	uint8_t *sp_top = idle_kstack + KSTACK_SIZE;
@@ -43,6 +46,27 @@ void sched_init(void)
 	proctab[0] = p;
 	current    = p;
 	proc_cnt   = 1;
+}
+
+void sched_tick(void)
+{
+	if (!current) return;
+
+	if (current->pid != 0) {
+		if (--current->ticks_remaining <= 0) {
+			need_resched = 1;
+		}
+	} else {
+		/* If we are in idle, check if anyone else is ready */
+		process_t *p = current->next;
+		while (p != current) {
+			if (p->state == PROC_READY) {
+				need_resched = 1;
+				break;
+			}
+			p = p->next;
+		}
+	}
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
@@ -60,6 +84,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->uid   = current->uid;
 	p->gid   = current->gid;
 	p->entry = fn;
+	p->ticks_remaining = SCHED_QUANTUM;
 
 	int nlen = 0;
 	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
@@ -248,6 +273,7 @@ void schedule(void)
 	}
 
 	next->state = PROC_RUNNING;
+	next->ticks_remaining = SCHED_QUANTUM;
 	current     = next;
 }
 
@@ -272,8 +298,10 @@ void task_exit(void)
 
 void task_wake(process_t *p)
 {
-	if (p && p->state == PROC_SLEEPING)
+	if (p && p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
+		need_resched = 1;
+	}
 }
 
 arch_context_t *sched_get_current_ctx(void)

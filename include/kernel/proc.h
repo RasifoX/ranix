@@ -35,6 +35,9 @@ typedef struct process {
 	struct process *next;         /* scheduler list */
 	vm_space_t     *vm;
 
+	/* ── scheduling ──────────────────────────── */
+	int             ticks_remaining;
+
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
 	uint64_t        mmap_next;
@@ -56,6 +59,7 @@ typedef struct process {
 
 /* scheduler */
 void       sched_init(void);
+void       sched_tick(void);
 void       schedule(void);
 void       yield(void);
 void       task_sleep(void);
@@ -74,7 +78,7 @@ process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);
 
 /* set by sys_vfork so the asm syscall path reschedules after handler */
-extern int need_resched;
+extern volatile int need_resched;
 
 typedef process_t task_t;
 #define task_create(name, fn)  proc_create(name, fn)
