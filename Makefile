@@ -47,7 +47,7 @@ ifeq ($(ARCH),aarch64)
         drivers/irqchip/arm-timer/arm_timer.c \
         drivers/mailbox/bcm2711_mbox.c
 else ifeq ($(ARCH),x86_64)
-    ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64
+    ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
     QEMU_CMD    = qemu-system-x86_64 -M q35
     SRCS_ARCH = \

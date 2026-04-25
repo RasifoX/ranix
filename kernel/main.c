@@ -66,6 +66,7 @@ void kernel_main(void)
 
 	/* framebuffer TTY needs kmalloc — init after heap */
 	if (fb_phys) {
+		fb.fb = (void *)PHYS_TO_VIRT(fb.fb);
 		fb_tty_init(&fb);
 		kprintf_set_fb();
 	}

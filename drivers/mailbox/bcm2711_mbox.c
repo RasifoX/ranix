@@ -22,6 +22,12 @@ int mbox_call(u8 channel, volatile u32 *msg) {
     u32 phys = (u32)(u64)msg;
     u32 val  = ((phys + _bus_offset) & ~0xFU) | (channel & 0xF);
 
+    u32 size = msg[0];
+    uintptr_t start = (uintptr_t)msg & ~63UL;
+    uintptr_t end   = ((uintptr_t)msg + size + 63) & ~63UL;
+    for (uintptr_t l = start; l < end; l += 64)
+        __asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
+
     __asm__ volatile("dsb sy" ::: "memory");
 
     while (mmio_read(MBOX_STATUS) & MBOX_FULL)
@@ -37,8 +43,12 @@ int mbox_call(u8 channel, volatile u32 *msg) {
         u32 r = mmio_read(MBOX_READ);
         __asm__ volatile("dsb sy" ::: "memory");
 
-        if (r == val)
+        if (r == val) {
+            for (uintptr_t l = start; l < end; l += 64)
+                __asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
+            __asm__ volatile("dsb sy" ::: "memory");
             return (msg[1] == MBOX_RESPONSE) ? 0 : -1;
+        }
     }
 }
 
