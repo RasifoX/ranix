@@ -13,6 +13,7 @@ static volatile uint64_t ticks;
 void pit_handler(void)
 {
 	ticks++;
+	sched_tick();
 	for (int i = 0; i < task_count(); i++) {
 		task_t *t = task_get(i);
 		if (t && t->state == TASK_SLEEPING)

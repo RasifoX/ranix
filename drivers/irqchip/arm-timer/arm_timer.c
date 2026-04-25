@@ -17,6 +17,8 @@ void timer_handler(void) {
     next += freq / timer_hz;
     __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(next));
 
+    sched_tick();
+
     /* wake sleeping tasks so they can check their conditions */
     for (int i = 0; i < task_count(); i++) {
         task_t *t = task_get(i);

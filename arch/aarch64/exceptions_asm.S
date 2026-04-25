@@ -191,8 +191,17 @@ irq_handler:
 	str  x1, [x0, #16]    /* task->ctx = sp */
 	mov  w0, #0
 	bl   irq_dispatch
+
+	/* Check for reschedule */
+	adrp x19, need_resched
+	ldr  w20, [x19, :lo12:need_resched]
+	cbz  w20, .irq_ret
+	str  wzr, [x19, :lo12:need_resched]
+
 	bl   schedule
 	bl   vm_activate
+
+.irq_ret:
 	bl   sched_get_current_ctx
 	restore_trapframe
 	eret
