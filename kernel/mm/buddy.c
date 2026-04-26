@@ -3,6 +3,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/kprintf.h>
 #include <asm/mmu.h>
 
 struct node { struct node *next; };
@@ -105,7 +106,8 @@ void *buddy_alloc(int ord)
 		o++;
 	if (o >= BUDDY_MAX_ORDER) {
 		spin_unlock_irq(&buddy_lock, f);
-		return 0;
+		kprintf("[OOM] buddy_alloc: out of memory (order %d)\n", ord);
+		return NULL;
 	}
 
 	uint64_t addr = pop(o);
