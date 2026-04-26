@@ -45,12 +45,12 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 
 void arch_user_access_begin(void)
 {
-	__asm__ volatile("msr pan, #0" ::: "memory");
+	/* PAN not supported on Cortex-A72 */
 }
 
 void arch_user_access_end(void)
 {
-	__asm__ volatile("msr pan, #1" ::: "memory");
+	/* PAN not supported on Cortex-A72 */
 }
 
 void arch_set_user_kstack(uint64_t kstack_top)

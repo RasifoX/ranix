@@ -16,18 +16,14 @@ int access_ok(const void *addr, size_t n)
 long copy_from_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(src, n)) return -1;
-	arch_user_access_begin();
 	memcpy(dst, src, n);
-	arch_user_access_end();
 	return 0;
 }
 
 long copy_to_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(dst, n)) return -1;
-	arch_user_access_begin();
 	memcpy(dst, src, n);
-	arch_user_access_end();
 	return 0;
 }
 
