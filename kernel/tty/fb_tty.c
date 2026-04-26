@@ -3,6 +3,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include "font8x16.h"
+#include "font_latin_ext.h"
 
 #define FG_COLOR  0xFFFFFFFF
 #define BG_COLOR  0xFF000000
@@ -55,10 +56,21 @@ static void scroll_up(void)
     flush_all();
 }
 
-static void draw_char(u32 col, u32 row, char c)
+/* decode one UTF-8 codepoint; returns bytes consumed */
+static int utf8_next(const unsigned char *s, u32 *cp)
 {
-    if (c < 32 || c > 127) c = '?';
-    const u8 *glyph = font8x16[c - 32];
+    if (s[0] < 0x80)                     { *cp = s[0]; return 1; }
+    if ((s[0] & 0xE0) == 0xC0 && s[1])  { *cp = ((u32)(s[0]&0x1F)<<6)|(s[1]&0x3F); return 2; }
+    if ((s[0] & 0xF0) == 0xE0 && s[1] && s[2]) {
+        *cp = ((u32)(s[0]&0x0F)<<12)|((u32)(s[1]&0x3F)<<6)|(s[2]&0x3F);
+        return 3;
+    }
+    *cp = '?'; return 1;
+}
+
+static void draw_glyph(u32 col, u32 row, u32 cp)
+{
+    const u8 *glyph = font_lookup(cp);
     u32 px = col * FONT_W;
     u32 py = row * FONT_H;
 
@@ -71,6 +83,21 @@ static void draw_char(u32 col, u32 row, char c)
 
     if (py < _dirty_y0) _dirty_y0 = py;
     if (py + FONT_H > _dirty_y1) _dirty_y1 = py + FONT_H;
+}
+
+static void put_codepoint(u32 cp)
+{
+    if (cp == '\n') {
+        dirty_flush(); _cur_col = 0; _cur_row++;
+    } else if (cp == '\r') {
+        _cur_col = 0;
+    } else if (cp == '\b') {
+        if (_cur_col > 0) { _cur_col--; draw_glyph(_cur_col, _cur_row, ' '); }
+    } else {
+        draw_glyph(_cur_col, _cur_row, cp);
+        if (++_cur_col >= _cols) { _cur_col = 0; _cur_row++; }
+    }
+    if (_cur_row >= _rows) { scroll_up(); _cur_row = _rows - 1; }
 }
 
 void fb_tty_init(fb_info_t *fb)
@@ -99,34 +126,18 @@ void fb_tty_flush(void) { dirty_flush(); }
 
 void fb_tty_putchar(char c)
 {
-    if (c == '\n') {
-        dirty_flush();
-        _cur_col = 0;
-        _cur_row++;
-    } else if (c == '\r') {
-        _cur_col = 0;
-    } else if (c == '\b') {
-        if (_cur_col > 0) {
-            _cur_col--;
-            draw_char(_cur_col, _cur_row, ' ');
-        }
-    } else {
-        draw_char(_cur_col, _cur_row, c);
-        if (++_cur_col >= _cols) {
-            _cur_col = 0;
-            _cur_row++;
-        }
-    }
-
-    if (_cur_row >= _rows) {
-        scroll_up();
-        _cur_row = _rows - 1;
-    }
+    put_codepoint((unsigned char)c);
 }
 
 void fb_tty_puts(const char *s)
 {
-    while (*s) fb_tty_putchar(*s++);
+    const unsigned char *u = (const unsigned char *)s;
+    while (*u) {
+        u32 cp;
+        int n = utf8_next(u, &cp);
+        put_codepoint(cp);
+        u += n;
+    }
 }
 
 void fb_tty_clear(void)
