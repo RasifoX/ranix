@@ -44,7 +44,8 @@ typedef struct process {
 	void          (*entry)(void); /* offset 24 */
 	uint8_t        *kstack;       /* offset 32 */
 	char            name[PROC_NAME_MAX]; /* offset 40 */
-	struct process *next;         /* scheduler list */
+	struct process *next;         /* global process list */
+	struct process *sched_next;    /* scheduler runqueue list */
 	struct process *wait_next;    /* wait queue list */
 	vm_space_t     *vm;
 
@@ -73,6 +74,9 @@ typedef struct process {
 	/* ── vfork ───────────────────────────────── */
 	pid_t           vfork_parent;  /* -1 if not a vfork child */
 	int             reaped;        /* 1 if waitpid has already returned this child */
+
+	/* ── arch TLS base (FS_BASE on x86_64, TPIDR_EL0 on AArch64) ── */
+	uint64_t        tls_base;
 } process_t;
 
 /* scheduler */

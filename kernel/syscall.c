@@ -292,6 +292,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	arch_context_init_user(p->ctx, entry, USER_STACK_TOP_ - 64);
 
 	/* reset TLS */
+	p->tls_base = 0;
 #if defined(__aarch64__)
 	__asm__ volatile("msr tpidr_el0, xzr");
 #elif defined(__x86_64__)
@@ -409,11 +410,19 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 }
 
 #if defined(__x86_64__)
+#define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
+
 static long sys_arch_prctl(int code, uint64_t addr)
 {
 	if (code == ARCH_SET_FS) {
 		__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
+		task_current()->tls_base = addr;
+		return 0;
+	}
+	if (code == ARCH_SET_GS) {
+		/* When kernel is running, USER GS is stored in KERNEL_GS_BASE MSR. */
+		__asm__ volatile("wrmsr" :: "c"(0xC0000102U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
 		return 0;
 	}
 	return -22;

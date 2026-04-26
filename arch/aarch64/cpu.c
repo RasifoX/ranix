@@ -43,7 +43,27 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 	ctx->sp   = ustack_top;
 }
 
+void arch_user_access_begin(void)
+{
+	__asm__ volatile("msr pan, #0" ::: "memory");
+}
+
+void arch_user_access_end(void)
+{
+	__asm__ volatile("msr pan, #1" ::: "memory");
+}
+
 void arch_set_user_kstack(uint64_t kstack_top)
 {
 	(void)kstack_top;
+}
+
+void arch_save_tls(process_t *p)
+{
+	__asm__ volatile("mrs %0, tpidr_el0" : "=r"(p->tls_base));
+}
+
+void arch_restore_tls(process_t *p)
+{
+	__asm__ volatile("msr tpidr_el0, %0" :: "r"(p->tls_base));
 }
