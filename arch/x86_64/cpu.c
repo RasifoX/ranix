@@ -3,13 +3,42 @@
 #include <asm/gdt.h>
 #include <kernel/proc.h>
 
+#define MSR_FS_BASE 0xC0000100U
+
+void arch_save_tls(process_t *p)
+{
+	uint32_t lo, hi;
+	__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(MSR_FS_BASE));
+	p->tls_base = ((uint64_t)hi << 32) | lo;
+}
+
+void arch_restore_tls(process_t *p)
+{
+	uint32_t lo = (uint32_t)p->tls_base;
+	uint32_t hi = (uint32_t)(p->tls_base >> 32);
+	__asm__ volatile("wrmsr" :: "c"(MSR_FS_BASE), "a"(lo), "d"(hi));
+}
+
 extern void syscall_entry(void);
 
 static cpu_context_t early_cpu_ctx;
+static uint8_t early_irq_stack[4096] __attribute__((aligned(16)));
+
+void arch_user_access_begin(void)
+{
+	__asm__ volatile("stac" ::: "memory");
+}
+
+void arch_user_access_end(void)
+{
+	__asm__ volatile("clac" ::: "memory");
+}
 
 void arch_set_user_kstack(uint64_t kstack_top)
 {
 	tss_set_rsp0(kstack_top);
+	/* Update the fast-access pointer in per-CPU area */
+	arch_get_cpu_ctx()->kstack_top = (uint8_t *)kstack_top;
 }
 
 void arch_halt(void)  { __asm__ volatile("hlt"); }
@@ -24,20 +53,11 @@ cpu_context_t *arch_get_cpu_ctx(void)
 
 static void arch_syscall_init(void)
 {
-	early_cpu_ctx.self    = &early_cpu_ctx;
-	early_cpu_ctx.current = NULL;
-	early_cpu_ctx.cpu_id  = 0;
-	early_cpu_ctx.magic   = 0xCAFEBABE;
-	
-	uint64_t gs_base = (uint64_t)&early_cpu_ctx;
-	__asm__ volatile(
-		"movl $0xC0000101, %%ecx\n"
-		"movq %0, %%rax\n"
-		"movq %%rax, %%rdx\n"
-		"shrq $32, %%rdx\n"
-		"wrmsr\n"
-		:: "r"(gs_base) : "rax", "ecx", "edx"
-	);
+	/* Also enable SMAP/SMEP in CR4 if we want hardware guards */
+	uint64_t cr4;
+	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+	/* SMEP(20), SMAP(21) - set if supported. For now just ensure they are handled. */
+	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
 
 	/* EFER.SCE — enable syscall/sysret */
 	__asm__ volatile(
@@ -52,12 +72,11 @@ static void arch_syscall_init(void)
 	uint64_t star = (0x18ULL << 48) | (0x08ULL << 32);
 	__asm__ volatile(
 		"movl $0xC0000081, %%ecx\n"
-		"movl %%eax, %%eax\n"
 		"movq %0, %%rax\n"
 		"movq %%rax, %%rdx\n"
 		"shrq $32, %%rdx\n"
 		"wrmsr\n"
-		:: "r"(star) : "rax", "ecx", "edx"
+		:: "r"(star) : "rax", "ecx", "rdx"
 	);
 
 	/* LSTAR */
@@ -68,7 +87,7 @@ static void arch_syscall_init(void)
 		"movq %%rax, %%rdx\n"
 		"shrq $32, %%rdx\n"
 		"wrmsr\n"
-		:: "r"(lstar) : "rax", "ecx", "edx"
+		:: "r"(lstar) : "rax", "ecx", "rdx"
 	);
 
 	/* SFMASK */
@@ -83,17 +102,39 @@ static void arch_syscall_init(void)
 
 void arch_cpu_init(void)
 {
+	/* Enable per-CPU area EARLY */
+	early_cpu_ctx.self       = &early_cpu_ctx;
+	early_cpu_ctx.current    = NULL;
+	early_cpu_ctx.kstack_top = early_irq_stack + 4096;
+	early_cpu_ctx.irq_stack  = early_irq_stack + 4096;
+	early_cpu_ctx.cpu_id     = 0;
+	early_cpu_ctx.magic      = 0xCAFEBABE;
+
+	uint64_t gs_base = (uint64_t)&early_cpu_ctx;
+	/* Set BOTH GS_BASE and KERNEL_GS_BASE to kernel context.
+	 * When user syscalls, swapgs will flip them. */
+	__asm__ volatile(
+		"movl $0xC0000101, %%ecx\n" /* MSR_GS_BASE */
+		"movq %0, %%rax\n"
+		"movq %%rax, %%rdx\n"
+		"shrq $32, %%rdx\n"
+		"wrmsr\n"
+		"movl $0xC0000102, %%ecx\n" /* MSR_KERNEL_GS_BASE */
+		"wrmsr\n"
+		:: "r"(gs_base) : "rax", "ecx", "rdx"
+	);
+
 	/* enable SSE and FXSAVE */
-	uint64_t cr0, cr4;
+	uint64_t cr0, cr4_val;
 	__asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
 	cr0 &= ~(1ULL << 2);
 	cr0 |= (1ULL << 1);
 	__asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
 
-	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-	cr4 |= (1ULL << 9);
-	cr4 |= (1ULL << 10);
-	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
+	cr4_val |= (1ULL << 9);
+	cr4_val |= (1ULL << 10);
+	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
 
 	arch_syscall_init();
 }
