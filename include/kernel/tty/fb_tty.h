@@ -12,5 +12,6 @@ void fb_tty_clear(void);
 void fb_tty_show_cursor(int show);
 void fb_tty_erase_eol(void);
 void fb_tty_tick(void);
+void fb_tty_cursor_flush(void);
 
 #endif
