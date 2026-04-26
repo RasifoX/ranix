@@ -7,15 +7,45 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <asm/mmu.h>
 
 static process_t *proctab[PROC_MAX];
 static process_t  idle_proc;
 static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
+static uint8_t    irq_stack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 
 static spinlock_t sched_lock = SPINLOCK_INIT;
 
+/* O(1) Runqueue: simple head/tail linked list */
+static process_t *rq_head = NULL;
+static process_t *rq_tail = NULL;
+
 volatile int need_resched = 0;
+
+/* Internal: must hold sched_lock */
+static void runqueue_add(process_t *p)
+{
+	if (p->pid == 0) return;
+	p->sched_next = NULL;
+	if (!rq_tail) {
+		rq_head = rq_tail = p;
+	} else {
+		rq_tail->sched_next = p;
+		rq_tail = p;
+	}
+}
+
+/* Internal: must hold sched_lock */
+static process_t *runqueue_pop(void)
+{
+	if (!rq_head) return NULL;
+	process_t *p = rq_head;
+	rq_head = p->sched_next;
+	if (!rq_head) rq_tail = NULL;
+	p->sched_next = NULL;
+	return p;
+}
 
 #define SCHED_QUANTUM  10
 
@@ -32,9 +62,6 @@ void sched_init(void)
 	memset(p, 0, sizeof(*p));
 	p->pid   = 0;
 	p->state = PROC_RUNNING;
-	p->ppid  = 0;
-	p->uid   = 0;
-	p->gid   = 0;
 	p->entry = idle_loop;
 	p->next  = p;
 	p->kstack = idle_kstack;
@@ -46,11 +73,13 @@ void sched_init(void)
 	arch_context_init(ctx, idle_loop, (uint64_t)sp_top);
 	p->ctx = ctx;
 
-	/* Initialize per-CPU structure */
 	cpu_context_t *cpu = arch_get_cpu_ctx();
-	cpu->current = p;
-	cpu->cpu_id  = 0;
-	cpu->magic   = 0xCAFEBABE;
+	cpu->self       = cpu;
+	cpu->current    = p;
+	cpu->kstack_top = sp_top;
+	cpu->irq_stack  = irq_stack + KSTACK_SIZE;
+	cpu->cpu_id     = 0;
+	cpu->magic      = 0xCAFEBABE;
 
 	proctab[0] = p;
 	proc_cnt   = 1;
@@ -66,16 +95,8 @@ void sched_tick(void)
 		if (--current->ticks_remaining <= 0) {
 			need_resched = 1;
 		}
-	} else {
-		/* If we are in idle, check if anyone else is ready */
-		process_t *p = current->next;
-		while (p != current) {
-			if (p->state == PROC_READY) {
-				need_resched = 1;
-				break;
-			}
-			p = p->next;
-		}
+	} else if (rq_head) {
+		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -110,12 +131,13 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->name[nlen] = '\0';
 
 	/* kernel stack */
-	p->kstack = buddy_alloc(1);
-	if (!p->kstack) { 
+	void *kstack_phys = buddy_alloc(1);
+	if (!kstack_phys) { 
 		spin_unlock_irq(&sched_lock, f);
 		buddy_free((uint64_t)p, 0); 
 		return -1; 
 	}
+	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
 
 	p->fds = fd_table_create();
 
@@ -124,19 +146,14 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	arch_context_init(ctx, fn, (uint64_t)sp_top);
 	p->ctx = ctx;
 
-	/* insert into scheduler ring */
-	p->next = current->next;
-	current->next = p;
+	p->next = proctab[0]->next;
+	proctab[0]->next = p;
+	runqueue_add(p);
 
 	proctab[proc_cnt++] = p;
 	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
 }
-
-#define USER_CODE_BASE   0x400000UL
-#define USER_STACK_TOP   0x800000UL
-#define USER_STACK_PAGES 2
-#define USER_MMAP_BASE   0x10000000UL
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
@@ -165,11 +182,9 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	memcpy(p->name, name, nlen);
 	p->name[nlen] = '\0';
 
-	/* create address space */
 	p->vm = vm_create();
 	if (!p->vm) goto fail;
 
-	/* load ELF into address space */
 	uint64_t entry, load_end = 0;
 	if (elf_load(p->vm, elf_data, elf_len, &entry, &load_end) != 0) {
 		kprintf("[sched] elf_load failed\n");
@@ -177,30 +192,32 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	}
 
 	p->brk          = load_end;
-	p->mmap_next    = USER_MMAP_BASE;
+	p->mmap_next    = ARCH_USER_MMAP_BASE;
 	p->vfork_parent = -1;
 	p->reaped       = 0;
 
-	/* allocate and map user stack */
-	for (int i = 0; i < USER_STACK_PAGES; i++) {
+	for (int i = 0; i < ARCH_USER_STACK_PAGES; i++) {
 		void *spage = buddy_alloc(0);
 		if (!spage) goto fail;
 		memset(spage, 0, PAGE_SIZE);
-		uint64_t sva = USER_STACK_TOP - (uint64_t)(USER_STACK_PAGES - i) * PAGE_SIZE;
+		uint64_t sva = ARCH_USER_STACK_TOP - (uint64_t)(ARCH_USER_STACK_PAGES - i) * PAGE_SIZE;
 		vm_map(p->vm, sva, (uint64_t)spage, VM_USER | VM_READ | VM_WRITE);
 	}
 
-	p->kstack = buddy_alloc(1);
-	if (!p->kstack) goto fail;
+	void *kstack_phys = buddy_alloc(1);
+	if (!kstack_phys) goto fail;
+	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
 
 	uint8_t *ksp = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	arch_context_init_user(ctx, entry, USER_STACK_TOP - 64);
+	arch_context_init_user(ctx, entry, ARCH_USER_STACK_TOP - 64);
 	p->ctx = ctx;
 	p->fds = fd_table_create();
 
-	p->next = current->next;
-	current->next = p;
+	p->next = proctab[0]->next;
+	proctab[0]->next = p;
+	runqueue_add(p);
+
 	proctab[proc_cnt++] = p;
 	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
@@ -252,8 +269,9 @@ pid_t proc_fork(void)
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail;
 
-	child->kstack = buddy_alloc(1);
-	if (!child->kstack) goto fail;
+	void *child_kstack_phys = buddy_alloc(1);
+	if (!child_kstack_phys) goto fail;
+	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
 
 	uint8_t *ksp = child->kstack + KSTACK_SIZE;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
@@ -263,8 +281,9 @@ pid_t proc_fork(void)
 	child->ctx = cctx;
 	child->ticks_remaining = SCHED_QUANTUM;
 
-	child->next  = parent->next;
-	parent->next = child;
+	child->next  = proctab[0]->next;
+	proctab[0]->next = child;
+	runqueue_add(child);
 
 	proctab[proc_cnt++] = child;
 	spin_unlock_irq(&sched_lock, f);
@@ -307,12 +326,13 @@ pid_t proc_vfork(void)
 	child->fds          = fd_table_copy(parent->fds);
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
 
-	child->kstack = buddy_alloc(1);
-	if (!child->kstack) { 
+	void *child_kstack_phys = buddy_alloc(1);
+	if (!child_kstack_phys) { 
 		spin_unlock_irq(&sched_lock, f);
 		buddy_free((uint64_t)child, 0); 
 		return -1; 
 	}
+	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
 
 	uint8_t *ksp = child->kstack + KSTACK_SIZE;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
@@ -320,9 +340,9 @@ pid_t proc_vfork(void)
 	CTX_SYSCALL_RET(cctx, 0);
 	child->ctx = cctx;
 
-	child->next    = parent->next;
-	parent->next   = child;
-	proctab[proc_cnt++] = child;
+	child->next    = proctab[0]->next;
+	proctab[0]->next = child;
+	runqueue_add(child);
 
 	if (parent->ctx) {
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
@@ -362,36 +382,38 @@ void schedule(void)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *prev = task_current();
 
-	if (prev->state == PROC_RUNNING)
+	if (prev->state == PROC_RUNNING) {
 		prev->state = PROC_READY;
-
-	process_t *next = prev->next;
-	while (next != prev) {
-		if (next->state == PROC_READY)
-			break;
-		next = next->next;
+		runqueue_add(prev);
 	}
 
-	if (next == prev || next->state != PROC_READY) {
-		if (prev->state == PROC_READY && prev != &idle_proc) {
-			next = &idle_proc;
-		} else if (prev == &idle_proc) {
-			prev->state = PROC_RUNNING;
-			spin_unlock_irq(&sched_lock, f);
-			return;
-		} else {
-			next = &idle_proc;
-		}
+	process_t *next = runqueue_pop();
+	if (!next) {
+		next = &idle_proc;
 	}
 
 	next->state = PROC_RUNNING;
 	next->ticks_remaining = SCHED_QUANTUM;
-	arch_get_cpu_ctx()->current = next;
+
+	arch_save_tls(prev);
+
+	cpu_context_t *cpu = arch_get_cpu_ctx();
+	cpu->current = next;
+	/* IMPORTANT: update the syscall kstack pointer */
+	cpu->kstack_top = next->kstack + KSTACK_SIZE;
+
+	arch_restore_tls(next);
+
 	spin_unlock_irq(&sched_lock, f);
 }
 
 void yield(void)      { arch_yield(); }
-void task_sleep(void) { task_current()->state = PROC_SLEEPING; arch_yield(); }
+void task_sleep(void) { 
+	uint64_t f = spin_lock_irq(&sched_lock);
+	task_current()->state = PROC_SLEEPING; 
+	spin_unlock_irq(&sched_lock, f);
+	arch_yield(); 
+}
 
 void task_exit(void)
 {
@@ -403,6 +425,7 @@ void task_exit(void)
 		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
 		if (pp && pp->state == PROC_SLEEPING) {
 			pp->state = PROC_READY;
+			runqueue_add(pp);
 			need_resched = 1;
 		}
 		p->vfork_parent = -1;
@@ -412,9 +435,9 @@ void task_exit(void)
 	if (parent) {
 		if (parent->state == PROC_SLEEPING) {
 			parent->state = PROC_READY;
+			runqueue_add(parent);
 			need_resched = 1;
 		}
-		/* Send SIGCHLD to parent */
 		parent->sig_pending |= (1UL << (SIGCHLD - 1));
 	}
 
@@ -427,6 +450,7 @@ void task_wake(process_t *p)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (p && p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
+		runqueue_add(p);
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
@@ -439,6 +463,7 @@ void task_signal(process_t *p, int sig)
 	p->sig_pending |= (1UL << (sig - 1));
 	if (p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
+		runqueue_add(p);
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
@@ -453,7 +478,6 @@ void signal_dispatch(arch_context_t *tf)
 	uint64_t mask = p->sig_pending & ~p->sig_mask;
 	if (!mask) return;
 
-	/* Pick first signal */
 	int sig = 0;
 	for (int i = 0; i < NSIG; i++) {
 		if (mask & (1UL << i)) {
@@ -466,9 +490,6 @@ void signal_dispatch(arch_context_t *tf)
 		p->sig_pending &= ~(1UL << (sig - 1));
 		task_exit();
 	}
-
-	/* TODO: Implement user-mode signal handler jumping. 
-	 * For now, only SIGKILL is handled. */
 }
 
 arch_context_t *sched_get_current_ctx(void)
