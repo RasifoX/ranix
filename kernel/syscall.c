@@ -159,7 +159,10 @@ static long sys_read(int fd, void *buf, size_t len)
 		uart_putc('2'); uart_putc('5'); uart_putc('h'); /* UART: show cursor */
 
 		while (1) {
-			while (!uart_has_data()) arch_yield();
+			while (!uart_has_data()) {
+				fb_tty_cursor_flush();
+				arch_yield();
+			}
 			unsigned char c = (unsigned char)uart_getc();
 
 			if (c == '\r' || c == '\n') {
