@@ -154,6 +154,9 @@ static long sys_read(int fd, void *buf, size_t len)
 		static int  prev_display_cols = 0;
 
 		fb_tty_show_cursor(1);
+		fb_tty_flush();              /* show cursor immediately at prompt */
+		uart_putc('\033'); uart_putc('['); uart_putc('?');
+		uart_putc('2'); uart_putc('5'); uart_putc('h'); /* UART: show cursor */
 
 		while (1) {
 			while (!uart_has_data()) arch_yield();
