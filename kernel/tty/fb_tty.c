@@ -69,6 +69,7 @@ static void cursor_draw_on_fb(void)
 
 static void dirty_flush(void)
 {
+    if (!_fb) return;
     if (_cursor_visible) {
         u32 py = _cur_row * FONT_H;
         if (py < _dirty_y0) _dirty_y0 = py;
@@ -121,6 +122,7 @@ static void draw_glyph(u32 col, u32 row, u32 cp)
 
 static void put_codepoint(u32 cp)
 {
+    if (!_fb) return;
     if (cp == '\n') {
         dirty_flush(); _cur_col = 0; _cur_row++;
     } else if (cp == '\r') {
@@ -199,6 +201,7 @@ void fb_tty_write(const char *buf, size_t len)
 
 void fb_tty_clear(void)
 {
+    if (!_fb) return;
     u32 shadow_size = _fb->pitch * _fb->height;
     u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
 
@@ -222,6 +225,7 @@ void fb_tty_show_cursor(int show)
 
 void fb_tty_erase_eol(void)
 {
+    if (!_fb) return;
     u32 saved = _cur_col;
     for (u32 c = _cur_col; c < _cols; c++)
         draw_glyph(c, _cur_row, ' ');
