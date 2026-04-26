@@ -223,7 +223,6 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
-	(void)argv; (void)envp;
 	if (!path) return -14;
 
 	process_t *p = task_current();
@@ -236,6 +235,39 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		i++;
 	}
 	kpath[i] = '\0';
+
+	/* copy argv/envp strings to kernel before VM switch */
+#define EXEC_MAXARGS 32
+#define EXEC_MAXSTRTOTAL 4096
+	int argc = 0, envc = 0;
+	char *kstrs = kmalloc(EXEC_MAXSTRTOTAL);
+	char *kargv[EXEC_MAXARGS + 1];
+	char *kenvp[EXEC_MAXARGS + 1];
+	int koff = 0;
+	if (kstrs) {
+		if (argv) {
+			for (; argc < EXEC_MAXARGS && argv[argc]; argc++) {
+				const char *s = argv[argc];
+				int n = 0;
+				while (s[n] && koff + n < EXEC_MAXSTRTOTAL - 1) n++;
+				memcpy(kstrs + koff, s, n);
+				kstrs[koff + n] = '\0';
+				kargv[argc] = kstrs + koff;
+				koff += n + 1;
+			}
+		}
+		if (envp) {
+			for (; envc < EXEC_MAXARGS && envp[envc]; envc++) {
+				const char *s = envp[envc];
+				int n = 0;
+				while (s[n] && koff + n < EXEC_MAXSTRTOTAL - 1) n++;
+				memcpy(kstrs + koff, s, n);
+				kstrs[koff + n] = '\0';
+				kenvp[envc] = kstrs + koff;
+				koff += n + 1;
+			}
+		}
+	}
 
 	/* read file from VFS */
 	vfs_stat_t st = {0};
@@ -288,8 +320,44 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	p->mmap_next = USER_MMAP_BASE_;
 	arch_vm_switch((uint64_t)new_vm->root);
 
+	/* build SysV ABI initial stack */
+	uint64_t uargv[EXEC_MAXARGS + 1];
+	uint64_t uenvp[EXEC_MAXARGS + 1];
+	memset(uargv, 0, sizeof(uargv));
+	memset(uenvp, 0, sizeof(uenvp));
+
+	uint64_t sp = USER_STACK_TOP_;
+	arch_user_access_begin();
+	if (kstrs) {
+		for (int j = envc - 1; j >= 0; j--) {
+			int n = 0; while (kenvp[j][n]) n++;
+			sp -= (uint64_t)(n + 1);
+			memcpy((void *)sp, kenvp[j], (size_t)(n + 1));
+			uenvp[j] = sp;
+		}
+		for (int j = argc - 1; j >= 0; j--) {
+			int n = 0; while (kargv[j][n]) n++;
+			sp -= (uint64_t)(n + 1);
+			memcpy((void *)sp, kargv[j], (size_t)(n + 1));
+			uargv[j] = sp;
+		}
+		kfree(kstrs);
+	}
+	sp &= ~15ULL;
+	/* AT_NULL auxv entry */
+	sp -= 16; ((uint64_t *)sp)[0] = 0; ((uint64_t *)sp)[1] = 0;
+	/* envp[] */
+	sp -= 8; *(uint64_t *)sp = 0;
+	for (int j = envc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uenvp[j]; }
+	/* argv[] */
+	sp -= 8; *(uint64_t *)sp = 0;
+	for (int j = argc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uargv[j]; }
+	/* argc */
+	sp -= 8; *(uint64_t *)sp = (uint64_t)argc;
+	arch_user_access_end();
+
 	/* reinitialise context frame */
-	arch_context_init_user(p->ctx, entry, USER_STACK_TOP_ - 64);
+	arch_context_init_user(p->ctx, entry, sp);
 
 	/* reset TLS */
 	p->tls_base = 0;
