@@ -219,10 +219,11 @@ int fdt_init(void *dtb_addr)
 
     fdt_header_t *hdr = (fdt_header_t *)dtb_addr;
     if (be32(&hdr->magic) != FDT_MAGIC) {
-        kprintf("[  fdt] bad magic: 0x%x\n", be32(&hdr->magic));
-        return -1;
+    #ifndef __x86_64__
+    	kprintf("[  fdt] bad magic: 0x%x\n", be32(&hdr->magic));
+    #endif
+    	return -1;
     }
-
     _dtb = dtb_addr;
     _initialized = 1;
 
