@@ -1,5 +1,6 @@
 #include <kernel/proc.h>
 #include <kernel/hal.h>
+#include <kernel/tty/fb_tty.h>
 #include <kernel/elf.h>
 #include <kernel/kprintf.h>
 #include <kernel/irq.h>
@@ -99,6 +100,7 @@ void sched_tick(void)
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
+	fb_tty_tick();
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))

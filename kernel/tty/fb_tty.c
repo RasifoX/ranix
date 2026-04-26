@@ -21,6 +21,8 @@ static int  _cursor_visible  = 0;
 static u32  _cursor_fb_col   = 0;
 static u32  _cursor_fb_row   = 0;
 static int  _cursor_on_fb    = 0;
+static int  _blink_ticks     = 0;
+static int  _blink_state     = 1;
 
 static void flush_region(u32 y_start, u32 y_end)
 {
@@ -51,7 +53,7 @@ static void cursor_erase_from_fb(void)
 
 static void cursor_draw_on_fb(void)
 {
-    if (!_cursor_visible || !_fb) return;
+    if (!_cursor_visible || !_fb || !_blink_state) return;
     u32 px = _cur_col * FONT_W;
     u32 py = _cur_row * FONT_H;
     for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
@@ -222,4 +224,18 @@ void fb_tty_erase_eol(void)
     for (u32 c = _cur_col; c < _cols; c++)
         draw_glyph(c, _cur_row, ' ');
     _cur_col = saved;
+}
+
+void fb_tty_tick(void)
+{
+    if (!_cursor_visible || !_fb) return;
+    if (++_blink_ticks < 50) return;  /* 500ms at 100Hz */
+    _blink_ticks = 0;
+    _blink_state ^= 1;
+    cursor_erase_from_fb();
+    if (_blink_state) {
+        u32 py = _cur_row * FONT_H;
+        flush_region(py, py + FONT_H);  /* restore shadow under cursor */
+        cursor_draw_on_fb();
+    }
 }

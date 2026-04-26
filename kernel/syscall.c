@@ -119,16 +119,28 @@ static int utf8_step_right(const char *line, int pos, int len)
 #define PROMPT "$ "
 #define PROMPT_LEN 2
 
+static void tty_out(const char *s, int n)
+{
+	fb_tty_write(s, (size_t)n);
+	for (int i = 0; i < n; i++) {
+		if (s[i] == '\n') uart_putc('\r');
+		uart_putc(s[i]);
+	}
+}
+static void tty_out_s(const char *s)
+{
+	int n = 0; while (s[n]) n++;
+	tty_out(s, n);
+}
+
 static void tty_redraw(const char *line, int len, int pos, int old_cols)
 {
 	int new_cols = line_cols(line, len);
-	fb_tty_puts("\r" PROMPT);
-	fb_tty_write(line, (size_t)len);
-	/* erase any leftover chars from previous longer line */
-	for (int i = new_cols; i < old_cols; i++) fb_tty_puts(" ");
-	/* reposition cursor: go back to start, advance to pos */
-	fb_tty_puts("\r" PROMPT);
-	fb_tty_write(line, (size_t)pos);
+	tty_out_s("\r" PROMPT);
+	tty_out(line, len);
+	for (int i = new_cols; i < old_cols; i++) tty_out_s(" ");
+	tty_out_s("\r" PROMPT);
+	tty_out(line, pos);
 	fb_tty_flush();
 }
 
@@ -149,7 +161,7 @@ static long sys_read(int fd, void *buf, size_t len)
 
 			if (c == '\r' || c == '\n') {
 				fb_tty_show_cursor(0);
-				fb_tty_puts("\n");
+				tty_out_s("\n");
 				fb_tty_flush();
 				line[llen++] = '\n';
 				size_t n = (size_t)llen < len ? (size_t)llen : len;
@@ -161,9 +173,9 @@ static long sys_read(int fd, void *buf, size_t len)
 			}
 
 			if (c == 0x1B) { /* ESC — arrow key sequence */
-				if (!uart_has_data()) continue;
+				while (!uart_has_data()) arch_yield();
 				if (uart_getc() != '[') continue;
-				if (!uart_has_data()) continue;
+				while (!uart_has_data()) arch_yield();
 				unsigned char arrow = (unsigned char)uart_getc();
 				if (arrow == 'D' && pos > 0) {       /* left */
 					pos = utf8_step_left(line, pos);
