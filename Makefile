@@ -149,7 +149,7 @@ qemu: $(TARGET)
 iso: userspace $(TARGET)
 	@mkdir -p iso/boot/grub
 	@cp $(TARGET) iso/boot/ranix.elf
-	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg
+	@printf 'set timeout=0\nset default=0\nterminal_input serial console\nterminal_output serial console\nserial --speed=115200\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg
 	grub-mkrescue -o ranix.iso iso/ 2>/dev/null
 	@echo "[OK] ranix.iso hazır"
 
