@@ -2,8 +2,7 @@
 #include <kernel/fb.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
-#include "font8x16.h"
-#include "font_latin_ext.h"
+#include "font_spleen.h"
 
 #define FG_COLOR  0xFFFFFFFF
 #define BG_COLOR  0xFF000000
@@ -56,21 +55,11 @@ static void scroll_up(void)
     flush_all();
 }
 
-/* decode one UTF-8 codepoint; returns bytes consumed */
-static int utf8_next(const unsigned char *s, u32 *cp)
-{
-    if (s[0] < 0x80)                     { *cp = s[0]; return 1; }
-    if ((s[0] & 0xE0) == 0xC0 && s[1])  { *cp = ((u32)(s[0]&0x1F)<<6)|(s[1]&0x3F); return 2; }
-    if ((s[0] & 0xF0) == 0xE0 && s[1] && s[2]) {
-        *cp = ((u32)(s[0]&0x0F)<<12)|((u32)(s[1]&0x3F)<<6)|(s[2]&0x3F);
-        return 3;
-    }
-    *cp = '?'; return 1;
-}
+static void put_codepoint(u32 cp);
 
 static void draw_glyph(u32 col, u32 row, u32 cp)
 {
-    const u8 *glyph = font_lookup(cp);
+    const u8 *glyph = spleen_lookup(cp);
     u32 px = col * FONT_W;
     u32 py = row * FONT_H;
 
@@ -124,20 +113,43 @@ void fb_tty_init(fb_info_t *fb)
 
 void fb_tty_flush(void) { dirty_flush(); }
 
+static u32  utf8_state = 0;
+static u32  utf8_cp = 0;
+
 void fb_tty_putchar(char c)
 {
-    put_codepoint((unsigned char)c);
+    unsigned char u = (unsigned char)c;
+    if (u < 0x80) {
+        utf8_state = 0;
+        put_codepoint(u);
+    } else if (u >= 0xC0 && u <= 0xDF) {
+        utf8_cp = u & 0x1F;
+        utf8_state = 1;
+    } else if (u >= 0xE0 && u <= 0xEF) {
+        utf8_cp = u & 0x0F;
+        utf8_state = 2;
+    } else if (u >= 0x80 && u <= 0xBF) {
+        if (utf8_state > 0) {
+            utf8_cp = (utf8_cp << 6) | (u & 0x3F);
+            if (--utf8_state == 0) put_codepoint(utf8_cp);
+        } else {
+            put_codepoint('?');
+        }
+    } else {
+        utf8_state = 0;
+        put_codepoint('?');
+    }
 }
 
 void fb_tty_puts(const char *s)
 {
-    const unsigned char *u = (const unsigned char *)s;
-    while (*u) {
-        u32 cp;
-        int n = utf8_next(u, &cp);
-        put_codepoint(cp);
-        u += n;
-    }
+    while (*s) fb_tty_putchar(*s++);
+}
+
+void fb_tty_write(const char *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        fb_tty_putchar(buf[i]);
 }
 
 void fb_tty_clear(void)
