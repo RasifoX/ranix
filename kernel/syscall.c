@@ -133,14 +133,26 @@ static void tty_out_s(const char *s)
 	tty_out(s, n);
 }
 
+static void uart_goto_col(int col)  /* 1-based absolute column */
+{
+	uart_putc('\033'); uart_putc('[');
+	if (col >= 100) uart_putc((char)('0' + col / 100));
+	if (col >= 10)  uart_putc((char)('0' + (col / 10) % 10));
+	uart_putc((char)('0' + col % 10));
+	uart_putc('G');
+}
+
 static void tty_redraw(const char *line, int len, int pos, int old_cols)
 {
 	int new_cols = line_cols(line, len);
+	int cur_cols = line_cols(line, pos);
+
 	tty_out_s("\r" PROMPT);
 	tty_out(line, len);
 	for (int i = new_cols; i < old_cols; i++) tty_out_s(" ");
-	tty_out_s("\r" PROMPT);
-	tty_out(line, pos);
+
+	fb_tty_set_col(PROMPT_LEN + cur_cols);       /* fb: direct cursor jump */
+	uart_goto_col(PROMPT_LEN + cur_cols + 1);    /* uart: absolute col (1-based) */
 	fb_tty_flush();
 }
 
@@ -185,10 +197,14 @@ static long sys_read(int fd, void *buf, size_t len)
 				unsigned char arrow = (unsigned char)uart_getc();
 				if (arrow == 'D' && pos > 0) {       /* left */
 					pos = utf8_step_left(line, pos);
-					tty_redraw(line, llen, pos, prev_display_cols);
+					fb_tty_set_col(PROMPT_LEN + line_cols(line, pos));
+					fb_tty_flush();
+					uart_putc('\033'); uart_putc('['); uart_putc('D');
 				} else if (arrow == 'C' && pos < llen) { /* right */
 					pos = utf8_step_right(line, pos, llen);
-					tty_redraw(line, llen, pos, prev_display_cols);
+					fb_tty_set_col(PROMPT_LEN + line_cols(line, pos));
+					fb_tty_flush();
+					uart_putc('\033'); uart_putc('['); uart_putc('C');
 				}
 				continue;
 			}
