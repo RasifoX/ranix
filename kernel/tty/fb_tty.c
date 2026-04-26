@@ -3,6 +3,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include "font_spleen.h"
+#include <drivers/serial/uart.h>
 
 #define FG_COLOR  0xFFFFFFFF
 #define BG_COLOR  0xFF000000
@@ -226,16 +227,25 @@ void fb_tty_erase_eol(void)
     _cur_col = saved;
 }
 
+static void uart_esc(const char *s)
+{
+    uart_putc('\033'); uart_putc('[');
+    while (*s) uart_putc(*s++);
+}
+
 void fb_tty_tick(void)
 {
     if (!_cursor_visible || !_fb) return;
     if (++_blink_ticks < 50) return;  /* 500ms at 100Hz */
     _blink_ticks = 0;
     _blink_state ^= 1;
+    /* framebuffer cursor */
     cursor_erase_from_fb();
     if (_blink_state) {
         u32 py = _cur_row * FONT_H;
-        flush_region(py, py + FONT_H);  /* restore shadow under cursor */
+        flush_region(py, py + FONT_H);
         cursor_draw_on_fb();
     }
+    /* UART cursor — send VT100 show/hide */
+    uart_esc(_blink_state ? "?25h" : "?25l");
 }
