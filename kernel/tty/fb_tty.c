@@ -18,12 +18,13 @@ static u8  *shadow;
 static u32  _dirty_y0, _dirty_y1;
 
 /* cursor state — drawn directly on fb, not in shadow */
-static int  _cursor_visible  = 0;
-static u32  _cursor_fb_col   = 0;
-static u32  _cursor_fb_row   = 0;
-static int  _cursor_on_fb    = 0;
-static int  _blink_ticks     = 0;
-static int  _blink_state     = 1;
+static int           _cursor_visible  = 0;
+static u32           _cursor_fb_col   = 0;
+static u32           _cursor_fb_row   = 0;
+static int           _cursor_on_fb    = 0;
+static int           _blink_ticks     = 0;
+static int           _blink_state     = 1;
+static volatile int  _blink_dirty     = 0;
 
 static void flush_region(u32 y_start, u32 y_end)
 {
@@ -239,13 +240,14 @@ void fb_tty_tick(void)
     if (++_blink_ticks < 50) return;  /* 500ms at 100Hz */
     _blink_ticks = 0;
     _blink_state ^= 1;
-    /* framebuffer cursor */
+    _blink_dirty  = 1;
+}
+
+void fb_tty_cursor_flush(void)
+{
+    if (!_blink_dirty) return;
+    _blink_dirty = 0;
     cursor_erase_from_fb();
-    if (_blink_state) {
-        u32 py = _cur_row * FONT_H;
-        flush_region(py, py + FONT_H);
-        cursor_draw_on_fb();
-    }
-    /* UART cursor — send VT100 show/hide */
+    cursor_draw_on_fb();
     uart_esc(_blink_state ? "?25h" : "?25l");
 }
