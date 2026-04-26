@@ -16,6 +16,12 @@ static u32  _cur_col, _cur_row;
 static u8  *shadow;
 static u32  _dirty_y0, _dirty_y1;
 
+/* cursor state — drawn directly on fb, not in shadow */
+static int  _cursor_visible  = 0;
+static u32  _cursor_fb_col   = 0;
+static u32  _cursor_fb_row   = 0;
+static int  _cursor_on_fb    = 0;
+
 static void flush_region(u32 y_start, u32 y_end)
 {
     if (y_end > _fb->height) y_end = _fb->height;
@@ -30,10 +36,45 @@ static void flush_all(void)
     memcpy(_fb->fb, shadow, _fb->height * _fb->pitch);
 }
 
+static void cursor_erase_from_fb(void)
+{
+    if (!_cursor_on_fb || !_fb) return;
+    u32 px = _cursor_fb_col * FONT_W;
+    u32 py = _cursor_fb_row * FONT_H;
+    for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
+        u32 *dst = (u32 *)((u8 *)_fb->fb + (py + y) * _fb->pitch) + px;
+        u32 *src = (u32 *)(shadow         + (py + y) * _fb->pitch) + px;
+        for (u32 x = 0; x < FONT_W; x++) dst[x] = src[x];
+    }
+    _cursor_on_fb = 0;
+}
+
+static void cursor_draw_on_fb(void)
+{
+    if (!_cursor_visible || !_fb) return;
+    u32 px = _cur_col * FONT_W;
+    u32 py = _cur_row * FONT_H;
+    for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
+        u32 *line = (u32 *)((u8 *)_fb->fb + (py + y) * _fb->pitch) + px;
+        for (u32 x = 0; x < FONT_W; x++) line[x] ^= 0x00FFFFFF;
+    }
+    _cursor_fb_col = _cur_col;
+    _cursor_fb_row = _cur_row;
+    _cursor_on_fb  = 1;
+}
+
 static void dirty_flush(void)
 {
-    if (_dirty_y1 > _dirty_y0)
+    if (_cursor_visible) {
+        u32 py = _cur_row * FONT_H;
+        if (py < _dirty_y0) _dirty_y0 = py;
+        if (py + FONT_H > _dirty_y1) _dirty_y1 = py + FONT_H;
+    }
+    if (_dirty_y1 > _dirty_y0) {
+        cursor_erase_from_fb();
         flush_region(_dirty_y0, _dirty_y1);
+        cursor_draw_on_fb();
+    }
     _dirty_y0 = _fb->height;
     _dirty_y1 = 0;
 }
@@ -167,4 +208,18 @@ void fb_tty_clear(void)
     _dirty_y1 = 0;
 
     flush_all();
+}
+
+void fb_tty_show_cursor(int show)
+{
+    if (!show) cursor_erase_from_fb();
+    _cursor_visible = show;
+}
+
+void fb_tty_erase_eol(void)
+{
+    u32 saved = _cur_col;
+    for (u32 c = _cur_col; c < _cols; c++)
+        draw_glyph(c, _cur_row, ' ');
+    _cur_col = saved;
 }

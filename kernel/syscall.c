@@ -9,6 +9,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <kernel/lib/string.h>
+#include <kernel/tty/fb_tty.h>
 #include <drivers/serial/uart.h>
 
 #define AT_FDCWD     (-100)
@@ -59,13 +60,76 @@ static long sys_write(int fd, const void *buf, size_t len)
 	if (!access_ok(buf, len)) return -14;
 
 	if (fd == 0 || fd == 1 || fd == 2) {
-		const char *p = buf;
-		for (size_t i = 0; i < len; i++)
-			kprintf("%c", p[i]);
-		kprintf_flush();
+		char kbuf[256];
+		size_t remaining = len;
+		const char *uptr = buf;
+		while (remaining > 0) {
+			size_t chunk = remaining > sizeof(kbuf) ? sizeof(kbuf) : remaining;
+			if (copy_from_user(kbuf, uptr, chunk) != 0)
+				return -14;
+			
+			for (size_t i = 0; i < chunk; i++) {
+				char c = kbuf[i];
+				fb_tty_putchar(c);
+				if (c == '\n') uart_putc('\r');
+				uart_putc(c);
+			}
+			uptr += chunk;
+			remaining -= chunk;
+		}
+		fb_tty_flush();
 		return (long)len;
 	}
 	return vfs_write(fd, buf, len);
+}
+
+/* count display columns for line[0..bytes] (UTF-8 codepoints = columns) */
+static int line_cols(const char *line, int bytes)
+{
+	int cols = 0;
+	for (int i = 0; i < bytes; ) {
+		unsigned char c = (unsigned char)line[i];
+		if      (c < 0x80)                    { i += 1; }
+		else if ((c & 0xE0) == 0xC0)          { i += 2; }
+		else if ((c & 0xF0) == 0xE0)          { i += 3; }
+		else                                   { i += 1; }
+		cols++;
+	}
+	return cols;
+}
+
+/* step one UTF-8 codepoint left from pos, return new pos */
+static int utf8_step_left(const char *line, int pos)
+{
+	if (pos <= 0) return 0;
+	pos--;
+	while (pos > 0 && ((unsigned char)line[pos] & 0xC0) == 0x80) pos--;
+	return pos;
+}
+
+/* step one UTF-8 codepoint right from pos, return new pos */
+static int utf8_step_right(const char *line, int pos, int len)
+{
+	if (pos >= len) return len;
+	pos++;
+	while (pos < len && ((unsigned char)line[pos] & 0xC0) == 0x80) pos++;
+	return pos;
+}
+
+#define PROMPT "$ "
+#define PROMPT_LEN 2
+
+static void tty_redraw(const char *line, int len, int pos, int old_cols)
+{
+	int new_cols = line_cols(line, len);
+	fb_tty_puts("\r" PROMPT);
+	fb_tty_write(line, (size_t)len);
+	/* erase any leftover chars from previous longer line */
+	for (int i = new_cols; i < old_cols; i++) fb_tty_puts(" ");
+	/* reposition cursor: go back to start, advance to pos */
+	fb_tty_puts("\r" PROMPT);
+	fb_tty_write(line, (size_t)pos);
+	fb_tty_flush();
 }
 
 static long sys_read(int fd, void *buf, size_t len)
@@ -73,22 +137,70 @@ static long sys_read(int fd, void *buf, size_t len)
 	if (!access_ok(buf, len)) return -14;
 
 	if (fd == 0) {
-		char *p = buf;
-		size_t i = 0;
-		while (i < len) {
+		static char line[256];
+		static int  llen = 0, pos = 0;
+		static int  prev_display_cols = 0;
+
+		fb_tty_show_cursor(1);
+
+		while (1) {
 			while (!uart_has_data()) arch_yield();
-			char c = uart_getc();
-			if (c == '\r') c = '\n';
-			if (c == 127 || c == '\b') {
-				if (i > 0) { i--; kprintf("\b \b"); kprintf_flush(); }
+			unsigned char c = (unsigned char)uart_getc();
+
+			if (c == '\r' || c == '\n') {
+				fb_tty_show_cursor(0);
+				fb_tty_puts("\n");
+				fb_tty_flush();
+				line[llen++] = '\n';
+				size_t n = (size_t)llen < len ? (size_t)llen : len;
+				arch_user_access_begin();
+				memmove(buf, line, n);
+				arch_user_access_end();
+				llen = pos = prev_display_cols = 0;
+				return (long)n;
+			}
+
+			if (c == 0x1B) { /* ESC — arrow key sequence */
+				if (!uart_has_data()) continue;
+				if (uart_getc() != '[') continue;
+				if (!uart_has_data()) continue;
+				unsigned char arrow = (unsigned char)uart_getc();
+				if (arrow == 'D' && pos > 0) {       /* left */
+					pos = utf8_step_left(line, pos);
+					tty_redraw(line, llen, pos, prev_display_cols);
+				} else if (arrow == 'C' && pos < llen) { /* right */
+					pos = utf8_step_right(line, pos, llen);
+					tty_redraw(line, llen, pos, prev_display_cols);
+				}
 				continue;
 			}
-			p[i++] = c;
-			kprintf("%c", c);
-			kprintf_flush();
-			if (c == '\n') break;
+
+			if (c == 127 || c == '\b') { /* backspace */
+				if (pos > 0) {
+					int newpos = utf8_step_left(line, pos);
+					int del    = pos - newpos;
+					memmove(line + newpos, line + pos, (size_t)(llen - pos));
+					llen -= del;
+					pos   = newpos;
+					tty_redraw(line, llen, pos, prev_display_cols);
+					prev_display_cols = line_cols(line, llen);
+				}
+				continue;
+			}
+
+			if (c >= 0x20 || (c & 0x80)) { /* printable or UTF-8 continuation */
+				if (llen < 254) {
+					memmove(line + pos + 1, line + pos, (size_t)(llen - pos));
+					line[pos] = (char)c;
+					llen++;
+					pos++;
+					int dc = line_cols(line, llen);
+					tty_redraw(line, llen, pos, prev_display_cols);
+					prev_display_cols = dc;
+				}
+				continue;
+			}
 		}
-		return (long)i;
 	}
 	return vfs_read(fd, buf, len);
 }
@@ -327,7 +439,6 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	memset(uenvp, 0, sizeof(uenvp));
 
 	uint64_t sp = USER_STACK_TOP_;
-	arch_user_access_begin();
 	if (kstrs) {
 		for (int j = envc - 1; j >= 0; j--) {
 			int n = 0; while (kenvp[j][n]) n++;
@@ -354,7 +465,6 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	for (int j = argc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uargv[j]; }
 	/* argc */
 	sp -= 8; *(uint64_t *)sp = (uint64_t)argc;
-	arch_user_access_end();
 
 	/* reinitialise context frame */
 	arch_context_init_user(p->ctx, entry, sp);
