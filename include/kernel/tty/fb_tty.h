@@ -10,6 +10,7 @@ void fb_tty_write(const char *buf, size_t len);
 void fb_tty_flush(void);
 void fb_tty_clear(void);
 void fb_tty_show_cursor(int show);
+void fb_tty_set_col(u32 col);
 void fb_tty_erase_eol(void);
 void fb_tty_tick(void);
 void fb_tty_cursor_flush(void);

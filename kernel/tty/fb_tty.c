@@ -240,14 +240,16 @@ void fb_tty_tick(void)
     if (++_blink_ticks < 50) return;  /* 500ms at 100Hz */
     _blink_ticks = 0;
     _blink_state ^= 1;
-    _blink_dirty  = 1;
+    _blink_dirty = 1;
+    cursor_erase_from_fb();   /* direct fb write — fast, no flush needed */
+    cursor_draw_on_fb();
 }
 
 void fb_tty_cursor_flush(void)
 {
     if (!_blink_dirty) return;
     _blink_dirty = 0;
-    cursor_erase_from_fb();
-    cursor_draw_on_fb();
     uart_esc(_blink_state ? "?25h" : "?25l");
 }
+
+void fb_tty_set_col(u32 col) { _cur_col = col; }
