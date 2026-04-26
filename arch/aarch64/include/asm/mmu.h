@@ -5,6 +5,12 @@
 #define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
 #define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
 
+/* User space layout */
+#define ARCH_USER_CODE_BASE   0x400000UL
+#define ARCH_USER_STACK_TOP   0x800000UL
+#define ARCH_USER_STACK_PAGES 2
+#define ARCH_USER_MMAP_BASE   0x10000000UL
+
 /* MAIR indices — must match mmu_asm.S enable_mmu() setup */
 #define MT_DEVICE_nGnRnE  0x0
 #define MT_NORMAL         0x1
