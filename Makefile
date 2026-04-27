@@ -51,7 +51,7 @@ ifeq ($(ARCH),aarch64)
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
-    QEMU_CMD    = qemu-system-x86_64 -M q35
+    QEMU_CMD    = qemu-system-x86_64
     SRCS_ARCH = \
         arch/x86_64/cpu.c \
         arch/x86_64/irq.c \
@@ -149,7 +149,7 @@ qemu: $(TARGET)
 iso: userspace $(TARGET)
 	@mkdir -p iso/boot/grub
 	@cp $(TARGET) iso/boot/ranix.elf
-	@printf 'set timeout=0\nset default=0\nterminal_input serial console\nterminal_output serial console\nserial --speed=115200\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg
+	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg
 	grub-mkrescue -o ranix.iso iso/ 2>/dev/null
 	@echo "[OK] ranix.iso hazır"
 
