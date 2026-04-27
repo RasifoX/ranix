@@ -20,8 +20,8 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out);
 
 void board_early_init(void)
 {
-	multiboot2_parse(_dtb_ptr, &config.mem_size);
 	uart16550_init();
+	multiboot2_parse(_dtb_ptr, &config.mem_size);
 }
 
 int board_fb_alloc(fb_info_t *out)
