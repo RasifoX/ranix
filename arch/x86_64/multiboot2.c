@@ -37,7 +37,7 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
     while (p < end) {
         mb2_tag_t *tag = (mb2_tag_t *)p;
         if (tag->type == MB2_TAG_TYPE_END) break;
-        if (tag->size == 0) break;
+        if (tag->size < 8) break;
 
         if (tag->type == MB2_TAG_TYPE_MMAP) {
             uint32_t entry_size = *(uint32_t *)(p + 8);
@@ -53,7 +53,7 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
                 entry = (mb2_mmap_entry_t *)((uint8_t *)entry + entry_size);
             }
         }
-        p += (tag->size + 7) & ~7;
+        p += ((uint64_t)tag->size + 7) & ~(uint64_t)7;
     }
 
     if (max_ram > 0)
