@@ -192,3 +192,5 @@ uint64_t buddy_free_pages(void)
 		if (bm_get(i)) n += 1ul << blk_order[i];
 	return n;
 }
+
+uint64_t buddy_total_pages(void) { return _npages; }

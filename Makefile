@@ -89,6 +89,8 @@ SRCS_KERNEL = \
     kernel/vfs.c \
     kernel/fs/ramfs.c \
     kernel/fs/pipe.c \
+    kernel/fs/procfs.c \
+    kernel/fs/devfs.c \
     kernel/block.c \
     kernel/mm/buddy.c \
     kernel/mm/vm.c \
