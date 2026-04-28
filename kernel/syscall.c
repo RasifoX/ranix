@@ -55,9 +55,18 @@ typedef struct {
 
 /* ── helpers ─────────────────────────────────────────────── */
 
+static int resolve_path(char *out, int dirfd, const char *upath);
+
 static long sys_write(int fd, const void *buf, size_t len)
 {
 	if (!access_ok(buf, len)) return -14;
+
+	/* If a real VFS file is installed at fd (e.g. via dup2), use it */
+	if (fd >= 0 && fd <= 2) {
+		process_t *p = task_current();
+		if (p->fds && fd_get(p->fds, fd))
+			return vfs_write(fd, buf, len);
+	}
 
 	if (fd == 0 || fd == 1 || fd == 2) {
 		char kbuf[256];
@@ -160,6 +169,13 @@ static long sys_read(int fd, void *buf, size_t len)
 {
 	if (!access_ok(buf, len)) return -14;
 
+	/* If a real VFS file is installed at fd (e.g. via dup2), use it */
+	if (fd == 0) {
+		process_t *p = task_current();
+		if (p->fds && fd_get(p->fds, 0))
+			return vfs_read(0, buf, len);
+	}
+
 	if (fd == 0) {
 		static char line[256];
 		static int  llen = 0, pos = 0;
@@ -258,19 +274,26 @@ static long sys_open(const char *path, int flags, mode_t mode)
 	char kpath[PROC_NAME_MAX];
 	if (copy_from_user(kpath, path, PROC_NAME_MAX) != 0)
 		return -14;
-
 	long fd = vfs_open(kpath, flags, mode);
 	return fd < 0 ? -2 : fd;
 }
+
 static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 {
-	(void)dirfd;
-	return sys_open(path, flags, mode);
+	char kpath[PROC_NAME_MAX];
+	int r = resolve_path(kpath, dirfd, path);
+	if (r) return r;
+	long fd = vfs_open(kpath, flags, mode);
+	return fd < 0 ? -2 : fd;
 }
 
 static long sys_close(int fd)
 {
-	if (fd < 3) return 0;
+	if (fd < 0 || fd >= FD_MAX) return -9;
+	if (fd < 3) {
+		process_t *p = task_current();
+		if (!p->fds || !fd_get(p->fds, fd)) return 0;
+	}
 	return vfs_close(fd) == 0 ? 0 : -9;
 }
 
@@ -654,11 +677,637 @@ static long sys_munmap(uint64_t addr, size_t len)
 static long sys_mprotect(uint64_t addr, size_t len, int prot) { (void)addr; (void)len; (void)prot; return 0; }
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
+	(void)pid; (void)resource;
 	if (old_limit) { uint64_t limits[2] = { 8192 * 1024, 8192 * 1024 }; memcpy(old_limit, limits, 16); }
 	return 0;
 }
-static long sys_mkdir(const char *path, mode_t mode) { return vfs_mkdir(path, mode); }
-static long sys_unlink(const char *path) { return vfs_unlink(path); }
+
+/* ── path helper ─────────────────────────────────────────── */
+
+extern volatile uint64_t kernel_ticks;
+
+static int resolve_path(char *out, int dirfd, const char *upath)
+{
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, upath, PROC_NAME_MAX) != 0) return -14;
+	if (kp[0] == '/') { memcpy(out, kp, PROC_NAME_MAX); return 0; }
+	process_t *p = task_current();
+	const char *base = (dirfd == AT_FDCWD) ? p->cwd : "/";
+	int blen = strlen(base), plen = strlen(kp);
+	if (blen + 1 + plen >= PROC_NAME_MAX) return -36;
+	memcpy(out, base, blen);
+	if (blen == 0 || out[blen - 1] != '/') out[blen++] = '/';
+	memcpy(out + blen, kp, plen);
+	out[blen + plen] = '\0';
+	return 0;
+}
+
+/* ── fs syscalls ─────────────────────────────────────────── */
+
+static long sys_mkdir(const char *path, mode_t mode)
+{
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	return vfs_mkdir(kp, mode);
+}
+
+static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
+{
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	return vfs_mkdir(kp, mode);
+}
+
+static long sys_unlink(const char *path)
+{
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	return vfs_unlink(kp) == 0 ? 0 : -2;
+}
+
+static long sys_unlinkat(int dirfd, const char *path, int flags)
+{
+	(void)flags;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	return vfs_unlink(kp) == 0 ? 0 : -2;
+}
+
+static long sys_rename(const char *old, const char *new)
+{
+	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
+	if (copy_from_user(ko, old, PROC_NAME_MAX) != 0) return -14;
+	if (copy_from_user(kn, new, PROC_NAME_MAX) != 0) return -14;
+	return vfs_rename(ko, kn) == 0 ? 0 : -2;
+}
+
+static long sys_renameat(int olddirfd, const char *old, int newdirfd, const char *newp)
+{
+	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
+	int r = resolve_path(ko, olddirfd, old);  if (r) return r;
+	    r = resolve_path(kn, newdirfd, newp); if (r) return r;
+	return vfs_rename(ko, kn) == 0 ? 0 : -2;
+}
+
+static long sys_rmdir(const char *path)
+{
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	return vfs_unlink(kp) == 0 ? 0 : -2;
+}
+
+/* ── stat syscalls ───────────────────────────────────────── */
+
+static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
+{
+	memset(st, 0, sizeof(*st));
+	st->st_mode    = vs->mode;
+	st->st_ino     = vs->ino;
+	st->st_size    = (int64_t)vs->size;
+	st->st_nlink   = vs->nlink ? vs->nlink : 1;
+	st->st_uid     = vs->uid;
+	st->st_gid     = vs->gid;
+	st->st_blksize = 4096;
+	st->st_blocks  = (vs->size + 511) / 512;
+	st->st_rdev    = vs->rdev;
+}
+
+static long sys_stat_path(const char *path, linux_stat_t *st)
+{
+	if (!st) return -14;
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	vfs_stat_t vs = {0};
+	if (vfs_stat(kp, &vs) != 0) return -2;
+	linux_stat_t ks;
+	fill_linux_stat(&ks, &vs);
+	return copy_to_user(st, &ks, sizeof(ks));
+}
+
+#define AT_EMPTY_PATH 0x1000
+
+static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int flags)
+{
+	if (!st) return -14;
+	char kp[PROC_NAME_MAX];
+	if (flags & AT_EMPTY_PATH) {
+		/* stat the fd itself */
+		if (copy_from_user(kp, path, 1) == 0 && kp[0] == '\0')
+			return sys_fstat(dirfd, st);
+	}
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	vfs_stat_t vs = {0};
+	if (vfs_stat(kp, &vs) != 0) return -2;
+	linux_stat_t ks;
+	fill_linux_stat(&ks, &vs);
+	return copy_to_user(st, &ks, sizeof(ks));
+}
+
+static long sys_access(const char *path, int mode)
+{
+	(void)mode;
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	vfs_stat_t vs = {0};
+	return vfs_stat(kp, &vs) == 0 ? 0 : -2;
+}
+
+static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
+{
+	(void)flags; (void)mode;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	vfs_stat_t vs = {0};
+	return vfs_stat(kp, &vs) == 0 ? 0 : -2;
+}
+
+static long sys_truncate(const char *path, off_t len)
+{
+	(void)path; (void)len; return 0;
+}
+
+static long sys_ftruncate(int fd, off_t len)
+{
+	(void)fd; (void)len; return 0;
+}
+
+/* ── getdents64 ──────────────────────────────────────────── */
+
+#define DT_FIFO  1
+#define DT_CHR   2
+#define DT_DIR   4
+#define DT_BLK   6
+#define DT_REG   8
+#define DT_LNK  10
+#define DT_SOCK 12
+
+static long sys_getdents64(int fd, void *buf, size_t bufsize)
+{
+	if (!access_ok(buf, bufsize)) return -14;
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f) return -9;
+	vfs_inode_t *inode = f->inode;
+	if (!S_ISDIR(inode->mode)) return -20;
+	if (!inode->iops || !inode->iops->readdir) return -95;
+
+	uint8_t *kbuf = kmalloc(bufsize > 4096 ? 4096 : bufsize);
+	if (!kbuf) return -12;
+	size_t bufcap = bufsize > 4096 ? 4096 : bufsize;
+
+	size_t  offset = 0;
+	long    total  = 0;
+	uint32_t idx   = (uint32_t)f->pos;
+
+	while (1) {
+		vfs_dirent_t vde;
+		if (inode->iops->readdir(inode, idx, &vde) != 0) break;
+		int namelen = strlen(vde.name);
+		size_t reclen = (19 + namelen + 1 + 7) & ~7UL;
+		if (offset + reclen > bufcap) break;
+
+		uint8_t *e = kbuf + offset;
+		memset(e, 0, reclen);
+		*(uint64_t *)(e + 0)  = vde.ino;
+		*(int64_t  *)(e + 8)  = (int64_t)(idx + 1);
+		*(uint16_t *)(e + 16) = (uint16_t)reclen;
+		e[18] = S_ISREG(vde.mode)  ? DT_REG  :
+		        S_ISDIR(vde.mode)  ? DT_DIR  :
+		        S_ISCHR(vde.mode)  ? DT_CHR  :
+		        S_ISFIFO(vde.mode) ? DT_FIFO : 0;
+		memcpy(e + 19, vde.name, namelen);
+		e[19 + namelen] = '\0';
+		offset += reclen;
+		total  += (long)reclen;
+		idx++;
+	}
+
+	f->pos = (off_t)idx;
+	if (total > 0) {
+		arch_user_access_begin();
+		memcpy(buf, kbuf, offset);
+		arch_user_access_end();
+	}
+	kfree(kbuf);
+	return total;
+}
+
+/* ── dup / fcntl ─────────────────────────────────────────── */
+
+static long sys_dup(int oldfd)
+{
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, oldfd);
+	if (!f) return -9;
+	f->refcount++;
+	int newfd = fd_alloc(p->fds, f);
+	if (newfd < 0) { f->refcount--; return -24; }
+	return newfd;
+}
+
+static long sys_dup2(int oldfd, int newfd)
+{
+	if (newfd < 0 || newfd >= FD_MAX) return -9;
+	process_t *p = task_current();
+	vfs_file_t *src;
+	if (oldfd >= 0 && oldfd < 3 && !(p->fds && fd_get(p->fds, oldfd)))
+		return -9; /* can't dup bare UART stdin/stdout */
+	src = p->fds ? fd_get(p->fds, oldfd) : NULL;
+	if (!src) return -9;
+	if (oldfd == newfd) return newfd;
+	if (p->fds->bitmap & (1ULL << newfd)) vfs_close(newfd);
+	src->refcount++;
+	p->fds->files[newfd] = src;
+	p->fds->bitmap |= (1ULL << newfd);
+	return newfd;
+}
+
+static long sys_dup3(int oldfd, int newfd, int flags)
+{
+	(void)flags;
+	return sys_dup2(oldfd, newfd);
+}
+
+#define F_DUPFD    0
+#define F_GETFD    1
+#define F_SETFD    2
+#define F_GETFL    3
+#define F_SETFL    4
+#define F_DUPFD_CLOEXEC 1030
+#define FD_CLOEXEC 1
+
+static long sys_fcntl(int fd, int cmd, uint64_t arg)
+{
+	process_t  *p = task_current();
+	switch (cmd) {
+	case F_DUPFD:
+	case F_DUPFD_CLOEXEC: {
+		/* dup to first fd >= arg */
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f) return -9;
+		for (int i = (int)arg; i < FD_MAX; i++) {
+			if (!(p->fds->bitmap & (1ULL << i))) {
+				f->refcount++;
+				p->fds->files[i] = f;
+				p->fds->bitmap |= (1ULL << i);
+				return i;
+			}
+		}
+		return -24;
+	}
+	case F_GETFD: return 0;
+	case F_SETFD: return 0;
+	case F_GETFL: {
+		vfs_file_t *f = fd_get(p->fds, fd);
+		return f ? (long)f->flags : -9;
+	}
+	case F_SETFL: {
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f) return -9;
+		f->flags = (f->flags & ~0xFFF) | ((int)arg & 0xFFF);
+		return 0;
+	}
+	default: return 0;
+	}
+}
+
+/* ── chdir / getcwd ──────────────────────────────────────── */
+
+static long sys_chdir(const char *path)
+{
+	char kp[PROC_NAME_MAX];
+	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	vfs_stat_t vs = {0};
+	if (vfs_stat(kp, &vs) != 0) return -2;
+	if (!S_ISDIR(vs.mode)) return -20;
+	process_t *p = task_current();
+	int n = strlen(kp);
+	if (n >= 256) return -36;
+	memcpy(p->cwd, kp, n + 1);
+	return 0;
+}
+
+static long sys_getcwd(char *buf, size_t size)
+{
+	if (!buf || size == 0) return -14;
+	process_t *p = task_current();
+	int n = strlen(p->cwd);
+	if ((size_t)(n + 1) > size) return -34; /* ERANGE */
+	arch_user_access_begin();
+	memcpy(buf, p->cwd, n + 1);
+	arch_user_access_end();
+	return (long)(uintptr_t)buf;
+}
+
+/* ── process info ────────────────────────────────────────── */
+
+static long sys_getuid(void)  { return (long)task_current()->uid; }
+static long sys_geteuid(void) { return (long)task_current()->uid; }
+static long sys_getgid(void)  { return (long)task_current()->gid; }
+static long sys_getegid(void) { return (long)task_current()->gid; }
+static long sys_getppid(void) { return (long)task_current()->ppid; }
+static long sys_getpgrp(void) { return (long)task_current()->pid; }
+static long sys_getpgid(pid_t pid) { (void)pid; return (long)task_current()->pid; }
+static long sys_setsid(void)  { return (long)task_current()->pid; }
+static long sys_setpgid(pid_t pid, pid_t pgid) { (void)pid; (void)pgid; return 0; }
+static long sys_setuid(uid_t uid) { task_current()->uid = uid; return 0; }
+static long sys_setgid(gid_t gid) { task_current()->gid = gid; return 0; }
+static long sys_umask(mode_t mask)
+{
+	process_t *p = task_current();
+	mode_t old = p->umask;
+	p->umask = mask & 0777;
+	return (long)old;
+}
+
+/* ── uname ───────────────────────────────────────────────── */
+
+typedef struct {
+	char sysname[65];
+	char nodename[65];
+	char release[65];
+	char version[65];
+	char machine[65];
+	char domainname[65];
+} linux_utsname_t;
+
+static long sys_uname(linux_utsname_t *uts)
+{
+	if (!uts) return -14;
+	linux_utsname_t k;
+	memset(&k, 0, sizeof(k));
+	memcpy(k.sysname,    "Linux",   6);
+	memcpy(k.nodename,   "ranix",   6);
+	memcpy(k.release,    "6.1.0",   6);
+	memcpy(k.version,    "Ranix",   6);
+#if defined(__x86_64__)
+	memcpy(k.machine,    "x86_64",  7);
+#else
+	memcpy(k.machine,    "aarch64", 8);
+#endif
+	memcpy(k.domainname, "(none)",  7);
+	return copy_to_user(uts, &k, sizeof(k));
+}
+
+/* ── time syscalls ───────────────────────────────────────── */
+
+typedef struct { int64_t tv_sec; int64_t tv_nsec; } linux_timespec_t;
+typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
+
+#define TIMER_HZ 100
+
+static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
+{
+	(void)clkid;
+	if (!tp) return -14;
+	linux_timespec_t k;
+	k.tv_sec  = (int64_t)(kernel_ticks / TIMER_HZ);
+	k.tv_nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
+	return copy_to_user(tp, &k, sizeof(k));
+}
+
+static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
+{
+	(void)tz;
+	if (!tv) return 0;
+	linux_timeval_t k;
+	k.tv_sec  = (int64_t)(kernel_ticks / TIMER_HZ);
+	k.tv_usec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000 / TIMER_HZ));
+	return copy_to_user(tv, &k, sizeof(k));
+}
+
+static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
+{
+	(void)rem;
+	if (!req) return -14;
+	linux_timespec_t k;
+	if (copy_from_user(&k, req, sizeof(k)) != 0) return -14;
+	uint64_t ticks = (uint64_t)k.tv_sec * TIMER_HZ +
+	                 (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
+	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
+	while (kernel_ticks < end) yield();
+	return 0;
+}
+
+static long sys_times(void *buf)
+{
+	if (buf) {
+		int64_t zeros[4] = {0};
+		copy_to_user(buf, zeros, sizeof(zeros));
+	}
+	return (long)kernel_ticks;
+}
+
+static long sys_sysinfo(void *info)
+{
+	if (!info) return 0;
+	uint64_t zeros[12] = {0};
+	copy_to_user(info, zeros, sizeof(zeros));
+	return 0;
+}
+
+/* ── ioctl ───────────────────────────────────────────────── */
+
+#define TIOCGWINSZ 0x5413
+#define TCGETS     0x5401
+#define TCSETS     0x5402
+#define TCSETSW    0x5403
+#define TCSETSF    0x5404
+#define TIOCSPGRP  0x5410
+#define TIOCGPGRP  0x540F
+
+typedef struct { uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel; } linux_winsize_t;
+
+static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
+{
+	/* Forward to VFS if file has ioctl */
+	if (fd >= 3) {
+		process_t  *p = task_current();
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (f && f->inode->fops && f->inode->fops->ioctl)
+			return f->inode->fops->ioctl(f, cmd, arg);
+	}
+	switch (cmd) {
+	case TIOCGWINSZ: {
+		linux_winsize_t ws = {24, 80, 0, 0};
+		return copy_to_user((void *)(uintptr_t)arg, &ws, sizeof(ws));
+	}
+	case TCGETS: {
+		uint8_t termios[60]; memset(termios, 0, 60);
+		return copy_to_user((void *)(uintptr_t)arg, termios, 60);
+	}
+	case TCSETS: case TCSETSW: case TCSETSF: return 0;
+	case TIOCGPGRP: { int pgid = (int)task_current()->pid; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
+	case TIOCSPGRP: return 0;
+	default: return -25; /* ENOTTY */
+	}
+}
+
+/* ── poll / select ───────────────────────────────────────── */
+
+#define POLLIN  0x0001
+#define POLLOUT 0x0004
+#define POLLERR 0x0008
+#define POLLHUP 0x0010
+#define POLLNVAL 0x0020
+
+typedef struct { int fd; short events; short revents; } linux_pollfd_t;
+
+static int fd_is_readable(int fd)
+{
+	if (fd == 0) {
+		process_t  *p = task_current();
+		vfs_file_t *f = p->fds ? fd_get(p->fds, 0) : NULL;
+		if (f) {
+			if (f->inode->fops && f->inode->fops->poll)
+				return f->inode->fops->poll(f);
+			return 1;
+		}
+		return uart_has_data() ? 1 : 0;
+	}
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f) return 0;
+	if (f->inode->fops && f->inode->fops->poll)
+		return f->inode->fops->poll(f);
+	return 1; /* regular file: always readable */
+}
+
+static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
+{
+	if (!fds || nfds == 0) return 0;
+	if (!access_ok(fds, nfds * sizeof(linux_pollfd_t))) return -14;
+
+	linux_pollfd_t *kfds = kmalloc(nfds * sizeof(linux_pollfd_t));
+	if (!kfds) return -12;
+	if (copy_from_user(kfds, fds, nfds * sizeof(linux_pollfd_t)) != 0) {
+		kfree(kfds); return -14;
+	}
+
+	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
+	                  : (timeout_ms == 0) ? 0
+	                  : kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
+	int ready = 0;
+	while (1) {
+		ready = 0;
+		for (uint64_t i = 0; i < nfds; i++) {
+			kfds[i].revents = 0;
+			if (kfds[i].fd < 0) continue;
+			if ((kfds[i].events & POLLIN) && fd_is_readable(kfds[i].fd))
+				kfds[i].revents |= POLLIN;
+			if (kfds[i].revents) ready++;
+		}
+		if (ready > 0 || kernel_ticks >= deadline) break;
+		yield();
+	}
+
+	copy_to_user(fds, kfds, nfds * sizeof(linux_pollfd_t));
+	kfree(kfds);
+	return ready;
+}
+
+static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
+                       uint64_t *exceptfds, linux_timeval_t *timeout)
+{
+	(void)writefds; (void)exceptfds;
+	if (nfds <= 0) return 0;
+
+	uint64_t rfds = 0;
+	if (readfds && copy_from_user(&rfds, readfds, 8) != 0) return -14;
+
+	uint64_t deadline = (uint64_t)-1;
+	if (timeout) {
+		linux_timeval_t tv;
+		if (copy_from_user(&tv, timeout, sizeof(tv)) == 0 && (tv.tv_sec || tv.tv_usec))
+			deadline = kernel_ticks + (uint64_t)tv.tv_sec * TIMER_HZ +
+			           (uint64_t)tv.tv_usec * TIMER_HZ / 1000000 + 1;
+		else if (timeout)
+			deadline = 0;
+	}
+
+	int ready = 0;
+	uint64_t result = 0;
+	while (1) {
+		result = 0; ready = 0;
+		for (int i = 0; i < nfds && i < 64; i++) {
+			if ((rfds & (1ULL << i)) && fd_is_readable(i)) {
+				result |= (1ULL << i);
+				ready++;
+			}
+		}
+		if (ready > 0 || kernel_ticks >= deadline) break;
+		yield();
+	}
+
+	if (readfds) copy_to_user(readfds, &result, 8);
+	return ready;
+}
+
+/* pselect6 / ppoll */
+static long sys_pselect6(int nfds, uint64_t *r, uint64_t *w, uint64_t *e,
+                         linux_timespec_t *ts, void *sigmask)
+{
+	(void)sigmask;
+	linux_timeval_t tv = {0};
+	linux_timeval_t *tvp = NULL;
+	if (ts) {
+		linux_timespec_t k;
+		if (copy_from_user(&k, ts, sizeof(k)) == 0) {
+			tv.tv_sec = k.tv_sec; tv.tv_usec = k.tv_nsec / 1000;
+			tvp = &tv;
+		}
+	}
+	return sys_select(nfds, r, w, e, tvp);
+}
+
+static long sys_ppoll(linux_pollfd_t *fds, uint64_t nfds,
+                      linux_timespec_t *ts, void *sigmask)
+{
+	(void)sigmask;
+	int timeout_ms = -1;
+	if (ts) {
+		linux_timespec_t k;
+		if (copy_from_user(&k, ts, sizeof(k)) == 0)
+			timeout_ms = (int)(k.tv_sec * 1000 + k.tv_nsec / 1000000);
+	}
+	return sys_poll(fds, nfds, timeout_ms);
+}
+
+/* ── symlink / link / readlink (stubs) ───────────────────── */
+
+static long sys_readlink(const char *path, char *buf, size_t bufsiz)
+{
+	(void)path; (void)buf; (void)bufsiz; return -22;
+}
+static long sys_readlinkat(int d, const char *path, char *buf, size_t sz)
+{
+	(void)d; return sys_readlink(path, buf, sz);
+}
+static long sys_symlink(const char *t, const char *lp) { (void)t; (void)lp; return -1; }
+static long sys_symlinkat(const char *t, int d, const char *lp)
+{
+	(void)d; return sys_symlink(t, lp);
+}
+static long sys_link(const char *o, const char *n) { (void)o; (void)n; return -1; }
+static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
+{
+	(void)od; (void)nd; (void)f; return sys_link(o, n);
+}
+
+/* ── chmod / chown (stubs) ───────────────────────────────── */
+
+static long sys_chmod(const char *p, mode_t m)  { (void)p; (void)m; return 0; }
+static long sys_fchmod(int fd, mode_t m)         { (void)fd; (void)m; return 0; }
+static long sys_fchmodat(int d, const char *p, mode_t m, int f)
+{ (void)d; (void)p; (void)m; (void)f; return 0; }
+static long sys_chown(const char *p, uid_t u, gid_t g)  { (void)p; (void)u; (void)g; return 0; }
+static long sys_fchown(int fd, uid_t u, gid_t g)         { (void)fd; (void)u; (void)g; return 0; }
+static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int f)
+{ (void)d; (void)p; (void)u; (void)g; (void)f; return 0; }
 
 void syscall_handle(arch_context_t *ctx)
 {
@@ -667,46 +1316,108 @@ void syscall_handle(arch_context_t *ctx)
 	long arg1 = (long)CTX_SYSCALL_ARG1(ctx);
 	long arg2 = (long)CTX_SYSCALL_ARG2(ctx);
 	long arg3 = (long)CTX_SYSCALL_ARG3(ctx);
+	long arg4 = (long)CTX_SYSCALL_ARG4(ctx);
 	long ret  = -38;
+	(void)arg4;
 
 	switch (n) {
-	case SYS_ARCH_READ:          ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
-	case SYS_ARCH_WRITE:         ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
-	case SYS_ARCH_WRITEV:        ret = sys_writev((int)arg0, (iovec_t*)arg1, (int)arg2); break;
-	case SYS_ARCH_OPENAT:        ret = sys_openat((int)arg0, (const char*)arg1, (int)arg2, (mode_t)arg3); break;
-	case SYS_ARCH_CLOSE:         ret = sys_close((int)arg0); break;
-	case SYS_ARCH_LSEEK:         ret = sys_lseek((int)arg0, (off_t)arg1, (int)arg2); break;
-	case SYS_ARCH_FSTAT:         ret = sys_fstat((int)arg0, (linux_stat_t*)arg1); break;
-	case SYS_ARCH_EXIT:          ret = sys_exit((int)arg0); break;
-	case SYS_ARCH_EXIT_GROUP:    ret = sys_exit((int)arg0); break;
-	case SYS_ARCH_GETPID:        ret = sys_getpid(); break;
-	case SYS_ARCH_BRK:           ret = sys_brk((uint64_t)arg0); break;
-	case SYS_ARCH_MMAP:          ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
-	case SYS_ARCH_MUNMAP:        ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
-	case SYS_ARCH_PIPE2:         ret = sys_pipe2((int*)arg0, (int)arg1); break;
-	case SYS_ARCH_KILL:          ret = sys_kill((pid_t)arg0, (int)arg1); break;
-	case SYS_ARCH_RT_SIGACTION:   ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
+	/* ── I/O ─────────────────────────────────────────────── */
+	case SYS_ARCH_READ:    ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_WRITE:   ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_WRITEV:  ret = sys_writev((int)arg0, (iovec_t*)arg1, (int)arg2); break;
+	case SYS_ARCH_CLOSE:   ret = sys_close((int)arg0); break;
+	case SYS_ARCH_LSEEK:   ret = sys_lseek((int)arg0, (off_t)arg1, (int)arg2); break;
+	case SYS_ARCH_IOCTL:   ret = sys_ioctl((int)arg0, (uint32_t)arg1, (uint64_t)arg2); break;
+	case SYS_ARCH_DUP:     ret = sys_dup((int)arg0); break;
+	case SYS_ARCH_DUP3:    ret = sys_dup3((int)arg0, (int)arg1, (int)arg2); break;
+	case SYS_ARCH_FCNTL:   ret = sys_fcntl((int)arg0, (int)arg1, (uint64_t)arg2); break;
+	case SYS_ARCH_PIPE2:   ret = sys_pipe2((int*)arg0, (int)arg1); break;
+	/* ── open / stat ─────────────────────────────────────── */
+	case SYS_ARCH_OPENAT:     ret = sys_openat((int)arg0, (const char*)arg1, (int)arg2, (mode_t)arg3); break;
+	case SYS_ARCH_FSTAT:      ret = sys_fstat((int)arg0, (linux_stat_t*)arg1); break;
+	case SYS_ARCH_NEWFSTATAT: ret = sys_newfstatat((int)arg0, (const char*)arg1, (linux_stat_t*)arg2, (int)arg3); break;
+	case SYS_ARCH_GETDENTS64: ret = sys_getdents64((int)arg0, (void*)arg1, (size_t)arg2); break;
+	/* ── fs ops ──────────────────────────────────────────── */
+	case SYS_ARCH_CHDIR:    ret = sys_chdir((const char*)arg0); break;
+	case SYS_ARCH_GETCWD:   ret = sys_getcwd((char*)arg0, (size_t)arg1); break;
+	case SYS_ARCH_MKDIRAT:  ret = sys_mkdirat((int)arg0, (const char*)arg1, (mode_t)arg2); break;
+	case SYS_ARCH_UNLINKAT: ret = sys_unlinkat((int)arg0, (const char*)arg1, (int)arg2); break;
+	case SYS_ARCH_RENAMEAT: ret = sys_renameat((int)arg0, (const char*)arg1, (int)arg2, (const char*)arg3); break;
+	case SYS_ARCH_FTRUNCATE: ret = sys_ftruncate((int)arg0, (off_t)arg1); break;
+	case SYS_ARCH_FCHMOD:   ret = sys_fchmod((int)arg0, (mode_t)arg1); break;
+	case SYS_ARCH_FCHMODAT: ret = sys_fchmodat((int)arg0, (const char*)arg1, (mode_t)arg2, (int)arg3); break;
+	case SYS_ARCH_FCHOWN:   ret = sys_fchown((int)arg0, (uid_t)arg1, (gid_t)arg2); break;
+	case SYS_ARCH_FCHOWNAT: ret = sys_fchownat((int)arg0, (const char*)arg1, (uid_t)arg2, (gid_t)arg3, 0); break;
+	case SYS_ARCH_READLINKAT: ret = sys_readlinkat((int)arg0, (const char*)arg1, (char*)arg2, (size_t)arg3); break;
+	case SYS_ARCH_SYMLINKAT: ret = sys_symlinkat((const char*)arg0, (int)arg1, (const char*)arg2); break;
+	case SYS_ARCH_LINKAT:   ret = sys_linkat((int)arg0, (const char*)arg1, (int)arg2, (const char*)arg3, 0); break;
+	case SYS_ARCH_FACCESSAT: ret = sys_faccessat((int)arg0, (const char*)arg1, (int)arg2, (int)arg3); break;
+	/* ── poll / select ───────────────────────────────────── */
+	case SYS_ARCH_PSELECT6: ret = sys_pselect6((int)arg0, (uint64_t*)arg1, (uint64_t*)arg2, (uint64_t*)arg3, (linux_timespec_t*)arg4, NULL); break;
+	case SYS_ARCH_PPOLL:    ret = sys_ppoll((linux_pollfd_t*)arg0, (uint64_t)arg1, (linux_timespec_t*)arg2, NULL); break;
+	/* ── memory ──────────────────────────────────────────── */
+	case SYS_ARCH_BRK:     ret = sys_brk((uint64_t)arg0); break;
+	case SYS_ARCH_MMAP:    ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
+	case SYS_ARCH_MUNMAP:  ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
+	case SYS_ARCH_MPROTECT: ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
+	case SYS_ARCH_PRLIMIT64: ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
+	/* ── process ─────────────────────────────────────────── */
+	case SYS_ARCH_EXIT:        ret = sys_exit((int)arg0); break;
+	case SYS_ARCH_EXIT_GROUP:  ret = sys_exit((int)arg0); break;
+	case SYS_ARCH_GETPID:      ret = sys_getpid(); break;
+	case SYS_ARCH_GETPPID:     ret = sys_getppid(); break;
+	case SYS_ARCH_GETUID:      ret = sys_getuid(); break;
+	case SYS_ARCH_GETEUID:     ret = sys_geteuid(); break;
+	case SYS_ARCH_GETGID:      ret = sys_getgid(); break;
+	case SYS_ARCH_GETEGID:     ret = sys_getegid(); break;
+	case SYS_ARCH_SETUID:      ret = sys_setuid((uid_t)arg0); break;
+	case SYS_ARCH_SETGID:      ret = sys_setgid((gid_t)arg0); break;
+	case SYS_ARCH_SETPGID:     ret = sys_setpgid((pid_t)arg0, (pid_t)arg1); break;
+	case SYS_ARCH_GETPGID:     ret = sys_getpgid((pid_t)arg0); break;
+	case SYS_ARCH_SETSID:      ret = sys_setsid(); break;
+	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
+	case SYS_ARCH_SET_TID_ADDR: ret = (long)task_current()->pid; break;
+	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
+	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
-	case SYS_ARCH_MPROTECT:      ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
-	case SYS_ARCH_PRLIMIT64:     ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
-	case SYS_ARCH_SET_TID_ADDR:  ret = (long)task_current()->pid; break;
-	case SYS_ARCH_VFORK:            ret = sys_vfork(); break;
+	case SYS_ARCH_VFORK:  ret = sys_vfork(); break;
 #ifdef SYS_ARCH_FORK
-	case SYS_ARCH_FORK:             ret = sys_fork(); break;
+	case SYS_ARCH_FORK:   ret = sys_fork(); break;
 #endif
 	case SYS_ARCH_CLONE: {
 		uint64_t flags = (uint64_t)arg0;
-		if (flags & 0x4000) { /* CLONE_VFORK */
-			ret = sys_vfork();
-		} else {
-			ret = sys_fork();
-		}
+		ret = (flags & 0x4000) ? sys_vfork() : sys_fork();
 		break;
 	}
-	case SYS_ARCH_EXECVE:           ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
-	case SYS_ARCH_WAIT4:            ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
+	case SYS_ARCH_EXECVE: ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
+	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
+	/* ── time ────────────────────────────────────────────── */
+	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
+	case SYS_ARCH_GETTIMEOFDAY:  ret = sys_gettimeofday((linux_timeval_t*)arg0, (void*)arg1); break;
+	case SYS_ARCH_NANOSLEEP:     ret = sys_nanosleep((linux_timespec_t*)arg0, (linux_timespec_t*)arg1); break;
+	case SYS_ARCH_TIMES:         ret = sys_times((void*)arg0); break;
+	/* ── misc ────────────────────────────────────────────── */
+	case SYS_ARCH_UNAME:   ret = sys_uname((linux_utsname_t*)arg0); break;
+	case SYS_ARCH_SYSINFO: ret = sys_sysinfo((void*)arg0); break;
 #if defined(__x86_64__)
-	case SYS_ARCH_ARCH_PRCTL:      ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
+	case SYS_ARCH_STAT:    ret = sys_stat_path((const char*)arg0, (linux_stat_t*)arg1); break;
+	case SYS_ARCH_LSTAT:   ret = sys_stat_path((const char*)arg0, (linux_stat_t*)arg1); break;
+	case SYS_ARCH_ACCESS:  ret = sys_access((const char*)arg0, (int)arg1); break;
+	case SYS_ARCH_SELECT:  ret = sys_select((int)arg0, (uint64_t*)arg1, (uint64_t*)arg2, (uint64_t*)arg3, (linux_timeval_t*)arg4); break;
+	case SYS_ARCH_POLL:    ret = sys_poll((linux_pollfd_t*)arg0, (uint64_t)arg1, (int)arg2); break;
+	case SYS_ARCH_DUP2:    ret = sys_dup2((int)arg0, (int)arg1); break;
+	case SYS_ARCH_MKDIR:   ret = sys_mkdir((const char*)arg0, (mode_t)arg1); break;
+	case SYS_ARCH_RMDIR:   ret = sys_rmdir((const char*)arg0); break;
+	case SYS_ARCH_UNLINK:  ret = sys_unlink((const char*)arg0); break;
+	case SYS_ARCH_LINK:    ret = sys_link((const char*)arg0, (const char*)arg1); break;
+	case SYS_ARCH_SYMLINK: ret = sys_symlink((const char*)arg0, (const char*)arg1); break;
+	case SYS_ARCH_READLINK: ret = sys_readlink((const char*)arg0, (char*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_RENAME:  ret = sys_rename((const char*)arg0, (const char*)arg1); break;
+	case SYS_ARCH_CHMOD:   ret = sys_chmod((const char*)arg0, (mode_t)arg1); break;
+	case SYS_ARCH_CHOWN:   ret = sys_chown((const char*)arg0, (uid_t)arg1, (gid_t)arg2); break;
+	case SYS_ARCH_TRUNCATE: ret = sys_truncate((const char*)arg0, (off_t)arg1); break;
+	case SYS_ARCH_GETPGRP: ret = sys_getpgrp(); break;
+	case SYS_ARCH_ARCH_PRCTL: ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
 #endif
 	default:
 		kprintf("[syscall] unknown #%ld\n", n);

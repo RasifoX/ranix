@@ -22,7 +22,8 @@ static spinlock_t sched_lock = SPINLOCK_INIT;
 static process_t *rq_head = NULL;
 static process_t *rq_tail = NULL;
 
-volatile int need_resched = 0;
+volatile int      need_resched  = 0;
+volatile uint64_t kernel_ticks  = 0;
 
 /* Internal: must hold sched_lock */
 static void runqueue_add(process_t *p)
@@ -88,6 +89,7 @@ void sched_init(void)
 
 void sched_tick(void)
 {
+	kernel_ticks++;
 	process_t *current = task_current();
 	if (!current) return;
 
@@ -142,6 +144,8 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
 
 	p->fds = fd_table_create();
+	p->cwd[0] = '/'; p->cwd[1] = '\0';
+	p->umask = 022;
 
 	uint8_t *sp_top = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
@@ -215,6 +219,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	arch_context_init_user(ctx, entry, ARCH_USER_STACK_TOP - 64);
 	p->ctx = ctx;
 	p->fds = fd_table_create();
+	memcpy(p->cwd, current->cwd, 256);
+	p->umask = current->umask;
 
 	p->next = proctab[0]->next;
 	proctab[0]->next = p;
@@ -270,6 +276,8 @@ pid_t proc_fork(void)
 
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail;
+	memcpy(child->cwd, parent->cwd, 256);
+	child->umask = parent->umask;
 
 	void *child_kstack_phys = buddy_alloc(1);
 	if (!child_kstack_phys) goto fail;
@@ -327,6 +335,8 @@ pid_t proc_vfork(void)
 	child->reaped       = 0;
 	child->fds          = fd_table_copy(parent->fds);
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
+	memcpy(child->cwd, parent->cwd, 256);
+	child->umask        = parent->umask;
 
 	void *child_kstack_phys = buddy_alloc(1);
 	if (!child_kstack_phys) { 

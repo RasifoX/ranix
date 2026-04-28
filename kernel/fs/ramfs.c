@@ -216,12 +216,35 @@ static int ramfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	return 0;
 }
 
+static int ramfs_rename(vfs_inode_t *old_dir, const char *old_name,
+                        vfs_inode_t *new_dir, const char *new_name)
+{
+	if (old_dir != new_dir) return -18; /* EXDEV: cross-dir not supported */
+	ramfs_dir_t *rd = old_dir->priv;
+	if (!rd) return -2;
+	/* remove new_name if it exists */
+	ramfs_unlink(new_dir, new_name);
+	ramfs_entry_t *e = rd->entries;
+	while (e) {
+		if (strcmp(e->name, old_name) == 0) {
+			int nlen = 0;
+			while (new_name[nlen] && nlen < 254) nlen++;
+			memcpy(e->name, new_name, nlen);
+			e->name[nlen] = '\0';
+			return 0;
+		}
+		e = e->next;
+	}
+	return -2;
+}
+
 static vfs_iops_t ramfs_iops = {
 	.lookup  = ramfs_lookup,
 	.create  = ramfs_create,
 	.mkdir   = ramfs_mkdir,
 	.unlink  = ramfs_unlink,
 	.readdir = ramfs_readdir,
+	.rename  = ramfs_rename,
 };
 
 /* ── mount ───────────────────────────────────────────────── */
