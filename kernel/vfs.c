@@ -454,6 +454,55 @@ int vfs_stat(const char *path, vfs_stat_t *out)
 	return 0;
 }
 
+int vfs_rename(const char *old_path, const char *new_path)
+{
+	/* parse old path */
+	const char *s = old_path + strlen(old_path) - 1;
+	while (s > old_path && *s != '/') s--;
+	char old_dir[256];
+	int dlen = (int)(s - old_path);
+	if (dlen == 0) { old_dir[0] = '/'; old_dir[1] = '\0'; }
+	else           { memcpy(old_dir, old_path, dlen); old_dir[dlen] = '\0'; }
+	const char *old_name = s + 1;
+
+	/* parse new path */
+	const char *s2 = new_path + strlen(new_path) - 1;
+	while (s2 > new_path && *s2 != '/') s2--;
+	char new_dir[256];
+	int dlen2 = (int)(s2 - new_path);
+	if (dlen2 == 0) { new_dir[0] = '/'; new_dir[1] = '\0'; }
+	else            { memcpy(new_dir, new_path, dlen2); new_dir[dlen2] = '\0'; }
+	const char *new_name = s2 + 1;
+
+	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
+	if (!old_parent || !old_parent->inode) return -2;
+	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
+	if (!new_parent || !new_parent->inode) return -2;
+
+	if (!old_parent->inode->iops || !old_parent->inode->iops->rename)
+		return -38;
+
+	int ret = old_parent->inode->iops->rename(
+		old_parent->inode, old_name, new_parent->inode, new_name);
+	if (ret == 0) {
+		/* update dentry name in the tree */
+		uint64_t f = spin_lock_irq(&vfs_lock);
+		vfs_dentry_t *d = old_parent->child;
+		while (d) {
+			if (strcmp(d->name, old_name) == 0) {
+				int nlen = 0;
+				while (new_name[nlen] && nlen < 254) nlen++;
+				memcpy(d->name, new_name, nlen);
+				d->name[nlen] = '\0';
+				break;
+			}
+			d = d->next;
+		}
+		spin_unlock_irq(&vfs_lock, f);
+	}
+	return ret;
+}
+
 int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 {
 	vfs_dentry_t *d = vfs_dentry_resolve(path);

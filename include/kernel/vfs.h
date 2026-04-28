@@ -13,6 +13,9 @@
 #define S_ISREG(m)  (((m) & 0xF000) == S_IFREG)
 #define S_ISDIR(m)  (((m) & 0xF000) == S_IFDIR)
 #define S_ISCHR(m)  (((m) & 0xF000) == S_IFCHR)
+#define S_ISBLK(m)  (((m) & 0xF000) == S_IFBLK)
+#define S_ISFIFO(m) (((m) & 0xF000) == S_IFIFO)
+#define S_ISLNK(m)  (((m) & 0xF000) == S_IFLNK)
 
 #define O_RDONLY   0x0
 #define O_WRONLY   0x1
@@ -55,6 +58,8 @@ typedef struct {
     int               (*unlink)(struct vfs_inode *dir, const char *name);
     int               (*readdir)(struct vfs_inode *dir, uint32_t idx, vfs_dirent_t *out);
     int               (*stat)(struct vfs_inode *inode, vfs_stat_t *out);
+    int               (*rename)(struct vfs_inode *old_dir, const char *old_name,
+                                struct vfs_inode *new_dir, const char *new_name);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
@@ -65,6 +70,7 @@ typedef struct {
     int     (*ioctl)(struct vfs_file *file, uint32_t cmd, uint64_t arg);
     off_t   (*seek)(struct vfs_file *file, off_t off, int whence);
     int     (*close)(struct vfs_file *file);
+    int     (*poll)(struct vfs_file *file); /* 1=readable, 0=not */
 } vfs_fops_t;
 
 /* ── inode ───────────────────────────────────────────────── */
@@ -143,6 +149,7 @@ int        vfs_kernel_install(const char *path, const void *data, size_t len);
 
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
+int        vfs_rename(const char *old_path, const char *new_path);
 
 /* fd_table helpers */
 fd_table_t *fd_table_create(void);

@@ -106,10 +106,20 @@ static int pipe_close(vfs_file_t *file)
     return 0;
 }
 
+static int pipe_poll(vfs_file_t *file)
+{
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
+    spin_unlock_irq(&pipe->lock, f);
+    return avail > 0 ? 1 : 0;
+}
+
 static vfs_fops_t pipe_fops = {
     .read  = pipe_read,
     .write = pipe_write,
     .close = pipe_close,
+    .poll  = pipe_poll,
 };
 
 int vfs_pipe(int pipefd[2])

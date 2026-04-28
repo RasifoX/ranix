@@ -67,6 +67,8 @@ typedef struct process {
 
 	/* ── open files ──────────────────────────── */
 	fd_table_t     *fds;
+	char            cwd[256];
+	mode_t          umask;
 
 	/* ── virtual memory regions ──────────────── */
 	vma_t          *vmas;
