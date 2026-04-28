@@ -123,13 +123,13 @@ typedef struct {
 	int (*fill)(vfs_mount_t *mnt, void *data);
 } vfs_fstype_t;
 
-static vfs_fstype_t fstypes[8];
+static vfs_fstype_t fstypes[16];
 static int          fstype_cnt = 0;
 
 void vfs_register_fs(const char *name, int (*fill)(vfs_mount_t *, void *))
 {
 	uint64_t f = spin_lock_irq(&vfs_lock);
-	if (fstype_cnt >= 8) {
+	if (fstype_cnt >= 16) {
 		spin_unlock_irq(&vfs_lock, f);
 		return;
 	}
@@ -515,9 +515,13 @@ int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 /* ── init ────────────────────────────────────────────────── */
 
 extern void ramfs_register(void);
+extern void procfs_register(void);
+extern void devfs_register(void);
 
 void vfs_init(void)
 {
 	ramfs_register();
+	procfs_register();
+	devfs_register();
 	kprintf("[  vfs] initialized\n");
 }

@@ -89,6 +89,8 @@ void kernel_main(void)
 	vfs_mkdir("/dev",  0755);
 	vfs_mkdir("/proc", 0555);
 	vfs_mkdir("/tmp",  0777);
+	vfs_mount("/proc", "proc",  NULL);
+	vfs_mount("/dev",  "devfs", NULL);
 	initrd_init();
 
 	kprintf("[ranix] ready\n");
