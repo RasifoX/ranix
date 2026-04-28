@@ -10,5 +10,6 @@ void     buddy_add_region(uint64_t addr, uint64_t size);
 void    *buddy_alloc(int order);
 void     buddy_free(uint64_t addr, int order);
 uint64_t buddy_free_pages(void);
+uint64_t buddy_total_pages(void);
 
 #endif
