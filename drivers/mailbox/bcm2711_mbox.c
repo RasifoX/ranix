@@ -161,3 +161,35 @@ int mbox_set_virt_offset(u32 x, u32 y)
     mbox_buf[0] = i * sizeof(u32);
     return mbox_call(MBOX_CH_PROP, mbox_buf);
 }
+
+int mbox_set_clock(u32 clock_id, u32 rate_hz)
+{
+    u32 i = 0;
+    mbox_buf[i++] = 0;           /* total size — filled below */
+    mbox_buf[i++] = 0;           /* request code */
+    mbox_buf[i++] = MBOX_TAG_SET_CLOCK_RATE;
+    mbox_buf[i++] = 12;          /* value buffer size (3×4 bytes) */
+    mbox_buf[i++] = 0;           /* request/response indicator */
+    mbox_buf[i++] = clock_id;
+    mbox_buf[i++] = rate_hz;
+    mbox_buf[i++] = 0;           /* skip_turbo = 0 */
+    mbox_buf[i++] = MBOX_TAG_END;
+    mbox_buf[0] = i * sizeof(u32);
+    return mbox_call(MBOX_CH_PROP, mbox_buf);
+}
+
+u32 mbox_get_clock(u32 clock_id)
+{
+    u32 i = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = MBOX_TAG_GET_CLOCK_RATE;
+    mbox_buf[i++] = 8;
+    mbox_buf[i++] = 0;
+    mbox_buf[i++] = clock_id;
+    mbox_buf[i++] = 0;           /* rate returned here */
+    mbox_buf[i++] = MBOX_TAG_END;
+    mbox_buf[0] = i * sizeof(u32);
+    if (mbox_call(MBOX_CH_PROP, mbox_buf) != 0) return 0;
+    return mbox_buf[6];          /* returned rate_hz */
+}
