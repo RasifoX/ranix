@@ -124,6 +124,14 @@ static void sd_set_clock(pi4_sd_t *s, uint32_t hz)
 
 /* ── command ─────────────────────────────────────────────────── */
 
+static void sd_reset_cmd(pi4_sd_t *s)
+{
+	sd_write(s, SDHCI_INTERRUPT, INT_ALL);
+	sd_write(s, SDHCI_CONTROL1, sd_read(s, SDHCI_CONTROL1) | C1_SRST_CMD);
+	sd_wait(s, SDHCI_CONTROL1, C1_SRST_CMD, 0, 100000);
+	sd_wait(s, SDHCI_STATUS, STATUS_CMD_INHIBIT, 0, 100000);
+}
+
 static int sd_cmd(pi4_sd_t *s, uint32_t cmd, uint32_t arg)
 {
 	if (sd_wait(s, SDHCI_STATUS, STATUS_CMD_INHIBIT, 0, 500000) != 0) {
@@ -135,16 +143,28 @@ static int sd_cmd(pi4_sd_t *s, uint32_t cmd, uint32_t arg)
 	sd_write(s, SDHCI_ARG1, arg);
 	sd_write(s, SDHCI_CMDTM, cmd);
 
-	if (sd_wait(s, SDHCI_INTERRUPT, INT_CMD_DONE | INT_ERROR, INT_CMD_DONE, 500000) != 0) {
-		uint32_t intr = sd_read(s, SDHCI_INTERRUPT);
-		if (intr & INT_ERROR) {
-			sd_write(s, SDHCI_CONTROL1, sd_read(s, SDHCI_CONTROL1) | C1_SRST_CMD);
-			sd_wait(s, SDHCI_CONTROL1, C1_SRST_CMD, 0, 100000);
-		}
-		return -1;
+	/* No response: wait for CMD line to free rather than polling INT_CMD_DONE,
+	 * since BCM2711 EMMC2 may not assert CMD_DONE for no-response commands. */
+	if (((cmd >> 16) & 0x3) == 0) {
+		sd_wait(s, SDHCI_STATUS, STATUS_CMD_INHIBIT, 0, 500000);
+		sd_write(s, SDHCI_INTERRUPT, INT_ALL);
+		return 0;
 	}
-	sd_write(s, SDHCI_INTERRUPT, INT_CMD_DONE);
-	return 0;
+
+	for (uint32_t i = 0; i < 500000; i++) {
+		uint32_t intr = sd_read(s, SDHCI_INTERRUPT);
+		if (intr & INT_CMD_DONE) {
+			sd_write(s, SDHCI_INTERRUPT, INT_CMD_DONE);
+			return 0;
+		}
+		if (intr & INT_ERROR) {
+			sd_reset_cmd(s);
+			return -1;
+		}
+		for (volatile int d = 0; d < 100; d++) {}
+	}
+	sd_reset_cmd(s);
+	return -1;
 }
 
 /* ── card init ───────────────────────────────────────────────── */
@@ -161,7 +181,7 @@ static int sd_card_init(pi4_sd_t *s)
 	int hc = 0;
 	for (int i = 0; i < 1000; i++) {
 		sd_cmd(s, CMD_INDEX(55) | CMD_RSPNS_48 | CMD_IXCHK_EN | CMD_CRCCHK_EN, 0);
-		if (sd_cmd(s, CMD_INDEX(41) | CMD_RSPNS_48, 0x51FF8000) != 0)
+		if (sd_cmd(s, CMD_INDEX(41) | CMD_RSPNS_48, 0x40FF8000) != 0)
 			continue;
 		uint32_t ocr = sd_read(s, SDHCI_RESP0);
 		if (ocr & 0x80000000u) { hc = (ocr & 0x40000000u) ? 1 : 0; break; }
