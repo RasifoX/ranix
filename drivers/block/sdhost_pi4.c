@@ -54,8 +54,10 @@
 #define INT_ERROR           (1u << 15)
 #define INT_ALL             0xFFFFFFFFu
 
-/* CONTROL0 bits */
+/* CONTROL0 bits — register at 0x28 contains Host Control (byte 0) + Power Control (byte 1) */
 #define C0_4BIT             (1u << 1)
+/* Power Control byte (bits [15:8]): voltage = 3.3V (111b), bus power on (bit 0) */
+#define C0_PWR_ON_33V       (0x0Fu << 8)
 
 /* CONTROL1 bits */
 #define C1_CLK_INTLEN       (1u << 0)
@@ -279,6 +281,11 @@ void pi4_sd_init(void)
 	sd_write(&g_sd, SDHCI_IRPT_MASK, INT_ALL);
 	sd_write(&g_sd, SDHCI_IRPT_EN,   0);
 	sd_write(&g_sd, SDHCI_INTERRUPT,  INT_ALL);
+
+	/* SRST_HC cleared the Power Control register (SD bus power off).
+	 * Re-enable 3.3 V bus power before driving CMD/DAT lines. */
+	sd_write(&g_sd, SDHCI_CONTROL0, C0_PWR_ON_33V);
+	for (volatile int i = 0; i < 200000; i++) {}   /* ≥1 ms power-up */
 
 	sd_set_clock(&g_sd, 400000);
 
