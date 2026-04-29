@@ -91,6 +91,9 @@ SRCS_KERNEL = \
     kernel/fs/pipe.c \
     kernel/fs/procfs.c \
     kernel/fs/devfs.c \
+    kernel/fs/mbr.c \
+    kernel/fs/ext2.c \
+    kernel/pci.c \
     kernel/block.c \
     kernel/mm/buddy.c \
     kernel/mm/vm.c \
@@ -143,7 +146,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso userspace/hello userspace/sh userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/*_elf.h
 
 qemu: $(TARGET)
 	$(QEMU_CMD) -nographic -kernel $(TARGET)
@@ -157,6 +160,19 @@ iso: userspace $(TARGET)
 
 qemu-iso: iso
 	$(QEMU_CMD) -nographic -cdrom ranix.iso
+
+# Create a 32 MB ext2 test disk image with some files
+disk-image: ranix-disk.img
+
+ranix-disk.img:
+	dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
+	mkfs.ext2 -b 1024 -L ranix-disk $@ 2>/dev/null
+	@echo "[OK] ranix-disk.img ready"
+
+# Boot with virtio-blk disk attached (x86_64 only)
+qemu-disk: iso disk-image
+	$(QEMU_CMD) -nographic -cdrom ranix.iso \
+	  -drive file=ranix-disk.img,format=raw,if=virtio
 
 image: all
 	llvm-objcopy -O binary $(TARGET) kernel8.img

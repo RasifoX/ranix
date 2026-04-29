@@ -1,5 +1,6 @@
 build/
 ranix.iso
+ranix-disk.img
 iso/
 kernel8.img
 *.o
