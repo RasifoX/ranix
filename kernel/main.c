@@ -9,6 +9,8 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/proc.h>
 #include <kernel/shell.h>
+#include <kernel/block.h>
+#include <kernel/fs/mbr.h>
 
 extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
@@ -89,6 +91,7 @@ void kernel_main(void)
 	vfs_mkdir("/dev",  0755);
 	vfs_mkdir("/proc", 0555);
 	vfs_mkdir("/tmp",  0777);
+	vfs_mkdir("/mnt",  0755);
 	vfs_mount("/proc", "proc",  NULL);
 	vfs_mount("/dev",  "devfs", NULL);
 	initrd_init();
@@ -102,6 +105,31 @@ void kernel_main(void)
 
 	irq_enable();
 	board_drivers_register();
+
+	/* Auto-detect and mount first ext2/ext4 disk partition */
+	{
+		int ndev = block_device_count();
+		for (int bi = 0; bi < ndev; bi++) {
+			block_device_t *bd = block_device_get(bi);
+			if (!bd) continue;
+			/* try MBR — registers partitions as bdev->name + "p0" etc. */
+			mbr_probe(bd);
+		}
+		/* try mounting first block device or partition as ext2/ext4 */
+		int total = block_device_count();
+		for (int bi = 0; bi < total; bi++) {
+			block_device_t *bd = block_device_get(bi);
+			if (!bd) continue;
+			if (vfs_mount("/mnt", "ext2", bd) == 0) {
+				kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
+				break;
+			}
+			if (vfs_mount("/mnt", "ext4", bd) == 0) {
+				kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
+				break;
+			}
+		}
+	}
 
 	/* Start userspace shell as the primary task */
 	vfs_stat_t st = {0};

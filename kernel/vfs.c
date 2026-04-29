@@ -517,11 +517,13 @@ int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 extern void ramfs_register(void);
 extern void procfs_register(void);
 extern void devfs_register(void);
+extern void ext2_register(void);
 
 void vfs_init(void)
 {
 	ramfs_register();
 	procfs_register();
 	devfs_register();
+	ext2_register();
 	kprintf("[  vfs] initialized\n");
 }
