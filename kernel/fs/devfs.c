@@ -246,6 +246,7 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->nlink   = 2;
 	root_inode->refcount= 1;
 	root_inode->iops    = &devfs_root_iops;
+	root_inode->fops    = &(vfs_fops_t){ 0 };
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) { buddy_free((uint64_t)root_inode, 0); return -1; }
