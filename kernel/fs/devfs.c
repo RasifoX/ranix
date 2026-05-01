@@ -226,6 +226,8 @@ static int devfs_stat(vfs_inode_t *in, vfs_stat_t *out)
 	return 0;
 }
 
+static vfs_fops_t devfs_dir_fops = { 0 };
+
 static vfs_iops_t devfs_root_iops = {
 	.lookup  = devfs_lookup,
 	.readdir = devfs_readdir,
@@ -246,7 +248,7 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->nlink   = 2;
 	root_inode->refcount= 1;
 	root_inode->iops    = &devfs_root_iops;
-	root_inode->fops    = &(vfs_fops_t){ 0 };
+	root_inode->fops    = &devfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) { buddy_free((uint64_t)root_inode, 0); return -1; }
