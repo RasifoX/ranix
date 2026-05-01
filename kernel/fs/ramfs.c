@@ -109,6 +109,8 @@ static vfs_fops_t ramfs_fops = {
 	.write = ramfs_write,
 };
 
+static vfs_fops_t ramfs_dir_fops = { 0 };
+
 /* ── inode ops ───────────────────────────────────────────── */
 
 static vfs_inode_t *ramfs_lookup(vfs_inode_t *dir, const char *name)
@@ -167,7 +169,8 @@ static int ramfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	if (!nrd) { buddy_free((uint64_t)in, 0); return -1; }
 	memset(nrd, 0, sizeof(*nrd));
 	in->priv = nrd;
-	in->iops = &ramfs_iops;   /* subdir must inherit iops */
+	in->iops = &ramfs_iops;
+	in->fops = &ramfs_dir_fops;
 
 	ramfs_entry_t *ent = buddy_alloc(0);
 	if (!ent) { buddy_free((uint64_t)nrd, 0); buddy_free((uint64_t)in, 0); return -1; }
@@ -238,6 +241,17 @@ static int ramfs_rename(vfs_inode_t *old_dir, const char *old_name,
 	return -2;
 }
 
+static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
+{
+	out->ino   = inode->ino;
+	out->mode  = inode->mode;
+	out->nlink = inode->nlink ? inode->nlink : 1;
+	out->uid   = inode->uid;
+	out->gid   = inode->gid;
+	out->size  = inode->size;
+	return 0;
+}
+
 static vfs_iops_t ramfs_iops = {
 	.lookup  = ramfs_lookup,
 	.create  = ramfs_create,
@@ -245,6 +259,7 @@ static vfs_iops_t ramfs_iops = {
 	.unlink  = ramfs_unlink,
 	.readdir = ramfs_readdir,
 	.rename  = ramfs_rename,
+	.stat    = ramfs_stat,
 };
 
 /* ── mount ───────────────────────────────────────────────── */
@@ -261,6 +276,7 @@ int ramfs_mount(vfs_mount_t *mnt, void *data)
 	memset(rd, 0, sizeof(*rd));
 	root_inode->priv  = rd;
 	root_inode->iops  = &ramfs_iops;
+	root_inode->fops  = &ramfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) return -1;
