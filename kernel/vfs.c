@@ -231,7 +231,7 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 
 int fd_alloc(fd_table_t *t, vfs_file_t *f)
 {
-	for (int i = 0; i < FD_MAX; i++) {
+	for (int i = 3; i < FD_MAX; i++) {
 		if (!(t->bitmap & (1ULL << i))) {
 			t->files[i]  = f;
 			t->bitmap   |= (1ULL << i);
@@ -297,7 +297,8 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		inode = d->inode;
 	}
 
-	if (!inode || !inode->fops) return -1;
+	if (!inode) return -1;
+	if (!inode->fops && !S_ISDIR(inode->mode)) return -1;
 
 	vfs_file_t *f = buddy_alloc(0);
 	if (!f) return -1;
@@ -306,7 +307,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	f->flags    = flags;
 	f->refcount = 0; /* incremented by fd_alloc */
 
-	if (inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
+	if (inode->fops && inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
 		buddy_free((uint64_t)f, 0);
 		return -1;
 	}

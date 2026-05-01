@@ -1000,7 +1000,7 @@ static long sys_getcwd(char *buf, size_t size)
 	arch_user_access_begin();
 	memcpy(buf, p->cwd, n + 1);
 	arch_user_access_end();
-	return (long)(uintptr_t)buf;
+	return (long)(n + 1);
 }
 
 /* ── process info ────────────────────────────────────────── */
