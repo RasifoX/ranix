@@ -312,6 +312,8 @@ static vfs_fops_t procfs_fops = {
 	.read = procfs_file_read,
 };
 
+static vfs_fops_t procfs_dir_fops = { 0 };
+
 /* ── inode allocation ────────────────────────────────────────── */
 
 static uint64_t proc_ino_next = 0x8000;
@@ -392,6 +394,7 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 	in->nlink   = 2;
 	in->refcount= 1;
 	in->iops    = &procfs_piddir_iops;
+	in->fops    = &procfs_dir_fops;
 
 	procfs_piddir_priv_t *pp = buddy_alloc(0);
 	if (!pp) { buddy_free((uint64_t)in, 0); return NULL; }
@@ -496,6 +499,7 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->nlink   = 2;
 	root_inode->refcount= 1;
 	root_inode->iops    = &procfs_root_iops;
+	root_inode->fops    = &procfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) { buddy_free((uint64_t)root_inode, 0); return -1; }
