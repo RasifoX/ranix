@@ -77,6 +77,13 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		size_t len = (size_t)(end - p);
 		if (len == 0) break;
 
+		/* handle . and .. */
+		if (len == 1 && p[0] == '.') { p = end; continue; }
+		if (len == 2 && p[0] == '.' && p[1] == '.') {
+			if (d->parent) d = d->parent;
+			p = end; continue;
+		}
+
 		/* look in dentry children first */
 		vfs_dentry_t *child = d->child;
 		while (child) {

@@ -125,8 +125,10 @@ static int utf8_step_right(const char *line, int pos, int len)
 	return pos;
 }
 
-#define PROMPT "$ "
-#define PROMPT_LEN 2
+static char tty_prompt[128] = "$ ";
+static int  tty_prompt_len  = 2;
+#define PROMPT     tty_prompt
+#define PROMPT_LEN tty_prompt_len
 
 static void tty_out(const char *s, int n)
 {
@@ -156,7 +158,8 @@ static void tty_redraw(const char *line, int len, int pos, int old_cols)
 	int new_cols = line_cols(line, len);
 	int cur_cols = line_cols(line, pos);
 
-	tty_out_s("\r" PROMPT);
+	tty_out_s("\r");
+	tty_out_s(PROMPT);
 	tty_out(line, len);
 	for (int i = new_cols; i < old_cols; i++) tty_out_s(" ");
 
@@ -980,14 +983,32 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 static long sys_chdir(const char *path)
 {
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
-	vfs_stat_t vs = {0};
-	if (vfs_stat(kp, &vs) != 0) return -2;
-	if (!S_ISDIR(vs.mode)) return -20;
+	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
+	if (r) return r;
+	/* resolve . and .. via dentry so we get the canonical path */
+	vfs_dentry_t *d = vfs_dentry_resolve(kp);
+	if (!d) return -2;
+	if (!S_ISDIR(d->inode->mode)) return -20;
+	/* rebuild canonical path by walking up the dentry tree */
+	char canon[PROC_NAME_MAX];
+	char tmp[PROC_NAME_MAX];
+	canon[0] = '\0';
+	vfs_dentry_t *cur = d;
+	while (cur && cur->parent) {
+		int tlen = strlen(cur->name);
+		int clen = strlen(canon);
+		if (tlen + 1 + clen >= PROC_NAME_MAX) return -36;
+		memmove(tmp + tlen + 1, canon, (size_t)(clen + 1));
+		tmp[0] = '/';
+		memcpy(tmp + 1, cur->name, (size_t)tlen);
+		memcpy(canon, tmp, (size_t)(tlen + 1 + clen + 1));
+		cur = cur->parent;
+	}
+	if (canon[0] == '\0') { canon[0] = '/'; canon[1] = '\0'; }
 	process_t *p = task_current();
-	int n = strlen(kp);
+	int n = strlen(canon);
 	if (n >= 256) return -36;
-	memcpy(p->cwd, kp, n + 1);
+	memcpy(p->cwd, canon, (size_t)(n + 1));
 	return 0;
 }
 
@@ -1112,8 +1133,9 @@ static long sys_sysinfo(void *info)
 
 /* ── ioctl ───────────────────────────────────────────────── */
 
-#define TIOCGWINSZ 0x5413
-#define TCGETS     0x5401
+#define TIOCGWINSZ  0x5413
+#define TCGETS      0x5401
+#define TIOCSPROMPT 0x54FF  /* Ranix: set TTY prompt string */
 #define TCSETS     0x5402
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
@@ -1143,6 +1165,15 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 	case TCSETS: case TCSETSW: case TCSETSF: return 0;
 	case TIOCGPGRP: { int pgid = (int)task_current()->pid; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
 	case TIOCSPGRP: return 0;
+	case TIOCSPROMPT: {
+		char kp[128];
+		if (copy_from_user(kp, (const char *)(uintptr_t)arg, 127) != 0) return -14;
+		kp[127] = '\0';
+		int n = 0; while (kp[n]) n++;
+		memcpy(tty_prompt, kp, (size_t)(n + 1));
+		tty_prompt_len = n;
+		return 0;
+	}
 	default: return -25; /* ENOTTY */
 	}
 }

@@ -1,8 +1,11 @@
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdio.h>
+
+#define TIOCSPROMPT 0x54FF
 
 #define ARGV_MAX  32
 #define INPUT_MAX 512
@@ -252,7 +255,18 @@ int main(void)
         strncpy(cwd_buf, "/", 2);
 
     while (1) {
-        print(cwd_buf); print(" $ ");
+        /* tell kernel TTY the current prompt so redraw is correct */
+        {
+            char prompt[PATH_MAX + 4];
+            int plen = strlen(cwd_buf);
+            memcpy(prompt, cwd_buf, (size_t)plen);
+            prompt[plen++] = ' ';
+            prompt[plen++] = '$';
+            prompt[plen++] = ' ';
+            prompt[plen]   = '\0';
+            ioctl(0, TIOCSPROMPT, prompt);
+            print(prompt);
+        }
 
         memset(input_buf, 0, sizeof(input_buf));
         int n = read(0, input_buf, sizeof(input_buf) - 1);
