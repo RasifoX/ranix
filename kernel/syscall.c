@@ -192,7 +192,7 @@ static long sys_read(int fd, void *buf, size_t len)
 		while (1) {
 			while (!uart_has_data()) {
 				fb_tty_cursor_flush();
-				arch_yield();
+				task_sleep();
 			}
 			unsigned char c = (unsigned char)uart_getc();
 
@@ -210,9 +210,9 @@ static long sys_read(int fd, void *buf, size_t len)
 			}
 
 			if (c == 0x1B) { /* ESC — arrow key sequence */
-				while (!uart_has_data()) arch_yield();
+				while (!uart_has_data()) task_sleep();
 				if (uart_getc() != '[') continue;
-				while (!uart_has_data()) arch_yield();
+				while (!uart_has_data()) task_sleep();
 				unsigned char arrow = (unsigned char)uart_getc();
 				if (arrow == 'D' && pos > 0) {       /* left */
 					pos = utf8_step_left(line, pos);
@@ -1110,7 +1110,7 @@ static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 	uint64_t ticks = (uint64_t)k.tv_sec * TIMER_HZ +
 	                 (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
 	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
-	while (kernel_ticks < end) yield();
+	while (kernel_ticks < end) task_sleep();
 	return 0;
 }
 
@@ -1233,7 +1233,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			if (kfds[i].revents) ready++;
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		yield();
+		task_sleep();
 	}
 
 	copy_to_user(fds, kfds, nfds * sizeof(linux_pollfd_t));
@@ -1271,7 +1271,7 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 			}
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		yield();
+		task_sleep();
 	}
 
 	if (readfds) copy_to_user(readfds, &result, 8);

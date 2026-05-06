@@ -58,12 +58,13 @@ void board_irq_init(void)
 {
 	config.gic_dist_base = PHYS_TO_VIRT(config.gic_dist_base);
 	config.gic_cpu_base  = PHYS_TO_VIRT(config.gic_cpu_base);
+	config.local_base    = PHYS_TO_VIRT(config.local_base);
+
 	irqchip_init(config.gic_dist_base, config.gic_cpu_base);
 
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 
-	config.local_base = PHYS_TO_VIRT(config.local_base);
 	timer_init(100);
 }
 

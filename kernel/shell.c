@@ -81,12 +81,12 @@ static void cmd_ps(void)
 {
     static const char *state_names[] = { "run", "ready", "dead", "sleep" };
     int n = task_count();
-    kprintf("  ID  NAME             STATE\n");
+    kprintf("  ID  NAME             STATE   TICKS\n");
     for (int i = 0; i < n; i++) {
         task_t *t = task_get(i);
-        kprintf("  %d   %s  %s\n",
+        kprintf("  %-2d  %-15s  %-6s  %d\n",
                 (int)t->pid, t->name,
-                state_names[t->state]);
+                state_names[t->state], (int)t->ticks);
     }
 }
 
