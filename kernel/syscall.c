@@ -11,6 +11,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/tty/fb_tty.h>
 #include <drivers/serial/uart.h>
+#include <kernel/board.h>
 
 #define AT_FDCWD     (-100)
 
@@ -1078,8 +1079,6 @@ static long sys_uname(linux_utsname_t *uts)
 
 typedef struct { int64_t tv_sec; int64_t tv_nsec; } linux_timespec_t;
 typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
-
-#define TIMER_HZ 100
 
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {

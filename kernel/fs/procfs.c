@@ -104,14 +104,17 @@ static int fill_mounts(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+#include <kernel/board.h>
+
 static int fill_uptime(char *buf, size_t sz)
 {
 	extern volatile uint64_t kernel_ticks;
-	uint64_t secs = kernel_ticks / 100;
+	uint64_t secs = kernel_ticks / TIMER_HZ;
+	uint64_t centi = ((kernel_ticks % TIMER_HZ) * 100) / TIMER_HZ;
 	pb_t b = {buf, sz};
-	pb_u64(&b, secs); pb_char(&b, '.'); pb_u64(&b, (kernel_ticks % 100) * 10);
+	pb_u64(&b, secs); pb_char(&b, '.'); pb_u64(&b, centi);
 	pb_str(&b, " ");
-	pb_u64(&b, secs); pb_char(&b, '.'); pb_u64(&b, 0);
+	pb_u64(&b, secs); pb_char(&b, '.'); pb_u64(&b, centi);
 	pb_char(&b, '\n');
 	return (int)(sz - b.rem);
 }

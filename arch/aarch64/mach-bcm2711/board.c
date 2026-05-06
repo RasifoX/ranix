@@ -65,7 +65,7 @@ void board_irq_init(void)
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 
-	timer_init(100);
+	timer_init(TIMER_HZ);
 }
 
 #include <drivers/block/sdcard.h>

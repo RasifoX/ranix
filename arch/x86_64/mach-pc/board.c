@@ -38,7 +38,7 @@ void board_irq_init(void)
 	idt_init();
 	pic8259_init();
 	irq_register(0x20, pit_handler);
-	pit_init(100);
+	pit_init(TIMER_HZ);
 	ps2_kbd_init();
 }
 
