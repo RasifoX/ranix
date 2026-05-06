@@ -59,10 +59,12 @@ static void cmd_mem(void)
 
 extern uint64_t timer_ticks(void);
 
+#include <kernel/board.h>
+
 static void cmd_uptime(void)
 {
     uint64_t t = timer_ticks();
-    uint32_t sec = (uint32_t)(t / 100);
+    uint32_t sec = (uint32_t)(t / TIMER_HZ);
     kprintf("Uptime: %d ticks (%d s)\n", (int)t, (int)sec);
 }
 

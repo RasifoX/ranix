@@ -4,6 +4,7 @@
 #include <kernel/lib/string.h>
 #include "font_spleen.h"
 #include <drivers/serial/uart.h>
+#include <kernel/board.h>
 
 #define FG_COLOR  0xFFFFFFFF
 #define BG_COLOR  0xFF000000
@@ -241,7 +242,7 @@ static void uart_esc(const char *s)
 void fb_tty_tick(void)
 {
     if (!_cursor_visible || !_fb) return;
-    if (++_blink_ticks < 50) return;  /* 500ms at 100Hz */
+    if (++_blink_ticks < (TIMER_HZ / 2)) return;  /* 500ms at TIMER_HZ */
     _blink_ticks = 0;
     _blink_state ^= 1;
     _blink_dirty = 1;
