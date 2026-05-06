@@ -90,13 +90,15 @@ static vfs_fops_t urandom_fops = {
 
 /* ── /dev/tty ────────────────────────────────────────────────── */
 
+#include <kernel/proc.h>
+
 static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
 	char *b = buf;
 	size_t i;
 	for (i = 0; i < len; i++) {
-		while (!uart_has_data());
+		while (!uart_has_data()) task_sleep();
 		char c = uart_getc();
 		b[i] = c;
 		if (c == '\n' || c == '\r') { i++; break; }

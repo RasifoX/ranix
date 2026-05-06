@@ -76,7 +76,7 @@ void mutex_lock(mutex_t *m)
 			return;
 		}
 		spin_unlock_irq(&m->guard, f);
-		yield();
+		task_sleep();
 	}
 }
 
