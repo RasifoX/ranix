@@ -4,6 +4,8 @@
 #include <uapi/types.h>
 #include <kernel/fb.h>
 
+#define TIMER_HZ 250
+
 typedef struct {
 	const char *name;
 	uint64_t    uart_base;

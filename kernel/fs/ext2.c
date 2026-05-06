@@ -551,7 +551,6 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 
 	ext2_super_t *sb = (ext2_super_t *)sb_buf;
 	if (sb->s_magic != EXT2_MAGIC) {
-		kprintf("[ext2] bad magic: 0x%04x\n", sb->s_magic);
 		buddy_free((uint64_t)sb_buf, 0);
 		return -1;
 	}

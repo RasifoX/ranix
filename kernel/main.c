@@ -120,13 +120,17 @@ void kernel_main(void)
 		for (int bi = 0; bi < total; bi++) {
 			block_device_t *bd = block_device_get(bi);
 			if (!bd) continue;
-			if (vfs_mount("/mnt", "ext2", bd) == 0) {
-				kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
-				break;
-			}
-			if (vfs_mount("/mnt", "ext4", bd) == 0) {
-				kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
-				break;
+			
+			/* probe for ext2 magic before attempting mount */
+			uint8_t sb_buf[1024];
+			if (bd->read(bd, 2, sb_buf, 2) == 0) {
+				uint16_t magic = *(uint16_t *)(sb_buf + 56); /* s_magic offset */
+				if (magic == 0xEF53) {
+					if (vfs_mount("/mnt", "ext2", bd) == 0) {
+						kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
+						break;
+					}
+				}
 			}
 		}
 	}
