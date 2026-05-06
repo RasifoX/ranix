@@ -127,6 +127,8 @@ void kpanic(const char *msg)
     _puts("\n[PANIC] ");
     _puts(msg);
     _puts("\n--- halted ---\n");
+    if (fb_ready)
+        fb_tty_flush();
     for (;;)
         arch_halt();
 }

@@ -51,6 +51,7 @@ typedef struct process {
 
 	/* ── scheduling ──────────────────────────── */
 	int             ticks_remaining;
+	uint64_t        ticks;
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;

@@ -93,6 +93,8 @@ void sched_tick(void)
 	process_t *current = task_current();
 	if (!current) return;
 
+	current->ticks++;
+
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (current->pid != 0) {
 		if (--current->ticks_remaining <= 0) {
