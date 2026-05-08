@@ -1329,7 +1329,7 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 #define FUTEX_WAKE         1
 #define FUTEX_PRIVATE_FLAG 128
 
-#define FUTEX_SLOTS 32
+#define FUTEX_SLOTS 256
 static struct {
 	uint32_t  *uaddr;
 	process_t *waiter;
@@ -1526,7 +1526,7 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 
 typedef struct { int fd; short events; short revents; } linux_pollfd_t;
 
-static int fd_is_readable(int fd)
+static int fd_poll_bits(int fd)
 {
 	if (fd == 0) {
 		process_t  *p = task_current();
@@ -1534,17 +1534,20 @@ static int fd_is_readable(int fd)
 		if (f) {
 			if (f->inode->fops && f->inode->fops->poll)
 				return f->inode->fops->poll(f);
-			return 1;
+			return 0x0005; /* POLLIN|POLLOUT */
 		}
-		return uart_has_data() ? 1 : 0;
+		return uart_has_data() ? 0x0001 : 0;
 	}
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
 	if (!f) return 0;
 	if (f->inode->fops && f->inode->fops->poll)
 		return f->inode->fops->poll(f);
-	return 1; /* regular file: always readable */
+	return 0x0005; /* regular file: always readable+writable */
 }
+
+static int fd_is_readable(int fd) { return fd_poll_bits(fd) & 0x0001; }
+static int fd_is_writable(int fd) { return fd_poll_bits(fd) & 0x0004; }
 
 static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 {
@@ -1566,8 +1569,9 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 		for (uint64_t i = 0; i < nfds; i++) {
 			kfds[i].revents = 0;
 			if (kfds[i].fd < 0) continue;
-			if ((kfds[i].events & POLLIN) && fd_is_readable(kfds[i].fd))
-				kfds[i].revents |= POLLIN;
+			int bits = fd_poll_bits(kfds[i].fd);
+			if ((kfds[i].events & POLLIN)  && (bits & POLLIN))  kfds[i].revents |= POLLIN;
+			if ((kfds[i].events & POLLOUT) && (bits & POLLOUT)) kfds[i].revents |= POLLOUT;
 			if (kfds[i].revents) ready++;
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
@@ -1582,11 +1586,12 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
                        uint64_t *exceptfds, linux_timeval_t *timeout)
 {
-	(void)writefds; (void)exceptfds;
+	(void)exceptfds;
 	if (nfds <= 0) return 0;
 
-	uint64_t rfds = 0;
-	if (readfds && copy_from_user(&rfds, readfds, 8) != 0) return -14;
+	uint64_t rfds = 0, wfds = 0;
+	if (readfds  && copy_from_user(&rfds, readfds,  8) != 0) return -14;
+	if (writefds && copy_from_user(&wfds, writefds, 8) != 0) return -14;
 
 	uint64_t deadline = (uint64_t)-1;
 	if (timeout) {
@@ -1599,20 +1604,19 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 	}
 
 	int ready = 0;
-	uint64_t result = 0;
+	uint64_t rres = 0, wres = 0;
 	while (1) {
-		result = 0; ready = 0;
+		rres = 0; wres = 0; ready = 0;
 		for (int i = 0; i < nfds && i < 64; i++) {
-			if ((rfds & (1ULL << i)) && fd_is_readable(i)) {
-				result |= (1ULL << i);
-				ready++;
-			}
+			if ((rfds & (1ULL << i)) && fd_is_readable(i)) { rres |= (1ULL << i); ready++; }
+			if ((wfds & (1ULL << i)) && fd_is_writable(i)) { wres |= (1ULL << i); ready++; }
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
 		task_sleep();
 	}
 
-	if (readfds) copy_to_user(readfds, &result, 8);
+	if (readfds)  copy_to_user(readfds,  &rres, 8);
+	if (writefds) copy_to_user(writefds, &wres, 8);
 	return ready;
 }
 
@@ -1644,6 +1648,167 @@ static long sys_ppoll(linux_pollfd_t *fds, uint64_t nfds,
 			timeout_ms = (int)(k.tv_sec * 1000 + k.tv_nsec / 1000000);
 	}
 	return sys_poll(fds, nfds, timeout_ms);
+}
+
+/* ── epoll ───────────────────────────────────────────────── */
+
+#define EPOLLIN    0x00000001
+#define EPOLLOUT   0x00000004
+#define EPOLLERR   0x00000008
+#define EPOLLHUP   0x00000010
+#define EPOLLRDHUP 0x00002000
+#define EPOLLET    0x80000000
+#define EPOLLONESHOT 0x40000000
+
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+
+typedef struct {
+	uint32_t events;
+	uint64_t data;
+} __attribute__((packed)) linux_epoll_event_t;
+
+#define EPOLL_MAX_WATCH 64
+
+typedef struct {
+	spinlock_t lock;
+	int        fds[EPOLL_MAX_WATCH];
+	uint32_t   ev[EPOLL_MAX_WATCH];
+	uint64_t   data[EPOLL_MAX_WATCH];
+} epoll_t;
+
+static int epoll_close(vfs_file_t *file)
+{
+	epoll_t     *ep = (epoll_t *)file->inode->priv;
+	vfs_inode_t *in = file->inode;
+	kfree(ep);
+	kfree(in);
+	return 0;
+}
+
+static vfs_fops_t epoll_fops = { .close = epoll_close };
+
+static epoll_t *epfd_get(int epfd)
+{
+	process_t  *p = task_current();
+	vfs_file_t *f = p->fds ? fd_get(p->fds, epfd) : NULL;
+	if (!f || !f->inode || f->inode->fops != &epoll_fops) return NULL;
+	return (epoll_t *)f->inode->priv;
+}
+
+static long sys_epoll_create1(int flags)
+{
+	(void)flags;
+	epoll_t *ep = kmalloc(sizeof(*ep));
+	if (!ep) return -12;
+	memset(ep, 0, sizeof(*ep));
+	ep->lock = (spinlock_t)SPINLOCK_INIT;
+	for (int i = 0; i < EPOLL_MAX_WATCH; i++) ep->fds[i] = -1;
+
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) { kfree(ep); return -12; }
+	memset(in, 0, sizeof(*in));
+	in->fops     = &epoll_fops;
+	in->priv     = ep;
+	in->refcount = 1;
+
+	vfs_file_t *f = kmalloc(sizeof(*f));
+	if (!f) { kfree(ep); kfree(in); return -12; }
+	memset(f, 0, sizeof(*f));
+	f->inode    = in;
+	f->refcount = 1;
+
+	process_t *p = task_current();
+	int fd = fd_alloc(p->fds, f);
+	if (fd < 0) { kfree(f); kfree(ep); kfree(in); return -12; }
+	return fd;
+}
+
+static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
+{
+	epoll_t *ep = epfd_get(epfd);
+	if (!ep) return -9;
+
+	linux_epoll_event_t ev = {0};
+	if (op != EPOLL_CTL_DEL && uevent)
+		copy_from_user(&ev, uevent, sizeof(ev));
+
+	uint64_t f = spin_lock_irq(&ep->lock);
+
+	if (op == EPOLL_CTL_ADD) {
+		for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+			if (ep->fds[i] == fd) { spin_unlock_irq(&ep->lock, f); return -17; }
+		}
+		for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+			if (ep->fds[i] < 0) {
+				ep->fds[i]  = fd;
+				ep->ev[i]   = ev.events;
+				ep->data[i] = ev.data;
+				spin_unlock_irq(&ep->lock, f);
+				return 0;
+			}
+		}
+		spin_unlock_irq(&ep->lock, f);
+		return -28;
+	}
+
+	for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+		if (ep->fds[i] != fd) continue;
+		if (op == EPOLL_CTL_DEL) {
+			ep->fds[i] = -1;
+		} else if (op == EPOLL_CTL_MOD) {
+			ep->ev[i]   = ev.events;
+			ep->data[i] = ev.data;
+		}
+		spin_unlock_irq(&ep->lock, f);
+		return 0;
+	}
+
+	spin_unlock_irq(&ep->lock, f);
+	return (op == EPOLL_CTL_MOD || op == EPOLL_CTL_DEL) ? -2 : -22;
+}
+
+static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevents,
+                            int timeout_ms, void *sigmask)
+{
+	(void)sigmask;
+	epoll_t *ep = epfd_get(epfd);
+	if (!ep) return -9;
+	if (!uevents || maxevents <= 0) return -22;
+	if (!access_ok(uevents, (size_t)maxevents * sizeof(linux_epoll_event_t))) return -14;
+
+	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
+	                  : (timeout_ms == 0) ? 0
+	                  : kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
+
+	linux_epoll_event_t *kev = kmalloc((size_t)maxevents * sizeof(*kev));
+	if (!kev) return -12;
+
+	int ready = 0;
+	while (1) {
+		ready = 0;
+		uint64_t f = spin_lock_irq(&ep->lock);
+		for (int i = 0; i < EPOLL_MAX_WATCH && ready < maxevents; i++) {
+			if (ep->fds[i] < 0) continue;
+			int bits = fd_poll_bits(ep->fds[i]);
+			int r = 0;
+			if ((ep->ev[i] & EPOLLIN)  && (bits & POLLIN))  r |= EPOLLIN;
+			if ((ep->ev[i] & EPOLLOUT) && (bits & POLLOUT)) r |= EPOLLOUT;
+			if (r) {
+				kev[ready].events = (uint32_t)r;
+				kev[ready].data   = ep->data[i];
+				ready++;
+			}
+		}
+		spin_unlock_irq(&ep->lock, f);
+		if (ready > 0 || kernel_ticks >= deadline) break;
+		task_sleep();
+	}
+
+	copy_to_user(uevents, kev, (size_t)ready * sizeof(*kev));
+	kfree(kev);
+	return ready;
 }
 
 /* ── symlink / link / readlink (stubs) ───────────────────── */
@@ -1702,6 +1867,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_DUP3:    ret = sys_dup3((int)arg0, (int)arg1, (int)arg2); break;
 	case SYS_ARCH_FCNTL:   ret = sys_fcntl((int)arg0, (int)arg1, (uint64_t)arg2); break;
 	case SYS_ARCH_PIPE2:   ret = sys_pipe2((int*)arg0, (int)arg1); break;
+	case SYS_ARCH_EPOLL_CREATE1: ret = sys_epoll_create1((int)arg0); break;
+	case SYS_ARCH_EPOLL_CTL:     ret = sys_epoll_ctl((int)arg0, (int)arg1, (int)arg2, (linux_epoll_event_t*)arg3); break;
+	case SYS_ARCH_EPOLL_PWAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, (void*)arg4); break;
 	/* ── open / stat ─────────────────────────────────────── */
 	case SYS_ARCH_OPENAT:     ret = sys_openat((int)arg0, (const char*)arg1, (int)arg2, (mode_t)arg3); break;
 	case SYS_ARCH_FSTAT:      ret = sys_fstat((int)arg0, (linux_stat_t*)arg1); break;
@@ -1814,6 +1982,11 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SET_ROBUST_LIST: ret = 0; break;
 	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
 	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); return;
+	case SYS_ARCH_EPOLL_CREATE:  ret = sys_epoll_create1(0); break;
+	case SYS_ARCH_EPOLL_CREATE1: ret = sys_epoll_create1((int)arg0); break;
+	case SYS_ARCH_EPOLL_CTL:     ret = sys_epoll_ctl((int)arg0, (int)arg1, (int)arg2, (linux_epoll_event_t*)arg3); break;
+	case SYS_ARCH_EPOLL_WAIT:    ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, NULL); break;
+	case SYS_ARCH_EPOLL_PWAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, (void*)arg4); break;
 #endif
 	default:
 		ret = -38; /* ENOSYS */

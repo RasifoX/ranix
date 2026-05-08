@@ -129,5 +129,10 @@ typedef struct {
 #define SYS_ARCH_SET_ROBUST_LIST 273
 #define SYS_ARCH_GET_ROBUST_LIST 274
 #define SYS_ARCH_RT_SIGRETURN    15
+#define SYS_ARCH_EPOLL_CREATE    213
+#define SYS_ARCH_EPOLL_CTL       233
+#define SYS_ARCH_EPOLL_WAIT      232
+#define SYS_ARCH_EPOLL_CREATE1   291
+#define SYS_ARCH_EPOLL_PWAIT     281
 
 #endif
