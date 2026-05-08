@@ -858,6 +858,7 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 	vfs_inode_t *inode = f->inode;
 	if (!S_ISDIR(inode->mode)) return -20;
 	if (!inode->iops || !inode->iops->readdir) return -95;
+	kprintf("[gd64] fd=%d ino=%llu pos=%lld\n", fd, inode->ino, (long long)f->pos);
 
 	uint8_t *kbuf = kmalloc(bufsize > 4096 ? 4096 : bufsize);
 	if (!kbuf) return -12;
