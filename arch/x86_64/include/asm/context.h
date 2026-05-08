@@ -128,5 +128,6 @@ typedef struct {
 #define SYS_ARCH_TGKILL       234
 #define SYS_ARCH_SET_ROBUST_LIST 273
 #define SYS_ARCH_GET_ROBUST_LIST 274
+#define SYS_ARCH_RT_SIGRETURN    15
 
 #endif

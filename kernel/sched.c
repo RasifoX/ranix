@@ -599,9 +599,28 @@ void task_signal(process_t *p, int sig)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* Signals that kill the process by default */
+static int sig_default_kill(int sig)
+{
+	switch (sig) {
+	case 1:  /* SIGHUP  */
+	case 2:  /* SIGINT  */
+	case 3:  /* SIGQUIT */
+	case 6:  /* SIGABRT */
+	case 8:  /* SIGFPE  */
+	case 9:  /* SIGKILL */
+	case 11: /* SIGSEGV */
+	case 13: /* SIGPIPE */
+	case 14: /* SIGALRM */
+	case 15: /* SIGTERM */
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 void signal_dispatch(arch_context_t *tf)
 {
-	(void)tf;
 	process_t *p = task_current();
 	if (!p) return;
 
@@ -610,16 +629,52 @@ void signal_dispatch(arch_context_t *tf)
 
 	int sig = 0;
 	for (int i = 0; i < NSIG; i++) {
-		if (mask & (1UL << i)) {
-			sig = i + 1;
-			break;
+		if (mask & (1UL << i)) { sig = i + 1; break; }
+	}
+	if (!sig) return;
+
+	p->sig_pending &= ~(1UL << (sig - 1));
+
+	sigaction_t *sa = &p->sig_actions[sig - 1];
+	void (*handler)(int) = sa->sa_handler;
+
+	/* SIG_IGN = 1 */
+	if ((uintptr_t)handler == 1) return;
+
+	/* SIG_DFL = 0 or NULL */
+	if (!handler) {
+		if (sig_default_kill(sig)) {
+			p->exit_code = sig;
+			task_exit();
 		}
+		return;
 	}
 
-	if (sig == SIGKILL) {
-		p->sig_pending &= ~(1UL << (sig - 1));
-		task_exit();
-	}
+	/* Deliver to user handler: redirect the trap frame */
+	/* Block this signal during handler execution */
+	p->sig_mask |= (1UL << (sig - 1));
+
+#if defined(__aarch64__)
+	/* Set up user stack frame: save link register + align */
+	uint64_t usp = tf->sp;
+	usp -= 16;
+	usp &= ~15UL;
+	*(uint64_t *)usp        = tf->elr;   /* return address */
+	*(uint64_t *)(usp + 8)  = tf->regs[30]; /* saved LR */
+	tf->sp                  = usp;
+	tf->regs[30]            = sa->sa_restorer ? (uint64_t)sa->sa_restorer
+	                                           : tf->elr; /* fall back: resume */
+	tf->regs[0]             = (uint64_t)sig;
+	tf->elr                 = (uint64_t)handler;
+#elif defined(__x86_64__)
+	uint64_t usp = tf->rsp;
+	usp -= 8;
+	usp &= ~15UL;
+	*(uint64_t *)usp        = tf->rip;   /* return address for restorer */
+	tf->rsp                 = usp;
+	tf->rdi                 = (uint64_t)sig;
+	tf->rip                 = (uint64_t)handler;
+#endif
 }
 
 arch_context_t *sched_get_current_ctx(void)
