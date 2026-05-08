@@ -60,6 +60,7 @@ typedef struct {
     int               (*stat)(struct vfs_inode *inode, vfs_stat_t *out);
     int               (*rename)(struct vfs_inode *old_dir, const char *old_name,
                                 struct vfs_inode *new_dir, const char *new_name);
+    int               (*readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
