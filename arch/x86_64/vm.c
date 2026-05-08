@@ -45,12 +45,21 @@ vm_space_t *vm_create(void)
 		}
 	}
 
+	vs->refcount = 1;
+	return vs;
+}
+
+vm_space_t *vm_get(vm_space_t *vs)
+{
+	if (vs) vs->refcount++;
 	return vs;
 }
 
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
+	if (vs->refcount > 1) { vs->refcount--; return; }
+	vs->refcount = 0;
 	uint64_t *l4 = vs->root;
 
 	/* We only walk index 0 (user space) */
@@ -253,5 +262,6 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	uint64_t cr3;
 	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
 
+	new_vs->refcount = 1;
 	return new_vs;
 }

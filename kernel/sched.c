@@ -6,6 +6,8 @@
 #include <kernel/irq.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/vm.h>
+#include <kernel/vfs.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <asm/mmu.h>
@@ -193,13 +195,13 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->vm = vm_create();
 	if (!p->vm) goto fail;
 
-	uint64_t entry, load_end = 0;
-	if (elf_load(p->vm, elf_data, elf_len, &entry, &load_end) != 0) {
+	elf_info_t ei = {0};
+	if (elf_load(p->vm, elf_data, elf_len, &ei) != 0) {
 		kprintf("[sched] elf_load failed\n");
 		goto fail;
 	}
 
-	p->brk          = load_end;
+	p->brk          = ei.load_end;
 	p->mmap_next    = ARCH_USER_MMAP_BASE;
 	p->vfork_parent = -1;
 	p->reaped       = 0;
@@ -218,7 +220,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	uint8_t *ksp = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	arch_context_init_user(ctx, entry, ARCH_USER_STACK_TOP - 64);
+	arch_context_init_user(ctx, ei.entry, ARCH_USER_STACK_TOP - 64);
 	p->ctx = ctx;
 	p->fds = fd_table_create();
 	memcpy(p->cwd, current->cwd, 256);
@@ -367,6 +369,107 @@ pid_t proc_vfork(void)
 	
 	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
+}
+
+pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (proc_cnt >= PROC_MAX) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
+
+	process_t *parent = task_current();
+	process_t *child  = buddy_alloc(0);
+	if (!child) {
+		spin_unlock_irq(&sched_lock, f);
+		return -1;
+	}
+	memset(child, 0, sizeof(*child));
+
+	child->pid          = proc_cnt;
+	child->ppid         = parent->pid;
+	child->state        = PROC_READY;
+	child->uid          = parent->uid;
+	child->gid          = parent->gid;
+	child->brk          = parent->brk;
+	child->mmap_next    = parent->mmap_next;
+	child->vfork_parent = -1;
+
+	int nlen = 0;
+	while (parent->name[nlen] && nlen < PROC_NAME_MAX - 3) nlen++;
+	memcpy(child->name, parent->name, nlen);
+	child->name[nlen] = '\0';
+
+	/* Threads share the VM space */
+	child->vm = vm_get(parent->vm);
+	if (!child->vm) goto fail;
+
+	/* Threads share the fd table */
+	child->fds = parent->fds;
+	/* bump refcounts for each open fd so close() works correctly */
+	if (child->fds) {
+		for (int i = 0; i < FD_MAX; i++) {
+			if (child->fds->files[i])
+				child->fds->files[i]->refcount++;
+		}
+	}
+
+	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+	child->umask = parent->umask;
+
+	void *ks = buddy_alloc(1);
+	if (!ks) goto fail;
+	child->kstack = (uint8_t *)PHYS_TO_VIRT(ks);
+
+	uint8_t *ksp = child->kstack + KSTACK_SIZE;
+	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
+
+	/* Thread starts at clone() return point with return value 0 */
+	CTX_SYSCALL_RET(cctx, 0);
+
+	/* Set new stack pointer */
+	if (newsp) {
+#if defined(__aarch64__)
+		cctx->sp = newsp;
+#elif defined(__x86_64__)
+		cctx->rsp = newsp;
+#endif
+	}
+
+	/* Set TLS */
+	if (tls) {
+		child->tls_base = tls;
+#if defined(__aarch64__)
+		/* will be written to tpidr_el0 on context switch */
+#endif
+	}
+
+	/* Write child TID to ctid if requested */
+	if (ctid) {
+		uint32_t tid = (uint32_t)child->pid;
+		/* we can't use copy_to_user here (no current context switch yet),
+		 * but ctid is in the shared VM so direct write works */
+		*ctid = tid;
+	}
+
+	child->ctx             = cctx;
+	child->ticks_remaining = SCHED_QUANTUM;
+
+	child->next      = proctab[0]->next;
+	proctab[0]->next = child;
+	runqueue_add(child);
+	proctab[proc_cnt++] = child;
+
+	spin_unlock_irq(&sched_lock, f);
+	return child->pid;
+
+fail:
+	spin_unlock_irq(&sched_lock, f);
+	if (child->vm) vm_destroy(child->vm);
+	buddy_free((uint64_t)child, 0);
+	return -1;
 }
 
 process_t *proc_find(pid_t pid)
