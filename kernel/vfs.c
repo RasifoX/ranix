@@ -62,24 +62,34 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		return NULL;
 	}
 
+	/* mutable work buffer so symlink splicing can rewrite the path */
+	char work[512];
+	int wi = 0;
+	while (wi < 511 && path[wi]) { work[wi] = path[wi]; wi++; }
+	work[wi] = '\0';
+
 	vfs_dentry_t *d = root_dentry;
-	const char   *p = path + 1;
+	const char   *p = work + 1;   /* skip leading '/' */
+	int symlink_depth = 0;
 
 	while (*p) {
 		/* skip consecutive slashes */
 		while (*p == '/') p++;
 		if (!*p) break;
 
-		/* extract next component */
-		const char *end = p;
-		while (*end && *end != '/') end++;
+		/* extract next component (null-terminated in tmp) */
+		char tmp[256];
+		int i = 0;
+		while (i < 255 && p[i] && p[i] != '/') { tmp[i] = p[i]; i++; }
+		tmp[i] = '\0';
+		const char *end = p + i;
 
-		size_t len = (size_t)(end - p);
+		size_t len = (size_t)i;
 		if (len == 0) break;
 
 		/* handle . and .. */
-		if (len == 1 && p[0] == '.') { p = end; continue; }
-		if (len == 2 && p[0] == '.' && p[1] == '.') {
+		if (len == 1 && tmp[0] == '.') { p = end; continue; }
+		if (len == 2 && tmp[0] == '.' && tmp[1] == '.') {
 			if (d->parent) d = d->parent;
 			p = end; continue;
 		}
@@ -87,32 +97,61 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		/* look in dentry children first */
 		vfs_dentry_t *child = d->child;
 		while (child) {
-			if (strncmp(child->name, p, len) == 0 && child->name[len] == '\0')
-				break;
+			if (strcmp(child->name, tmp) == 0) break;
 			child = child->next;
 		}
 
 		if (!child) {
-			/* ask the inode */
+			/* ask the inode — pass null-terminated component, not full path */
 			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			vfs_inode_t *in = d->inode->iops->lookup(d->inode, p);
+			vfs_inode_t *in = d->inode->iops->lookup(d->inode, tmp);
 			if (!in) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			/* cache the result */
-			char tmp[256];
-			int i = 0;
-			while (i < 255 && p[i] && p[i] != '/') { tmp[i] = p[i]; i++; }
-			tmp[i] = '\0';
 			child = _dentry_create(d, tmp, in);
 			if (!child) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
+		}
+
+		/* follow symlinks */
+		if (S_ISLNK(child->inode->mode)) {
+			if (++symlink_depth > 8 ||
+			    !child->inode->iops || !child->inode->iops->readlink) {
+				spin_unlock_irq(&vfs_lock, f);
+				return NULL;
+			}
+			char target[256];
+			if (child->inode->iops->readlink(child->inode, target, sizeof(target)) != 0) {
+				spin_unlock_irq(&vfs_lock, f);
+				return NULL;
+			}
+			/* splice: work = target + remaining(end) */
+			int tlen = strlen(target);
+			int rlen = strlen(end);
+			if (tlen + rlen + 2 >= (int)sizeof(work)) {
+				spin_unlock_irq(&vfs_lock, f);
+				return NULL;
+			}
+			memcpy(work, target, tlen);
+			if (rlen > 0) {
+				if (end[0] != '/') work[tlen++] = '/';
+				memcpy(work + tlen, end, rlen + 1);
+			} else {
+				work[tlen] = '\0';
+			}
+			if (target[0] == '/') {
+				d = root_dentry;
+				p = work + 1;
+			} else {
+				p = work; /* resolve relative target from current parent d */
+			}
+			continue;
 		}
 
 		d = child;
@@ -332,7 +371,7 @@ int vfs_close(int fd)
 
 	fd_free(p->fds, fd);
 	if (--f->refcount == 0) {
-		if (f->inode->fops->close)
+		if (f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
 		buddy_free((uint64_t)f, 0);
 	}

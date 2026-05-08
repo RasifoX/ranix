@@ -524,10 +524,40 @@ static int ext2_stat(vfs_inode_t *vi, vfs_stat_t *out)
 	return 0;
 }
 
+static int ext2_readlink(vfs_inode_t *vi, char *buf, size_t bufsize)
+{
+	ext2_inode_priv_t *priv = vi->priv;
+	ext2_inode_t      *in   = &priv->raw;
+	uint64_t           len  = vi->size;
+
+	if (len == 0 || len >= bufsize) return -1;
+
+	if (len < 60) {
+		memcpy(buf, in->i_block, (size_t)len);
+		buf[len] = '\0';
+		return 0;
+	}
+
+	ext2_fs_t *fs = priv->fs;
+	uint8_t *blk = buddy_alloc(0);
+	if (!blk) return -1;
+	uint32_t phys = inode_map_block(fs, in, 0);
+	if (read_block(fs, phys, blk) != 0) {
+		buddy_free((uint64_t)blk, 0);
+		return -1;
+	}
+	size_t copy = len < bufsize - 1 ? (size_t)len : bufsize - 1;
+	memcpy(buf, blk, copy);
+	buf[copy] = '\0';
+	buddy_free((uint64_t)blk, 0);
+	return 0;
+}
+
 static vfs_iops_t ext2_iops = {
-	.lookup  = ext2_lookup,
-	.readdir = ext2_readdir,
-	.stat    = ext2_stat,
+	.lookup   = ext2_lookup,
+	.readdir  = ext2_readdir,
+	.stat     = ext2_stat,
+	.readlink = ext2_readlink,
 };
 
 /* ── mount ───────────────────────────────────────────────────── */

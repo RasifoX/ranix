@@ -881,6 +881,7 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 		*(uint16_t *)(e + 16) = (uint16_t)reclen;
 		e[18] = S_ISREG(vde.mode)  ? DT_REG  :
 		        S_ISDIR(vde.mode)  ? DT_DIR  :
+		        S_ISLNK(vde.mode)  ? DT_LNK  :
 		        S_ISCHR(vde.mode)  ? DT_CHR  :
 		        S_ISFIFO(vde.mode) ? DT_FIFO : 0;
 		memcpy(e + 19, vde.name, namelen);
