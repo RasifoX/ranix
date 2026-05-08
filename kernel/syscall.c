@@ -877,7 +877,7 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 		uint8_t *e = kbuf + offset;
 		memset(e, 0, reclen);
 		*(uint64_t *)(e + 0)  = vde.ino;
-		*(int64_t  *)(e + 8)  = (int64_t)(idx + 1);
+		*(int64_t  *)(e + 8)  = (int64_t)vde.next_off;
 		*(uint16_t *)(e + 16) = (uint16_t)reclen;
 		e[18] = S_ISREG(vde.mode)  ? DT_REG  :
 		        S_ISDIR(vde.mode)  ? DT_DIR  :
@@ -888,7 +888,7 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 		e[19 + namelen] = '\0';
 		offset += reclen;
 		total  += (long)reclen;
-		idx++;
+		idx = vde.next_off;
 	}
 
 	f->pos = (off_t)idx;

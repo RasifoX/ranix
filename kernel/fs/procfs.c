@@ -364,8 +364,9 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 	if (idx >= PID_FILES_N) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	out->ino  = 0x8000 + (uint64_t)pid * 100 + idx;
-	out->mode = S_IFREG | 0444;
+	out->ino      = 0x8000 + (uint64_t)pid * 100 + idx;
+	out->mode     = S_IFREG | 0444;
+	out->next_off = idx + 1;
 	int nlen = 0; const char *n = pid_files[idx].name;
 	while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -439,8 +440,9 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 
 	/* static files first */
 	if (idx < ROOT_FILES_N) {
-		out->ino  = 0x8000 + idx;
-		out->mode = S_IFREG | 0444;
+		out->ino      = 0x8000 + idx;
+		out->mode     = S_IFREG | 0444;
+		out->next_off = idx + 1;
 		const char *n = root_files[idx].name;
 		int nlen = 0; while (n[nlen]) nlen++;
 		memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -450,8 +452,9 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 
 	/* "self" entry */
 	if (idx == 0) {
-		out->ino  = 0x7fff;
-		out->mode = S_IFDIR | 0555;
+		out->ino      = 0x7fff;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 1;
 		out->name[0] = 's'; out->name[1] = 'e'; out->name[2] = 'l';
 		out->name[3] = 'f'; out->name[4] = '\0';
 		return 0;
@@ -462,8 +465,9 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	if ((int)idx >= n_proc) return -1;
 	process_t *p = task_get((int)idx);
 	if (!p) return -1;
-	out->ino  = 0x8000 + (uint64_t)p->pid * 100 + 50;
-	out->mode = S_IFDIR | 0555;
+	out->ino      = 0x8000 + (uint64_t)p->pid * 100 + 50;
+	out->mode     = S_IFDIR | 0555;
+	out->next_off = ROOT_FILES_N + 1 + idx + 1;
 	/* write decimal pid into name */
 	char tmp[16]; int ti = 0;
 	uint32_t pid = p->pid;
