@@ -201,8 +201,13 @@ static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
 		memcpy(buf, fs->cache_buf, fs->block_size);
 		return 0;
 	}
+	kprintf("[ext2] sd read blk=%u\n", blkno);
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
-	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
+	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) {
+		kprintf("[ext2] sd read FAILED blk=%u\n", blkno);
+		return -1;
+	}
+	kprintf("[ext2] sd read OK blk=%u\n", blkno);
 	/* update cache */
 	if (!fs->cache_buf) fs->cache_buf = buddy_alloc(0);
 	if (fs->cache_buf) {
