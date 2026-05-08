@@ -37,6 +37,7 @@ typedef struct {
     uint64_t ino;
     char     name[256];
     mode_t   mode;
+    uint32_t next_off; /* opaque cursor for next readdir call */
 } vfs_dirent_t;
 
 /* ── file stat ───────────────────────────────────────────── */
