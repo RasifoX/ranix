@@ -3,6 +3,7 @@
 #include <kernel/tty/fb_tty.h>
 #include <kernel/elf.h>
 #include <kernel/kprintf.h>
+#include <kernel/mm/heap.h>
 #include <kernel/irq.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
@@ -538,6 +539,10 @@ void task_exit(void)
 	process_t *p = task_current();
 	p->state = PROC_DEAD;
 
+	/* Steal vm/fds pointers under lock so we own them for teardown */
+	vm_space_t *dying_vm   = p->vm;   p->vm  = NULL;
+	fd_table_t *dying_fds  = p->fds;  p->fds = NULL;
+
 	if (p->vfork_parent >= 0) {
 		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
 		if (pp && pp->state == PROC_SLEEPING) {
@@ -559,6 +564,14 @@ void task_exit(void)
 	}
 
 	spin_unlock_irq(&sched_lock, f);
+
+	/* Free resources outside the scheduler lock */
+	if (dying_fds) fd_table_destroy(dying_fds);
+	if (dying_vm)  vm_destroy(dying_vm);
+	/* Free VMA list */
+	vma_t *v = p->vmas; p->vmas = NULL;
+	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
+
 	arch_yield();
 }
 
