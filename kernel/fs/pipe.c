@@ -33,6 +33,10 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 break; /* EOF */
             }
+            if (file->flags & O_NONBLOCK) {
+                spin_unlock_irq(&pipe->lock, f);
+                return read ? (ssize_t)read : -11; /* EAGAIN */
+            }
             spin_unlock_irq(&pipe->lock, f);
             sleep_on(&pipe->rd_wait);
             continue;
@@ -67,6 +71,10 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
 
         uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
         if (free == 0) {
+            if (file->flags & O_NONBLOCK) {
+                spin_unlock_irq(&pipe->lock, f);
+                return written ? (ssize_t)written : -11; /* EAGAIN */
+            }
             spin_unlock_irq(&pipe->lock, f);
             sleep_on(&pipe->wr_wait);
             continue;
