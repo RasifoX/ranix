@@ -659,7 +659,8 @@ void signal_dispatch(arch_context_t *tf)
 	/* SIG_DFL = 0 or NULL */
 	if (!handler) {
 		if (sig_default_kill(sig)) {
-			p->exit_code = sig;
+			p->exit_code      = sig;
+			p->killed_by_sig  = 1;
 			task_exit();
 		}
 		return;
