@@ -39,12 +39,22 @@ vm_space_t *vm_create(void)
 		}
 	}
 
+	vs->refcount = 1;
+	return vs;
+}
+
+vm_space_t *vm_get(vm_space_t *vs)
+{
+	if (vs) vs->refcount++;
 	return vs;
 }
 
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
+	if (vs->refcount > 1) { vs->refcount--; return; }
+	/* refcount == 1 (or 0): proceed with full teardown */
+	vs->refcount = 0;
 	uint64_t *l1 = vs->root;
 
 	/* We only walk index 0 (user space) to avoid touching shared kernel tables */
@@ -255,5 +265,6 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	/* Flush TLB to ensure RO takes effect on the parent too */
 	__asm__ volatile("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
 
+	new_vs->refcount = 1;
 	return new_vs;
 }

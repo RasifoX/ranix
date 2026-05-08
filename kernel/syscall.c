@@ -1622,7 +1622,22 @@ void syscall_handle(arch_context_t *ctx)
 #endif
 	case SYS_ARCH_CLONE: {
 		uint64_t flags = (uint64_t)arg0;
-		ret = (flags & 0x4000) ? sys_vfork() : sys_fork();
+#define CLONE_VM       0x00000100
+#define CLONE_THREAD   0x00010000
+#define CLONE_SETTLS   0x00080000
+#define CLONE_CTID     0x00200000 /* CLONE_CHILD_CLEARTID */
+#define CLONE_VFORK    0x00004000
+		if (flags & CLONE_VM) {
+			/* Thread: share address space */
+			uint64_t newsp  = (uint64_t)arg1;
+			uint32_t *ctid  = (flags & CLONE_CTID) ? (uint32_t*)arg3 : NULL;
+			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg4 : 0;
+			ret = (long)proc_clone_thread(newsp, tls, ctid);
+		} else if (flags & CLONE_VFORK) {
+			ret = sys_vfork();
+		} else {
+			ret = sys_fork();
+		}
 		break;
 	}
 	case SYS_ARCH_EXECVE: ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;

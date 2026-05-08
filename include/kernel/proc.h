@@ -104,6 +104,7 @@ pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
 pid_t      proc_fork(void);
 pid_t      proc_vfork(void);
+pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);
 
