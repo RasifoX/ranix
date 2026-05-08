@@ -124,5 +124,7 @@ typedef struct {
 #define SYS_ARCH_GETPGID      121
 #define SYS_ARCH_ARCH_PRCTL   158
 #define SYS_ARCH_PRLIMIT64    302
+#define SYS_ARCH_FUTEX        202
+#define SYS_ARCH_TGKILL       234
 
 #endif

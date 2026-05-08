@@ -50,39 +50,43 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
 	return (void *)(vaddr + offset);
 }
 
+#define USER_STACK_TOP  0x800000UL
+#define MAX_STACK_SIZE  (256 * PAGE_SIZE)  /* 1 MB */
+
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
-	if (!is_write) return -1;
-	
 	vaddr &= PAGE_MASK;
 	process_t *p = task_current();
 	if (!p || !p->vm) return -1;
 
-	/* Find physical address. 
-	 * Note: This assumes vm_map can be used to re-map.
-	 * We need a way to get the physical address of a virtual address.
-	 * Let's add arch_vm_get_paddr. */
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	uint64_t paddr = arch_vm_get_paddr(p->vm->root, vaddr);
-	if (!paddr) return -1;
 
+	/* No mapping — check if this is a stack expansion */
+	if (!paddr) {
+		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
+			void *pg = buddy_alloc(0);
+			if (!pg) return -1;
+			memset(pg, 0, PAGE_SIZE);
+			vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
+			return 0;
+		}
+		return -1;
+	}
+
+	if (!is_write) return -1;
+
+	/* Permission fault on a mapped page — COW */
 	page_t *pg = paddr_to_page(paddr);
 	if (!pg) return -1;
 
 	if (pg->refcount > 1) {
-		/* COW: Duplicate the page */
 		void *new_p = pmm_alloc();
 		if (!new_p) return -1;
-		
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
-		
-		/* Map new page as Writable */
 		vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE);
-		
-		/* Release old page reference */
 		pmm_free((void *)paddr);
 	} else {
-		/* Refcount == 1: Just mark as Writable */
 		vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 	}
 

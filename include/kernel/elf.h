@@ -50,6 +50,15 @@ typedef struct {
 #define ELF_PF_W  0x2
 #define ELF_PF_R  0x4
 
-int elf_load(vm_space_t *vm, const void *data, size_t len, uint64_t *entry_out, uint64_t *load_end_out);
+typedef struct {
+	uint64_t entry;
+	uint64_t load_end;
+	uint64_t phdr_va;    /* AT_PHDR: virtual address of program headers */
+	uint64_t load_bias;  /* 0 for ET_EXEC; base for ET_DYN */
+	uint16_t phnum;
+	uint16_t phentsize;
+} elf_info_t;
+
+int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *info);
 
 #endif
