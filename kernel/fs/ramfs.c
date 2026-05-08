@@ -70,17 +70,19 @@ static ssize_t ramfs_write(vfs_file_t *f, const void *buf, size_t len)
 	if (end > rf->capacity) {
 		/* grow: round up to next page boundary */
 		uint64_t newcap = (end + 4095) & ~4095ULL;
-		int order = 0;
-		while (((uint64_t)4096 << order) < newcap) order++;
-		uint8_t *newbuf = buddy_alloc(order);
+		int new_order = 0;
+		while (((uint64_t)4096 << new_order) < newcap) new_order++;
+		uint8_t *newbuf = buddy_alloc(new_order);
 		if (!newbuf) return -1;
-		memset(newbuf, 0, (size_t)((uint64_t)4096 << order));
+		memset(newbuf, 0, (size_t)((uint64_t)4096 << new_order));
 		if (rf->data) {
 			memcpy(newbuf, rf->data, rf->size);
-			buddy_free((uint64_t)rf->data, order > 0 ? order - 1 : 0);
+			int old_order = 0;
+			while (((uint64_t)4096 << old_order) < rf->capacity) old_order++;
+			buddy_free((uint64_t)rf->data, old_order);
 		}
 		rf->data     = newbuf;
-		rf->capacity = (uint64_t)4096 << order;
+		rf->capacity = (uint64_t)4096 << new_order;
 	}
 
 	memcpy(rf->data + f->pos, buf, len);

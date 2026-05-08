@@ -127,24 +127,39 @@ static int tty_poll(vfs_file_t *f)
 
 static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
-	(void)f; (void)arg;
+	(void)f;
 #define TCGETS   0x5401
 #define TCSETS   0x5402
 #define TCSETSW  0x5403
+#define TCSETSF  0x5404
 #define TIOCGWINSZ 0x5413
 #define TIOCGPGRP  0x540f
+#define TIOCSPGRP  0x5410
 	switch (cmd) {
-	case TCGETS: case TCSETS: case TCSETSW: return 0;
+	case TCSETS: case TCSETSW: case TCSETSF: return 0;
+	case TCGETS: {
+		uint8_t termios[60];
+		memset(termios, 0, sizeof(termios));
+		/* c_oflag offset 4: OPOST|ONLCR */
+		((uint32_t *)termios)[1] = 0x5;
+		/* c_cflag offset 8: CS8|CREAD|CLOCAL|B38400 */
+		((uint32_t *)termios)[2] = 0xBF;
+		/* c_lflag offset 12: ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN */
+		((uint32_t *)termios)[3] = 0x8A3B;
+		memcpy((void *)(uintptr_t)arg, termios, sizeof(termios));
+		return 0;
+	}
 	case TIOCGWINSZ: {
-		uint16_t *ws = (uint16_t *)(uintptr_t)arg;
-		if (ws) { ws[0] = 24; ws[1] = 80; ws[2] = 0; ws[3] = 0; }
+		uint16_t ws[4] = {24, 80, 0, 0};
+		memcpy((void *)(uintptr_t)arg, ws, sizeof(ws));
 		return 0;
 	}
 	case TIOCGPGRP: {
-		int *pg = (int *)(uintptr_t)arg;
-		if (pg) *pg = 1;
+		int pgid = 1;
+		memcpy((void *)(uintptr_t)arg, &pgid, sizeof(pgid));
 		return 0;
 	}
+	case TIOCSPGRP: return 0;
 	default: return -25; /* ENOTTY */
 	}
 }

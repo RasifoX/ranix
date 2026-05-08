@@ -412,9 +412,13 @@ off_t vfs_seek(int fd, off_t off, int whence)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f) return -1;
+	if (!f) return -9; /* EBADF */
 
-	if (f->inode->fops->seek)
+	/* pipes and character devices are not seekable */
+	if (f->inode && (f->inode->mode & 0170000) == 0010000) return -29; /* ESPIPE: S_IFIFO */
+	if (f->inode && (f->inode->mode & 0170000) == 0020000) return -29; /* ESPIPE: S_IFCHR */
+
+	if (f->inode->fops && f->inode->fops->seek)
 		return f->inode->fops->seek(f, off, whence);
 
 	off_t newpos;
