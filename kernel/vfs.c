@@ -394,7 +394,8 @@ ssize_t vfs_read(int fd, void *buf, size_t len)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f || !f->inode->fops->read) return -1;
+	if (!f) return -9; /* EBADF */
+	if (!f->inode->fops || !f->inode->fops->read) return -22; /* EINVAL */
 	return f->inode->fops->read(f, buf, len);
 }
 
@@ -402,7 +403,8 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f || !f->inode->fops->write) return -1;
+	if (!f) return -9; /* EBADF */
+	if (!f->inode->fops || !f->inode->fops->write) return -22; /* EINVAL */
 	return f->inode->fops->write(f, buf, len);
 }
 
