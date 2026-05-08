@@ -304,8 +304,7 @@ static long sys_close(int fd)
 
 static long sys_lseek(int fd, off_t off, int whence)
 {
-	off_t r = vfs_seek(fd, off, whence);
-	return r < 0 ? -29 : (long)r;
+	return (long)vfs_seek(fd, off, whence);
 }
 
 static long sys_fstat(int fd, linux_stat_t *st)
@@ -493,8 +492,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	kpath[i] = '\0';
 
 	/* copy argv/envp strings to kernel before VM switch */
-#define EXEC_MAXARGS 32
-#define EXEC_MAXSTRTOTAL 4096
+#define EXEC_MAXARGS 64
+#define EXEC_MAXSTRTOTAL 16384
 	int argc = 0, envc = 0;
 	char *kstrs = kmalloc(EXEC_MAXSTRTOTAL);
 	char *kargv[EXEC_MAXARGS + 1];
@@ -822,7 +821,9 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 			if (child) {
 				child->reaped = 1;
 				if (status && (uint64_t)status > 0x1000)
-					*status = (child->exit_code & 0xFF) << 8;
+					*status = child->killed_by_sig
+					        ? (child->exit_code & 0x7F)
+					        : (child->exit_code & 0xFF) << 8;
 				return (long)child->pid;
 			}
 			if (!any_alive) return -10; /* ECHILD */
@@ -907,8 +908,16 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 }
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
-	(void)pid; (void)resource;
-	if (old_limit) { uint64_t limits[2] = { 8192 * 1024, 8192 * 1024 }; memcpy(old_limit, limits, 16); }
+	(void)pid; (void)new_limit;
+	if (old_limit) {
+		uint64_t limits[2];
+		switch (resource) {
+		case 3:  /* RLIMIT_STACK  */ limits[0] = limits[1] = 8UL << 20; break;
+		case 7:  /* RLIMIT_NOFILE */ limits[0] = limits[1] = 1024; break;
+		default: limits[0] = limits[1] = (uint64_t)-1; break; /* RLIM_INFINITY */
+		}
+		copy_to_user(old_limit, limits, 16);
+	}
 	return 0;
 }
 

@@ -65,6 +65,7 @@ typedef struct process {
 	uid_t           uid;
 	gid_t           gid;
 	int             exit_code;
+	int             killed_by_sig; /* non-zero if exited due to signal */
 
 	/* ── open files ──────────────────────────── */
 	fd_table_t     *fds;
