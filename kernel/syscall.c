@@ -329,6 +329,8 @@ static long sys_fstat(int fd, linux_stat_t *st)
 	if (f->inode->iops && f->inode->iops->stat)
 		f->inode->iops->stat(f->inode, &vs);
 
+	st->st_dev     = 1;  /* single root device */
+	st->st_rdev    = vs.rdev;
 	st->st_mode    = vs.mode;
 	st->st_ino     = vs.ino;
 	st->st_size    = (int64_t)vs.size;
@@ -991,6 +993,7 @@ static long sys_rmdir(const char *path)
 static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
 {
 	memset(st, 0, sizeof(*st));
+	st->st_dev     = 1;
 	st->st_mode    = vs->mode;
 	st->st_ino     = vs->ino;
 	st->st_size    = (int64_t)vs->size;
