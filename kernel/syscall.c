@@ -657,7 +657,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	PUSH_AUX(31, at_execfn_addr);           /* AT_EXECFN */
 	PUSH_AUX(25, at_random_addr);           /* AT_RANDOM */
 	PUSH_AUX(23, 0);                        /* AT_SECURE */
-	PUSH_AUX(17, 100);                      /* AT_CLKTCK */
+	PUSH_AUX(17, TIMER_HZ);                 /* AT_CLKTCK */
 #if defined(__aarch64__)
 	PUSH_AUX(16, 3);                        /* AT_HWCAP: FP + ASIMD */
 #else
