@@ -37,7 +37,16 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 - [x] Initial stack 2 sayfa → 8 sayfa (32KB), max 1MB otomatik büyüme
 - [x] `vm_unmap` fiziksel sayfayı serbest bırakıyor (bellek sızıntısı kapatıldı)
 
-### v0.16.4 — SMP (Symmetric Multiprocessing) Temeli
+### v0.16.4 — Bellek Verimliliği & Süreç Temizliği ✅ TAMAMLANDI
+- [x] Ext2: 1-blok cache → 16-girişli LRU block cache (EXT2_BCACHE_N=16) — SD okuma sayısı dramatik düşüş
+- [x] VFS: tüm küçük struct tahsisleri (vfs_inode_t, vfs_dentry_t, vfs_file_t, fd_table_t, pipe_t, priv'ler) buddy_alloc(4KB) → kmalloc/slab (~45 inode/sayfa yerine 1)
+- [x] pipe: son kapatmada spin_unlock eksikliği düzeltildi (lock tutularak free ediliyordu)
+- [x] `task_exit`: VM ve fd tablosu process ölümünde hemen serbest bırakılıyor (reap'e kadar sızıyor değil)
+- [x] VMA takibi: `sys_mmap`, `sys_execve` → `process_t->vmas` dolduruluyor; `/proc/[pid]/maps` çalışıyor
+- [x] `sys_munmap`: VMA listesini temizliyor
+- [x] Thread desteği (`proc_clone_thread`, CLONE_VM): VM refcount ile güvenli paylaşım
+
+### v0.16.5 — SMP (Symmetric Multiprocessing) Temeli
 **Hedef:** RPi4'ün 4 çekirdeğini ve QEMU'nun `-smp N` bayrağını kullanmaya başlamak.
 
 - [ ] Atomik primitifler — AArch64 LDXR/STXR ve x86_64 LOCK prefix ile CAS ve fetch-add
@@ -50,7 +59,7 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 ## v0.17 Serisi — POSIX Olgunluk & Kullanılabilirlik
 
 ### v0.17.0 — Gelişmiş Süreç Yönetimi
-- [ ] Thread desteği (`sys_clone` CLONE_VM+CLONE_THREAD) — musl pthreads için
+- [x] Thread desteği (`sys_clone` CLONE_VM+CLONE_THREAD, `proc_clone_thread`) — musl pthreads için
 - [ ] Tam POSIX sinyalleri — `SIGTERM`, `SIGSEGV`, `SIGCHLD` ve `sigaction` semantiği
 - [ ] `waitpid` semantiği — `WNOHANG`, `WUNTRACED`, `WIFEXITED`, `WIFSIGNALED`
 - [ ] Session ve process group yönetimi — `setsid`, `setpgid`, terminal I/O
