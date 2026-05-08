@@ -11,14 +11,16 @@
 #define VM_DEVICE  (1 << 5)
 
 typedef struct {
-	uint64_t *root;   /* physical address of top-level page table */
+	uint64_t *root;     /* physical address of top-level page table */
+	uint32_t  refcount; /* number of processes/threads sharing this space */
 } vm_space_t;
 
 extern vm_space_t *kernel_vm_space;
 
 vm_space_t *vm_create(void);
 vm_space_t *vm_copy(vm_space_t *vs);
-void        vm_destroy(vm_space_t *vs);
+vm_space_t *vm_get(vm_space_t *vs);   /* increment refcount */
+void        vm_destroy(vm_space_t *vs); /* decrement refcount; free when 0 */
 int         vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 void        vm_unmap(vm_space_t *vs, uint64_t vaddr);
 void        vm_activate(void);
