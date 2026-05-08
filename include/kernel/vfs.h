@@ -17,12 +17,14 @@
 #define S_ISFIFO(m) (((m) & 0xF000) == S_IFIFO)
 #define S_ISLNK(m)  (((m) & 0xF000) == S_IFLNK)
 
-#define O_RDONLY   0x0
-#define O_WRONLY   0x1
-#define O_RDWR     0x2
-#define O_CREAT    0x40
-#define O_TRUNC    0x200
-#define O_APPEND   0x400
+#define O_RDONLY    0x0
+#define O_WRONLY    0x1
+#define O_RDWR      0x2
+#define O_CREAT     0x40
+#define O_TRUNC     0x200
+#define O_APPEND    0x400
+#define O_NONBLOCK  0x800
+#define O_CLOEXEC   0x80000
 
 #define SEEK_SET   0
 #define SEEK_CUR   1
