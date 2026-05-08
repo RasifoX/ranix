@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/block.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -177,9 +178,17 @@ typedef struct __attribute__((packed)) {
 
 /* ── filesystem metadata ─────────────────────────────────────── */
 
+#define EXT2_BCACHE_N  16   /* LRU block cache entries per fs */
+
+typedef struct {
+	uint32_t blkno;   /* (uint32_t)-1 = empty */
+	uint8_t *buf;     /* NULL until slot first allocated */
+	uint32_t lru_ts;  /* monotonically increasing access stamp */
+} bcache_entry_t;
+
 typedef struct {
 	block_device_t *bdev;
-	uint32_t        block_size;    /* bytes per block */
+	uint32_t        block_size;
 	uint32_t        sectors_per_block;
 	uint32_t        blocks_per_group;
 	uint32_t        inodes_per_group;
@@ -187,9 +196,9 @@ typedef struct {
 	uint32_t        first_data_block;
 	uint32_t        total_inodes;
 	uint16_t        desc_size;
-	/* 1-block read cache — avoids re-reading same block on consecutive readdir calls */
-	uint32_t        cache_blk_no;  /* UINT32_MAX = invalid */
-	uint8_t        *cache_buf;     /* NULL until first use */
+	/* LRU block cache */
+	bcache_entry_t  cache[EXT2_BCACHE_N];
+	uint32_t        cache_clock;
 } ext2_fs_t;
 
 /* ── block I/O helpers ───────────────────────────────────────── */
@@ -197,17 +206,41 @@ typedef struct {
 static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
 {
 	if (blkno == 0) { memset(buf, 0, fs->block_size); return 0; }
-	if (fs->cache_blk_no == blkno && fs->cache_buf) {
-		memcpy(buf, fs->cache_buf, fs->block_size);
-		return 0;
+
+	/* search cache */
+	for (int i = 0; i < EXT2_BCACHE_N; i++) {
+		if (fs->cache[i].blkno == blkno && fs->cache[i].buf) {
+			fs->cache[i].lru_ts = ++fs->cache_clock;
+			memcpy(buf, fs->cache[i].buf, fs->block_size);
+			return 0;
+		}
 	}
+
+	/* read from device */
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
 	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
-	/* update cache */
-	if (!fs->cache_buf) fs->cache_buf = buddy_alloc(0);
-	if (fs->cache_buf) {
-		memcpy(fs->cache_buf, buf, fs->block_size);
-		fs->cache_blk_no = blkno;
+
+	/* find victim: prefer empty slot, else oldest */
+	int victim = 0;
+	uint32_t oldest = (uint32_t)-1;
+	for (int i = 0; i < EXT2_BCACHE_N; i++) {
+		if (!fs->cache[i].buf || fs->cache[i].blkno == (uint32_t)-1) {
+			victim = i;
+			oldest = 0;
+			break;
+		}
+		if (fs->cache[i].lru_ts < oldest) {
+			oldest = fs->cache[i].lru_ts;
+			victim = i;
+		}
+	}
+
+	if (!fs->cache[victim].buf)
+		fs->cache[victim].buf = buddy_alloc(0);
+	if (fs->cache[victim].buf) {
+		memcpy(fs->cache[victim].buf, buf, fs->block_size);
+		fs->cache[victim].blkno  = blkno;
+		fs->cache[victim].lru_ts = ++fs->cache_clock;
 	}
 	return 0;
 }
@@ -358,12 +391,12 @@ static vfs_iops_t ext2_iops;
 
 static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *raw)
 {
-	vfs_inode_t *vi = buddy_alloc(0);
+	vfs_inode_t *vi = kmalloc(sizeof(*vi));
 	if (!vi) return NULL;
 	memset(vi, 0, sizeof(*vi));
 
-	ext2_inode_priv_t *priv = buddy_alloc(0);
-	if (!priv) { buddy_free((uint64_t)vi, 0); return NULL; }
+	ext2_inode_priv_t *priv = kmalloc(sizeof(*priv));
+	if (!priv) { kfree(vi); return NULL; }
 	priv->fs  = fs;
 	priv->ino = ino;
 	memcpy(&priv->raw, raw, sizeof(*raw));
@@ -622,8 +655,12 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	fs->first_data_block  = sb->s_first_data_block;
 	fs->total_inodes      = sb->s_inodes_count;
 	fs->desc_size         = (sb->s_desc_size >= 32) ? sb->s_desc_size : 32;
-	fs->cache_blk_no      = (uint32_t)-1;
-	fs->cache_buf         = NULL;
+	fs->cache_clock = 0;
+	for (int i = 0; i < EXT2_BCACHE_N; i++) {
+		fs->cache[i].blkno  = (uint32_t)-1;
+		fs->cache[i].buf    = NULL;
+		fs->cache[i].lru_ts = 0;
+	}
 
 	kprintf("[ext2] bs=%u ino_sz=%u groups=%u/%u\n",
 	        bs, fs->inode_size,
@@ -643,7 +680,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	if (!root_vi) return -1;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_vi);
-	if (!root_dentry) { buddy_free((uint64_t)root_vi->priv, 0); buddy_free((uint64_t)root_vi, 0); return -1; }
+	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); return -1; }
 
 	mnt->root = root_dentry;
 	kprintf("[ext2] mounted (ino root=%u)\n", EXT2_ROOT_INO);

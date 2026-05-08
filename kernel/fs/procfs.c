@@ -2,6 +2,7 @@
 #include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -323,7 +324,7 @@ static uint64_t proc_ino_next = 0x8000;
 
 static vfs_inode_t *procfs_inode_file(int pid, int type)
 {
-	vfs_inode_t *in = buddy_alloc(0);
+	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino     = proc_ino_next++;
@@ -332,8 +333,8 @@ static vfs_inode_t *procfs_inode_file(int pid, int type)
 	in->refcount= 1;
 	in->fops    = &procfs_fops;
 
-	procfs_inode_priv_t *pr = buddy_alloc(0);
-	if (!pr) { buddy_free((uint64_t)in, 0); return NULL; }
+	procfs_inode_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
 	memset(pr, 0, sizeof(*pr));
 	pr->pid  = pid;
 	pr->type = type;
@@ -390,7 +391,7 @@ static vfs_iops_t procfs_piddir_iops = {
 
 static vfs_inode_t *procfs_piddir_inode(int pid)
 {
-	vfs_inode_t *in = buddy_alloc(0);
+	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino     = 0x8000 + (uint64_t)pid * 100 + 50;
@@ -400,8 +401,8 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 	in->iops    = &procfs_piddir_iops;
 	in->fops    = &procfs_dir_fops;
 
-	procfs_piddir_priv_t *pp = buddy_alloc(0);
-	if (!pp) { buddy_free((uint64_t)in, 0); return NULL; }
+	procfs_piddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
 	pp->pid  = pid;
 	in->priv = pp;
 	return in;
@@ -498,7 +499,7 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 {
 	(void)data;
 
-	vfs_inode_t *root_inode = buddy_alloc(0);
+	vfs_inode_t *root_inode = kmalloc(sizeof(*root_inode));
 	if (!root_inode) return -1;
 	memset(root_inode, 0, sizeof(*root_inode));
 	root_inode->ino     = 1;
@@ -509,7 +510,7 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->fops    = &procfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
-	if (!root_dentry) { buddy_free((uint64_t)root_inode, 0); return -1; }
+	if (!root_dentry) { kfree(root_inode); return -1; }
 
 	mnt->root = root_dentry;
 	return 0;

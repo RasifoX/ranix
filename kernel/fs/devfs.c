@@ -1,5 +1,6 @@
 #include <kernel/vfs.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <drivers/serial/uart.h>
 #include <kernel/tty/fb_tty.h>
@@ -184,7 +185,7 @@ static uint64_t dev_ino_next = 0xd000;
 
 static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 {
-	vfs_inode_t *in = buddy_alloc(0);
+	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino     = dev_ino_next++;
@@ -243,7 +244,7 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 {
 	(void)data;
 
-	vfs_inode_t *root_inode = buddy_alloc(0);
+	vfs_inode_t *root_inode = kmalloc(sizeof(*root_inode));
 	if (!root_inode) return -1;
 	memset(root_inode, 0, sizeof(*root_inode));
 	root_inode->ino     = 1;
@@ -254,7 +255,7 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->fops    = &devfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
-	if (!root_dentry) { buddy_free((uint64_t)root_inode, 0); return -1; }
+	if (!root_dentry) { kfree(root_inode); return -1; }
 
 	mnt->root = root_dentry;
 	return 0;

@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -18,7 +19,7 @@ static spinlock_t vfs_lock = SPINLOCK_INIT;
 
 static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
 {
-	vfs_dentry_t *d = buddy_alloc(0);
+	vfs_dentry_t *d = kmalloc(sizeof(*d));
 	if (!d) return NULL;
 
 	int nlen = 0;
@@ -250,7 +251,7 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 
 fd_table_t *fd_table_create(void)
 {
-	fd_table_t *t = buddy_alloc(0);
+	fd_table_t *t = kmalloc(sizeof(*t));
 	if (!t) return NULL;
 	memset(t, 0, sizeof(*t));
 	return t;
@@ -264,11 +265,11 @@ void fd_table_destroy(fd_table_t *t)
 			vfs_file_t *f = t->files[i];
 			if (--f->refcount == 0) {
 				if (f->inode->fops->close) f->inode->fops->close(f);
-				buddy_free((uint64_t)f, 0);
+				kfree(f);
 			}
 		}
 	}
-	buddy_free((uint64_t)t, 0);
+	kfree(t);
 }
 
 fd_table_t *fd_table_copy(fd_table_t *old)
@@ -357,7 +358,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	if (!inode) return -1;
 	if (!inode->fops && !S_ISDIR(inode->mode)) return -1;
 
-	vfs_file_t *f = buddy_alloc(0);
+	vfs_file_t *f = kmalloc(sizeof(*f));
 	if (!f) return -1;
 	memset(f, 0, sizeof(*f));
 	f->inode    = inode;
@@ -365,12 +366,12 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	f->refcount = 0; /* incremented by fd_alloc */
 
 	if (inode->fops && inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
-		buddy_free((uint64_t)f, 0);
+		kfree(f);
 		return -1;
 	}
 
 	int fd = fd_alloc(p->fds, f);
-	if (fd < 0) buddy_free((uint64_t)f, 0);
+	if (fd < 0) kfree(f);
 	return fd;
 }
 
@@ -384,7 +385,7 @@ int vfs_close(int fd)
 	if (--f->refcount == 0) {
 		if (f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
-		buddy_free((uint64_t)f, 0);
+		kfree(f);
 	}
 	return 0;
 }

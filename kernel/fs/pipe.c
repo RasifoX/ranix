@@ -1,5 +1,6 @@
 #include <kernel/vfs.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/sched.h>
 #include <kernel/lib/string.h>
@@ -25,7 +26,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
 
     while (read < len) {
         uint64_t f = spin_lock_irq(&pipe->lock);
-        
+
         uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
         if (avail == 0) {
             if (pipe->writers == 0) {
@@ -96,9 +97,11 @@ static int pipe_close(vfs_file_t *file)
     wake_up(&pipe->wr_wait);
 
     if (pipe->readers == 0 && pipe->writers == 0) {
+        spin_unlock_irq(&pipe->lock, f);
         buddy_free((uint64_t)pipe->buffer, 0);
-        buddy_free((uint64_t)pipe, 0);
-        buddy_free((uint64_t)file->inode, 0);
+        vfs_inode_t *inode = file->inode;
+        kfree(pipe);
+        kfree(inode);
     } else {
         spin_unlock_irq(&pipe->lock, f);
     }
@@ -124,21 +127,21 @@ static vfs_fops_t pipe_fops = {
 
 int vfs_pipe(int pipefd[2])
 {
-    pipe_t *pipe = buddy_alloc(0);
+    pipe_t *pipe = kmalloc(sizeof(*pipe));
     if (!pipe) return -1;
     memset(pipe, 0, sizeof(*pipe));
     pipe->buffer = buddy_alloc(0);
-    if (!pipe->buffer) { buddy_free((uint64_t)pipe, 0); return -1; }
+    if (!pipe->buffer) { kfree(pipe); return -1; }
     pipe->readers = 1;
     pipe->writers = 1;
     pipe->lock = (spinlock_t)SPINLOCK_INIT;
     wait_queue_init(&pipe->rd_wait);
     wait_queue_init(&pipe->wr_wait);
 
-    vfs_inode_t *inode = buddy_alloc(0);
+    vfs_inode_t *inode = kmalloc(sizeof(*inode));
     if (!inode) {
         buddy_free((uint64_t)pipe->buffer, 0);
-        buddy_free((uint64_t)pipe, 0);
+        kfree(pipe);
         return -1;
     }
     memset(inode, 0, sizeof(*inode));
@@ -147,10 +150,14 @@ int vfs_pipe(int pipefd[2])
     inode->priv = pipe;
     inode->refcount = 2;
 
-    vfs_file_t *rf = buddy_alloc(0);
-    vfs_file_t *wf = buddy_alloc(0);
+    vfs_file_t *rf = kmalloc(sizeof(*rf));
+    vfs_file_t *wf = kmalloc(sizeof(*wf));
     if (!rf || !wf) {
-        /* cleanup ... */
+        kfree(rf);
+        kfree(wf);
+        buddy_free((uint64_t)pipe->buffer, 0);
+        kfree(pipe);
+        kfree(inode);
         return -1;
     }
 

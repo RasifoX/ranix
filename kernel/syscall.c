@@ -1614,6 +1614,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
 	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
 	case SYS_ARCH_GETPGRP:    ret = (long)task_current()->pid; break;
+	case SYS_ARCH_SET_ROBUST_LIST: ret = 0; break;
+	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_VFORK:  ret = sys_vfork(); break;
@@ -1671,9 +1673,11 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_ARCH_PRCTL: ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
 	case SYS_ARCH_FUTEX:  ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
 	case SYS_ARCH_TGKILL: ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
+	case SYS_ARCH_SET_ROBUST_LIST: ret = 0; break;
+	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
 #endif
 	default:
-		kprintf("[syscall] unknown #%ld\n", n);
+		ret = -38; /* ENOSYS */
 		break;
 	}
 
