@@ -187,6 +187,9 @@ typedef struct {
 	uint32_t        first_data_block;
 	uint32_t        total_inodes;
 	uint16_t        desc_size;
+	/* 1-block read cache — avoids re-reading same block on consecutive readdir calls */
+	uint32_t        cache_blk_no;  /* UINT32_MAX = invalid */
+	uint8_t        *cache_buf;     /* NULL until first use */
 } ext2_fs_t;
 
 /* ── block I/O helpers ───────────────────────────────────────── */
@@ -194,8 +197,19 @@ typedef struct {
 static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
 {
 	if (blkno == 0) { memset(buf, 0, fs->block_size); return 0; }
+	if (fs->cache_blk_no == blkno && fs->cache_buf) {
+		memcpy(buf, fs->cache_buf, fs->block_size);
+		return 0;
+	}
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
-	return fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block);
+	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
+	/* update cache */
+	if (!fs->cache_buf) fs->cache_buf = buddy_alloc(0);
+	if (fs->cache_buf) {
+		memcpy(fs->cache_buf, buf, fs->block_size);
+		fs->cache_blk_no = blkno;
+	}
+	return 0;
 }
 
 /* ── inode lookup ────────────────────────────────────────────── */
@@ -604,6 +618,8 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	fs->first_data_block  = sb->s_first_data_block;
 	fs->total_inodes      = sb->s_inodes_count;
 	fs->desc_size         = (sb->s_desc_size >= 32) ? sb->s_desc_size : 32;
+	fs->cache_blk_no      = (uint32_t)-1;
+	fs->cache_buf         = NULL;
 
 	kprintf("[ext2] bs=%u ino_sz=%u groups=%u/%u\n",
 	        bs, fs->inode_size,
