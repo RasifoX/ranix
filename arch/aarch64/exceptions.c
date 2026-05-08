@@ -1,6 +1,7 @@
     #include <arch/aarch64/exceptions.h>
     #include <kernel/kprintf.h>
     #include <kernel/proc.h>
+    #include <kernel/hal.h>
 
     extern void exception_vectors(void);
 
@@ -46,18 +47,26 @@
         uint32_t ec  = (uint32_t)(esr >> 26) & 0x3F;
         uint32_t iss = (uint32_t)(esr & 0x1FFFFFF);
 
-        if (ec == 0x24 || ec == 0x25) {
-            /* Data Abort (EL0 or EL1) */
+        if (ec == 0x20 || ec == 0x24 || ec == 0x25) {
             int is_write = (iss & (1 << 6)) != 0;
             uint32_t dfsc = iss & 0x3F;
-            
-            if (dfsc >= 0xC && dfsc <= 0xF) { /* Permission Fault (Level 0-3) */
+
+            /* Translation fault (0x04-0x07) or Permission fault (0x0C-0x0F) */
+            if ((dfsc >= 0x04 && dfsc <= 0x07) || (dfsc >= 0x0C && dfsc <= 0x0F)) {
                 if (vm_handle_fault(far, is_write) == 0)
-                    return; /* Fixed via COW! */
+                    return;
             }
         }
 
         process_t *p = task_current();
+
+        /* EL0 faults — kill the offending process instead of panicking */
+        if (ec == 0x20 || ec == 0x24) {
+            kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x\n",
+                    (int)p->pid, p->name, elr, far, ec);
+            task_exit();
+            __builtin_unreachable();
+        }
 
         kprintf("\n--- fault: pid=%d (%s) ---\n",
                 (int)p->pid, p->name);

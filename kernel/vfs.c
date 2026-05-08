@@ -102,20 +102,31 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		}
 
 		if (!child) {
-			/* ask the inode — pass null-terminated component, not full path */
 			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			vfs_inode_t *in = d->inode->iops->lookup(d->inode, tmp);
+			/* Release lock during I/O so timer/scheduler can run */
+			vfs_inode_t *dir_inode = d->inode;
+			spin_unlock_irq(&vfs_lock, f);
+			vfs_inode_t *in = dir_inode->iops->lookup(dir_inode, tmp);
+			f = spin_lock_irq(&vfs_lock);
 			if (!in) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			child = _dentry_create(d, tmp, in);
+			/* Re-check: another task may have added this dentry while unlocked */
+			child = d->child;
+			while (child) {
+				if (strcmp(child->name, tmp) == 0) break;
+				child = child->next;
+			}
 			if (!child) {
-				spin_unlock_irq(&vfs_lock, f);
-				return NULL;
+				child = _dentry_create(d, tmp, in);
+				if (!child) {
+					spin_unlock_irq(&vfs_lock, f);
+					return NULL;
+				}
 			}
 		}
 

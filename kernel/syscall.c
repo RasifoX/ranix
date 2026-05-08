@@ -9,6 +9,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <kernel/lib/string.h>
+#include <kernel/sync.h>
 #include <kernel/tty/fb_tty.h>
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
@@ -355,8 +356,18 @@ static long sys_getpid(void)
 static long sys_brk(uint64_t addr)
 {
 	process_t *p = task_current();
-	if (addr == 0 || addr <= p->brk) return (long)p->brk;
-	uint64_t new_brk = (addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+	if (addr == 0) return (long)p->brk;
+
+	uint64_t new_brk = (addr + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+	if (new_brk < p->brk) {
+		/* Shrink: free pages above new_brk */
+		for (uint64_t va = new_brk; va < p->brk; va += PAGE_SIZE)
+			vm_unmap(p->vm, va);
+		p->brk = new_brk;
+		return (long)new_brk;
+	}
+
 	for (uint64_t va = p->brk; va < new_brk; va += PAGE_SIZE) {
 		void *page = buddy_alloc(0);
 		if (!page) return (long)p->brk;
@@ -369,29 +380,62 @@ static long sys_brk(uint64_t addr)
 
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
-	(void)fd; (void)off;
-	if (!(flags & MAP_ANONYMOUS)) return -38;
-	if (len == 0)                 return -22;
+	if (len == 0) return -22;
 	process_t *p = task_current();
 	len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
 	uint64_t va;
-	if ((flags & MAP_FIXED) && addr) va = addr & ~(PAGE_SIZE - 1);
+	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	else { va = p->mmap_next; p->mmap_next += len; }
+
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
 	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
+
+	if (flags & MAP_ANONYMOUS) {
+		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+			void *pg = buddy_alloc(0);
+			if (!pg) return -12;
+			memset(pg, 0, PAGE_SIZE);
+			vm_map(p->vm, v, (uint64_t)pg, vmflags);
+		}
+		return (long)va;
+	}
+
+	/* File-backed mmap */
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f || !f->inode->fops->read) return -9;
+
+	uint64_t file_off = off;
 	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 		void *pg = buddy_alloc(0);
 		if (!pg) return -12;
 		memset(pg, 0, PAGE_SIZE);
+
+		/* read one page from file at current offset via a temporary file handle */
+		vfs_file_t tmp_f = *f;
+		tmp_f.pos = (off_t)file_off;
+		ssize_t nr = f->inode->fops->read(&tmp_f, pg, PAGE_SIZE);
+		(void)nr;
+		file_off += PAGE_SIZE;
+
 		vm_map(p->vm, v, (uint64_t)pg, vmflags);
+
+#if defined(__aarch64__)
+		if (prot & PROT_EXEC) {
+			uintptr_t pp = (uintptr_t)pg;
+			for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
+				__asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
+			__asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory");
+		}
+#endif
 	}
 	return (long)va;
 }
 
 #define USER_STACK_TOP_   0x800000UL
-#define USER_STACK_PAGES_ 2
+#define USER_STACK_PAGES_ 8
 #define USER_MMAP_BASE_   0x10000000UL
 
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
@@ -459,8 +503,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	vm_space_t *new_vm = vm_create();
 	if (!new_vm) { kfree(buf); return -12; }
 
-	uint64_t entry = 0, load_end = 0;
-	if (elf_load(new_vm, buf, (size_t)st.size, &entry, &load_end) != 0) {
+	elf_info_t ei = {0};
+	if (elf_load(new_vm, buf, (size_t)st.size, &ei) != 0) {
 		kfree(buf);
 		vm_destroy(new_vm);
 		return -8;
@@ -487,11 +531,13 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	p->name[nlen] = '\0';
 
-	/* switch to new address space */
+	/* switch to new address space, freeing the old one */
+	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
-	p->brk       = load_end;
+	p->brk       = ei.load_end;
 	p->mmap_next = USER_MMAP_BASE_;
 	arch_vm_switch((uint64_t)new_vm->root);
+	if (old_vm) vm_destroy(old_vm);
 
 	/* build SysV ABI initial stack */
 	uint64_t uargv[EXEC_MAXARGS + 1];
@@ -516,8 +562,59 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		kfree(kstrs);
 	}
 	sp &= ~15ULL;
-	/* AT_NULL auxv entry */
-	sp -= 16; ((uint64_t *)sp)[0] = 0; ((uint64_t *)sp)[1] = 0;
+
+	/* 16 pseudo-random bytes for AT_RANDOM */
+	sp -= 16;
+	{
+		extern volatile uint64_t kernel_ticks;
+		uint64_t rs = (uint64_t)(uintptr_t)p ^ kernel_ticks ^ ei.entry;
+		uint64_t *rp = (uint64_t *)sp;
+		rs = rs * 6364136223846793005ULL + 1442695040888963407ULL;
+		rp[0] = rs;
+		rs = rs * 6364136223846793005ULL + 1442695040888963407ULL;
+		rp[1] = rs;
+	}
+	uint64_t at_random_addr = sp;
+
+	/* execfn string */
+	{
+		int plen = 0; while (kpath[plen]) plen++;
+		sp -= (uint64_t)(plen + 1);
+		memcpy((void *)sp, kpath, (size_t)(plen + 1));
+	}
+	uint64_t at_execfn_addr = sp;
+
+	sp &= ~15ULL;
+
+/* push one auxv key/value pair (16 bytes each, stack grows down) */
+#define PUSH_AUX(k, v) do { \
+	sp -= 16; \
+	((uint64_t *)sp)[0] = (uint64_t)(k); \
+	((uint64_t *)sp)[1] = (uint64_t)(v); \
+} while (0)
+
+	PUSH_AUX(0,  0);                        /* AT_NULL */
+	PUSH_AUX(31, at_execfn_addr);           /* AT_EXECFN */
+	PUSH_AUX(25, at_random_addr);           /* AT_RANDOM */
+	PUSH_AUX(23, 0);                        /* AT_SECURE */
+	PUSH_AUX(17, 100);                      /* AT_CLKTCK */
+#if defined(__aarch64__)
+	PUSH_AUX(16, 3);                        /* AT_HWCAP: FP + ASIMD */
+#else
+	PUSH_AUX(16, 0);                        /* AT_HWCAP */
+#endif
+	PUSH_AUX(14, 0);                        /* AT_EGID */
+	PUSH_AUX(13, 0);                        /* AT_GID */
+	PUSH_AUX(12, 0);                        /* AT_EUID */
+	PUSH_AUX(11, 0);                        /* AT_UID */
+	PUSH_AUX(9,  ei.entry);                 /* AT_ENTRY */
+	PUSH_AUX(7,  0);                        /* AT_BASE (static: no interp) */
+	PUSH_AUX(6,  PAGE_SIZE);               /* AT_PAGESZ */
+	PUSH_AUX(5,  ei.phnum);                 /* AT_PHNUM */
+	PUSH_AUX(4,  ei.phentsize);             /* AT_PHENT */
+	PUSH_AUX(3,  ei.phdr_va);              /* AT_PHDR */
+#undef PUSH_AUX
+
 	/* envp[] */
 	sp -= 8; *(uint64_t *)sp = 0;
 	for (int j = envc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uenvp[j]; }
@@ -528,7 +625,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	sp -= 8; *(uint64_t *)sp = (uint64_t)argc;
 
 	/* reinitialise context frame */
-	arch_context_init_user(p->ctx, entry, sp);
+	arch_context_init_user(p->ctx, ei.entry, sp);
 
 	/* reset TLS */
 	p->tls_base = 0;
@@ -588,6 +685,14 @@ static long sys_kill(pid_t pid, int sig)
 	task_signal(p, sig);
 	return 0;
 }
+
+/* tgkill: simplified — thread groups not implemented, just route to kill */
+static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
+{
+	(void)tgid;
+	return sys_kill(tid, sig);
+}
+
 
 static long sys_pipe2(int *pipefd, int flags)
 {
@@ -678,7 +783,25 @@ static long sys_munmap(uint64_t addr, size_t len)
 	return 0;
 }
 
-static long sys_mprotect(uint64_t addr, size_t len, int prot) { (void)addr; (void)len; (void)prot; return 0; }
+static long sys_mprotect(uint64_t addr, size_t len, int prot)
+{
+	if (len == 0) return 0;
+	process_t *p = task_current();
+	addr &= ~(uint64_t)(PAGE_SIZE - 1);
+	len  = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+	uint32_t vmflags = VM_USER;
+	if (prot & PROT_READ)  vmflags |= VM_READ;
+	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
+	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
+
+	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+		uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
+		if (pa) vm_map(p->vm, va, pa, vmflags);
+	}
+	return 0;
+}
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
 	(void)pid; (void)resource;
@@ -1081,6 +1204,84 @@ static long sys_uname(linux_utsname_t *uts)
 typedef struct { int64_t tv_sec; int64_t tv_nsec; } linux_timespec_t;
 typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 
+/* ── futex ───────────────────────────────────────────────────── */
+
+#define FUTEX_WAIT         0
+#define FUTEX_WAKE         1
+#define FUTEX_PRIVATE_FLAG 128
+
+#define FUTEX_SLOTS 32
+static struct {
+	uint32_t  *uaddr;
+	process_t *waiter;
+} futex_table[FUTEX_SLOTS];
+static spinlock_t futex_lock = SPINLOCK_INIT;
+
+static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
+                      linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
+{
+	(void)uaddr2; (void)val3;
+	int cmd = op & ~FUTEX_PRIVATE_FLAG;
+
+	if (cmd == FUTEX_WAIT) {
+		uint64_t f = spin_lock_irq(&futex_lock);
+		uint32_t cur;
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) {
+			spin_unlock_irq(&futex_lock, f);
+			return -14;
+		}
+		if (cur != val) {
+			spin_unlock_irq(&futex_lock, f);
+			return -11; /* EAGAIN */
+		}
+		int slot = -1;
+		for (int i = 0; i < FUTEX_SLOTS; i++) {
+			if (!futex_table[i].waiter) { slot = i; break; }
+		}
+		if (slot < 0) { spin_unlock_irq(&futex_lock, f); return -11; }
+		futex_table[slot].uaddr  = uaddr;
+		futex_table[slot].waiter = task_current();
+		spin_unlock_irq(&futex_lock, f);
+
+		if (timeout) {
+			linux_timespec_t kts;
+			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
+				uint64_t end = kernel_ticks +
+				    (uint64_t)kts.tv_sec * TIMER_HZ +
+				    (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
+				while (futex_table[slot].waiter && kernel_ticks < end)
+					task_sleep();
+			}
+		} else {
+			while (futex_table[slot].waiter)
+				task_sleep();
+		}
+
+		f = spin_lock_irq(&futex_lock);
+		futex_table[slot].waiter = NULL;
+		futex_table[slot].uaddr  = NULL;
+		spin_unlock_irq(&futex_lock, f);
+		return 0;
+	}
+
+	if (cmd == FUTEX_WAKE) {
+		uint64_t f = spin_lock_irq(&futex_lock);
+		int woken = 0;
+		for (int i = 0; i < FUTEX_SLOTS && woken < (int)val; i++) {
+			if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
+				task_wake(futex_table[i].waiter);
+				futex_table[i].waiter = NULL;
+				futex_table[i].uaddr  = NULL;
+				woken++;
+			}
+		}
+		spin_unlock_irq(&futex_lock, f);
+		return woken;
+	}
+
+	return -38;
+}
+
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
 	(void)clkid;
@@ -1348,8 +1549,9 @@ void syscall_handle(arch_context_t *ctx)
 	long arg2 = (long)CTX_SYSCALL_ARG2(ctx);
 	long arg3 = (long)CTX_SYSCALL_ARG3(ctx);
 	long arg4 = (long)CTX_SYSCALL_ARG4(ctx);
+	long arg5 = (long)CTX_SYSCALL_ARG5(ctx);
 	long ret  = -38;
-	(void)arg4;
+	(void)arg5;
 
 	switch (n) {
 	/* ── I/O ─────────────────────────────────────────────── */
@@ -1388,7 +1590,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_PPOLL:    ret = sys_ppoll((linux_pollfd_t*)arg0, (uint64_t)arg1, (linux_timespec_t*)arg2, NULL); break;
 	/* ── memory ──────────────────────────────────────────── */
 	case SYS_ARCH_BRK:     ret = sys_brk((uint64_t)arg0); break;
-	case SYS_ARCH_MMAP:    ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, 0, 0); break;
+	case SYS_ARCH_MMAP:    ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, (int)arg4, (uint64_t)arg5); break;
 	case SYS_ARCH_MUNMAP:  ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MPROTECT: ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_PRLIMIT64: ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
@@ -1409,6 +1611,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
 	case SYS_ARCH_SET_TID_ADDR: ret = (long)task_current()->pid; break;
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
+	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
+	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
+	case SYS_ARCH_GETPGRP:    ret = (long)task_current()->pid; break;
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_VFORK:  ret = sys_vfork(); break;
@@ -1449,6 +1654,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_TRUNCATE: ret = sys_truncate((const char*)arg0, (off_t)arg1); break;
 	case SYS_ARCH_GETPGRP: ret = sys_getpgrp(); break;
 	case SYS_ARCH_ARCH_PRCTL: ret = sys_arch_prctl((int)arg0, (uint64_t)arg1); break;
+	case SYS_ARCH_FUTEX:  ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
+	case SYS_ARCH_TGKILL: ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
 #endif
 	default:
 		kprintf("[syscall] unknown #%ld\n", n);
