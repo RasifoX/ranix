@@ -1157,8 +1157,13 @@ static long sys_dup2(int oldfd, int newfd)
 
 static long sys_dup3(int oldfd, int newfd, int flags)
 {
-	(void)flags;
-	return sys_dup2(oldfd, newfd);
+	long r = sys_dup2(oldfd, newfd);
+	if (r >= 0 && (flags & O_CLOEXEC)) {
+		process_t *p = task_current();
+		vfs_file_t *f = fd_get(p->fds, newfd);
+		if (f) f->flags |= O_CLOEXEC;
+	}
+	return r;
 }
 
 #define F_DUPFD    0
@@ -1188,8 +1193,18 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 		}
 		return -24;
 	}
-	case F_GETFD: return 0;
-	case F_SETFD: return 0;
+	case F_GETFD: {
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f) return -9;
+		return (f->flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+	}
+	case F_SETFD: {
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f) return -9;
+		if (arg & FD_CLOEXEC) f->flags |= O_CLOEXEC;
+		else                  f->flags &= ~O_CLOEXEC;
+		return 0;
+	}
 	case F_GETFL: {
 		vfs_file_t *f = fd_get(p->fds, fd);
 		return f ? (long)f->flags : -9;
