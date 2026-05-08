@@ -568,6 +568,21 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	p->name[nlen] = '\0';
 
+	/* close O_CLOEXEC file descriptors before exec */
+	if (p->fds) {
+		for (int i = 3; i < FD_MAX; i++) {
+			vfs_file_t *xf = fd_get(p->fds, i);
+			if (xf && (xf->flags & O_CLOEXEC)) {
+				fd_free(p->fds, i);
+				if (--xf->refcount == 0) {
+					if (xf->inode->fops && xf->inode->fops->close)
+						xf->inode->fops->close(xf);
+					kfree(xf);
+				}
+			}
+		}
+	}
+
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);
 	vm_space_t *old_vm = p->vm;
@@ -759,9 +774,16 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 
 static long sys_pipe2(int *pipefd, int flags)
 {
-	(void)flags;
 	int kfds[2];
 	if (vfs_pipe(kfds) != 0) return -1;
+	/* propagate O_CLOEXEC and O_NONBLOCK to the file instances */
+	if (flags & (O_CLOEXEC | O_NONBLOCK)) {
+		process_t *p = task_current();
+		for (int i = 0; i < 2; i++) {
+			vfs_file_t *f = fd_get(p->fds, kfds[i]);
+			if (f) f->flags |= flags & (O_CLOEXEC | O_NONBLOCK);
+		}
+	}
 	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
 	return 0;
 }
