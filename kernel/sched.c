@@ -284,6 +284,21 @@ pid_t proc_fork(void)
 	memcpy(child->cwd, parent->cwd, 256);
 	child->umask = parent->umask;
 
+	/* copy VMA list */
+	{
+		vma_t **dst = &child->vmas;
+		for (vma_t *v = parent->vmas; v; v = v->next) {
+			vma_t *nv = kmalloc(sizeof(*nv));
+			if (!nv) goto fail;
+			*nv = *v; nv->next = NULL;
+			*dst = nv; dst = &nv->next;
+		}
+	}
+
+	/* copy signal actions */
+	memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
+	child->sig_mask = parent->sig_mask;
+
 	void *child_kstack_phys = buddy_alloc(1);
 	if (!child_kstack_phys) goto fail;
 	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
