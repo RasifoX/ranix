@@ -66,7 +66,8 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
 
         if (pipe->readers == 0) {
             spin_unlock_irq(&pipe->lock, f);
-            return -1; /* Broken pipe */
+            task_signal(task_current(), 13); /* SIGPIPE */
+            return -32; /* EPIPE */
         }
 
         uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
@@ -122,8 +123,12 @@ static int pipe_poll(vfs_file_t *file)
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
     uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
+    uint32_t free  = PIPE_BUF_SIZE - 1 - avail;
     spin_unlock_irq(&pipe->lock, f);
-    return avail > 0 ? 1 : 0;
+    int r = 0;
+    if (avail > 0) r |= 0x0001; /* POLLIN  */
+    if (free  > 0) r |= 0x0004; /* POLLOUT */
+    return r;
 }
 
 static vfs_fops_t pipe_fops = {
