@@ -1446,8 +1446,26 @@ static long sys_times(void *buf)
 static long sys_sysinfo(void *info)
 {
 	if (!info) return 0;
-	uint64_t zeros[12] = {0};
-	copy_to_user(info, zeros, sizeof(zeros));
+	/* struct sysinfo layout (Linux ABI) */
+	struct {
+		int64_t  uptime;
+		uint64_t loads[3];
+		uint64_t totalram;
+		uint64_t freeram;
+		uint64_t sharedram;
+		uint64_t bufferram;
+		uint64_t totalswap;
+		uint64_t freeswap;
+		uint16_t procs;
+		uint8_t  _pad[22];
+		uint32_t mem_unit;
+	} si = {0};
+	si.uptime    = (int64_t)(kernel_ticks / TIMER_HZ);
+	si.totalram  = buddy_total_pages() * PAGE_SIZE;
+	si.freeram   = buddy_free_pages()  * PAGE_SIZE;
+	si.procs     = (uint16_t)task_count();
+	si.mem_unit  = 1;
+	copy_to_user(info, &si, sizeof(si));
 	return 0;
 }
 
