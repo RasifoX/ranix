@@ -3,6 +3,7 @@
 #include <asm/idt.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/vm.h>
+#include <kernel/proc.h>
 
 void exceptions_init(void)
 {
@@ -35,8 +36,23 @@ void exc_dispatch(arch_context_t *ctx)
 	if (ctx->vector == 14) {
 		uint64_t cr2 = read_cr2();
 		int is_write = (ctx->error_code & (1 << 1)) != 0;
-		if (vm_handle_fault(cr2, is_write) == 0)
-			return;
+		int is_present = (ctx->error_code & (1 << 0)) != 0;
+		/* Handle both translation faults (not present) and permission faults (COW) */
+		if (!is_present || is_write) {
+			if (vm_handle_fault(cr2, is_write) == 0)
+				return;
+		}
+	}
+
+	/* Ring-3 fault — kill the process, don't panic the kernel */
+	if ((ctx->cs & 3) == 3) {
+		process_t *p = task_current();
+		kprintf("segfault: pid=%d (%s) RIP=0x%lx vec=%d\n",
+		        (int)p->pid, p->name, ctx->rip, (int)ctx->vector);
+		if (ctx->vector == 14)
+			kprintf("  CR2=0x%lx\n", read_cr2());
+		task_exit();
+		__builtin_unreachable();
 	}
 
 	kprintf("\n--- kernel fault ---\n");

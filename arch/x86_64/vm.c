@@ -150,8 +150,11 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	             ? (uint64_t *)(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL) : 0;
 	if (!pt) return;
 
+	uint64_t pte = pt[(vaddr >> 12) & 0x1FF];
 	pt[(vaddr >> 12) & 0x1FF] = 0;
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+	if ((pte & PTE_P) && (pte & PTE_U))
+		pmm_free((void *)(pte & ~0xFFFUL));
 }
 
 uint64_t arch_vm_get_paddr(uint64_t *pml4, uint64_t vaddr)

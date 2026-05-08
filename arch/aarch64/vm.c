@@ -149,6 +149,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	if (!(l2[l2i] & PTE_VALID)) return;
 	uint64_t *l3 = (uint64_t *)(l2[l2i] & ~0xFFFUL);
 
+	uint64_t pte = l3[l3i];
 	l3[l3i] = 0;
 	__asm__ volatile(
 		"dsb ishst\n"
@@ -157,6 +158,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		"isb\n"
 		:: "r"(vaddr >> 12)
 	);
+	/* Free the physical page if it was a user allocation */
+	if ((pte & PTE_VALID) && (pte & PTE_USER))
+		pmm_free((void *)(pte & ~0xFFFUL));
 }
 
 uint64_t arch_vm_get_paddr(uint64_t *l1, uint64_t vaddr)
