@@ -340,10 +340,33 @@ static long sys_fstat(int fd, linux_stat_t *st)
 	return 0;
 }
 
+static void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
+{
+	vma_t *v = kmalloc(sizeof(*v));
+	if (!v) return;
+	v->vaddr = vaddr;
+	v->size  = size;
+	v->flags = flags;
+	v->next  = p->vmas;
+	p->vmas  = v;
+}
+
+static void vma_free_all(process_t *p)
+{
+	vma_t *v = p->vmas;
+	while (v) {
+		vma_t *next = v->next;
+		kfree(v);
+		v = next;
+	}
+	p->vmas = NULL;
+}
+
 static long sys_exit(int code)
 {
 	process_t *p = task_current();
 	p->exit_code  = code;
+	vma_free_all(p);
 	task_exit();
 	return 0;
 }
@@ -400,6 +423,13 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			memset(pg, 0, PAGE_SIZE);
 			vm_map(p->vm, v, (uint64_t)pg, vmflags);
 		}
+		{
+			uint32_t vf = VMA_USER | VMA_ANON;
+			if (prot & PROT_READ)  vf |= VMA_READ;
+			if (prot & PROT_WRITE) vf |= VMA_WRITE;
+			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+			vma_add(p, va, len, vf);
+		}
 		return (long)va;
 	}
 
@@ -430,6 +460,13 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			__asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory");
 		}
 #endif
+	}
+	{
+		uint32_t vf = VMA_USER;
+		if (prot & PROT_READ)  vf |= VMA_READ;
+		if (prot & PROT_WRITE) vf |= VMA_WRITE;
+		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+		vma_add(p, va, len, vf);
 	}
 	return (long)va;
 }
@@ -532,12 +569,18 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	p->name[nlen] = '\0';
 
 	/* switch to new address space, freeing the old one */
+	vma_free_all(p);
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
 	p->brk       = ei.load_end;
 	p->mmap_next = USER_MMAP_BASE_;
 	arch_vm_switch((uint64_t)new_vm->root);
 	if (old_vm) vm_destroy(old_vm);
+
+	/* record initial VMAs */
+	vma_add(p, USER_STACK_TOP_ - USER_STACK_PAGES_ * PAGE_SIZE,
+	        USER_STACK_PAGES_ * PAGE_SIZE, VMA_USER | VMA_READ | VMA_WRITE);
+	vma_add(p, ei.load_bias, ei.load_end - ei.load_bias, VMA_USER | VMA_READ | VMA_EXEC);
 
 	/* build SysV ABI initial stack */
 	uint64_t uargv[EXEC_MAXARGS + 1];
@@ -780,6 +823,17 @@ static long sys_munmap(uint64_t addr, size_t len)
 	len           = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE)
 		vm_unmap(p->vm, va);
+	/* remove fully-covered VMAs */
+	vma_t **pp = &p->vmas;
+	while (*pp) {
+		vma_t *v = *pp;
+		if (v->vaddr >= addr && v->vaddr + v->size <= addr + len) {
+			*pp = v->next;
+			kfree(v);
+		} else {
+			pp = &v->next;
+		}
+	}
 	return 0;
 }
 
