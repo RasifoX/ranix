@@ -1,6 +1,7 @@
 #include <kernel/fs/ramfs.h>
 #include <kernel/vfs.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -35,7 +36,7 @@ static vfs_iops_t ramfs_iops;   /* forward declaration */
 
 static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 {
-	vfs_inode_t *in = buddy_alloc(0);
+	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino      = next_ino++;
@@ -135,14 +136,14 @@ static int ramfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	vfs_inode_t *in = ramfs_inode_alloc(mode | S_IFREG);
 	if (!in) return -1;
 
-	ramfs_file_t *rf = buddy_alloc(0);
-	if (!rf) { buddy_free((uint64_t)in, 0); return -1; }
+	ramfs_file_t *rf = kmalloc(sizeof(*rf));
+	if (!rf) { kfree(in); return -1; }
 	memset(rf, 0, sizeof(*rf));
 	in->priv = rf;
 	in->fops = &ramfs_fops;
 
-	ramfs_entry_t *ent = buddy_alloc(0);
-	if (!ent) { buddy_free((uint64_t)rf, 0); buddy_free((uint64_t)in, 0); return -1; }
+	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
+	if (!ent) { kfree(rf); kfree(in); return -1; }
 	int nlen = 0;
 	while (name[nlen] && nlen < 255) nlen++;
 	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
@@ -165,15 +166,15 @@ static int ramfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	vfs_inode_t *in = ramfs_inode_alloc(mode | S_IFDIR);
 	if (!in) return -1;
 
-	ramfs_dir_t *nrd = buddy_alloc(0);
-	if (!nrd) { buddy_free((uint64_t)in, 0); return -1; }
+	ramfs_dir_t *nrd = kmalloc(sizeof(*nrd));
+	if (!nrd) { kfree(in); return -1; }
 	memset(nrd, 0, sizeof(*nrd));
 	in->priv = nrd;
 	in->iops = &ramfs_iops;
 	in->fops = &ramfs_dir_fops;
 
-	ramfs_entry_t *ent = buddy_alloc(0);
-	if (!ent) { buddy_free((uint64_t)nrd, 0); buddy_free((uint64_t)in, 0); return -1; }
+	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
+	if (!ent) { kfree(nrd); kfree(in); return -1; }
 	int nlen = 0;
 	while (name[nlen] && nlen < 255) nlen++;
 	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
@@ -196,7 +197,7 @@ static int ramfs_unlink(vfs_inode_t *dir, const char *name)
 			*pp = e->next;
 			rd->count--;
 			dir->nlink--;
-			buddy_free((uint64_t)e, 0);
+			kfree(e);
 			return 0;
 		}
 		pp = &(*pp)->next;
@@ -272,8 +273,8 @@ int ramfs_mount(vfs_mount_t *mnt, void *data)
 	vfs_inode_t *root_inode = ramfs_inode_alloc(S_IFDIR | 0755);
 	if (!root_inode) return -1;
 
-	ramfs_dir_t *rd = buddy_alloc(0);
-	if (!rd) { buddy_free((uint64_t)root_inode, 0); return -1; }
+	ramfs_dir_t *rd = kmalloc(sizeof(*rd));
+	if (!rd) { kfree(root_inode); return -1; }
 	memset(rd, 0, sizeof(*rd));
 	root_inode->priv  = rd;
 	root_inode->iops  = &ramfs_iops;
