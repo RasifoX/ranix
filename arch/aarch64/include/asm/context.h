@@ -112,5 +112,6 @@ typedef struct {
 #define SYS_ARCH_TGKILL        131
 #define SYS_ARCH_GETPGRP       158
 #define SYS_ARCH_FORK          1079  /* not a real AArch64 syscall; clone handles it */
+#define SYS_ARCH_RT_SIGRETURN   139
 
 #endif
