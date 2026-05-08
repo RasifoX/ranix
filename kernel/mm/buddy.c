@@ -15,6 +15,7 @@ static uint64_t    _base;
 static uint64_t    _npages;
 
 static spinlock_t buddy_lock = SPINLOCK_INIT;
+static uint64_t  _free_pages;
 
 page_t *mem_map = NULL;
 
@@ -27,12 +28,8 @@ static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
 page_t *paddr_to_page(uint64_t p)
 {
-	/* No lock needed for simple map access usually, but for safety: */
-	uint64_t f = spin_lock_irq(&buddy_lock);
 	uint64_t idx = p >> PAGE_SHIFT;
-	page_t *res = (idx >= _npages) ? NULL : &mem_map[idx];
-	spin_unlock_irq(&buddy_lock, f);
-	return res;
+	return (idx >= _npages) ? NULL : &mem_map[idx];
 }
 
 uint64_t page_to_paddr(page_t *page)
@@ -74,9 +71,9 @@ void buddy_free(uint64_t addr, int ord)
 {
 	uint64_t f = spin_lock_irq(&buddy_lock);
 	uint64_t p = pidx(addr);
-	
-	/* Reset refcounts for the freed block */
+
 	uint64_t npg = 1ul << ord;
+	_free_pages += npg;
 	for (uint64_t i = 0; i < npg; i++) {
 		uint64_t idx = (addr + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
 		if (idx < _npages) mem_map[idx].refcount = 0;
@@ -123,9 +120,10 @@ void *buddy_alloc(int ord)
 	}
 
 	blk_order[p] = (uint8_t)ord;
-	
+
 	/* Initialize refcounts for allocated block */
 	uint64_t npg = 1ul << ord;
+	_free_pages -= npg;
 	for (uint64_t i = 0; i < npg; i++) {
 		uint64_t idx = (addr + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
 		if (idx < _npages) {
@@ -174,8 +172,9 @@ uint64_t buddy_init(uint64_t base, uint64_t limit)
 	free_bm   = (uint8_t *)PHYS_TO_VIRT(base + blk_order_sz);
 	mem_map   = (page_t *)PHYS_TO_VIRT(base + blk_order_sz + free_bm_sz);
 
-	_base   = 0;
-	_npages = total_pages;
+	_base       = 0;
+	_npages     = total_pages;
+	_free_pages = 0;
 
 	memset(free_list, 0, sizeof(free_list));
 	memset(blk_order, 0, blk_order_sz);
@@ -187,9 +186,9 @@ uint64_t buddy_init(uint64_t base, uint64_t limit)
 
 uint64_t buddy_free_pages(void)
 {
-	uint64_t n = 0;
-	for (uint64_t i = 0; i < _npages; i++)
-		if (bm_get(i)) n += 1ul << blk_order[i];
+	uint64_t f = spin_lock_irq(&buddy_lock);
+	uint64_t n = _free_pages;
+	spin_unlock_irq(&buddy_lock, f);
 	return n;
 }
 
