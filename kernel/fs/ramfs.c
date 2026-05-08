@@ -211,8 +211,9 @@ static int ramfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	ramfs_entry_t *e = rd->entries;
 	for (uint32_t i = 0; i < idx && e; i++) e = e->next;
 	if (!e) return -1;
-	out->ino  = e->inode->ino;
-	out->mode = e->inode->mode;
+	out->ino      = e->inode->ino;
+	out->mode     = e->inode->mode;
+	out->next_off = idx + 1;
 	int nlen = 0;
 	while (e->name[nlen] && nlen < 255) nlen++;
 	memcpy(out->name, e->name, nlen); out->name[nlen] = '\0';

@@ -464,6 +464,8 @@ static vfs_inode_t *ext2_lookup(vfs_inode_t *dir, const char *name)
 	return NULL;
 }
 
+/* idx is a byte offset into the directory data (0 = start).
+   out->next_off is set to the byte offset of the next entry. */
 static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	ext2_inode_priv_t *priv = dir->priv;
@@ -474,39 +476,39 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	uint8_t *blk = buddy_alloc(0);
 	if (!blk) return -1;
 
-	uint32_t count   = 0;
-	uint32_t log_blk = 0;
-	uint64_t off     = 0;
+	uint32_t byte_off = idx;
+	int loaded_blk = -1;
 
-	while (off < size) {
-		uint32_t phys = inode_map_block(fs, in, log_blk++);
-		if (read_block(fs, phys, blk) != 0) break;
+	while ((uint64_t)byte_off < size) {
+		uint32_t log_blk = byte_off / fs->block_size;
+		uint32_t blk_off = byte_off % fs->block_size;
 
-		uint32_t blk_off = 0;
-		while (blk_off < fs->block_size) {
-			ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
-			if (de->rec_len == 0) break;
-			if (de->inode != 0) {
-				if (count == idx) {
-					out->ino  = de->inode;
-					uint8_t nl = de->name_len;
-					memcpy(out->name, de->name, nl);
-					out->name[nl] = '\0';
-					/* file_type: 1=reg, 2=dir, 7=symlink */
-					switch (de->file_type) {
-					case 1: out->mode = S_IFREG; break;
-					case 2: out->mode = S_IFDIR; break;
-					case 7: out->mode = S_IFLNK; break;
-					default: out->mode = S_IFREG; break;
-					}
-					buddy_free((uint64_t)blk, 0);
-					return 0;
-				}
-				count++;
-			}
-			blk_off += de->rec_len;
+		if ((int)log_blk != loaded_blk) {
+			uint32_t phys = inode_map_block(fs, in, log_blk);
+			if (read_block(fs, phys, blk) != 0) break;
+			loaded_blk = (int)log_blk;
 		}
-		off += fs->block_size;
+
+		ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
+		if (de->rec_len == 0) break;
+
+		byte_off += de->rec_len;
+
+		if (de->inode == 0) continue; /* deleted entry, skip */
+
+		out->ino      = de->inode;
+		out->next_off = byte_off;
+		uint8_t nl = de->name_len;
+		memcpy(out->name, de->name, nl);
+		out->name[nl] = '\0';
+		switch (de->file_type) {
+		case 1: out->mode = S_IFREG; break;
+		case 2: out->mode = S_IFDIR; break;
+		case 7: out->mode = S_IFLNK; break;
+		default: out->mode = S_IFREG; break;
+		}
+		buddy_free((uint64_t)blk, 0);
+		return 0;
 	}
 
 	buddy_free((uint64_t)blk, 0);

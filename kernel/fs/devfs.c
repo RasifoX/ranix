@@ -210,8 +210,9 @@ static int devfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	(void)dir;
 	if (idx >= DEVFS_N) return -1;
 	const devfs_entry_t *e = &devfs_table[idx];
-	out->ino  = 0xd000 + idx;
-	out->mode = e->mode;
+	out->ino      = 0xd000 + idx;
+	out->mode     = e->mode;
+	out->next_off = idx + 1;
 	int nlen = 0; const char *n = e->name;
 	while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
