@@ -492,7 +492,9 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	ext2_inode_t      *in   = &priv->raw;
 	uint64_t           size = dir->size;
 
+	kprintf("[rd] idx=%u size=%llu\n", idx, (unsigned long long)size);
 	uint8_t *blk = buddy_alloc(0);
+	kprintf("[rd] blk=%p\n", (void*)blk);
 	if (!blk) return -1;
 
 	uint32_t byte_off = idx;
@@ -504,11 +506,14 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 
 		if ((int)log_blk != loaded_blk) {
 			uint32_t phys = inode_map_block(fs, in, log_blk);
+			kprintf("[rd] phys=%u\n", phys);
 			if (read_block(fs, phys, blk) != 0) break;
 			loaded_blk = (int)log_blk;
 		}
 
 		ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
+		kprintf("[rd] de@%u ino=%u rec=%u nl=%u\n",
+		        byte_off, de->inode, de->rec_len, de->name_len);
 		if (de->rec_len == 0) break;
 
 		byte_off += de->rec_len;
