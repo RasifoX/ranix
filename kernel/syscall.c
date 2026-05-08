@@ -776,10 +776,12 @@ static long sys_vfork(void)
 	return (long)proc_vfork();
 }
 
+#define WNOHANG 1
+
 static long sys_waitpid(pid_t pid, int *status, int flags)
 {
-	(void)flags;
 	process_t *p = task_current();
+	int wnohang  = (flags & WNOHANG) != 0;
 
 	if (pid == -1) {
 		while (1) {
@@ -799,7 +801,8 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 					*status = (child->exit_code & 0xFF) << 8;
 				return (long)child->pid;
 			}
-			if (!any_alive) return -10;
+			if (!any_alive) return -10; /* ECHILD */
+			if (wnohang)    return 0;
 			task_sleep();
 		}
 	}
@@ -807,8 +810,10 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	process_t *child = proc_find(pid);
 	if (!child || child->ppid != p->pid) return -10;
 
-	while (child->state != PROC_DEAD)
+	while (child->state != PROC_DEAD) {
+		if (wnohang) return 0;
 		task_sleep();
+	}
 
 	child->reaped = 1;
 	if (status && (uint64_t)status > 0x1000)
