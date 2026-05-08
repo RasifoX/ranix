@@ -201,13 +201,8 @@ static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
 		memcpy(buf, fs->cache_buf, fs->block_size);
 		return 0;
 	}
-	kprintf("[ext2] sd read blk=%u\n", blkno);
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
-	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) {
-		kprintf("[ext2] sd read FAILED blk=%u\n", blkno);
-		return -1;
-	}
-	kprintf("[ext2] sd read OK blk=%u\n", blkno);
+	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
 	/* update cache */
 	if (!fs->cache_buf) fs->cache_buf = buddy_alloc(0);
 	if (fs->cache_buf) {
@@ -305,11 +300,15 @@ static uint32_t ext4_extent_lookup(ext2_fs_t *fs, uint32_t *tree, uint32_t logic
 /* Map logical block number → physical block number */
 static uint32_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logical)
 {
-	/* ext4 extent tree */
+	/* ext4 extent tree — use heap buffer so extent traversal can overwrite
+	   it with a full block (1024 B) without corrupting the stack */
 	if (in->i_flags & EXT4_EXTENTS_FL) {
-		uint32_t tree[60];  /* 60×4 = 240 bytes: i_block[15] × 4 bytes */
-		memcpy(tree, in->i_block, 60 * sizeof(uint32_t));
-		return ext4_extent_lookup(fs, tree, logical);
+		uint8_t *tree = buddy_alloc(0);
+		if (!tree) return 0;
+		memcpy(tree, in->i_block, 15 * sizeof(uint32_t)); /* 60 bytes inline */
+		uint32_t r = ext4_extent_lookup(fs, (uint32_t *)tree, logical);
+		buddy_free((uint64_t)tree, 0);
+		return r;
 	}
 
 	uint32_t ptrs_per_blk = fs->block_size / 4;
@@ -492,9 +491,7 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	ext2_inode_t      *in   = &priv->raw;
 	uint64_t           size = dir->size;
 
-	kprintf("[rd] idx=%u size=%llu\n", idx, (unsigned long long)size);
 	uint8_t *blk = buddy_alloc(0);
-	kprintf("[rd] blk=%p\n", (void*)blk);
 	if (!blk) return -1;
 
 	uint32_t byte_off = idx;
@@ -506,14 +503,11 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 
 		if ((int)log_blk != loaded_blk) {
 			uint32_t phys = inode_map_block(fs, in, log_blk);
-			kprintf("[rd] phys=%u\n", phys);
 			if (read_block(fs, phys, blk) != 0) break;
 			loaded_blk = (int)log_blk;
 		}
 
 		ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
-		kprintf("[rd] de@%u ino=%u rec=%u nl=%u\n",
-		        byte_off, de->inode, de->rec_len, de->name_len);
 		if (de->rec_len == 0) break;
 
 		byte_off += de->rec_len;

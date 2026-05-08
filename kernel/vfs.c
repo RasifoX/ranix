@@ -52,7 +52,6 @@ vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inod
 
 vfs_dentry_t *vfs_dentry_resolve(const char *path)
 {
-	kprintf("[vfs] resolve: %s\n", path ? path : "(null)");
 	uint64_t f = spin_lock_irq(&vfs_lock);
 	if (!path || path[0] != '/') {
 		spin_unlock_irq(&vfs_lock, f);
@@ -160,7 +159,6 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	}
 
 	spin_unlock_irq(&vfs_lock, f);
-	kprintf("[vfs] resolve done: %s -> %s\n", path, d ? d->name : "NULL");
 	return d;
 }
 

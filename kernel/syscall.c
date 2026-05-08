@@ -858,7 +858,6 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 	vfs_inode_t *inode = f->inode;
 	if (!S_ISDIR(inode->mode)) return -20;
 	if (!inode->iops || !inode->iops->readdir) return -95;
-	kprintf("[gd64] fd=%d ino=%llu pos=%lld\n", fd, inode->ino, (long long)f->pos);
 
 	uint8_t *kbuf = kmalloc(bufsize > 4096 ? 4096 : bufsize);
 	if (!kbuf) return -12;
@@ -868,12 +867,9 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 	long    total  = 0;
 	uint32_t idx   = (uint32_t)f->pos;
 
-	kprintf("[gd64] kmalloc ok cap=%zu\n", bufcap);
 	while (1) {
-		kprintf("[gd64] readdir idx=%u\n", idx);
 		vfs_dirent_t vde;
 		if (inode->iops->readdir(inode, idx, &vde) != 0) break;
-		kprintf("[gd64] got '%s' next=%u\n", vde.name, vde.next_off);
 		int namelen = strlen(vde.name);
 		size_t reclen = (19 + namelen + 1 + 7) & ~7UL;
 		if (offset + reclen > bufcap) break;
@@ -895,14 +891,12 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 		idx = vde.next_off;
 	}
 
-	kprintf("[gd64] loop done total=%ld idx=%u\n", total, idx);
 	f->pos = (off_t)idx;
 	if (total > 0) {
 		arch_user_access_begin();
 		memcpy(buf, kbuf, offset);
 		arch_user_access_end();
 	}
-	kprintf("[gd64] returning %ld\n", total);
 	kfree(kbuf);
 	return total;
 }
