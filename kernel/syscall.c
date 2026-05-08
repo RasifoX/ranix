@@ -737,6 +737,26 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 }
 
 
+static void sys_rt_sigreturn(arch_context_t *ctx)
+{
+	process_t *p = task_current();
+#if defined(__aarch64__)
+	/* Restore saved ELR and LR from the mini-frame we pushed */
+	uint64_t usp     = ctx->sp;
+	ctx->elr         = *(uint64_t *)usp;
+	ctx->regs[30]    = *(uint64_t *)(usp + 8);
+	ctx->sp          = usp + 16;
+#elif defined(__x86_64__)
+	/* Restore saved RIP from stack */
+	ctx->rip         = *(uint64_t *)ctx->rsp;
+	ctx->rsp        += 8;
+#endif
+	/* Unblock the signal that was being handled */
+	/* We don't track which signal was being handled per-frame, so unblock all
+	   non-permanently-masked signals that were auto-blocked */
+	p->sig_mask = 0;
+}
+
 static long sys_pipe2(int *pipefd, int flags)
 {
 	(void)flags;
@@ -1672,6 +1692,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
+	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); return; /* returns directly, no ret value */
 	case SYS_ARCH_VFORK:  ret = sys_vfork(); break;
 #ifdef SYS_ARCH_FORK
 	case SYS_ARCH_FORK:   ret = sys_fork(); break;
@@ -1729,6 +1750,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_TGKILL: ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
 	case SYS_ARCH_SET_ROBUST_LIST: ret = 0; break;
 	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
+	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); return;
 #endif
 	default:
 		ret = -38; /* ENOSYS */
