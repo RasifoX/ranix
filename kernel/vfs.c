@@ -590,5 +590,5 @@ void vfs_init(void)
 	procfs_register();
 	devfs_register();
 	ext2_register();
-	kprintf("[  vfs] initialized\n");
+	kprintf("VFS: initialized\n");
 }

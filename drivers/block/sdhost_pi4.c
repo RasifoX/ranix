@@ -118,7 +118,7 @@ static void sd_set_clock(pi4_sd_t *s, uint32_t hz)
 	sd_write(s, SDHCI_CONTROL1, c1);
 
 	if (sd_wait(s, SDHCI_CONTROL1, C1_CLK_STABLE, C1_CLK_STABLE, 100000) != 0)
-		kprintf("[sd] clock stable timeout\n");
+		kprintf("sd: clock stable timeout\n");
 
 	sd_write(s, SDHCI_CONTROL1, sd_read(s, SDHCI_CONTROL1) | C1_CLK_EN);
 	for (volatile int i = 0; i < 10000; i++) {}
@@ -137,7 +137,7 @@ static void sd_reset_cmd(pi4_sd_t *s)
 static int sd_cmd(pi4_sd_t *s, uint32_t cmd, uint32_t arg)
 {
 	if (sd_wait(s, SDHCI_STATUS, STATUS_CMD_INHIBIT, 0, 500000) != 0) {
-		kprintf("[sd] cmd inhibit timeout cmd=0x%x\n", cmd >> 24);
+		kprintf("sd: cmd inhibit timeout cmd=0x%x\n", cmd >> 24);
 		return -1;
 	}
 
@@ -190,7 +190,7 @@ static int sd_card_init(pi4_sd_t *s)
 		for (volatile int d = 0; d < 100000; d++) {}
 	}
 	s->hc = hc;
-	kprintf("[sd] card ready: %s\n", hc ? "SDHC/SDXC" : "SDSC");
+	kprintf("sd: card ready: %s\n", hc ? "SDHC/SDXC" : "SDSC");
 
 	/* CMD2: CID */
 	sd_cmd(s, CMD_INDEX(2) | CMD_RSPNS_136 | CMD_CRCCHK_EN, 0);
@@ -264,19 +264,19 @@ void pi4_sd_init(void)
 #if defined(__aarch64__)
 	g_sd.base = (uint64_t)ioremap(cfg->sd_base, 0x1000,
 	                               VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
-	if (!g_sd.base) { kprintf("[sd] ioremap failed\n"); return; }
+	if (!g_sd.base) { kprintf("sd: ioremap failed\n"); return; }
 
 	/* request 100 MHz for EMMC2 */
 	mbox_set_clock(MBOX_CLK_EMMC2, 100000000);
 	g_sd.base_clk = mbox_get_clock(MBOX_CLK_EMMC2);
 	if (g_sd.base_clk == 0) g_sd.base_clk = 100000000;
-	kprintf("[sd] EMMC2 base_clk=%u Hz\n", g_sd.base_clk);
+	kprintf("sd: EMMC2 base_clk=%u Hz\n", g_sd.base_clk);
 
 	/* full reset */
 	sd_write(&g_sd, SDHCI_CONTROL1,
 	         sd_read(&g_sd, SDHCI_CONTROL1) | C1_SRST_HC | C1_SRST_CMD | C1_SRST_DATA);
 	if (sd_wait(&g_sd, SDHCI_CONTROL1, C1_SRST_HC | C1_SRST_CMD | C1_SRST_DATA, 0, 1000000) != 0)
-		kprintf("[sd] reset timeout\n");
+		kprintf("sd: reset timeout\n");
 
 	sd_write(&g_sd, SDHCI_IRPT_MASK, INT_ALL);
 	sd_write(&g_sd, SDHCI_IRPT_EN,   0);
@@ -289,7 +289,7 @@ void pi4_sd_init(void)
 
 	sd_set_clock(&g_sd, 400000);
 
-	if (sd_card_init(&g_sd) != 0) { kprintf("[sd] init failed\n"); return; }
+	if (sd_card_init(&g_sd) != 0) { kprintf("sd: init failed\n"); return; }
 
 	memset(&g_sd_dev, 0, sizeof(g_sd_dev));
 	memcpy(g_sd_dev.name, "sd0", 4);
@@ -299,6 +299,6 @@ void pi4_sd_init(void)
 	g_sd_dev.priv        = &g_sd;
 
 	if (block_device_register(&g_sd_dev) == 0)
-		kprintf("[  drv] sdcard: EMMC2 ready\n");
+		kprintf("sd: EMMC2 ready\n");
 #endif
 }

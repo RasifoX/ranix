@@ -9,17 +9,50 @@ typedef __builtin_va_list va_list;
 #define va_end(v)      __builtin_va_end(v)
 #define va_arg(v, l)   __builtin_va_arg(v, l)
 
-static int fb_ready = 0;
+static int fb_ready        = 0;
+static int at_line_start   = 1;
 
 void kprintf_set_fb(void) { fb_ready = 1; }
 
-static void _putc(char c)
+extern volatile uint64_t kernel_ticks;
+
+static void _emit(char c)
 {
     if (c == '\n')
         uart_putc('\r');
     uart_putc(c);
     if (fb_ready)
         fb_tty_putchar(c);
+}
+
+static void _putc(char c)
+{
+    if (at_line_start && c != '\n') {
+        /* prepend [    S.UUUUUU] timestamp */
+        uint64_t t    = kernel_ticks;
+        uint32_t secs = (uint32_t)(t / 250);
+        uint32_t usec = (uint32_t)((t % 250) * 4000);
+        char buf[16]; int i;
+        _emit('['); _emit(' '); _emit(' '); _emit(' ');
+        /* 4-digit seconds, space-padded */
+        i = 0;
+        char sbuf[5]; uint32_t s2 = secs;
+        do { sbuf[i++] = '0' + s2 % 10; s2 /= 10; } while (s2);
+        while (i < 4) sbuf[i++] = ' ';
+        while (i--) _emit(sbuf[i]);
+        _emit('.');
+        /* 6-digit microseconds, zero-padded */
+        i = 0;
+        char ubuf[6]; uint32_t u2 = usec;
+        do { ubuf[i++] = '0' + u2 % 10; u2 /= 10; } while (u2 && i < 6);
+        while (i < 6) ubuf[i++] = '0';
+        while (i--) _emit(ubuf[i]);
+        _emit(']'); _emit(' ');
+        at_line_start = 0;
+    }
+    if (c == '\n')
+        at_line_start = 1;
+    _emit(c);
 }
 
 static void _puts(const char *s)

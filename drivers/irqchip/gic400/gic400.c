@@ -37,7 +37,7 @@ void irqchip_init(uint64_t dist_base, uint64_t cpu_base) {
     GICC(0x004) = 0xF0;
     GICC(0x000) = 1;
 
-    kprintf("[  irq] GIC v2\n");
+    kprintf("GIC: v2\n");
 }
 
 void irqchip_enable_irq(uint32_t irq) {

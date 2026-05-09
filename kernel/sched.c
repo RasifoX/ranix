@@ -198,7 +198,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	elf_info_t ei = {0};
 	if (elf_load(p->vm, elf_data, elf_len, &ei) != 0) {
-		kprintf("[sched] elf_load failed\n");
+		kprintf("exec: elf_load failed\n");
 		goto fail;
 	}
 

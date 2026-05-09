@@ -114,7 +114,7 @@ OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 
 all: userspace $(TARGET)
 
-userspace: userspace/hello_elf.h userspace/sh_elf.h
+userspace: userspace/hello_elf.h userspace/sh_elf.h userspace/init_elf.h
 
 userspace/hello: userspace/hello.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
@@ -132,6 +132,14 @@ userspace/sh_elf.h: userspace/sh
 	  sed 's/unsigned char .*\[\]/static const uint8_t sh_elf[]/' | \
 	  sed 's/unsigned int .*_len/static const unsigned int sh_elf_len/' > $@
 
+userspace/init: userspace/init.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
+userspace/init_elf.h: userspace/init
+	xxd -i $< | \
+	  sed 's/unsigned char .*\[\]/static const uint8_t init_elf[]/' | \
+	  sed 's/unsigned int .*_len/static const unsigned int init_elf_len/' > $@
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -146,7 +154,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/*_elf.h
 
 qemu: $(TARGET)
 	$(QEMU_CMD) -nographic -kernel $(TARGET)
