@@ -30,6 +30,7 @@ void board_early_init(void)
 	);
 
 	config.uart_base = PHYS_TO_VIRT(config.uart_base);
+	config.local_base = PHYS_TO_VIRT(config.local_base);
 	uart_init();
 }
 

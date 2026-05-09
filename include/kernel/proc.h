@@ -17,9 +17,9 @@
 
 typedef struct {
 	void (*sa_handler)(int);
-	uint64_t sa_mask;
-	int      sa_flags;
+	uint64_t sa_flags;
 	void (*sa_restorer)(void);
+	uint64_t sa_mask;
 } sigaction_t;
 
 typedef enum {
@@ -108,6 +108,7 @@ pid_t      proc_vfork(void);
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);
+void       proc_reap(process_t *child);
 
 /* set by sys_vfork so the asm syscall path reschedules after handler */
 extern volatile int need_resched;

@@ -51,7 +51,7 @@ ifeq ($(ARCH),aarch64)
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
-    QEMU_CMD    = qemu-system-x86_64
+    QEMU_CMD    = qemu-system-x86_64 -cpu max
     SRCS_ARCH = \
         arch/x86_64/cpu.c \
         arch/x86_64/irq.c \

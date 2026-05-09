@@ -208,11 +208,11 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->reaped       = 0;
 
 	for (int i = 0; i < ARCH_USER_STACK_PAGES; i++) {
-		void *spage = buddy_alloc(0);
-		if (!spage) goto fail;
-		memset(spage, 0, PAGE_SIZE);
+		void *spage_phys = buddy_alloc(0);
+		if (!spage_phys) goto fail;
+		memset((void *)PHYS_TO_VIRT(spage_phys), 0, PAGE_SIZE);
 		uint64_t sva = ARCH_USER_STACK_TOP - (uint64_t)(ARCH_USER_STACK_PAGES - i) * PAGE_SIZE;
-		vm_map(p->vm, sva, (uint64_t)spage, VM_USER | VM_READ | VM_WRITE);
+		vm_map(p->vm, sva, (uint64_t)spage_phys, VM_USER | VM_READ | VM_WRITE);
 	}
 
 	void *kstack_phys = buddy_alloc(1);
@@ -375,6 +375,7 @@ pid_t proc_vfork(void)
 	child->next    = proctab[0]->next;
 	proctab[0]->next = child;
 	runqueue_add(child);
+	proctab[proc_cnt++] = child;
 
 	if (parent->ctx) {
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
@@ -382,7 +383,7 @@ pid_t proc_vfork(void)
 
 	parent->state = PROC_SLEEPING;
 	need_resched  = 1;
-	
+
 	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
 }
@@ -582,7 +583,10 @@ void task_exit(void)
 
 	/* Free resources outside the scheduler lock */
 	if (dying_fds) fd_table_destroy(dying_fds);
-	if (dying_vm)  vm_destroy(dying_vm);
+	if (dying_vm) {
+		vm_activate();
+		vm_destroy(dying_vm);
+	}
 	/* Free VMA list */
 	vma_t *v = p->vmas; p->vmas = NULL;
 	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
@@ -711,4 +715,19 @@ process_t *task_get(int i)
 	process_t *p = (i < 0 || i >= proc_cnt) ? NULL : proctab[i];
 	spin_unlock_irq(&sched_lock, f);
 	return p;
+}
+
+void proc_reap(process_t *child)
+{
+	pid_t cpid = child->pid;
+	uint8_t *kstack = child->kstack;
+
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (cpid >= 0 && cpid < proc_cnt)
+		proctab[cpid] = NULL;
+	spin_unlock_irq(&sched_lock, f);
+
+	if (kstack)
+		buddy_free((uint64_t)VIRT_TO_PHYS(kstack), 1);
+	buddy_free((uint64_t)child, 0);
 }
