@@ -44,9 +44,9 @@ int board_fb_alloc(fb_info_t *out)
 
 	u32 w = config.fb_width, h = config.fb_height;
 	if (mbox_get_display_size(&w, &h) == 0)
-		kprintf("display:%dx%d (GPU)\n", (int)w, (int)h);
+		kprintf("display: %dx%d (GPU)\n", (int)w, (int)h);
 	else
-		kprintf("display:%dx%d (default)\n", (int)w, (int)h);
+		kprintf("display: %dx%d (default)\n", (int)w, (int)h);
 
 	if (mbox_fb_init(w, h, out) != 0)
 		return -1;
