@@ -187,7 +187,19 @@ static void run_external(int argc, char **argv)
     if (cmd[0] == '/') {
         strncpy(path_buf, cmd, PATH_MAX - 1);
     } else {
-        snprintf(path_buf, PATH_MAX, "/bin/%s", cmd);
+        const char *path_env = getenv("PATH");
+        if (!path_env) path_env = "/bin";
+        char tmp[PATH_MAX];
+        strncpy(tmp, path_env, PATH_MAX - 1);
+        char *dir = tmp, *found = NULL;
+        while (dir && !found) {
+            char *colon = strchr(dir, ':');
+            if (colon) *colon = '\0';
+            snprintf(path_buf, PATH_MAX, "%s/%s", dir, cmd);
+            if (access(path_buf, X_OK) == 0) found = path_buf;
+            dir = colon ? colon + 1 : NULL;
+        }
+        if (!found) snprintf(path_buf, PATH_MAX, "/bin/%s", cmd);
     }
 
     long pid;
