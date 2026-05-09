@@ -16,7 +16,8 @@ int main(void)
         pid_t pid = vfork();
         if (pid == 0) {
             char *argv[] = { "/bin/sh", NULL };
-            execve("/bin/sh", argv, NULL);
+            char *envp[] = { "PATH=/bin:/mnt/usr/bin:/mnt/bin", "HOME=/", NULL };
+            execve("/bin/sh", argv, envp);
             _exit(127);
         }
         write_str("[init] fork returned\n");
