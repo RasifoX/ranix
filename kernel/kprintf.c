@@ -33,12 +33,12 @@ static void _putc(char c)
         uint32_t secs = (uint32_t)(t / 250);
         uint32_t usec = (uint32_t)((t % 250) * 4000);
         char buf[16]; int i;
-        _emit('['); _emit(' '); _emit(' '); _emit(' ');
-        /* 4-digit seconds, space-padded */
+        _emit('[');
+        /* 5-digit seconds, space-padded */
         i = 0;
-        char sbuf[5]; uint32_t s2 = secs;
+        char sbuf[6]; uint32_t s2 = secs;
         do { sbuf[i++] = '0' + s2 % 10; s2 /= 10; } while (s2);
-        while (i < 4) sbuf[i++] = ' ';
+        while (i < 5) sbuf[i++] = ' ';
         while (i--) _emit(sbuf[i]);
         _emit('.');
         /* 6-digit microseconds, zero-padded */
