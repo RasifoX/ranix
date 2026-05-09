@@ -257,9 +257,17 @@ sync_handler:
 	eret
 
 .sync_fault:
+	bl   task_current
+	mov  x1, sp
+	str  x1, [x0, #16]
 	mov  x0, sp
 	bl   sync_dispatch
-	b    .
+	mov  x0, sp
+	bl   signal_dispatch
+	bl   sched_get_current_ctx
+	mov  sp, x0
+	restore_trapframe
+	eret
 
 default_handler:
 	b default_handler

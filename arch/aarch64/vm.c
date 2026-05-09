@@ -236,7 +236,12 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
-	/* We only copy the first 1GB (index 0) which contains user space. */
+	/* Copy kernel identity entries (index 1+) directly — EL1 needs these
+	 * accessible via TTBR0 when this table is active. */
+	for (int i = 1; i < PT_ENTRIES; i++)
+		l1_new[i] = l1_old[i];
+
+	/* COW-copy user space (index 0 = first 1GB). */
 	for (int i = 0; i < 1; i++) {
 		if (!(l1_old[i] & PTE_VALID)) continue;
 		if ((l1_old[i] & 3) != 3) {
