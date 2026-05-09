@@ -51,9 +51,9 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
 		if (ph->flags & ELF_PF_X) vmflags |= VM_EXEC;
 
 		for (uint64_t va = vstart; va < vend; va += PAGE_SIZE) {
-			void *page = buddy_alloc(0);
-			if (!page) return -1;
-			memset(page, 0, PAGE_SIZE);
+			void *page_phys = buddy_alloc(0);
+			if (!page_phys) return -1;
+			memset((void *)PHYS_TO_VIRT(page_phys), 0, PAGE_SIZE);
 
 			if (ph->filesz > 0) {
 				uint64_t copy_va_start = (va < vbase) ? vbase : va;
@@ -65,17 +65,17 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
 					uint64_t dst_off = copy_va_start - va;
 					uint64_t src_off = copy_va_start - vbase;
 					uint64_t cplen   = copy_va_end - copy_va_start;
-					memcpy((uint8_t *)page + dst_off,
+					memcpy((uint8_t *)PHYS_TO_VIRT(page_phys) + dst_off,
 					       bytes + ph->offset + src_off,
 					       cplen);
 				}
 			}
 
-			vm_map(vm, va, (uint64_t)page, vmflags);
+			vm_map(vm, va, (uint64_t)page_phys, vmflags);
 
 #if defined(__aarch64__)
 			{
-				uintptr_t p = (uintptr_t)page;
+				uintptr_t p = (uintptr_t)PHYS_TO_VIRT(page_phys);
 				for (uintptr_t l = p; l < p + PAGE_SIZE; l += 64)
 					__asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
 				__asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory");

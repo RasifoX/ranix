@@ -1,5 +1,6 @@
 #include <drivers/mailbox/mbox.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 uint64_t _mbox_base;
 static uint32_t _bus_offset;

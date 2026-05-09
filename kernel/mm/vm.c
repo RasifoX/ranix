@@ -29,7 +29,7 @@ void vm_set_kernel_pt(uint64_t phys)
 void vm_init_kernel(uint64_t root_phys)
 {
 	kernel_pt_phys = root_phys;
-	_kernel_vm_space.root = (uint64_t *)PHYS_TO_VIRT(root_phys);
+	_kernel_vm_space.root = (uint64_t *)root_phys;
 }
 
 void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
@@ -67,7 +67,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
 			void *pg = buddy_alloc(0);
 			if (!pg) return -1;
-			memset(pg, 0, PAGE_SIZE);
+			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 			vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
 			return 0;
 		}

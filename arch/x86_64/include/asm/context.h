@@ -134,5 +134,15 @@ typedef struct {
 #define SYS_ARCH_EPOLL_WAIT      232
 #define SYS_ARCH_EPOLL_CREATE1   291
 #define SYS_ARCH_EPOLL_PWAIT     281
+#define SYS_ARCH_MSYNC            26
+#define SYS_ARCH_MADVISE          28
+#define SYS_ARCH_SCHED_YIELD      24
+#define SYS_ARCH_SCHED_SETAFFINITY 203
+#define SYS_ARCH_SCHED_GETAFFINITY 204
+#define SYS_ARCH_PRCTL           157
+#define SYS_ARCH_GETRANDOM       318
+#define SYS_ARCH_STATX           332
+#define SYS_ARCH_MEMBARRIER      324
+#define SYS_ARCH_RSEQ            334
 
 #endif
