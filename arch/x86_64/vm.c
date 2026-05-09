@@ -4,6 +4,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 #define PT_ENTRIES  512
 #define PTE_P   (1UL << 0)
@@ -15,33 +16,41 @@
 
 extern uint64_t pml4[];
 
-static uint64_t *alloc_table(void)
+static uint64_t alloc_table(void)
 {
 	void *p = buddy_alloc(0);
 	if (!p) kpanic("vm: out of memory");
-	memset(p, 0, PAGE_SIZE);
-	return p;
+	memset((void *)PHYS_TO_VIRT(p), 0, PAGE_SIZE);
+	return (uint64_t)p;
 }
 
 vm_space_t *vm_create(void)
 {
-	vm_space_t *vs = buddy_alloc(0);
-	if (!vs) kpanic("vm: out of memory");
+	void *vs_phys = buddy_alloc(0);
+	if (!vs_phys) kpanic("vm: out of memory");
+	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
 
-	vs->root = alloc_table();
-	memcpy(vs->root, pml4, PT_ENTRIES * sizeof(uint64_t));
+	uint64_t root_phys = alloc_table();
+	vs->root = (uint64_t *)root_phys;
 
-	if (vs->root[0] & PTE_P) {
-		uint64_t *kpdpt = (uint64_t *)(vs->root[0] & ~0xFFFUL);
-		uint64_t *pdpt  = alloc_table();
-		memcpy(pdpt, kpdpt, PT_ENTRIES * sizeof(uint64_t));
-		vs->root[0] = (uint64_t)pdpt | (vs->root[0] & 0xFFFUL);
+	uint64_t *root_virt = (uint64_t *)PHYS_TO_VIRT(root_phys);
+	uint64_t *kpml4_virt = (uint64_t *)PHYS_TO_VIRT(pml4);
 
-		if (pdpt[0] & PTE_P) {
-			uint64_t *kpd = (uint64_t *)(pdpt[0] & ~0xFFFUL);
-			uint64_t *pd  = alloc_table();
-			memcpy(pd, kpd, PT_ENTRIES * sizeof(uint64_t));
-			pdpt[0] = (uint64_t)pd | (pdpt[0] & 0xFFFUL);
+	memcpy(root_virt, kpml4_virt, PT_ENTRIES * sizeof(uint64_t));
+
+	if (root_virt[0] & PTE_P) {
+		uint64_t *kpdpt_virt = (uint64_t *)PHYS_TO_VIRT(root_virt[0] & ~0xFFFUL);
+		uint64_t pdpt_phys  = alloc_table();
+		uint64_t *pdpt_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_phys);
+		memcpy(pdpt_virt, kpdpt_virt, PT_ENTRIES * sizeof(uint64_t));
+		root_virt[0] = pdpt_phys | (root_virt[0] & 0xFFFUL);
+
+		if (pdpt_virt[0] & PTE_P) {
+			uint64_t *kpd_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_virt[0] & ~0xFFFUL);
+			uint64_t pd_phys  = alloc_table();
+			uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(pd_phys);
+			memcpy(pd_virt, kpd_virt, PT_ENTRIES * sizeof(uint64_t));
+			pdpt_virt[0] = pd_phys | (pdpt_virt[0] & 0xFFFUL);
 		}
 	}
 
@@ -60,18 +69,22 @@ void vm_destroy(vm_space_t *vs)
 	if (!vs) return;
 	if (vs->refcount > 1) { vs->refcount--; return; }
 	vs->refcount = 0;
-	uint64_t *l4 = vs->root;
+	
+	uint64_t l4_phys = (uint64_t)vs->root;
+	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(l4_phys);
 
 	/* We only walk index 0 (user space) */
 	for (int i = 0; i < 1; i++) {
 		if (!(l4[i] & PTE_P)) continue;
 
-		uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l4[i] & ~0xFFFUL);
+		uint64_t l3_phys = l4[i] & ~0xFFFUL;
+		uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l3_phys);
 		for (int j = 0; j < 512; j++) {
 			if (!(l3[j] & PTE_P)) continue;
 			if (l3[j] & PTE_PS) continue;
 
-			uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l3[j] & ~0xFFFUL);
+			uint64_t l2_phys = l3[j] & ~0xFFFUL;
+			uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
 			for (int k = 0; k < 512; k++) {
 				if (!(l2[k] & PTE_P)) continue;
 				if (l2[k] & PTE_PS) {
@@ -83,59 +96,63 @@ void vm_destroy(vm_space_t *vs)
 					continue;
 				}
 
-				uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l2[k] & ~0xFFFUL);
+				uint64_t l1_phys = l2[k] & ~0xFFFUL;
+				uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 				for (int l = 0; l < 512; l++) {
 					if (!(l1[l] & PTE_P)) continue;
 					if (l1[l] & PTE_U) {
 						pmm_free((void *)(l1[l] & ~0xFFFUL));
 					}
 				}
-				buddy_free(l2[k] & ~0xFFFUL, 0);
+				buddy_free(l1_phys, 0);
 			}
-			buddy_free(l3[j] & ~0xFFFUL, 0);
+			buddy_free(l2_phys, 0);
 		}
-		buddy_free(l4[i] & ~0xFFFUL, 0);
+		buddy_free(l3_phys, 0);
 	}
 
-	buddy_free((uint64_t)VIRT_TO_PHYS(l4), 0);
-	buddy_free((uint64_t)VIRT_TO_PHYS(vs), 0);
+	buddy_free(l4_phys, 0);
+	buddy_free(VIRT_TO_PHYS(vs), 0);
 }
 
-static uint64_t *get_or_alloc(uint64_t *table, uint64_t idx, uint64_t eflags)
+static uint64_t get_or_alloc(uint64_t table_phys, uint64_t idx, uint64_t eflags)
 {
+	uint64_t *table = (uint64_t *)PHYS_TO_VIRT(table_phys);
 	if (table[idx] & PTE_P) {
 		if (table[idx] & PTE_PS) {
 			/* split 2MB huge page into 512 4KB pages */
 			uint64_t base = table[idx] & ~0x1FFFFFUL;
 			uint64_t attr = table[idx] & (PTE_P | PTE_W);
-			uint64_t *pt  = alloc_table();
+			uint64_t pt_phys  = alloc_table();
+			uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
 			for (int j = 0; j < PT_ENTRIES; j++)
-				pt[j] = (base + (uint64_t)j * 0x1000) | attr;
-			table[idx] = (uint64_t)pt | PTE_P | PTE_W | PTE_U;
+				pt_virt[j] = (base + (uint64_t)j * 0x1000) | attr;
+			table[idx] = pt_phys | PTE_P | PTE_W | PTE_U;
 			/* flush TLB — whole CR3 reload since we're changing a huge entry */
 			__asm__ volatile("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: "rax", "memory");
-			return pt;
+			return pt_phys;
 		}
 		/* propagate PTE_U flag to intermediate tables */
 		table[idx] |= eflags & PTE_U;
-		return (uint64_t *)(table[idx] & ~0xFFFUL);
+		return table[idx] & ~0xFFFUL;
 	}
-	uint64_t *child = alloc_table();
-	table[idx] = (uint64_t)child | eflags;
-	return child;
+	uint64_t child_phys = alloc_table();
+	table[idx] = child_phys | eflags;
+	return child_phys;
 }
 
 int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	uint64_t *pdp = get_or_alloc(vs->root,  (vaddr >> 39) & 0x1FF, eflags);
-	if (!pdp) return -1;
-	uint64_t *pd  = get_or_alloc(pdp,       (vaddr >> 30) & 0x1FF, eflags);
-	if (!pd)  return -1;
-	uint64_t *pt  = get_or_alloc(pd,        (vaddr >> 21) & 0x1FF, eflags);
-	if (!pt)  return -1;
+	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	if (!pdp_phys) return -1;
+	uint64_t pd_phys  = get_or_alloc(pdp_phys,           (vaddr >> 30) & 0x1FF, eflags);
+	if (!pd_phys)  return -1;
+	uint64_t pt_phys  = get_or_alloc(pd_phys,            (vaddr >> 21) & 0x1FF, eflags);
+	if (!pt_phys)  return -1;
 
+	uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
 	uint64_t entry = (paddr & ~0xFFFUL) | PTE_P;
 	if (flags & VM_WRITE)   entry |= PTE_W;
 	if (flags & VM_USER)    entry |= PTE_U;
@@ -149,15 +166,16 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
-	uint64_t *pdp = (vs->root[(vaddr >> 39) & 0x1FF] & PTE_P)
-	              ? (uint64_t *)(vs->root[(vaddr >> 39) & 0x1FF] & ~0xFFFUL) : 0;
-	if (!pdp) return;
-	uint64_t *pd = (pdp[(vaddr >> 30) & 0x1FF] & PTE_P)
-	             ? (uint64_t *)(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL) : 0;
-	if (!pd) return;
-	uint64_t *pt = (pd[(vaddr >> 21) & 0x1FF] & PTE_P)
-	             ? (uint64_t *)(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL) : 0;
-	if (!pt) return;
+	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	if (!(l4[(vaddr >> 39) & 0x1FF] & PTE_P)) return;
+
+	uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
+	if (!(pdp[(vaddr >> 30) & 0x1FF] & PTE_P)) return;
+
+	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL);
+	if (!(pd[(vaddr >> 21) & 0x1FF] & PTE_P)) return;
+
+	uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL);
 
 	uint64_t pte = pt[(vaddr >> 12) & 0x1FF];
 	pt[(vaddr >> 12) & 0x1FF] = 0;
@@ -166,24 +184,25 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
 
-uint64_t arch_vm_get_paddr(uint64_t *pml4, uint64_t vaddr)
+uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 {
+	uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(pml4_phys);
 	uint64_t p4i = (vaddr >> 39) & 0x1FF;
 	uint64_t p3i = (vaddr >> 30) & 0x1FF;
 	uint64_t p2i = (vaddr >> 21) & 0x1FF;
 	uint64_t p1i = (vaddr >> 12) & 0x1FF;
 
 	if (!(pml4[p4i] & PTE_P)) return 0;
-	uint64_t *pdp = (uint64_t *)(pml4[p4i] & ~0xFFFUL);
+	uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(pml4[p4i] & ~0xFFFUL);
 
 	if (!(pdp[p3i] & PTE_P)) return 0;
 	if (pdp[p3i] & PTE_PS) return (pdp[p3i] & ~0x3FFFFFFFUL) | (vaddr & 0x3FFFFFFFUL);
 
-	uint64_t *pd = (uint64_t *)(pdp[p3i] & ~0xFFFUL);
+	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[p3i] & ~0xFFFUL);
 	if (!(pd[p2i] & PTE_P)) return 0;
 	if (pd[p2i] & PTE_PS) return (pd[p2i] & ~0x1FFFFFUL) | (vaddr & 0x1FFFFFUL);
 
-	uint64_t *pt = (uint64_t *)(pd[p2i] & ~0xFFFUL);
+	uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[p2i] & ~0xFFFUL);
 	if (!(pt[p1i] & PTE_P)) return 0;
 	return (pt[p1i] & ~0xFFFUL);
 }
@@ -195,12 +214,15 @@ void arch_vm_switch(uint64_t root_phys)
 
 vm_space_t *vm_copy(vm_space_t *vs)
 {
-	vm_space_t *new_vs = buddy_alloc(0);
-	if (!new_vs) kpanic("vm_copy: out of memory");
-	new_vs->root = alloc_table();
+	void *new_vs_phys = buddy_alloc(0);
+	if (!new_vs_phys) kpanic("vm_copy: out of memory");
+	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
+	
+	uint64_t root_phys = alloc_table();
+	new_vs->root = (uint64_t *)root_phys;
 
-	uint64_t *l4_old = vs->root;
-	uint64_t *l4_new = new_vs->root;
+	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
@@ -208,9 +230,10 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	for (int i = 0; i < 1; i++) {
 		if (!(l4_old[i] & PTE_P)) continue;
 
-		uint64_t *l3_old = (uint64_t *)(l4_old[i] & ~0xFFFUL);
-		uint64_t *l3_new = alloc_table();
-		l4_new[i] = (uint64_t)l3_new | eflags;
+		uint64_t *l3_old = (uint64_t *)PHYS_TO_VIRT(l4_old[i] & ~0xFFFUL);
+		uint64_t l3_new_phys = alloc_table();
+		uint64_t *l3_new = (uint64_t *)PHYS_TO_VIRT(l3_new_phys);
+		l4_new[i] = l3_new_phys | eflags;
 
 		for (int j = 0; j < 512; j++) {
 			if (!(l3_old[j] & PTE_P)) continue;
@@ -220,9 +243,10 @@ vm_space_t *vm_copy(vm_space_t *vs)
 				continue;
 			}
 
-			uint64_t *l2_old = (uint64_t *)(l3_old[j] & ~0xFFFUL);
-			uint64_t *l2_new = alloc_table();
-			l3_new[j] = (uint64_t)l2_new | eflags;
+			uint64_t *l2_old = (uint64_t *)PHYS_TO_VIRT(l3_old[j] & ~0xFFFUL);
+			uint64_t l2_new_phys = alloc_table();
+			uint64_t *l2_new = (uint64_t *)PHYS_TO_VIRT(l2_new_phys);
+			l3_new[j] = l2_new_phys | eflags;
 
 			for (int k = 0; k < 512; k++) {
 				if (!(l2_old[k] & PTE_P)) continue;
@@ -240,9 +264,10 @@ vm_space_t *vm_copy(vm_space_t *vs)
 					continue;
 				}
 
-				uint64_t *l1_old = (uint64_t *)(l2_old[k] & ~0xFFFUL);
-				uint64_t *l1_new = alloc_table();
-				l2_new[k] = (uint64_t)l1_new | eflags;
+				uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(l2_old[k] & ~0xFFFUL);
+				uint64_t l1_new_phys = alloc_table();
+				uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(l1_new_phys);
+				l2_new[k] = l1_new_phys | eflags;
 
 				for (int l = 0; l < 512; l++) {
 					if (!(l1_old[l] & PTE_P)) continue;

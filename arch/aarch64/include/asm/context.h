@@ -113,5 +113,15 @@ typedef struct {
 #define SYS_ARCH_GETPGRP       158
 #define SYS_ARCH_FORK          1079  /* not a real AArch64 syscall; clone handles it */
 #define SYS_ARCH_RT_SIGRETURN   139
+#define SYS_ARCH_SCHED_YIELD   124
+#define SYS_ARCH_SCHED_SETAFFINITY 122
+#define SYS_ARCH_SCHED_GETAFFINITY 123
+#define SYS_ARCH_PRCTL         167
+#define SYS_ARCH_MADVISE       233
+#define SYS_ARCH_MSYNC         227
+#define SYS_ARCH_GETRANDOM     278
+#define SYS_ARCH_STATX         291
+#define SYS_ARCH_MEMBARRIER    283
+#define SYS_ARCH_RSEQ          293
 
 #endif

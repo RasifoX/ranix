@@ -3,6 +3,8 @@
 
 extern uint64_t pml4[];
 
+#include <asm/mmu.h>
+
 void mmu_init(void)
 {
 	vm_init_kernel((uint64_t)pml4);

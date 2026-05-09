@@ -4,6 +4,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/sync.h>
+#include <asm/mmu.h>
 
 #define HEAP_MAGIC 0x48454150
 #define HEAP_LARGE 0x4C415247
@@ -50,8 +51,8 @@ void *kmalloc(size_t size) {
             }
             
             /* Allocate a new page and slice it */
-            void *page = pmm_alloc();
-            if (!page) {
+            void *page_phys = pmm_alloc();
+            if (!page_phys) {
                 spin_unlock_irq(&heap_lock, f);
                 return NULL;
             }
@@ -59,7 +60,7 @@ void *kmalloc(size_t size) {
             size_t chunk = size_classes[i];
             size_t count = PAGE_SIZE / chunk;
             
-            uint8_t *p = (uint8_t *)page;
+            uint8_t *p = (uint8_t *)PHYS_TO_VIRT(page_phys);
             /* first chunk goes to the user */
             heap_header_t *hdr = (heap_header_t *)p;
             hdr->magic = HEAP_MAGIC;
@@ -85,13 +86,13 @@ void *kmalloc(size_t size) {
         return NULL;
     }
     
-    void *page = buddy_alloc(ord);
-    if (!page) {
+    void *page_phys = buddy_alloc(ord);
+    if (!page_phys) {
         spin_unlock_irq(&heap_lock, f);
         return NULL;
     }
     
-    heap_header_t *hdr = (heap_header_t *)page;
+    heap_header_t *hdr = (heap_header_t *)PHYS_TO_VIRT(page_phys);
     hdr->magic = HEAP_LARGE;
     hdr->class_idx = ord;
     spin_unlock_irq(&heap_lock, f);
@@ -106,7 +107,7 @@ void kfree(void *ptr) {
     uint64_t f = spin_lock_irq(&heap_lock);
     
     if (hdr->magic == HEAP_LARGE) {
-        buddy_free((uint64_t)hdr, hdr->class_idx);
+        buddy_free(VIRT_TO_PHYS(hdr), hdr->class_idx);
     } else if (hdr->magic == HEAP_MAGIC) {
         uint32_t i = hdr->class_idx;
         if (i < NUM_CLASSES) {
