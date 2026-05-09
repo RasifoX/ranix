@@ -37,7 +37,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size, uint64_t r
 		pmm_free_region(free_start, ram_limit - free_start);
 	}
 
-	kprintf("[  mem] 0x%lx-0x%lx, %d MB\n", start, ram_limit, (int)(size >> 20));
+	kprintf("Memory: %d MB (0x%lx-0x%lx)\n", (int)(size >> 20), start, ram_limit);
 }
 
 void kernel_main(void)
@@ -62,11 +62,10 @@ void kernel_main(void)
 	mmu_init();
 	arch_cpu_init();
 
-	kprintf("[ranix] Ranix\n");
 	if (fdt_ok == 0)
-		kprintf("[ranix] %s, %d cores\n", fi->model, (int)fi->num_cpus);
+		kprintf("Ranix — %s (%d cores)\n", fi->model, (int)fi->num_cpus);
 	else
-		kprintf("[ranix] %s\n", cfg->name);
+		kprintf("Ranix — %s\n", cfg->name);
 
 	setup_physical_memory(fb_phys, fb_sz, ram_base + ram_size);
 	heap_init();
@@ -96,7 +95,6 @@ void kernel_main(void)
 	vfs_mount("/dev",  "devfs", NULL);
 	initrd_init();
 
-	kprintf("[ranix] ready\n");
 	sched_init();
 	
 	/* idle process needs an fd table to use VFS during boot */
@@ -127,7 +125,7 @@ void kernel_main(void)
 				uint16_t magic = *(uint16_t *)(sb_buf + 56); /* s_magic offset */
 				if (magic == 0xEF53) {
 					if (vfs_mount("/mnt", "ext2", bd) == 0) {
-						kprintf("[boot] disk mounted at /mnt (%s)\n", bd->name);
+						kprintf("ext2: mounted /mnt (%s)\n", bd->name);
 						break;
 					}
 				}
@@ -135,24 +133,28 @@ void kernel_main(void)
 		}
 	}
 
-	/* Start userspace shell as the primary task */
+	/* Start init (PID 1) as the primary task */
 	vfs_stat_t st = {0};
-	if (vfs_stat("/bin/sh", &st) == 0 && st.size > 0) {
+	const char *init_path = vfs_stat("/bin/init", &st) == 0 && st.size > 0
+	                        ? "/bin/init" : NULL;
+	if (!init_path && vfs_stat("/bin/sh", &st) == 0 && st.size > 0)
+		init_path = "/bin/sh";
+	if (init_path) {
 		uint8_t *buf = kmalloc(st.size);
 		if (buf) {
-			int fd = vfs_open("/bin/sh", O_RDONLY, 0);
+			int fd = vfs_open(init_path, O_RDONLY, 0);
 			if (fd >= 0) {
 				vfs_read(fd, buf, st.size);
 				vfs_close(fd);
-				kprintf("[boot] launching /bin/sh...\n");
-				proc_exec("sh", buf, st.size);
+				kprintf("Starting %s...\n", init_path);
+				proc_exec("init", buf, st.size);
 			} else {
-				kprintf("[boot] vfs_open /bin/sh failed\n");
+				kprintf("init: vfs_open %s failed\n", init_path);
 			}
 			kfree(buf);
 		}
 	} else {
-		kprintf("[boot] /bin/sh not found in initrd, falling back to kshell\n");
+		kprintf("init: not found, falling back to kshell\n");
 		task_create("shell", shell_task);
 	}
 

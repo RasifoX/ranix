@@ -103,7 +103,7 @@ void *buddy_alloc(int ord)
 		o++;
 	if (o >= BUDDY_MAX_ORDER) {
 		spin_unlock_irq(&buddy_lock, f);
-		kprintf("[OOM] buddy_alloc: out of memory (order %d)\n", ord);
+		kprintf("buddy: OOM (order %d)\n", ord);
 		return NULL;
 	}
 

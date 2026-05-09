@@ -155,14 +155,14 @@ static int vblk_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 		while (p->used->idx == p->last_used_idx) {
 			__asm__ volatile("pause" ::: "memory");
 			if (++spin > 10000000) {
-				kprintf("[vblk] timeout lba=%lu\n", lba + i);
+				kprintf("virtio-blk: timeout lba=%lu\n", lba + i);
 				return -1;
 			}
 		}
 		p->last_used_idx = p->used->idx;
 
 		if (*stat != 0) {
-			kprintf("[vblk] read error lba=%lu status=%u\n", lba + i, *stat);
+			kprintf("virtio-blk: read error lba=%lu status=%u\n", lba + i, *stat);
 			return -1;
 		}
 
@@ -182,12 +182,12 @@ static int vblk_write(block_device_t *dev, uint64_t lba, const void *buf, uint64
 void virtio_blk_init(void)
 {
 #if !defined(__x86_64__)
-	kprintf("[vblk] virtio-blk PCI: not available on this arch\n");
+	kprintf("virtio-blk: not available on this arch\n");
 	return;
 #else
 	uint8_t bus, devn, fn;
 	if (pci_find(0x1AF4, 0x1001, &bus, &devn, &fn) != 0) {
-		kprintf("[vblk] virtio-blk not found\n");
+		kprintf("virtio-blk: not found\n");
 		return;
 	}
 
@@ -253,7 +253,7 @@ void virtio_blk_init(void)
 	g_dev.priv        = &g_priv;
 
 	if (block_device_register(&g_dev) == 0)
-		kprintf("[vblk] virtio-blk: %lu MB at I/O 0x%x\n",
+		kprintf("virtio-blk: %lu MB at I/O 0x%x\n",
 		        capacity >> 11, iobase);
 #endif
 }
