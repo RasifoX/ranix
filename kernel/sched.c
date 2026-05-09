@@ -348,7 +348,7 @@ pid_t proc_vfork(void)
 	child->state        = PROC_READY;
 	child->uid          = parent->uid;
 	child->gid          = parent->gid;
-	child->vm           = parent->vm;
+	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = parent->pid;
@@ -553,11 +553,27 @@ void task_exit(void)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *p = task_current();
-	p->state = PROC_DEAD;
 
-	/* Steal vm/fds pointers under lock so we own them for teardown */
-	vm_space_t *dying_vm   = p->vm;   p->vm  = NULL;
-	fd_table_t *dying_fds  = p->fds;  p->fds = NULL;
+	/* Steal vm/fds pointers under lock so we own them for teardown.
+	 * Keep state PROC_RUNNING so the scheduler can still preempt and
+	 * reschedule us during cleanup — prevents use-after-free of kstack. */
+	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
+	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
+
+	spin_unlock_irq(&sched_lock, f);
+
+	/* Free resources — process is still schedulable during this. */
+	if (dying_fds) fd_table_destroy(dying_fds);
+	if (dying_vm) {
+		vm_activate();
+		vm_destroy(dying_vm);
+	}
+	vma_t *v = p->vmas; p->vmas = NULL;
+	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
+
+	/* Cleanup done — now mark dead and wake parent. */
+	f = spin_lock_irq(&sched_lock);
+	p->state = PROC_DEAD;
 
 	if (p->vfork_parent >= 0) {
 		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
@@ -580,16 +596,6 @@ void task_exit(void)
 	}
 
 	spin_unlock_irq(&sched_lock, f);
-
-	/* Free resources outside the scheduler lock */
-	if (dying_fds) fd_table_destroy(dying_fds);
-	if (dying_vm) {
-		vm_activate();
-		vm_destroy(dying_vm);
-	}
-	/* Free VMA list */
-	vma_t *v = p->vmas; p->vmas = NULL;
-	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
 
 	arch_yield();
 }
