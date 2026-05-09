@@ -93,7 +93,7 @@ int mbr_probe(block_device_t *dev)
 		pd->priv        = pp;
 
 		block_device_register(pd);
-		kprintf("[mbr] %s: type=0x%02x start=%u size=%u sectors\n",
+		kprintf("mbr: %s type=0x%02x start=%u size=%u\n",
 		        pd->name, e->type, e->lba_start, e->lba_size);
 		part_cnt++;
 		found++;

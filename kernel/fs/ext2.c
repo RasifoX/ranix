@@ -195,6 +195,8 @@ typedef struct {
 	uint16_t        inode_size;
 	uint32_t        first_data_block;
 	uint32_t        total_inodes;
+	uint32_t        total_blocks;
+	uint32_t        num_groups;
 	uint16_t        desc_size;
 	/* LRU block cache */
 	bcache_entry_t  cache[EXT2_BCACHE_N];
@@ -466,9 +468,528 @@ static off_t ext2_seek(vfs_file_t *f, off_t off, int whence)
 	return new;
 }
 
+/* ── write support ───────────────────────────────────────────── */
+
+static int write_block(ext2_fs_t *fs, uint32_t blkno, const void *buf)
+{
+	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
+	if (fs->bdev->write(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
+	for (int i = 0; i < EXT2_BCACHE_N; i++) {
+		if (fs->cache[i].blkno == blkno && fs->cache[i].buf) {
+			memcpy(fs->cache[i].buf, buf, fs->block_size);
+			return 0;
+		}
+	}
+	return 0;
+}
+
+static int write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *in)
+{
+	uint32_t group = (ino - 1) / fs->inodes_per_group;
+	uint32_t idx   = (ino - 1) % fs->inodes_per_group;
+	uint8_t *tmp   = buddy_alloc(0);
+	if (!tmp) return -1;
+
+	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
+	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
+	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	uint32_t inode_tbl = ((ext2_bgd_t *)(tmp + bgd_boff))->bg_inode_table_lo;
+	buddy_free((uint64_t)tmp, 0);
+
+	tmp = buddy_alloc(0);
+	if (!tmp) return -1;
+	uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
+	uint32_t tbl_blk = inode_tbl + idx / inodes_per_blk;
+	uint32_t tbl_off = (idx % inodes_per_blk) * fs->inode_size;
+	if (read_block(fs, tbl_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	uint32_t csz = fs->inode_size < sizeof(ext2_inode_t) ? fs->inode_size : sizeof(ext2_inode_t);
+	memcpy(tmp + tbl_off, in, csz);
+	int r = write_block(fs, tbl_blk, tmp);
+	buddy_free((uint64_t)tmp, 0);
+	return r;
+}
+
+static int read_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *out)
+{
+	uint8_t *tmp = buddy_alloc(0);
+	if (!tmp) return -1;
+	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
+	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
+	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	*out = *(ext2_bgd_t *)(tmp + bgd_boff);
+	buddy_free((uint64_t)tmp, 0);
+	return 0;
+}
+
+static int write_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *bgd)
+{
+	uint8_t *tmp = buddy_alloc(0);
+	if (!tmp) return -1;
+	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
+	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
+	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	*(ext2_bgd_t *)(tmp + bgd_boff) = *bgd;
+	int r = write_block(fs, bgd_blk, tmp);
+	buddy_free((uint64_t)tmp, 0);
+	return r;
+}
+
+static uint32_t alloc_block(ext2_fs_t *fs, uint32_t pref_group)
+{
+	uint8_t *bmp = buddy_alloc(0);
+	if (!bmp) return 0;
+	for (uint32_t gi = 0; gi < fs->num_groups; gi++) {
+		uint32_t g = (pref_group + gi) % fs->num_groups;
+		ext2_bgd_t bgd;
+		if (read_bgd(fs, g, &bgd) != 0 || bgd.bg_free_blocks_count_lo == 0) continue;
+		if (read_block(fs, bgd.bg_block_bitmap_lo, bmp) != 0) continue;
+		uint32_t lim = fs->blocks_per_group;
+		for (uint32_t i = 0; i < lim; i++) {
+			if (!(bmp[i / 8] & (1u << (i & 7)))) {
+				bmp[i / 8] |= (1u << (i & 7));
+				write_block(fs, bgd.bg_block_bitmap_lo, bmp);
+				bgd.bg_free_blocks_count_lo--;
+				write_bgd(fs, g, &bgd);
+				buddy_free((uint64_t)bmp, 0);
+				return g * fs->blocks_per_group + fs->first_data_block + i;
+			}
+		}
+	}
+	buddy_free((uint64_t)bmp, 0);
+	return 0;
+}
+
+static void free_block(ext2_fs_t *fs, uint32_t blkno)
+{
+	if (!blkno || blkno < fs->first_data_block) return;
+	uint32_t rel = blkno - fs->first_data_block;
+	uint32_t g   = rel / fs->blocks_per_group;
+	uint32_t bit = rel % fs->blocks_per_group;
+	if (g >= fs->num_groups) return;
+	ext2_bgd_t bgd;
+	if (read_bgd(fs, g, &bgd) != 0) return;
+	uint8_t *bmp = buddy_alloc(0);
+	if (!bmp) return;
+	if (read_block(fs, bgd.bg_block_bitmap_lo, bmp) == 0) {
+		bmp[bit / 8] &= ~(1u << (bit & 7));
+		write_block(fs, bgd.bg_block_bitmap_lo, bmp);
+		bgd.bg_free_blocks_count_lo++;
+		write_bgd(fs, g, &bgd);
+	}
+	buddy_free((uint64_t)bmp, 0);
+}
+
+static uint32_t alloc_inode(ext2_fs_t *fs, uint32_t pref_group)
+{
+	uint8_t *bmp = buddy_alloc(0);
+	if (!bmp) return 0;
+	for (uint32_t gi = 0; gi < fs->num_groups; gi++) {
+		uint32_t g = (pref_group + gi) % fs->num_groups;
+		ext2_bgd_t bgd;
+		if (read_bgd(fs, g, &bgd) != 0 || bgd.bg_free_inodes_count_lo == 0) continue;
+		if (read_block(fs, bgd.bg_inode_bitmap_lo, bmp) != 0) continue;
+		for (uint32_t i = 0; i < fs->inodes_per_group; i++) {
+			if (!(bmp[i / 8] & (1u << (i & 7)))) {
+				bmp[i / 8] |= (1u << (i & 7));
+				write_block(fs, bgd.bg_inode_bitmap_lo, bmp);
+				bgd.bg_free_inodes_count_lo--;
+				write_bgd(fs, g, &bgd);
+				buddy_free((uint64_t)bmp, 0);
+				return g * fs->inodes_per_group + i + 1;
+			}
+		}
+	}
+	buddy_free((uint64_t)bmp, 0);
+	return 0;
+}
+
+static void free_inode(ext2_fs_t *fs, uint32_t ino)
+{
+	if (ino < 2 || ino > fs->total_inodes) return;
+	uint32_t g   = (ino - 1) / fs->inodes_per_group;
+	uint32_t bit = (ino - 1) % fs->inodes_per_group;
+	ext2_bgd_t bgd;
+	if (read_bgd(fs, g, &bgd) != 0) return;
+	uint8_t *bmp = buddy_alloc(0);
+	if (!bmp) return;
+	if (read_block(fs, bgd.bg_inode_bitmap_lo, bmp) == 0) {
+		bmp[bit / 8] &= ~(1u << (bit & 7));
+		write_block(fs, bgd.bg_inode_bitmap_lo, bmp);
+		bgd.bg_free_inodes_count_lo++;
+		write_bgd(fs, g, &bgd);
+	}
+	buddy_free((uint64_t)bmp, 0);
+}
+
+/* Allocate and link a physical block at logical position lbn in inode.
+ * Modifies *in in memory; caller must write_inode afterwards. */
+static uint32_t inode_alloc_block(ext2_fs_t *fs, ext2_inode_t *in,
+                                   uint32_t ino, uint32_t lbn)
+{
+	uint32_t pg = (ino - 1) / fs->inodes_per_group;
+	uint32_t ppp = fs->block_size / 4; /* pointers per block */
+
+	/* Direct */
+	if (lbn < 12) {
+		if (in->i_block[lbn]) return in->i_block[lbn];
+		uint32_t b = alloc_block(fs, pg);
+		if (!b) return 0;
+		in->i_block[lbn] = b;
+		in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+		return b;
+	}
+	lbn -= 12;
+
+	/* Single indirect */
+	if (lbn < ppp) {
+		uint8_t *tmp = buddy_alloc(0);
+		if (!tmp) return 0;
+		if (!in->i_block[12]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { buddy_free((uint64_t)tmp, 0); return 0; }
+			memset(tmp, 0, fs->block_size);
+			in->i_block[12] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+		} else if (read_block(fs, in->i_block[12], tmp) != 0) {
+			buddy_free((uint64_t)tmp, 0); return 0;
+		}
+		uint32_t *ptrs = (uint32_t *)tmp;
+		if (!ptrs[lbn]) {
+			uint32_t b = alloc_block(fs, pg);
+			if (!b) { buddy_free((uint64_t)tmp, 0); return 0; }
+			ptrs[lbn] = b;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, in->i_block[12], tmp);
+		}
+		uint32_t r = ptrs[lbn];
+		buddy_free((uint64_t)tmp, 0);
+		return r;
+	}
+	lbn -= ppp;
+
+	/* Double indirect */
+	if (lbn < ppp * ppp) {
+		uint8_t *t1 = buddy_alloc(0), *t2 = buddy_alloc(0);
+		if (!t1 || !t2) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+		if (!in->i_block[13]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			memset(t1, 0, fs->block_size);
+			in->i_block[13] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, ib, t1);
+		} else if (read_block(fs, in->i_block[13], t1) != 0) {
+			buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0;
+		}
+		uint32_t *l1 = (uint32_t *)t1;
+		uint32_t l1i = lbn / ppp, l2i = lbn % ppp;
+		if (!l1[l1i]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			memset(t2, 0, fs->block_size);
+			l1[l1i] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, in->i_block[13], t1);
+			write_block(fs, ib, t2);
+		} else if (read_block(fs, l1[l1i], t2) != 0) {
+			buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0;
+		}
+		uint32_t *l2 = (uint32_t *)t2;
+		if (!l2[l2i]) {
+			uint32_t b = alloc_block(fs, pg);
+			if (!b) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			l2[l2i] = b;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, l1[l1i], t2);
+		}
+		uint32_t r = l2[l2i];
+		buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0);
+		return r;
+	}
+	return 0; /* triple indirect not supported */
+}
+
+static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	if (!len) return 0;
+	ext2_inode_priv_t *priv = f->inode->priv;
+	ext2_fs_t  *fs  = priv->fs;
+	ext2_inode_t *in = &priv->raw;
+	if (in->i_flags & EXT4_EXTENTS_FL) return -1;
+
+	const uint8_t *src = buf;
+	uint64_t pos = (uint64_t)f->pos;
+	size_t done = 0;
+
+	uint8_t *blkbuf = buddy_alloc(0);
+	if (!blkbuf) return -12;
+
+	while (done < len) {
+		uint32_t lbn   = (uint32_t)(pos / fs->block_size);
+		uint32_t boff  = (uint32_t)(pos % fs->block_size);
+		uint32_t chunk = fs->block_size - boff;
+		if (chunk > (uint32_t)(len - done)) chunk = (uint32_t)(len - done);
+
+		uint32_t phys = inode_alloc_block(fs, in, priv->ino, lbn);
+		if (!phys) break;
+
+		if (boff || chunk < fs->block_size) {
+			if (read_block(fs, phys, blkbuf) != 0) break;
+		} else {
+			memset(blkbuf, 0, fs->block_size);
+		}
+		memcpy(blkbuf + boff, src + done, chunk);
+		if (write_block(fs, phys, blkbuf) != 0) break;
+		pos  += chunk;
+		done += chunk;
+	}
+	buddy_free((uint64_t)blkbuf, 0);
+
+	if (pos > (uint64_t)f->inode->size) {
+		in->i_size_lo   = (uint32_t)pos;
+		in->i_size_high = (uint32_t)(pos >> 32);
+		f->inode->size  = (off_t)pos;
+	}
+	f->pos = (off_t)pos;
+	write_inode(fs, priv->ino, in);
+	return (ssize_t)done;
+}
+
+/* Add a dirent to a directory. Modifies dir_in in memory; caller writes inode. */
+static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
+                         uint32_t ino, const char *name, uint8_t ftype)
+{
+	uint8_t nlen = 0; while (name[nlen]) nlen++;
+	uint16_t need = (uint16_t)(((uint32_t)8 + nlen + 3u) & ~3u);
+	uint8_t *blk = buddy_alloc(0);
+	if (!blk) return -12;
+
+	uint64_t dsz = (uint64_t)dir_in->i_size_lo | ((uint64_t)dir_in->i_size_high << 32);
+	uint32_t nblk = (uint32_t)((dsz + fs->block_size - 1) / fs->block_size);
+
+	for (uint32_t lbn = 0; lbn < nblk; lbn++) {
+		uint32_t phys = inode_map_block(fs, dir_in, lbn);
+		if (!phys || read_block(fs, phys, blk) != 0) continue;
+		uint32_t off = 0;
+		while (off + 8 <= fs->block_size) {
+			ext2_dirent_t *de = (ext2_dirent_t *)(blk + off);
+			if (!de->rec_len || off + de->rec_len > fs->block_size) break;
+			uint16_t used = de->inode ? (uint16_t)(((uint32_t)8 + de->name_len + 3u) & ~3u) : 0;
+			uint16_t avail = de->rec_len - used;
+			if (avail >= need) {
+				if (de->inode) { de->rec_len = used; off += used; de = (ext2_dirent_t *)(blk + off); de->rec_len = avail; }
+				de->inode     = ino;
+				de->name_len  = nlen;
+				de->file_type = ftype;
+				memcpy(de->name, name, nlen);
+				write_block(fs, phys, blk);
+				buddy_free((uint64_t)blk, 0);
+				return 0;
+			}
+			off += de->rec_len;
+		}
+	}
+
+	/* Allocate new block for directory */
+	uint32_t phys = inode_alloc_block(fs, dir_in, dir_ino, nblk);
+	if (!phys) { buddy_free((uint64_t)blk, 0); return -28; }
+
+	memset(blk, 0, fs->block_size);
+	ext2_dirent_t *de = (ext2_dirent_t *)blk;
+	de->inode     = ino;
+	de->rec_len   = (uint16_t)fs->block_size;
+	de->name_len  = nlen;
+	de->file_type = ftype;
+	memcpy(de->name, name, nlen);
+	write_block(fs, phys, blk);
+
+	dir_in->i_size_lo = (uint32_t)(dsz + fs->block_size);
+	buddy_free((uint64_t)blk, 0);
+	return 0;
+}
+
+/* Remove a dirent from a directory. Returns inode number of removed entry or 0. */
+static uint32_t dir_remove_entry(ext2_fs_t *fs, ext2_inode_t *dir_in, const char *name)
+{
+	uint8_t nlen = 0; while (name[nlen]) nlen++;
+	uint8_t *blk = buddy_alloc(0);
+	if (!blk) return 0;
+
+	uint64_t dsz = (uint64_t)dir_in->i_size_lo | ((uint64_t)dir_in->i_size_high << 32);
+	uint32_t nblk = (uint32_t)((dsz + fs->block_size - 1) / fs->block_size);
+
+	for (uint32_t lbn = 0; lbn < nblk; lbn++) {
+		uint32_t phys = inode_map_block(fs, dir_in, lbn);
+		if (!phys || read_block(fs, phys, blk) != 0) continue;
+		uint32_t off = 0;
+		ext2_dirent_t *prev = NULL;
+		while (off + 8 <= fs->block_size) {
+			ext2_dirent_t *de = (ext2_dirent_t *)(blk + off);
+			if (!de->rec_len || off + de->rec_len > fs->block_size) break;
+			if (de->inode && de->name_len == nlen && memcmp(de->name, name, nlen) == 0) {
+				uint32_t found_ino = de->inode;
+				if (prev) {
+					prev->rec_len = (uint16_t)(prev->rec_len + de->rec_len);
+				} else {
+					de->inode = 0; /* mark as deleted */
+				}
+				write_block(fs, phys, blk);
+				buddy_free((uint64_t)blk, 0);
+				return found_ino;
+			}
+			prev = de;
+			off += de->rec_len;
+		}
+	}
+	buddy_free((uint64_t)blk, 0);
+	return 0;
+}
+
+/* Free all data blocks of an inode (non-extent only) */
+static void inode_free_blocks(ext2_fs_t *fs, ext2_inode_t *in)
+{
+	if (in->i_flags & EXT4_EXTENTS_FL) return;
+	uint32_t ppp = fs->block_size / 4;
+	uint8_t *tmp = buddy_alloc(0);
+	if (!tmp) return;
+
+	/* Direct */
+	for (int i = 0; i < 12; i++) if (in->i_block[i]) free_block(fs, in->i_block[i]);
+
+	/* Single indirect */
+	if (in->i_block[12]) {
+		if (read_block(fs, in->i_block[12], tmp) == 0) {
+			uint32_t *p = (uint32_t *)tmp;
+			for (uint32_t i = 0; i < ppp; i++) if (p[i]) free_block(fs, p[i]);
+		}
+		free_block(fs, in->i_block[12]);
+	}
+
+	/* Double indirect */
+	if (in->i_block[13]) {
+		uint8_t *t2 = buddy_alloc(0);
+		if (t2 && read_block(fs, in->i_block[13], tmp) == 0) {
+			uint32_t *l1 = (uint32_t *)tmp;
+			for (uint32_t i = 0; i < ppp; i++) {
+				if (!l1[i]) continue;
+				if (read_block(fs, l1[i], t2) == 0) {
+					uint32_t *l2 = (uint32_t *)t2;
+					for (uint32_t j = 0; j < ppp; j++) if (l2[j]) free_block(fs, l2[j]);
+				}
+				free_block(fs, l1[i]);
+			}
+		}
+		buddy_free((uint64_t)t2, 0);
+		free_block(fs, in->i_block[13]);
+	}
+	buddy_free((uint64_t)tmp, 0);
+}
+
+static int ext2_create(vfs_inode_t *dir, const char *name, mode_t mode)
+{
+	ext2_inode_priv_t *dpriv = dir->priv;
+	ext2_fs_t *fs = dpriv->fs;
+	uint32_t pref = (dpriv->ino - 1) / fs->inodes_per_group;
+
+	uint32_t new_ino = alloc_inode(fs, pref);
+	if (!new_ino) return -28;
+
+	ext2_inode_t in;
+	memset(&in, 0, sizeof(in));
+	in.i_mode       = (uint16_t)(S_IFREG | (mode & 0xFFF));
+	in.i_links_count = 1;
+
+	if (write_inode(fs, new_ino, &in) != 0) { free_inode(fs, new_ino); return -5; }
+
+	if (dir_add_entry(fs, dpriv->ino, &dpriv->raw, new_ino, name, 1 /*EXT2_FT_REG_FILE*/) != 0) {
+		free_inode(fs, new_ino); return -5;
+	}
+	write_inode(fs, dpriv->ino, &dpriv->raw);
+	dir->size = dpriv->raw.i_size_lo;
+	return 0;
+}
+
+static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
+{
+	ext2_inode_priv_t *dpriv = dir->priv;
+	ext2_fs_t *fs = dpriv->fs;
+	uint32_t pref = (dpriv->ino - 1) / fs->inodes_per_group;
+
+	uint32_t new_ino = alloc_inode(fs, pref);
+	if (!new_ino) return -28;
+
+	ext2_inode_t in;
+	memset(&in, 0, sizeof(in));
+	in.i_mode        = (uint16_t)(S_IFDIR | (mode & 0xFFF ? mode & 0xFFF : 0755));
+	in.i_links_count = 2; /* . and parent */
+
+	/* Allocate and write first block with . and .. */
+	uint32_t phys = inode_alloc_block(fs, &in, new_ino, 0);
+	if (!phys) { free_inode(fs, new_ino); return -28; }
+
+	uint8_t *blk = buddy_alloc(0);
+	if (!blk) { free_block(fs, phys); free_inode(fs, new_ino); return -12; }
+	memset(blk, 0, fs->block_size);
+
+	ext2_dirent_t *dot = (ext2_dirent_t *)blk;
+	dot->inode     = new_ino;
+	dot->rec_len   = 12;
+	dot->name_len  = 1;
+	dot->file_type = 2; /* EXT2_FT_DIR */
+	dot->name[0]   = '.';
+
+	ext2_dirent_t *dotdot = (ext2_dirent_t *)(blk + 12);
+	dotdot->inode     = dpriv->ino;
+	dotdot->rec_len   = (uint16_t)(fs->block_size - 12);
+	dotdot->name_len  = 2;
+	dotdot->file_type = 2;
+	dotdot->name[0]   = '.';
+	dotdot->name[1]   = '.';
+
+	write_block(fs, phys, blk);
+	buddy_free((uint64_t)blk, 0);
+
+	in.i_size_lo = fs->block_size;
+	if (write_inode(fs, new_ino, &in) != 0) { inode_free_blocks(fs, &in); free_inode(fs, new_ino); return -5; }
+
+	if (dir_add_entry(fs, dpriv->ino, &dpriv->raw, new_ino, name, 2 /*EXT2_FT_DIR*/) != 0) {
+		inode_free_blocks(fs, &in); free_inode(fs, new_ino); return -5;
+	}
+	dpriv->raw.i_links_count++;
+	write_inode(fs, dpriv->ino, &dpriv->raw);
+	dir->size  = dpriv->raw.i_size_lo;
+	dir->nlink = dpriv->raw.i_links_count;
+	return 0;
+}
+
+static int ext2_unlink(vfs_inode_t *dir, const char *name)
+{
+	ext2_inode_priv_t *dpriv = dir->priv;
+	ext2_fs_t *fs = dpriv->fs;
+
+	uint32_t target_ino = dir_remove_entry(fs, &dpriv->raw, name);
+	if (!target_ino) return -2; /* ENOENT */
+	write_inode(fs, dpriv->ino, &dpriv->raw);
+	dir->size = dpriv->raw.i_size_lo;
+
+	ext2_inode_t tin;
+	if (read_inode(fs, target_ino, &tin) != 0) return 0;
+	if (tin.i_links_count > 0) tin.i_links_count--;
+	if (tin.i_links_count == 0) {
+		tin.i_dtime = 1;
+		inode_free_blocks(fs, &tin);
+		write_inode(fs, target_ino, &tin);
+		free_inode(fs, target_ino);
+	} else {
+		write_inode(fs, target_ino, &tin);
+	}
+	return 0;
+}
+
 static vfs_fops_t ext2_fops = {
-	.read = ext2_read,
-	.seek = ext2_seek,
+	.read  = ext2_read,
+	.write = ext2_write,
+	.seek  = ext2_seek,
 };
 
 /* ── ext2 iops ───────────────────────────────────────────────── */
@@ -611,6 +1132,9 @@ static vfs_iops_t ext2_iops = {
 	.readdir  = ext2_readdir,
 	.stat     = ext2_stat,
 	.readlink = ext2_readlink,
+	.create   = ext2_create,
+	.mkdir    = ext2_mkdir,
+	.unlink   = ext2_unlink,
 };
 
 /* ── mount ───────────────────────────────────────────────────── */
@@ -640,7 +1164,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 
 	uint32_t bs = 1024u << sb->s_log_block_size;
 	if (bs > 4096) {
-		kprintf("[ext2] block size %u not supported\n", bs);
+		kprintf("ext2: block size %u not supported\n", bs);
 		buddy_free((uint64_t)sb_buf, 0);
 		return -1;
 	}
@@ -654,6 +1178,8 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	fs->inode_size        = (sb->s_rev_level > 0) ? sb->s_inode_size : 128;
 	fs->first_data_block  = sb->s_first_data_block;
 	fs->total_inodes      = sb->s_inodes_count;
+	fs->total_blocks      = sb->s_blocks_count_lo;
+	fs->num_groups        = (sb->s_blocks_count_lo + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group;
 	fs->desc_size         = (sb->s_desc_size >= 32) ? sb->s_desc_size : 32;
 	fs->cache_clock = 0;
 	for (int i = 0; i < EXT2_BCACHE_N; i++) {
@@ -662,7 +1188,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		fs->cache[i].lru_ts = 0;
 	}
 
-	kprintf("[ext2] bs=%u ino_sz=%u groups=%u/%u\n",
+	kprintf("ext2: bs=%u ino_sz=%u groups=%u/%u\n",
 	        bs, fs->inode_size,
 	        (sb->s_blocks_count_lo + fs->blocks_per_group - 1) / fs->blocks_per_group,
 	        fs->inodes_per_group);
@@ -672,7 +1198,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	/* read root inode */
 	ext2_inode_t root_raw;
 	if (read_inode(fs, EXT2_ROOT_INO, &root_raw) != 0) {
-		kprintf("[ext2] cannot read root inode\n");
+		kprintf("ext2: cannot read root inode\n");
 		return -1;
 	}
 
@@ -683,7 +1209,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); return -1; }
 
 	mnt->root = root_dentry;
-	kprintf("[ext2] mounted (ino root=%u)\n", EXT2_ROOT_INO);
+	kprintf("ext2: mounted (ino root=%u)\n", EXT2_ROOT_INO);
 	return 0;
 }
 

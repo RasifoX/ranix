@@ -24,14 +24,14 @@ int driver_register(driver_t *drv)
         int ret = drv->init();
         drv->initialized = (ret == 0) ? 1 : 0;
         if (ret != 0) {
-            kprintf("[  drv] %s: init failed (%d)\n", drv->name, ret);
+            kprintf("%s: init failed (%d)\n", drv->name, ret);
             return ret;
         }
     } else {
         drv->initialized = 1;
     }
 
-    kprintf("[  drv] %s %s\n", drv->name, type_name(drv->type));
+    kprintf("%s: %s\n", drv->name, type_name(drv->type));
     return 0;
 }
 
