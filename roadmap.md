@@ -58,10 +58,11 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 
 ## v0.17 Serisi — POSIX Olgunluk & Kullanılabilirlik
 
-### v0.17.0 — Gelişmiş Süreç Yönetimi
+### v0.17.0 — Gelişmiş Süreç Yönetimi ✅ TAMAMLANDI
 - [x] Thread desteği (`sys_clone` CLONE_VM+CLONE_THREAD, `proc_clone_thread`) — musl pthreads için
-- [ ] Tam POSIX sinyalleri — `SIGTERM`, `SIGSEGV`, `SIGCHLD` ve `sigaction` semantiği
-- [ ] `waitpid` semantiği — `WNOHANG`, `WUNTRACED`, `WIFEXITED`, `WIFSIGNALED`
+- [x] Fork/exec düzeltmeleri: vm_copy kernel identity L1 kopyası, TLS kaydı, GIC timer EOI sıralaması
+- [x] Tam POSIX sinyalleri — `SIGTERM`, `SIGSEGV`, `SIGCHLD`, `SIGPIPE` ve `sigaction` semantiği
+- [x] `waitpid` semantiği — `WNOHANG`, `WIFEXITED`, `WIFSIGNALED` (v0.16.17)
 - [ ] Session ve process group yönetimi — `setsid`, `setpgid`, terminal I/O
 
 ### v0.17.1 — Dosya Sistemi Genişletme
@@ -72,7 +73,8 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 
 ### v0.17.2 — Shell & Userspace Modülaritesi
 - [ ] Shell built-in'leri bağımsız ELF'e taşı — `userspace/ls`, `userspace/cat`
-- [ ] Init süreci (PID 1) yeniden canlandırma — shell crash edince kernel respawn
+- [x] Init süreci (PID 1) — `userspace/init.c`: fork+exec döngüsü, shell crash edince respawn
+- [x] Linux-standart boot log formatı — `[    T.TTTTTT] mesaj`, tüm `[  tag]` ön ekleri kaldırıldı
 - [ ] `dmesg` tarzı kernel ring buffer — `/proc/kmsg`
 
 ### v0.17.3 — Donanım & Ağ
