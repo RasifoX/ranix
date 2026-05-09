@@ -4,7 +4,7 @@
 #include <uapi/types.h>
 #include <kernel/fb.h>
 
-#define TIMER_HZ 250
+#define TIMER_HZ 100
 
 typedef struct {
 	const char *name;
