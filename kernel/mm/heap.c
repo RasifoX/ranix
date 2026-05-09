@@ -101,11 +101,11 @@ void *kmalloc(size_t size) {
 
 void kfree(void *ptr) {
     if (!ptr) return;
-    
+
     heap_header_t *hdr = (heap_header_t *)ptr - 1;
-    
+
     uint64_t f = spin_lock_irq(&heap_lock);
-    
+
     if (hdr->magic == HEAP_LARGE) {
         buddy_free(VIRT_TO_PHYS(hdr), hdr->class_idx);
     } else if (hdr->magic == HEAP_MAGIC) {
@@ -118,8 +118,9 @@ void kfree(void *ptr) {
             kpanic("kfree: invalid SLAB class index");
         }
     } else {
+        kprintf("kfree: bad ptr=%p hdr=%p magic=0x%x\n", ptr, hdr, hdr->magic);
         kpanic("kfree: invalid pointer or corrupted header");
     }
-    
+
     spin_unlock_irq(&heap_lock, f);
 }

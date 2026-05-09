@@ -2105,14 +2105,14 @@ void syscall_handle(arch_context_t *ctx)
 #define CLONE_SETTLS   0x00080000
 #define CLONE_CTID     0x00200000 /* CLONE_CHILD_CLEARTID */
 #define CLONE_VFORK    0x00004000
-		if (flags & CLONE_VM) {
+		if (flags & CLONE_VFORK) {
+			ret = sys_vfork();
+		} else if (flags & CLONE_VM) {
 			/* Thread: share address space */
 			uint64_t newsp  = (uint64_t)arg1;
 			uint32_t *ctid  = (flags & CLONE_CTID) ? (uint32_t*)arg3 : NULL;
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg4 : 0;
 			ret = (long)proc_clone_thread(newsp, tls, ctid);
-		} else if (flags & CLONE_VFORK) {
-			ret = sys_vfork();
 		} else {
 			ret = sys_fork();
 		}
