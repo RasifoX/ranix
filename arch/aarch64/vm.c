@@ -87,13 +87,17 @@ void vm_destroy(vm_space_t *vs)
 
 			uint64_t l3_phys = l2[j] & ~0xFFFUL;
 			uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l3_phys);
+			int is_user_l3 = 0;
 			for (int k = 0; k < 512; k++) {
 				if (!(l3[k] & PTE_VALID)) continue;
 				if (l3[k] & PTE_USER) {
+					is_user_l3 = 1;
 					pmm_free((void *)(l3[k] & ~0xFFFUL));
 				}
 			}
-			buddy_free(l3_phys, 0);
+			/* Don't free kernel-inherited L3 tables (e.g. framebuffer split).
+			 * They are shared via the private L2 copy and must not be recycled. */
+			if (is_user_l3) buddy_free(l3_phys, 0);
 		}
 		buddy_free(l2_phys, 0);
 	}
