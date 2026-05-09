@@ -52,20 +52,18 @@ void irqchip_enable_irq(uint32_t irq) {
 
 void irq_dispatch(uint32_t hint) {
     (void)hint;
-    /* BCM2711: per-core timer IRQs come via local controller, not GIC */
-    uint32_t src = *(volatile uint32_t *)local_irq_src0_addr;
-    if (src & (1 << 3)) {
-        irq_handle(27);  /* virtual timer PPI */
+
+    /* Try GIC first — covers PPIs (e.g. virtual timer on virt) and SPIs */
+    uint32_t iar = GICC(0x00C);
+    uint32_t irq = iar & 0x3FF;
+    if (irq < 1020) {
+        irq_handle(irq);
+        GICC(0x010) = iar;
         return;
     }
 
-    /* shared peripheral IRQs via GIC */
-    uint32_t iar = GICC(0x00C);
-    uint32_t irq = iar & 0x3FF;
-
-    if (irq >= 1020)
-        return;
-
-    irq_handle(irq);
-    GICC(0x010) = iar;
+    /* BCM2711: per-core timer IRQs come via local controller, not GIC */
+    uint32_t src = *(volatile uint32_t *)local_irq_src0_addr;
+    if (src & (1 << 3))
+        irq_handle(27);
 }
