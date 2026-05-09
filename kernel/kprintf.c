@@ -1,4 +1,5 @@
 #include <drivers/serial/uart.h>
+#include <kernel/board.h>
 #include <kernel/hal.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
@@ -30,8 +31,8 @@ static void _putc(char c)
     if (at_line_start && c != '\n') {
         /* prepend [    S.UUUUUU] timestamp */
         uint64_t t    = kernel_ticks;
-        uint32_t secs = (uint32_t)(t / 250);
-        uint32_t usec = (uint32_t)((t % 250) * 4000);
+        uint32_t secs = (uint32_t)(t / TIMER_HZ);
+        uint32_t usec = (uint32_t)((t % TIMER_HZ) * (1000000 / TIMER_HZ));
         char buf[16]; int i;
         _emit('[');
         /* 5-digit seconds, space-padded */
