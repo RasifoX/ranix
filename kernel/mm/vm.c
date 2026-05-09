@@ -57,7 +57,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	vaddr &= PAGE_MASK;
 	process_t *p = task_current();
-	if (!p || !p->vm) return -1;
+	if (!p || !p->vm) { kprintf("[fault] no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
 
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	uint64_t paddr = arch_vm_get_paddr(p->vm->root, vaddr);

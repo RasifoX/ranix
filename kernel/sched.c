@@ -252,6 +252,9 @@ pid_t proc_fork(void)
 	}
 
 	process_t *parent = task_current();
+	/* tpidr_el0 may not have been saved by scheduler yet (no context switch
+	 * since EL0 last set it), so capture it now while still in parent context. */
+	arch_save_tls(parent);
 	process_t *child  = buddy_alloc(0);
 	if (!child) {
 		spin_unlock_irq(&sched_lock, f);
@@ -309,6 +312,7 @@ pid_t proc_fork(void)
 	
 	CTX_SYSCALL_RET(cctx, 0);
 	child->ctx = cctx;
+	child->tls_base        = parent->tls_base;
 	child->ticks_remaining = SCHED_QUANTUM;
 
 	child->next  = proctab[0]->next;
@@ -336,6 +340,7 @@ pid_t proc_vfork(void)
 	}
 
 	process_t *parent = task_current();
+	arch_save_tls(parent);
 	process_t *child = buddy_alloc(0);
 	if (!child) {
 		spin_unlock_irq(&sched_lock, f);
@@ -370,7 +375,8 @@ pid_t proc_vfork(void)
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
 	CTX_SYSCALL_RET(cctx, 0);
-	child->ctx = cctx;
+	child->ctx      = cctx;
+	child->tls_base = parent->tls_base;
 
 	child->next    = proctab[0]->next;
 	proctab[0]->next = child;
@@ -455,13 +461,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 #endif
 	}
 
-	/* Set TLS */
-	if (tls) {
-		child->tls_base = tls;
-#if defined(__aarch64__)
-		/* will be written to tpidr_el0 on context switch */
-#endif
-	}
+	child->tls_base = tls ? tls : parent->tls_base;
 
 	/* Write child TID to ctid if requested */
 	if (ctid) {
@@ -525,7 +525,6 @@ void schedule(void)
 	if (!next) {
 		next = &idle_proc;
 	}
-
 	next->state = PROC_RUNNING;
 	next->ticks_remaining = SCHED_QUANTUM;
 
