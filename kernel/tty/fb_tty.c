@@ -5,6 +5,7 @@
 #include "font_spleen.h"
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
+#include <kernel/sync.h>
 
 #define FG_COLOR  0xFFFFFFFF
 #define BG_COLOR  0xFF000000
@@ -18,6 +19,8 @@ static u32  _cur_col, _cur_row;
 static u8  *shadow;
 static u32  _dirty_y0, _dirty_y1;
 
+static spinlock_t fb_tty_lock = SPINLOCK_INIT;
+
 /* cursor state — drawn directly on fb, not in shadow */
 static int           _cursor_visible  = 0;
 static u32           _cursor_fb_col   = 0;
@@ -27,6 +30,7 @@ static int           _blink_ticks     = 0;
 static int           _blink_state     = 1;
 static volatile int  _blink_dirty     = 0;
 
+/* LOCK HELD */
 static void flush_region(u32 y_start, u32 y_end)
 {
     if (y_end > _fb->height) y_end = _fb->height;
@@ -36,11 +40,13 @@ static void flush_region(u32 y_start, u32 y_end)
     memcpy(dst, src, (y_end - y_start) * _fb->pitch);
 }
 
+/* LOCK HELD */
 static void flush_all(void)
 {
     memcpy(_fb->fb, shadow, _fb->height * _fb->pitch);
 }
 
+/* LOCK HELD */
 static void cursor_erase_from_fb(void)
 {
     if (!_cursor_on_fb || !_fb) return;
@@ -54,6 +60,7 @@ static void cursor_erase_from_fb(void)
     _cursor_on_fb = 0;
 }
 
+/* LOCK HELD */
 static void cursor_draw_on_fb(void)
 {
     if (!_cursor_visible || !_fb || !_blink_state) return;
@@ -68,7 +75,8 @@ static void cursor_draw_on_fb(void)
     _cursor_on_fb  = 1;
 }
 
-static void dirty_flush(void)
+/* LOCK HELD */
+static void dirty_flush_locked(void)
 {
     if (!_fb) return;
     if (_cursor_visible) {
@@ -85,47 +93,42 @@ static void dirty_flush(void)
     _dirty_y1 = 0;
 }
 
+/* LOCK HELD */
 static void scroll_up(void)
 {
     u32 row_bytes = FONT_H * _fb->pitch;
-
-    dirty_flush();
-
+    dirty_flush_locked();
     memcpy(shadow, shadow + row_bytes, (_rows - 1) * row_bytes);
-
     u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
     u64 *last = (u64 *)(shadow + (_rows - 1) * row_bytes);
     u32 count = row_bytes / 8;
-    for (u32 i = 0; i < count; i++)
-        last[i] = bg;
-
+    for (u32 i = 0; i < count; i++) last[i] = bg;
     flush_all();
+    cursor_draw_on_fb();
 }
 
-static void put_codepoint(u32 cp);
-
+/* LOCK HELD */
 static void draw_glyph(u32 col, u32 row, u32 cp)
 {
     const u8 *glyph = spleen_lookup(cp);
     u32 px = col * FONT_W;
     u32 py = row * FONT_H;
-
     for (u32 y = 0; y < FONT_H; y++) {
         u32 *line = (u32 *)(shadow + (py + y) * _fb->pitch);
         u8 bits = glyph[y];
         for (u32 x = 0; x < FONT_W; x++)
             line[px + x] = (bits & (0x80 >> x)) ? FG_COLOR : BG_COLOR;
     }
-
     if (py < _dirty_y0) _dirty_y0 = py;
     if (py + FONT_H > _dirty_y1) _dirty_y1 = py + FONT_H;
 }
 
+/* LOCK HELD */
 static void put_codepoint(u32 cp)
 {
     if (!_fb) return;
     if (cp == '\n') {
-        dirty_flush(); _cur_col = 0; _cur_row++;
+        dirty_flush_locked(); _cur_col = 0; _cur_row++;
     } else if (cp == '\r') {
         _cur_col = 0;
     } else if (cp == '\b') {
@@ -135,6 +138,8 @@ static void put_codepoint(u32 cp)
         if (++_cur_col >= _cols) { _cur_col = 0; _cur_row++; }
     }
     if (_cur_row >= _rows) { scroll_up(); _cur_row = _rows - 1; }
+    _blink_state = 1; /* Reset blink when typing */
+    _blink_ticks = 0;
 }
 
 void fb_tty_init(fb_info_t *fb)
@@ -146,26 +151,27 @@ void fb_tty_init(fb_info_t *fb)
     _cur_row  = 0;
     _dirty_y0 = fb->height;
     _dirty_y1 = 0;
-
     u32 shadow_size = fb->pitch * fb->height;
     shadow = kmalloc(shadow_size);
     if (!shadow) return;
-
-    u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
-    u64 *p = (u64 *)shadow;
-    for (u32 i = 0; i < shadow_size / 8; i++)
-        p[i] = bg;
-
-    flush_all();
+    _cursor_visible = 1;
+    _blink_state = 1;
+    fb_tty_clear();
 }
 
-void fb_tty_flush(void) { dirty_flush(); }
+void fb_tty_flush(void)
+{
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    dirty_flush_locked();
+    spin_unlock_irq(&fb_tty_lock, f);
+}
 
 static u32  utf8_state = 0;
 static u32  utf8_cp = 0;
 
 void fb_tty_putchar(char c)
 {
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
     unsigned char u = (unsigned char)c;
     if (u < 0x80) {
         utf8_state = 0;
@@ -187,50 +193,50 @@ void fb_tty_putchar(char c)
         utf8_state = 0;
         put_codepoint('?');
     }
+    spin_unlock_irq(&fb_tty_lock, f);
 }
 
-void fb_tty_puts(const char *s)
-{
-    while (*s) fb_tty_putchar(*s++);
-}
+void fb_tty_puts(const char *s) { while (*s) fb_tty_putchar(*s++); }
 
 void fb_tty_write(const char *buf, size_t len)
 {
-    for (size_t i = 0; i < len; i++)
-        fb_tty_putchar(buf[i]);
+    for (size_t i = 0; i < len; i++) fb_tty_putchar(buf[i]);
 }
 
 void fb_tty_clear(void)
 {
     if (!_fb) return;
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
     u32 shadow_size = _fb->pitch * _fb->height;
     u64 bg = (u64)BG_COLOR | ((u64)BG_COLOR << 32);
-
     u64 *p = (u64 *)shadow;
-    for (u32 i = 0; i < shadow_size / 8; i++)
-        p[i] = bg;
-
+    for (u32 i = 0; i < shadow_size / 8; i++) p[i] = bg;
     _cur_col  = 0;
     _cur_row  = 0;
     _dirty_y0 = _fb->height;
     _dirty_y1 = 0;
-
     flush_all();
+    cursor_draw_on_fb();
+    spin_unlock_irq(&fb_tty_lock, f);
 }
 
 void fb_tty_show_cursor(int show)
 {
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
     if (!show) cursor_erase_from_fb();
     _cursor_visible = show;
+    if (show) cursor_draw_on_fb();
+    spin_unlock_irq(&fb_tty_lock, f);
 }
 
 void fb_tty_erase_eol(void)
 {
     if (!_fb) return;
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
     u32 saved = _cur_col;
-    for (u32 c = _cur_col; c < _cols; c++)
-        draw_glyph(c, _cur_row, ' ');
+    for (u32 c = _cur_col; c < _cols; c++) draw_glyph(c, _cur_row, ' ');
     _cur_col = saved;
+    spin_unlock_irq(&fb_tty_lock, f);
 }
 
 static void uart_esc(const char *s)
@@ -242,12 +248,17 @@ static void uart_esc(const char *s)
 void fb_tty_tick(void)
 {
     if (!_cursor_visible || !_fb) return;
-    if (++_blink_ticks < (TIMER_HZ / 2)) return;  /* 500ms at TIMER_HZ */
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    if (++_blink_ticks < (TIMER_HZ / 2)) {
+        spin_unlock_irq(&fb_tty_lock, f);
+        return;
+    }
     _blink_ticks = 0;
     _blink_state ^= 1;
     _blink_dirty = 1;
-    cursor_erase_from_fb();   /* direct fb write — fast, no flush needed */
+    cursor_erase_from_fb();
     cursor_draw_on_fb();
+    spin_unlock_irq(&fb_tty_lock, f);
 }
 
 void fb_tty_cursor_flush(void)
@@ -257,4 +268,11 @@ void fb_tty_cursor_flush(void)
     uart_esc(_blink_state ? "?25h" : "?25l");
 }
 
-void fb_tty_set_col(u32 col) { _cur_col = col; }
+void fb_tty_set_col(u32 col)
+{
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    cursor_erase_from_fb();
+    _cur_col = col;
+    cursor_draw_on_fb();
+    spin_unlock_irq(&fb_tty_lock, f);
+}

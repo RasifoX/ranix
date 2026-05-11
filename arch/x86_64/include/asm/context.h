@@ -57,6 +57,7 @@ typedef struct {
 #define SYS_ARCH_RT_SIGACTION  13
 #define SYS_ARCH_RT_SIGPROCMASK 14
 #define SYS_ARCH_IOCTL         16
+#define SYS_ARCH_READV         19
 #define SYS_ARCH_WRITEV        20
 #define SYS_ARCH_ACCESS        21
 #define SYS_ARCH_SELECT        23

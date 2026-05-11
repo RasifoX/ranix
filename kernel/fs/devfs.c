@@ -89,90 +89,6 @@ static vfs_fops_t urandom_fops = {
 	.write = null_write,
 };
 
-/* ── /dev/tty ────────────────────────────────────────────────── */
-
-#include <kernel/proc.h>
-
-static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
-{
-	(void)f;
-	char *b = buf;
-	size_t i;
-	for (i = 0; i < len; i++) {
-		while (!uart_has_data()) task_sleep();
-		char c = uart_getc();
-		b[i] = c;
-		if (c == '\n' || c == '\r') { i++; break; }
-	}
-	return (ssize_t)i;
-}
-
-static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
-{
-	(void)f;
-	const char *s = buf;
-	fb_tty_write(s, len);
-	for (size_t i = 0; i < len; i++) {
-		if (s[i] == '\n') uart_putc('\r');
-		uart_putc(s[i]);
-	}
-	return (ssize_t)len;
-}
-
-static int tty_poll(vfs_file_t *f)
-{
-	(void)f;
-	return uart_has_data() ? 1 : 0;
-}
-
-static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
-{
-	(void)f;
-#define TCGETS   0x5401
-#define TCSETS   0x5402
-#define TCSETSW  0x5403
-#define TCSETSF  0x5404
-#define TIOCGWINSZ 0x5413
-#define TIOCGPGRP  0x540f
-#define TIOCSPGRP  0x5410
-	switch (cmd) {
-	case TCSETS: case TCSETSW: case TCSETSF: return 0;
-	case TCGETS: {
-		uint8_t termios[60];
-		memset(termios, 0, sizeof(termios));
-		/* c_oflag offset 4: OPOST|ONLCR */
-		((uint32_t *)termios)[1] = 0x5;
-		/* c_cflag offset 8: CS8|CREAD|CLOCAL|B38400 */
-		((uint32_t *)termios)[2] = 0xBF;
-		/* c_lflag offset 12: ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN */
-		((uint32_t *)termios)[3] = 0x8A3B;
-		memcpy((void *)(uintptr_t)arg, termios, sizeof(termios));
-		return 0;
-	}
-	case TIOCGWINSZ: {
-		uint16_t ws[4] = {24, 80, 0, 0};
-		memcpy((void *)(uintptr_t)arg, ws, sizeof(ws));
-		return 0;
-	}
-	case TIOCGPGRP: {
-		int pgid = 1;
-		memcpy((void *)(uintptr_t)arg, &pgid, sizeof(pgid));
-		return 0;
-	}
-	case TIOCSPGRP: return 0;
-	default: return -25; /* ENOTTY */
-	}
-}
-
-static vfs_fops_t tty_fops = {
-	.read   = tty_read,
-	.write  = tty_write,
-	.poll   = tty_poll,
-	.ioctl  = tty_ioctl,
-};
-
-/* ── device table ────────────────────────────────────────────── */
-
 typedef struct {
 	const char  *name;
 	mode_t       mode;
@@ -180,19 +96,25 @@ typedef struct {
 	dev_t        rdev;
 } devfs_entry_t;
 
-static const devfs_entry_t devfs_table[] = {
+#define MAX_DEVFS_ENTRIES 32
+static devfs_entry_t devfs_table[MAX_DEVFS_ENTRIES] = {
 	{ "null",    S_IFCHR | 0666, &null_fops,    0x0101 },
 	{ "zero",    S_IFCHR | 0666, &zero_fops,    0x0105 },
 	{ "full",    S_IFCHR | 0666, &full_fops,    0x0107 },
 	{ "urandom", S_IFCHR | 0444, &urandom_fops, 0x0109 },
 	{ "random",  S_IFCHR | 0444, &urandom_fops, 0x0108 },
-	{ "tty",     S_IFCHR | 0666, &tty_fops,     0x0500 },
-	{ "console", S_IFCHR | 0600, &tty_fops,     0x0501 },
-	{ "stdin",   S_IFCHR | 0444, &tty_fops,     0x0502 },
-	{ "stdout",  S_IFCHR | 0222, &tty_fops,     0x0503 },
-	{ "stderr",  S_IFCHR | 0222, &tty_fops,     0x0504 },
 };
-#define DEVFS_N 10
+static int devfs_n = 5;
+
+void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
+{
+	if (devfs_n >= MAX_DEVFS_ENTRIES) return;
+	devfs_table[devfs_n].name = name;
+	devfs_table[devfs_n].mode = mode;
+	devfs_table[devfs_n].rdev = rdev;
+	devfs_table[devfs_n].fops = fops;
+	devfs_n++;
+}
 
 /* ── iops ────────────────────────────────────────────────────── */
 
@@ -215,7 +137,7 @@ static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 static vfs_inode_t *devfs_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
-	for (int i = 0; i < DEVFS_N; i++)
+	for (int i = 0; i < devfs_n; i++)
 		if (strcmp(devfs_table[i].name, name) == 0)
 			return devfs_inode_for(&devfs_table[i]);
 	return NULL;
@@ -224,7 +146,7 @@ static vfs_inode_t *devfs_lookup(vfs_inode_t *dir, const char *name)
 static int devfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx >= DEVFS_N) return -1;
+	if ((int)idx >= devfs_n) return -1;
 	const devfs_entry_t *e = &devfs_table[idx];
 	out->ino      = 0xd000 + idx;
 	out->mode     = e->mode;

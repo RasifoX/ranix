@@ -196,6 +196,11 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->vm = vm_create();
 	if (!p->vm) goto fail;
 
+	if (current->fds)
+		p->fds = fd_table_copy(current->fds);
+	else
+		p->fds = fd_table_create();
+
 	elf_info_t ei = {0};
 	if (elf_load(p->vm, elf_data, elf_len, &ei) != 0) {
 		kprintf("exec: elf_load failed\n");
