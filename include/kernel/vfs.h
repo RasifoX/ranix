@@ -75,6 +75,7 @@ typedef struct {
     off_t   (*seek)(struct vfs_file *file, off_t off, int whence);
     int     (*close)(struct vfs_file *file);
     int     (*poll)(struct vfs_file *file); /* 1=readable, 0=not */
+    uint64_t (*mmap)(struct vfs_file *file, off_t off); /* returns physical address */
 } vfs_fops_t;
 
 /* ── inode ───────────────────────────────────────────────── */

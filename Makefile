@@ -99,7 +99,10 @@ SRCS_KERNEL = \
     kernel/mm/vm.c \
     kernel/mm/pmm.c \
     kernel/mm/heap.c \
-    kernel/lib/string.c
+    kernel/lib/string.c \
+    kernel/tty/tty_core.c \
+    drivers/video/fbdev.c \
+    drivers/input/input_core.c
 
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_ARCH) $(SRCS_DRIVERS)
 SRCS_ASM = $(SRCS_ARCH_ASM)

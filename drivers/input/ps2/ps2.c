@@ -3,6 +3,7 @@
 #include <asm/io.h>
 #include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
+#include <kernel/input.h>
 
 #define PS2_DATA_PORT    0x60
 #define PS2_STATUS_PORT  0x64
@@ -32,6 +33,13 @@ static const char map_upper[] = {
 static void kbd_irq_handler(void)
 {
     uint8_t sc = inb(PS2_DATA_PORT);
+
+    int pressed = (sc & 0x80) ? 0 : 1;
+    uint16_t keycode = sc & 0x7F;
+
+    /* Report raw event to input_core */
+    input_report_key(keycode, pressed);
+    input_sync();
 
     if (sc == 0x2A || sc == 0x36) { /* left shift or right shift pressed */
         shift_pressed = 1;
