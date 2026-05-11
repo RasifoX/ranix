@@ -3,7 +3,7 @@
 
 #include <uapi/types.h>
 
-#define BUDDY_MAX_ORDER  11   /* 2^10 pages = 4 MB max single alloc */
+#define BUDDY_MAX_ORDER  14   /* 2^13 pages = 32 MB max single alloc */
 
 uint64_t buddy_init(uint64_t base, uint64_t size);
 void     buddy_add_region(uint64_t addr, uint64_t size);

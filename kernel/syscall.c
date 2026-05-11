@@ -62,201 +62,12 @@ static int resolve_path(char *out, int dirfd, const char *upath);
 static long sys_write(int fd, const void *buf, size_t len)
 {
 	if (!access_ok(buf, len)) return -14;
-
-	/* If a real VFS file is installed at fd (e.g. via dup2), use it */
-	if (fd >= 0 && fd <= 2) {
-		process_t *p = task_current();
-		if (p->fds && fd_get(p->fds, fd))
-			return vfs_write(fd, buf, len);
-	}
-
-	if (fd == 0 || fd == 1 || fd == 2) {
-		char kbuf[256];
-		size_t remaining = len;
-		const char *uptr = buf;
-		while (remaining > 0) {
-			size_t chunk = remaining > sizeof(kbuf) ? sizeof(kbuf) : remaining;
-			if (copy_from_user(kbuf, uptr, chunk) != 0)
-				return -14;
-			
-			for (size_t i = 0; i < chunk; i++) {
-				char c = kbuf[i];
-				fb_tty_putchar(c);
-				if (c == '\n') uart_putc('\r');
-				uart_putc(c);
-			}
-			uptr += chunk;
-			remaining -= chunk;
-		}
-		fb_tty_flush();
-		return (long)len;
-	}
 	return vfs_write(fd, buf, len);
-}
-
-/* count display columns for line[0..bytes] (UTF-8 codepoints = columns) */
-static int line_cols(const char *line, int bytes)
-{
-	int cols = 0;
-	for (int i = 0; i < bytes; ) {
-		unsigned char c = (unsigned char)line[i];
-		if      (c < 0x80)                    { i += 1; }
-		else if ((c & 0xE0) == 0xC0)          { i += 2; }
-		else if ((c & 0xF0) == 0xE0)          { i += 3; }
-		else                                   { i += 1; }
-		cols++;
-	}
-	return cols;
-}
-
-/* step one UTF-8 codepoint left from pos, return new pos */
-static int utf8_step_left(const char *line, int pos)
-{
-	if (pos <= 0) return 0;
-	pos--;
-	while (pos > 0 && ((unsigned char)line[pos] & 0xC0) == 0x80) pos--;
-	return pos;
-}
-
-/* step one UTF-8 codepoint right from pos, return new pos */
-static int utf8_step_right(const char *line, int pos, int len)
-{
-	if (pos >= len) return len;
-	pos++;
-	while (pos < len && ((unsigned char)line[pos] & 0xC0) == 0x80) pos++;
-	return pos;
-}
-
-static char tty_prompt[128] = "$ ";
-static int  tty_prompt_len  = 2;
-#define PROMPT     tty_prompt
-#define PROMPT_LEN tty_prompt_len
-
-static void tty_out(const char *s, int n)
-{
-	fb_tty_write(s, (size_t)n);
-	for (int i = 0; i < n; i++) {
-		if (s[i] == '\n') uart_putc('\r');
-		uart_putc(s[i]);
-	}
-}
-static void tty_out_s(const char *s)
-{
-	int n = 0; while (s[n]) n++;
-	tty_out(s, n);
-}
-
-static void uart_goto_col(int col)  /* 1-based absolute column */
-{
-	uart_putc('\033'); uart_putc('[');
-	if (col >= 100) uart_putc((char)('0' + col / 100));
-	if (col >= 10)  uart_putc((char)('0' + (col / 10) % 10));
-	uart_putc((char)('0' + col % 10));
-	uart_putc('G');
-}
-
-static void tty_redraw(const char *line, int len, int pos, int old_cols)
-{
-	int new_cols = line_cols(line, len);
-	int cur_cols = line_cols(line, pos);
-
-	tty_out_s("\r");
-	tty_out_s(PROMPT);
-	tty_out(line, len);
-	for (int i = new_cols; i < old_cols; i++) tty_out_s(" ");
-
-	fb_tty_set_col(PROMPT_LEN + cur_cols);       /* fb: direct cursor jump */
-	uart_goto_col(PROMPT_LEN + cur_cols + 1);    /* uart: absolute col (1-based) */
-	fb_tty_flush();
 }
 
 static long sys_read(int fd, void *buf, size_t len)
 {
 	if (!access_ok(buf, len)) return -14;
-
-	/* If a real VFS file is installed at fd (e.g. via dup2), use it */
-	if (fd == 0) {
-		process_t *p = task_current();
-		if (p->fds && fd_get(p->fds, 0))
-			return vfs_read(0, buf, len);
-	}
-
-	if (fd == 0) {
-		static char line[256];
-		static int  llen = 0, pos = 0;
-		static int  prev_display_cols = 0;
-
-		fb_tty_show_cursor(1);
-		fb_tty_flush();              /* show cursor immediately at prompt */
-		uart_putc('\033'); uart_putc('['); uart_putc('?');
-		uart_putc('2'); uart_putc('5'); uart_putc('h'); /* UART: show cursor */
-
-		while (1) {
-			while (!uart_has_data()) {
-				fb_tty_cursor_flush();
-				task_sleep();
-			}
-			unsigned char c = (unsigned char)uart_getc();
-
-			if (c == '\r' || c == '\n') {
-				fb_tty_show_cursor(0);
-				tty_out_s("\n");
-				fb_tty_flush();
-				line[llen++] = '\n';
-				size_t n = (size_t)llen < len ? (size_t)llen : len;
-				arch_user_access_begin();
-				memmove(buf, line, n);
-				arch_user_access_end();
-				llen = pos = prev_display_cols = 0;
-				return (long)n;
-			}
-
-			if (c == 0x1B) { /* ESC — arrow key sequence */
-				while (!uart_has_data()) task_sleep();
-				if (uart_getc() != '[') continue;
-				while (!uart_has_data()) task_sleep();
-				unsigned char arrow = (unsigned char)uart_getc();
-				if (arrow == 'D' && pos > 0) {       /* left */
-					pos = utf8_step_left(line, pos);
-					fb_tty_set_col(PROMPT_LEN + line_cols(line, pos));
-					fb_tty_flush();
-					uart_putc('\033'); uart_putc('['); uart_putc('D');
-				} else if (arrow == 'C' && pos < llen) { /* right */
-					pos = utf8_step_right(line, pos, llen);
-					fb_tty_set_col(PROMPT_LEN + line_cols(line, pos));
-					fb_tty_flush();
-					uart_putc('\033'); uart_putc('['); uart_putc('C');
-				}
-				continue;
-			}
-
-			if (c == 127 || c == '\b') { /* backspace */
-				if (pos > 0) {
-					int newpos = utf8_step_left(line, pos);
-					int del    = pos - newpos;
-					memmove(line + newpos, line + pos, (size_t)(llen - pos));
-					llen -= del;
-					pos   = newpos;
-					tty_redraw(line, llen, pos, prev_display_cols);
-					prev_display_cols = line_cols(line, llen);
-				}
-				continue;
-			}
-
-			if (c >= 0x20 || (c & 0x80)) { /* printable or UTF-8 continuation */
-				if (llen < 254) {
-					memmove(line + pos + 1, line + pos, (size_t)(llen - pos));
-					line[pos] = (char)c;
-					llen++;
-					pos++;
-					int dc = line_cols(line, llen);
-					tty_redraw(line, llen, pos, prev_display_cols);
-					prev_display_cols = dc;
-				}
-				continue;
-			}
-		}
-	}
 	return vfs_read(fd, buf, len);
 }
 
@@ -274,12 +85,27 @@ static long sys_writev(int fd, const iovec_t *iov, int cnt)
 	return total;
 }
 
+static long sys_readv(int fd, const iovec_t *iov, int cnt)
+{
+	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+
+	long total = 0;
+	for (int i = 0; i < cnt; i++) {
+		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
+		long r = sys_read(fd, iov[i].iov_base, iov[i].iov_len);
+		if (r < 0) return r;
+		if (r == 0) break;
+		total += r;
+	}
+	return total;
+}
+
 static long sys_open(const char *path, int flags, mode_t mode)
 {
 	char kpath[PROC_NAME_MAX];
 	if (copy_from_user(kpath, path, PROC_NAME_MAX) != 0)
 		return -14;
-	long fd = vfs_open(kpath, flags, mode);
+	long fd = vfs_open(kpath, flags, mode); kprintf("sys_openat: %s -> %d\n", kpath, (int)fd);
 	return fd < 0 ? -2 : fd;
 }
 
@@ -288,17 +114,14 @@ static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 	char kpath[PROC_NAME_MAX];
 	int r = resolve_path(kpath, dirfd, path);
 	if (r) return r;
-	long fd = vfs_open(kpath, flags, mode);
+	long fd = vfs_open(kpath, flags, mode); 
+	kprintf("sys_openat: %s -> %d (bitmap=%lx)\n", kpath, (int)fd, task_current()->fds ? task_current()->fds->bitmap : 0);
 	return fd < 0 ? -2 : fd;
 }
 
 static long sys_close(int fd)
 {
 	if (fd < 0 || fd >= FD_MAX) return -9;
-	if (fd < 3) {
-		process_t *p = task_current();
-		if (!p->fds || !fd_get(p->fds, fd)) return 0;
-	}
 	return vfs_close(fd) == 0 ? 0 : -9;
 }
 
@@ -436,7 +259,31 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 	/* File-backed mmap */
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f || !f->inode->fops->read) return -9;
+	if (!f) return -9;
+
+	/* If it's a device mapping via mmap callback */
+	if (f->inode->fops && f->inode->fops->mmap) {
+		uint64_t file_off = off;
+		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+			uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
+			if (!phys) {
+				/* Mapping failed, cleanup is complex here, but we return error */
+				return -22; /* EINVAL */
+			}
+			vm_map(p->vm, v, phys, vmflags);
+			file_off += PAGE_SIZE;
+		}
+		{
+			uint32_t vf = VMA_USER;
+			if (prot & PROT_READ)  vf |= VMA_READ;
+			if (prot & PROT_WRITE) vf |= VMA_WRITE;
+			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+			vma_add(p, va, len, vf);
+		}
+		return (long)va;
+	}
+
+	if (!f->inode->fops->read) return -9;
 
 	uint64_t file_off = off;
 	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
@@ -573,7 +420,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 
 	/* close O_CLOEXEC file descriptors before exec */
 	if (p->fds) {
-		for (int i = 3; i < FD_MAX; i++) {
+		for (int i = 0; i < FD_MAX; i++) {
 			vfs_file_t *xf = fd_get(p->fds, i);
 			if (xf && (xf->flags & O_CLOEXEC)) {
 				fd_free(p->fds, i);
@@ -1306,8 +1153,6 @@ static long sys_dup2(int oldfd, int newfd)
 	if (newfd < 0 || newfd >= FD_MAX) return -9;
 	process_t *p = task_current();
 	vfs_file_t *src;
-	if (oldfd >= 0 && oldfd < 3 && !(p->fds && fd_get(p->fds, oldfd)))
-		return -9; /* can't dup bare UART stdin/stdout */
 	src = p->fds ? fd_get(p->fds, oldfd) : NULL;
 	if (!src) return -9;
 	if (oldfd == newfd) return newfd;
@@ -1664,12 +1509,6 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 	case TIOCGPGRP: { int pgid = (int)task_current()->pid; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
 	case TIOCSPGRP: return 0;
 	case TIOCSPROMPT: {
-		char kp[128];
-		if (copy_from_user(kp, (const char *)(uintptr_t)arg, 127) != 0) return -14;
-		kp[127] = '\0';
-		int n = 0; while (kp[n]) n++;
-		memcpy(tty_prompt, kp, (size_t)(n + 1));
-		tty_prompt_len = n;
 		return 0;
 	}
 	default: return -25; /* ENOTTY */
@@ -2019,7 +1858,8 @@ void syscall_handle(arch_context_t *ctx)
 	/* ── I/O ─────────────────────────────────────────────── */
 	case SYS_ARCH_READ:    ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_WRITE:   ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
-	case SYS_ARCH_WRITEV:  ret = sys_writev((int)arg0, (iovec_t*)arg1, (int)arg2); break;
+	case SYS_ARCH_READV:   ret = sys_readv((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
+	case SYS_ARCH_WRITEV:  ret = sys_writev((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
 	case SYS_ARCH_CLOSE:   ret = sys_close((int)arg0); break;
 	case SYS_ARCH_LSEEK:   ret = sys_lseek((int)arg0, (off_t)arg1, (int)arg2); break;
 	case SYS_ARCH_IOCTL:   ret = sys_ioctl((int)arg0, (uint32_t)arg1, (uint64_t)arg2); break;

@@ -60,7 +60,7 @@
         process_t *p = task_current();
 
         /* EL0 faults — kill the offending process instead of panicking */
-        if (ec == 0x20 || ec == 0x24) {
+        if (elr < 0xFFFF000000000000UL) {
             kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x\n",
                     (int)p->pid, p->name, elr, far, ec);
             task_exit();

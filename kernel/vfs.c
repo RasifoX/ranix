@@ -289,7 +289,7 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 
 int fd_alloc(fd_table_t *t, vfs_file_t *f)
 {
-	for (int i = 3; i < FD_MAX; i++) {
+	for (int i = 0; i < FD_MAX; i++) {
 		if (!(t->bitmap & (1ULL << i))) {
 			t->files[i]  = f;
 			t->bitmap   |= (1ULL << i);

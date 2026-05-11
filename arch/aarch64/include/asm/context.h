@@ -66,6 +66,7 @@ typedef struct {
 #define SYS_ARCH_LSEEK         62
 #define SYS_ARCH_READ          63
 #define SYS_ARCH_WRITE         64
+#define SYS_ARCH_READV         65
 #define SYS_ARCH_WRITEV        66
 #define SYS_ARCH_PSELECT6      72
 #define SYS_ARCH_PPOLL         73

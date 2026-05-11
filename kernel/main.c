@@ -19,6 +19,9 @@ extern void initrd_init(void);
 extern char     __kernel_phys_end;
 extern uint64_t _dtb_ptr;
 
+fb_info_t global_fb;
+uint64_t  global_fb_phys = 0;
+
 static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size, uint64_t ram_limit)
 {
 	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
@@ -51,12 +54,11 @@ void kernel_main(void)
 	uint64_t ram_base = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_base : cfg->mem_base;
 	uint64_t ram_size = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_size : cfg->mem_size;
 
-	static fb_info_t fb;
-	uint64_t fb_phys = 0;
+	global_fb_phys = 0;
 	uint64_t fb_sz = 0;
-	if (board_fb_alloc(&fb) == 0) {
-		fb_phys = (uint64_t)fb.fb;
-		fb_sz = fb.fb_size;
+	if (board_fb_alloc(&global_fb) == 0) {
+		global_fb_phys = (uint64_t)global_fb.fb;
+		fb_sz = global_fb.fb_size;
 	}
 
 	mmu_init();
@@ -67,18 +69,18 @@ void kernel_main(void)
 	else
 		kprintf("Ranix — %s\n", cfg->name);
 
-	setup_physical_memory(fb_phys, fb_sz, ram_base + ram_size);
+	setup_physical_memory(global_fb_phys, fb_sz, ram_base + ram_size);
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */
-	if (fb_phys) {
-		uint64_t va = PHYS_TO_VIRT(fb_phys);
+	if (global_fb_phys) {
+		uint64_t va = PHYS_TO_VIRT(global_fb_phys);
 		uint64_t aligned_sz = (fb_sz + PAGE_SIZE - 1) & PAGE_MASK;
 		for (uint64_t i = 0; i < aligned_sz; i += PAGE_SIZE) {
-			vm_map(kernel_vm_space, va + i, fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);
+			vm_map(kernel_vm_space, va + i, global_fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);
 		}
-		fb.fb = (void *)va;
-		fb_tty_init(&fb);
+		global_fb.fb = (void *)va;
+		fb_tty_init(&global_fb);
 		kprintf_set_fb();
 	}
 
@@ -103,6 +105,12 @@ void kernel_main(void)
 
 	irq_enable();
 	board_drivers_register();
+	extern void fbdev_init(void);
+	fbdev_init();
+	extern void input_core_init(void);
+	input_core_init();
+	extern void tty_core_init(void);
+	tty_core_init();
 
 	/* Auto-detect and mount first ext2/ext4 disk partition */
 	{
