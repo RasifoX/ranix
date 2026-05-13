@@ -112,6 +112,9 @@ const void *fdt_get_prop(const char *path, const char *prop_name, uint32_t *out_
     return NULL;
 }
 
+extern uint64_t boot_initrd_start;
+extern uint64_t boot_initrd_size;
+
 /* ── parse DTB into fdt_info_t ───────────────────────────── */
 
 static void parse_info(void)
@@ -125,6 +128,22 @@ static void parse_info(void)
     if (val && len >= 4) addr_cells = be32(val);
     val = fdt_get_prop("/", "#size-cells", &len);
     if (val && len >= 4) size_cells = be32(val);
+
+    /* /chosen initrd */
+    val = fdt_get_prop("chosen", "linux,initrd-start", &len);
+    if (val) {
+        if (len == 4) boot_initrd_start = be32(val);
+        else if (len == 8) boot_initrd_start = be64(val);
+        
+        val = fdt_get_prop("chosen", "linux,initrd-end", &len);
+        if (val) {
+            uint64_t end = 0;
+            if (len == 4) end = be32(val);
+            else if (len == 8) end = be64(val);
+            if (end > boot_initrd_start)
+                boot_initrd_size = end - boot_initrd_start;
+        }
+    }
 
     /* /model */
     val = fdt_get_prop("/", "model", &len);

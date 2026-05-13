@@ -113,35 +113,46 @@ LDFLAGS = -nostdlib
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
 OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean qemu image userspace
+BUSYBOX_URL_x86_64 = https://busybox.net/downloads/binaries/1.31.0-defconfig-multiarch-musl/busybox-x86_64
+BUSYBOX_URL_aarch64 = https://busybox.net/downloads/binaries/1.31.0-defconfig-multiarch-musl/busybox-armv8l
 
-all: userspace $(TARGET)
+ifeq ($(ARCH),aarch64)
+    BUSYBOX_URL = $(BUSYBOX_URL_aarch64)
+else
+    BUSYBOX_URL = $(BUSYBOX_URL_x86_64)
+endif
 
-userspace: userspace/hello_elf.h userspace/sh_elf.h userspace/init_elf.h
+.PHONY: all clean qemu image initramfs
+
+all: initramfs $(TARGET)
+
+initramfs: $(BUILD_DIR)/initramfs.cpio
+
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
+	@mkdir -p $(BUILD_DIR)/initramfs/bin
+	@cp userspace/init userspace/hello $(BUILD_DIR)/initramfs/bin/
+	@if [ ! -f $(BUILD_DIR)/initramfs/bin/busybox ]; then \
+		echo "Downloading busybox for $(ARCH)..."; \
+		wget -qO $(BUILD_DIR)/initramfs/bin/busybox $(BUSYBOX_URL); \
+		chmod +x $(BUILD_DIR)/initramfs/bin/busybox; \
+	fi
+	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/sh
+	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/ls
+	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/cat
+	@if [ -f doomgeneric/doomgeneric ]; then \
+		cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
+	fi
+	@if [ -f doom1.wad ]; then \
+		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
+	fi
+	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc > ../initramfs.cpio 2>/dev/null
+	@echo "[OK] initramfs.cpio created"
 
 userspace/hello: userspace/hello.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
-userspace/hello_elf.h: userspace/hello
-	xxd -i $< | \
-	  sed 's/unsigned char .*\[\]/static const uint8_t hello_musl_elf[]/' | \
-	  sed 's/unsigned int .*_len/static const unsigned int hello_musl_elf_len/' > $@
-
-userspace/sh: userspace/sh.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/sh_elf.h: userspace/sh
-	xxd -i $< | \
-	  sed 's/unsigned char .*\[\]/static const uint8_t sh_elf[]/' | \
-	  sed 's/unsigned int .*_len/static const unsigned int sh_elf_len/' > $@
-
 userspace/init: userspace/init.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/init_elf.h: userspace/init
-	xxd -i $< | \
-	  sed 's/unsigned char .*\[\]/static const uint8_t init_elf[]/' | \
-	  sed 's/unsigned int .*_len/static const unsigned int init_elf_len/' > $@
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
@@ -159,13 +170,14 @@ $(BUILD_DIR)/%.o: %.S
 clean:
 	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/*_elf.h
 
-qemu: $(TARGET)
-	$(QEMU_CMD) -nographic -kernel $(TARGET)
+qemu: $(TARGET) initramfs
+	$(QEMU_CMD) -nographic -kernel $(TARGET) -initrd $(BUILD_DIR)/initramfs.cpio
 
-iso: userspace $(TARGET)
+iso: initramfs $(TARGET)
 	@mkdir -p iso/boot/grub
 	@cp $(TARGET) iso/boot/ranix.elf
-	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n}\n' > iso/boot/grub/grub.cfg
+	@cp $(BUILD_DIR)/initramfs.cpio iso/boot/initramfs.cpio
+	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n  module2 /boot/initramfs.cpio\n}\n' > iso/boot/grub/grub.cfg
 	grub-mkrescue -o ranix.iso iso/ 2>/dev/null
 	@echo "[OK] ranix.iso hazır"
 

@@ -18,6 +18,18 @@ int main(void)
     dup(0);                  /* fd 2 */
 
     write_str("[init] PID 1 started\n");
+    
+    /* Run a quick test command */
+    pid_t test_pid = vfork();
+    if (test_pid == 0) {
+        char *argv[] = { "/bin/sh", "-c", "echo '*** BUSYBOX SHELL IS ALIVE ***'", NULL };
+        char *envp[] = { "PATH=/bin:/mnt/usr/bin:/mnt/bin", "HOME=/", NULL };
+        execve("/bin/sh", argv, envp);
+        _exit(127);
+    }
+    int st;
+    waitpid(test_pid, &st, 0);
+
     while (1) {
         write_str("[init] calling fork\n");
         pid_t pid = vfork();
