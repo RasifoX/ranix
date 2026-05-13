@@ -224,9 +224,14 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
+	/* Copy kernel upper-half entries from global PML4 (shared, no per-process copy needed) */
+	uint64_t *kpml4 = (uint64_t *)PHYS_TO_VIRT(pml4);
+	for (int i = 1; i < 512; i++)
+		l4_new[i] = kpml4[i];
+
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	/* Only walk user space (PML4 index 0) */
+	/* Walk user space (PML4 index 0) */
 	for (int i = 0; i < 1; i++) {
 		if (!(l4_old[i] & PTE_P)) continue;
 

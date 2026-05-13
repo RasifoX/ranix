@@ -125,4 +125,16 @@ void initrd_init(void)
     }
 
     kprintf("initrd: unpack complete\n");
+
+    /* Minimal /etc skeleton for userspace tools */
+    vfs_mkdir("/etc", 0755);
+    static const char passwd[] = "root:x:0:0:root:/root:/bin/sh\n";
+    static const char group[]  = "root:x:0:\n";
+    static const char hosts[]  = "127.0.0.1 localhost\n";
+    vfs_kernel_install("/etc/passwd", (const uint8_t *)passwd, sizeof(passwd) - 1);
+    vfs_kernel_install("/etc/group",  (const uint8_t *)group,  sizeof(group)  - 1);
+    vfs_kernel_install("/etc/hosts",  (const uint8_t *)hosts,  sizeof(hosts)  - 1);
+    vfs_mkdir("/root", 0700);
+    vfs_mkdir("/tmp", 0777);
+    vfs_mkdir("/proc", 0555);
 }
