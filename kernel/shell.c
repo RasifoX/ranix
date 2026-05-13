@@ -9,7 +9,6 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
 #include <kernel/vfs.h>
-#include "userspace/hello_elf.h"
 
 #define CMD_MAX 256
 #define PROMPT  "ranix> "
@@ -29,7 +28,6 @@ static void cmd_help(void)
     kprintf("ps       - list tasks\n");
     kprintf("dtb      - device tree info\n");
     kprintf("fault    - trigger test fault\n");
-    kprintf("hello    - run hello binary\n");
     kprintf("run <path> - run ELF from VFS\n");
 }
 
@@ -125,10 +123,6 @@ static void execute(const char *line)
         cmd_dtb();
     else if (strcmp(line, "fault") == 0)
         cmd_fault();
-    else if (strcmp(line, "hello") == 0) {
-        pid_t pid = proc_exec("hello", hello_musl_elf, hello_musl_elf_len);
-        if (pid >= 0) proc_wait(pid);
-    }
     else if (strncmp(line, "run ", 4) == 0) {
         /* run /bin/foo — load ELF from VFS */
         const char *path = line + 4;
