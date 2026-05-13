@@ -3,12 +3,19 @@
 #include <asm/mmu.h>
 
 #define MB2_TAG_TYPE_END   0
+#define MB2_TAG_TYPE_MODULE 3
 #define MB2_TAG_TYPE_MMAP  6
 
 typedef struct {
     uint32_t type;
     uint32_t size;
 } mb2_tag_t;
+
+typedef struct {
+    uint32_t mod_start;
+    uint32_t mod_end;
+    char     string[1];
+} mb2_module_t;
 
 typedef struct {
     uint64_t addr;
@@ -21,6 +28,9 @@ typedef struct {
     uint32_t total_size;
     uint32_t reserved;
 } mb2_info_t;
+
+extern uint64_t boot_initrd_start;
+extern uint64_t boot_initrd_size;
 
 void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
 {
@@ -52,6 +62,11 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
                 }
                 entry = (mb2_mmap_entry_t *)((uint8_t *)entry + entry_size);
             }
+        } else if (tag->type == MB2_TAG_TYPE_MODULE) {
+            mb2_module_t *mod = (mb2_module_t *)(p + 8);
+            boot_initrd_start = (uint64_t)mod->mod_start;
+            boot_initrd_size  = (uint64_t)(mod->mod_end - mod->mod_start);
+            kprintf("MB2: found module start=%x end=%x\n", mod->mod_start, mod->mod_end);
         }
         p += ((uint64_t)tag->size + 7) & ~(uint64_t)7;
     }

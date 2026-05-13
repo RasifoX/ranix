@@ -22,26 +22,65 @@ extern uint64_t _dtb_ptr;
 fb_info_t global_fb;
 uint64_t  global_fb_phys = 0;
 
+extern uint64_t boot_initrd_start;
+extern uint64_t boot_initrd_size;
+
 static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size, uint64_t ram_limit)
 {
 	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	
+	/* Advance 'start' past initrd if they overlap or are very close */
+	if (boot_initrd_start && boot_initrd_start < start + 0x200000) {
+		uint64_t rd_end = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
+		if (rd_end > start) start = rd_end;
+	}
+
+	/* Advance 'start' past framebuffer if it overlaps */
+	if (fb_phys && fb_phys < start + 0x200000) {
+		uint64_t fb_end = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
+		if (fb_end > start) start = fb_end;
+	}
+
 	uint64_t size  = ram_limit - start;
 
 	uint64_t meta_size = pmm_init(start, ram_limit);
 	uint64_t free_start = start + meta_size;
 
+	uint64_t exc[2][2] = {0};
+	int n_exc = 0;
+
 	if (fb_phys && fb_phys > start && fb_phys < ram_limit) {
-		pmm_free_region(free_start, fb_phys - free_start);
-		uint64_t fb_end = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
-		if (fb_end < ram_limit) {
-			pmm_free_region(fb_end, ram_limit - fb_end);
+		exc[n_exc][0] = fb_phys;
+		exc[n_exc][1] = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
+		n_exc++;
+	}
+	if (boot_initrd_start && boot_initrd_start > start && boot_initrd_start < ram_limit) {
+		exc[n_exc][0] = boot_initrd_start;
+		exc[n_exc][1] = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
+		n_exc++;
+	}
+
+	if (n_exc == 2 && exc[0][0] > exc[1][0]) {
+		uint64_t t0 = exc[0][0], t1 = exc[0][1];
+		exc[0][0] = exc[1][0]; exc[0][1] = exc[1][1];
+		exc[1][0] = t0; exc[1][1] = t1;
+	}
+
+	uint64_t current = free_start;
+	for (int i = 0; i < n_exc; i++) {
+		if (exc[i][0] > current) {
+			if (exc[i][0] > ram_limit) exc[i][0] = ram_limit;
+			pmm_free_region(current, exc[i][0] - current);
 		}
-	} else {
-		pmm_free_region(free_start, ram_limit - free_start);
+		if (exc[i][1] > current) current = exc[i][1];
+	}
+	if (current < ram_limit) {
+		pmm_free_region(current, ram_limit - current);
 	}
 
 	kprintf("Memory: %d MB (0x%lx-0x%lx)\n", (int)(size >> 20), start, ram_limit);
 }
+
 
 void kernel_main(void)
 {

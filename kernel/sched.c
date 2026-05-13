@@ -226,7 +226,42 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	uint8_t *ksp = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	arch_context_init_user(ctx, ei.entry, ARCH_USER_STACK_TOP - 64);
+
+	/* Switch to new VM to write to user stack */
+	extern vm_space_t *kernel_vm_space;
+	vm_space_t *old_vm = current->vm;
+	arch_vm_switch((uint64_t)p->vm->root);
+
+	uint64_t sp = ARCH_USER_STACK_TOP;
+	sp &= ~15ULL;
+
+	sp -= 16;
+	uint64_t at_random = sp;
+	sp -= 16;
+	strcpy((char *)sp, name);
+	uint64_t at_execfn = sp;
+
+	sp &= ~15ULL;
+
+	/* auxv */
+	sp -= 16; ((uint64_t*)sp)[0] = 0; ((uint64_t*)sp)[1] = 0; /* AT_NULL */
+	sp -= 16; ((uint64_t*)sp)[0] = 9; ((uint64_t*)sp)[1] = ei.entry; /* AT_ENTRY */
+	sp -= 16; ((uint64_t*)sp)[0] = 6; ((uint64_t*)sp)[1] = PAGE_SIZE; /* AT_PAGESZ */
+	sp -= 16; ((uint64_t*)sp)[0] = 5; ((uint64_t*)sp)[1] = ei.phnum; /* AT_PHNUM */
+	sp -= 16; ((uint64_t*)sp)[0] = 4; ((uint64_t*)sp)[1] = ei.phentsize; /* AT_PHENT */
+	sp -= 16; ((uint64_t*)sp)[0] = 3; ((uint64_t*)sp)[1] = ei.phdr_va; /* AT_PHDR */
+	sp -= 16; ((uint64_t*)sp)[0] = 25; ((uint64_t*)sp)[1] = at_random; /* AT_RANDOM */
+
+	sp -= 8; *(uint64_t*)sp = 0; /* envp NULL */
+	sp -= 8; *(uint64_t*)sp = 0; /* argv NULL */
+	sp -= 8; *(uint64_t*)sp = at_execfn; /* argv[0] */
+	sp -= 8; *(uint64_t*)sp = 1; /* argc */
+
+	arch_context_init_user(ctx, ei.entry, sp);
+
+	if (old_vm) arch_vm_switch((uint64_t)old_vm->root);
+	else arch_vm_switch((uint64_t)kernel_vm_space->root);
+
 	p->ctx = ctx;
 	p->fds = fd_table_create();
 	memcpy(p->cwd, current->cwd, 256);
