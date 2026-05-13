@@ -27,19 +27,18 @@
 #define PROT_WRITE 0x2
 #define PROT_EXEC  0x4
 
-/* Linux ABI stat struct */
+/* Linux ABI stat struct — x86_64/aarch64 layout (kernel struct stat) */
 typedef struct {
 	uint64_t st_dev;
 	uint64_t st_ino;
+	uint64_t st_nlink;     /* must be 8 bytes, comes before st_mode */
 	uint32_t st_mode;
-	uint32_t st_nlink;
 	uint32_t st_uid;
 	uint32_t st_gid;
+	uint32_t __pad0;
 	uint64_t st_rdev;
-	uint64_t __pad1;
 	int64_t  st_size;
-	int32_t  st_blksize;
-	int32_t  __pad2;
+	int64_t  st_blksize;
 	int64_t  st_blocks;
 	int64_t  st_atime_sec;
 	uint64_t st_atime_nsec;
@@ -47,7 +46,7 @@ typedef struct {
 	uint64_t st_mtime_nsec;
 	int64_t  st_ctime_sec;
 	uint64_t st_ctime_nsec;
-	uint32_t __unused[2];
+	uint64_t __unused[3];
 } linux_stat_t;
 
 typedef struct {
@@ -103,9 +102,10 @@ static long sys_readv(int fd, const iovec_t *iov, int cnt)
 static long sys_open(const char *path, int flags, mode_t mode)
 {
 	char kpath[PROC_NAME_MAX];
-	if (copy_from_user(kpath, path, PROC_NAME_MAX) != 0)
-		return -14;
-	long fd = vfs_open(kpath, flags, mode); kprintf("sys_openat: %s -> %d\n", kpath, (int)fd);
+	int r = resolve_path(kpath, AT_FDCWD, path);
+	if (r) return r;
+	long fd = vfs_open(kpath, flags, mode);
+	kprintf("sys_openat: %s -> %d\n", kpath, (int)fd);
 	return fd < 0 ? -2 : fd;
 }
 
@@ -1016,7 +1016,8 @@ static long sys_stat_path(const char *path, linux_stat_t *st)
 {
 	if (!st) return -14;
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	int r = resolve_path(kp, AT_FDCWD, path);
+	if (r) return r;
 	vfs_stat_t vs = {0};
 	if (vfs_stat(kp, &vs) != 0) return -2;
 	linux_stat_t ks;
@@ -1048,7 +1049,8 @@ static long sys_access(const char *path, int mode)
 {
 	(void)mode;
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	int r = resolve_path(kp, AT_FDCWD, path);
+	if (r) return r;
 	vfs_stat_t vs = {0};
 	return vfs_stat(kp, &vs) == 0 ? 0 : -2;
 }
