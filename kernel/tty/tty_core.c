@@ -137,10 +137,13 @@ extern int copy_to_user(void *dst, const void *src, size_t size);
 extern int copy_from_user(void *dst, const void *src, size_t size);
 
 #define TCGETS   0x5401
-#define TCSETS   0x5402
-#define TCSETSW  0x5403
-#define TCSETSF  0x5404
+#define TCSETS     0x5402
+#define TCSETSW    0x5403
+#define TCSETSF    0x5404
 #define TIOCGWINSZ 0x5413
+#define TIOCGPGRP  0x540f
+#define TIOCSPGRP  0x5410
+#define TIOCSCTTY  0x540e
 
 static int tty_core_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
@@ -161,10 +164,17 @@ static int tty_core_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		return 0;
 	}
 	if (cmd == TIOCGWINSZ) {
-		uint16_t ws[4] = {24, 80, 0, 0}; /* fb_tty height/width is dynamic but standard fallback is fine */
+		uint16_t ws[4] = {24, 80, 0, 0};
 		if (copy_to_user((void *)(uintptr_t)arg, ws, sizeof(ws)) != 0) return -14;
 		return 0;
 	}
+	if (cmd == TIOCGPGRP) {
+		pid_t pgrp = task_current()->pid;
+		if (copy_to_user((void *)(uintptr_t)arg, &pgrp, sizeof(pgrp)) != 0) return -14;
+		return 0;
+	}
+	if (cmd == TIOCSPGRP || cmd == TIOCSCTTY)
+		return 0;
 	return -25;
 }
 
