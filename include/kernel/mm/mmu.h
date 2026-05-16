@@ -10,6 +10,5 @@
 
 void mmu_init(void);
 void arch_map_high_memory(uint64_t max_phys);
-uint64_t arch_direct_map_boot_limit(void);
 
 #endif
