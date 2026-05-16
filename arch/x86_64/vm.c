@@ -36,23 +36,10 @@ vm_space_t *vm_create(void)
 	uint64_t *root_virt = (uint64_t *)PHYS_TO_VIRT(root_phys);
 	uint64_t *kpml4_virt = (uint64_t *)PHYS_TO_VIRT(pml4);
 
-	memcpy(root_virt, kpml4_virt, PT_ENTRIES * sizeof(uint64_t));
-
-	if (root_virt[0] & PTE_P) {
-		uint64_t *kpdpt_virt = (uint64_t *)PHYS_TO_VIRT(root_virt[0] & ~0xFFFUL);
-		uint64_t pdpt_phys  = alloc_table();
-		uint64_t *pdpt_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_phys);
-		memcpy(pdpt_virt, kpdpt_virt, PT_ENTRIES * sizeof(uint64_t));
-		root_virt[0] = pdpt_phys | (root_virt[0] & 0xFFFUL);
-
-		if (pdpt_virt[0] & PTE_P) {
-			uint64_t *kpd_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_virt[0] & ~0xFFFUL);
-			uint64_t pd_phys  = alloc_table();
-			uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(pd_phys);
-			memcpy(pd_virt, kpd_virt, PT_ENTRIES * sizeof(uint64_t));
-			pdpt_virt[0] = pd_phys | (pdpt_virt[0] & 0xFFFUL);
-		}
-	}
+	/* User space starts clean; share kernel high-half entries only */
+	memset(root_virt, 0, PAGE_SIZE);
+	for (int i = 1; i < PT_ENTRIES; i++)
+		root_virt[i] = kpml4_virt[i];
 
 	vs->refcount = 1;
 	return vs;

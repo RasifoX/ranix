@@ -25,60 +25,95 @@ uint64_t  global_fb_phys = 0;
 extern uint64_t boot_initrd_start;
 extern uint64_t boot_initrd_size;
 
-static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size, uint64_t ram_limit)
+/* Add [base, end) to buddy, skipping exclusion windows in exc[0..n-1]. */
+static void add_range(uint64_t base, uint64_t end,
+                      uint64_t exc[][2], int n)
+{
+	uint64_t cur = base;
+	for (int i = 0; i < n; i++) {
+		if (exc[i][0] >= end || exc[i][1] <= cur) continue;
+		if (exc[i][0] > cur)
+			pmm_free_region(cur, exc[i][0] - cur);
+		if (exc[i][1] > cur) cur = exc[i][1];
+	}
+	if (cur < end)
+		pmm_free_region(cur, end - cur);
+}
+
+static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
+                                  fdt_info_t *fi, board_config_t *cfg)
 {
 	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-	
-	/* Advance 'start' past initrd if they overlap or are very close */
+
 	if (boot_initrd_start && boot_initrd_start < start + 0x200000) {
 		uint64_t rd_end = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
 		if (rd_end > start) start = rd_end;
 	}
-
-	/* Advance 'start' past framebuffer if it overlaps */
 	if (fb_phys && fb_phys < start + 0x200000) {
 		uint64_t fb_end = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
 		if (fb_end > start) start = fb_end;
 	}
 
-	uint64_t size  = ram_limit - start;
+	/* Collect non-contiguous memory regions, find highest address */
+	int n_reg = 0;
+	uint64_t reg_base[FDT_MAX_MEM_REGIONS];
+	uint64_t reg_end[FDT_MAX_MEM_REGIONS];
+	uint64_t max_limit = 0;
 
-	uint64_t meta_size = pmm_init(start, ram_limit);
+	if (fi && fi->num_mem_regions > 0) {
+		for (int i = 0; i < fi->num_mem_regions; i++) {
+			uint64_t b = fi->mem_regions[i].base;
+			uint64_t e = b + fi->mem_regions[i].size;
+			if (e > b && n_reg < FDT_MAX_MEM_REGIONS) {
+				reg_base[n_reg] = b;
+				reg_end[n_reg]  = e;
+				if (e > max_limit) max_limit = e;
+				n_reg++;
+			}
+		}
+	}
+	if (n_reg == 0) {
+		uint64_t b = cfg->mem_base;
+		uint64_t e = b + cfg->mem_size;
+		reg_base[0] = b; reg_end[0] = e;
+		max_limit = e; n_reg = 1;
+	}
+
+	uint64_t meta_size = pmm_init(start, max_limit);
 	uint64_t free_start = start + meta_size;
 
+	/* Exclusion windows: initrd and framebuffer */
 	uint64_t exc[2][2] = {0};
 	int n_exc = 0;
-
-	if (fb_phys && fb_phys > start && fb_phys < ram_limit) {
+	if (fb_phys && fb_phys < max_limit) {
 		exc[n_exc][0] = fb_phys;
 		exc[n_exc][1] = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
 		n_exc++;
 	}
-	if (boot_initrd_start && boot_initrd_start > start && boot_initrd_start < ram_limit) {
+	if (boot_initrd_start && boot_initrd_start < max_limit) {
 		exc[n_exc][0] = boot_initrd_start;
 		exc[n_exc][1] = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
 		n_exc++;
 	}
-
+	/* Sort exclusions by start address */
 	if (n_exc == 2 && exc[0][0] > exc[1][0]) {
 		uint64_t t0 = exc[0][0], t1 = exc[0][1];
 		exc[0][0] = exc[1][0]; exc[0][1] = exc[1][1];
-		exc[1][0] = t0; exc[1][1] = t1;
+		exc[1][0] = t0;        exc[1][1] = t1;
 	}
 
-	uint64_t current = free_start;
-	for (int i = 0; i < n_exc; i++) {
-		if (exc[i][0] > current) {
-			if (exc[i][0] > ram_limit) exc[i][0] = ram_limit;
-			pmm_free_region(current, exc[i][0] - current);
-		}
-		if (exc[i][1] > current) current = exc[i][1];
-	}
-	if (current < ram_limit) {
-		pmm_free_region(current, ram_limit - current);
+	/* Add each RAM region separately — avoids device memory holes */
+	uint64_t total_free = 0;
+	for (int r = 0; r < n_reg; r++) {
+		uint64_t base = (reg_base[r] < free_start) ? free_start : reg_base[r];
+		uint64_t end  = reg_end[r];
+		if (base >= end) continue;
+		add_range(base, end, exc, n_exc);
+		total_free += end - base;
 	}
 
-	kprintf("Memory: %d MB (0x%lx-0x%lx)\n", (int)(size >> 20), start, ram_limit);
+	kprintf("Memory: %d MB total across %d region(s)\n",
+	        (int)(total_free >> 20), n_reg);
 }
 
 
@@ -89,9 +124,6 @@ void kernel_main(void)
 
 	int fdt_ok = fdt_init((void *)_dtb_ptr);
 	fdt_info_t *fi = fdt_get_info();
-
-	uint64_t ram_base = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_base : cfg->mem_base;
-	uint64_t ram_size = (fdt_ok == 0 && fi->mem_size > 0) ? fi->mem_size : cfg->mem_size;
 
 	global_fb_phys = 0;
 	uint64_t fb_sz = 0;
@@ -108,12 +140,16 @@ void kernel_main(void)
 	else
 		kprintf("Ranix — %s\n", cfg->name);
 
-	setup_physical_memory(global_fb_phys, fb_sz, ram_base + ram_size);
+	setup_physical_memory(global_fb_phys, fb_sz,
+	                      (fdt_ok == 0) ? fi : NULL, cfg);
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */
 	if (global_fb_phys) {
-		uint64_t va = PHYS_TO_VIRT(global_fb_phys);
+		/* PHYS_TO_VIRT overflows for phys >= 2GB (typical MMIO range); use MMIO window */
+		uint64_t va = (global_fb_phys < 0x80000000UL)
+		              ? PHYS_TO_VIRT(global_fb_phys)
+		              : MMIO_TO_VIRT(global_fb_phys);
 		uint64_t aligned_sz = (fb_sz + PAGE_SIZE - 1) & PAGE_MASK;
 		for (uint64_t i = 0; i < aligned_sz; i += PAGE_SIZE) {
 			vm_map(kernel_vm_space, va + i, global_fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);

@@ -4,6 +4,7 @@
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/tty/fb_tty.h>
+#include <kernel/lib/string.h>
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
@@ -17,6 +18,30 @@ void kprintf_set_fb(void) { fb_ready = 1; }
 
 extern volatile uint64_t kernel_ticks;
 
+/* ── kernel log ring buffer ───────────────────────────────── */
+
+#define LOG_BUF_SIZE (1 << 17)  /* 128 KB */
+
+static char   log_buf[LOG_BUF_SIZE];
+static size_t log_head = 0;
+static size_t log_len  = 0;
+
+size_t kprintf_read_log(char *dst, size_t max)
+{
+    size_t n = log_len < max ? log_len : max;
+    size_t start = (log_head + LOG_BUF_SIZE - log_len) % LOG_BUF_SIZE;
+    if (start + n <= LOG_BUF_SIZE) {
+        memcpy(dst, log_buf + start, n);
+    } else {
+        size_t first = LOG_BUF_SIZE - start;
+        memcpy(dst, log_buf + start, first);
+        memcpy(dst + first, log_buf, n - first);
+    }
+    return n;
+}
+
+size_t kprintf_log_len(void) { return log_len; }
+
 static void _emit(char c)
 {
     if (c == '\n')
@@ -24,6 +49,9 @@ static void _emit(char c)
     uart_putc(c);
     if (fb_ready)
         fb_tty_putchar(c);
+    log_buf[log_head] = c;
+    log_head = (log_head + 1) % LOG_BUF_SIZE;
+    if (log_len < LOG_BUF_SIZE) log_len++;
 }
 
 static void _putc(char c)

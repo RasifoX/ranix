@@ -104,6 +104,7 @@ typedef struct {
 #define SYS_ARCH_EXIT_GROUP   231
 #define SYS_ARCH_SET_TID_ADDR 218
 #define SYS_ARCH_CLOCK_GETTIME 228
+#define SYS_ARCH_PIPE          22
 #define SYS_ARCH_PIPE2        293
 #define SYS_ARCH_DUP3         292
 #define SYS_ARCH_OPENAT       257
@@ -145,5 +146,9 @@ typedef struct {
 #define SYS_ARCH_STATX           332
 #define SYS_ARCH_MEMBARRIER      324
 #define SYS_ARCH_RSEQ            334
+#define SYS_ARCH_REBOOT          169
+#define SYS_ARCH_SYSLOG          103
+#define SYS_ARCH_UTIMENSAT       280
+#define SYS_ARCH_FUTIMENS        280  /* same number, used via fd path */
 
 #endif

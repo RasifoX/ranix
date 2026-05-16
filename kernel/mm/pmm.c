@@ -7,20 +7,19 @@ void    *pmm_alloc(void)   { return buddy_alloc(0); }
 void pmm_hold(void *p)
 {
 	page_t *pg = paddr_to_page((uint64_t)p);
-	if (pg) pg->refcount++;
+	if (pg && (pg->flags & PG_MANAGED)) pg->refcount++;
 }
 
 void pmm_free(void *p)
 {
 	page_t *pg = paddr_to_page((uint64_t)p);
-	if (!pg) return;
+	if (!pg || !(pg->flags & PG_MANAGED)) return;
 
 	if (pg->refcount > 0) {
 		pg->refcount--;
-	}
-
-	if (pg->refcount == 0) {
-		buddy_free((uint64_t)p, 0);
+		if (pg->refcount == 0) {
+			buddy_free((uint64_t)p, 0);
+		}
 	}
 }
 uint64_t pmm_free_pages(void) { return buddy_free_pages(); }

@@ -134,13 +134,17 @@ int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
         return -1;
     }
 
-    out->width   = width;
-    out->height  = height;
+    out->width       = width;
+    out->height      = height;
     out->virt_height = height * 2;
-    out->depth   = 32;
-    out->pitch   = pitch;
-    out->fb      = (void *)(u64)(fb_bus_addr & 0x3FFFFFFFU);
-    out->fb_size = fb_size;
+    out->depth       = 32;
+    out->pitch       = pitch;
+    out->fb          = (void *)(u64)(fb_bus_addr & 0x3FFFFFFFU);
+    out->fb_size     = fb_size;
+    /* PIXEL_ORD=1 → RGB: R at byte 0, G at byte 1, B at byte 2 */
+    out->red_shift   = 0;
+    out->green_shift = 8;
+    out->blue_shift  = 16;
 
     kprintf("fb: %dx%d, pitch %d, addr 0x%lx\n",
             width, height, pitch, (uint64_t)out->fb);

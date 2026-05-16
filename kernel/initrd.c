@@ -52,17 +52,17 @@ static void install(const char *path, const uint8_t *data, unsigned int len, uin
     if ((mode & 0170000) == 0040000) {
         /* Directory */
         vfs_mkdir(path, mode & 0777);
+    } else if ((mode & 0170000) == 0120000) {
+        /* Symlink: data is the target path */
+        char target[256];
+        int tlen = (len < 255) ? (int)len : 255;
+        memcpy(target, data, tlen);
+        target[tlen] = '\0';
+        vfs_symlink(target, path);
     } else if ((mode & 0170000) == 0100000) {
         /* Regular file */
-        if (vfs_kernel_install(path, data, len) != 0) {
-            /* parent might not exist, ensure it does roughly */
-            /* simplified: we could parse directories from path */
+        if (vfs_kernel_install(path, data, len) != 0)
             kprintf("initrd: failed to install file: %s\n", path);
-        } else {
-            /* Update mode if possible. Since ramfs creates files with default 0644,
-               we should ideally chmod, but vfs_kernel_install doesn't take mode.
-               For now we ignore permissions as ramfs root is owner. */
-        }
     }
 }
 

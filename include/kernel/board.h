@@ -36,4 +36,7 @@ void board_drivers_register(void);
 
 board_config_t *board_get_config(void);
 
+/* Trigger a hardware reset / system reboot. Does not return. */
+void board_reset(void);
+
 #endif

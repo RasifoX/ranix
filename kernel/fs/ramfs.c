@@ -4,6 +4,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 /*
  * ramfs — volatile in-memory filesystem.
@@ -72,14 +73,15 @@ static ssize_t ramfs_write(vfs_file_t *f, const void *buf, size_t len)
 		uint64_t newcap = (end + 4095) & ~4095ULL;
 		int new_order = 0;
 		while (((uint64_t)4096 << new_order) < newcap) new_order++;
-		uint8_t *newbuf = buddy_alloc(new_order);
-		if (!newbuf) return -1;
+		uint8_t *newbuf_phys = buddy_alloc(new_order);
+		if (!newbuf_phys) return -1;
+		uint8_t *newbuf = (uint8_t *)PHYS_TO_VIRT(newbuf_phys);
 		memset(newbuf, 0, (size_t)((uint64_t)4096 << new_order));
 		if (rf->data) {
 			memcpy(newbuf, rf->data, rf->size);
 			int old_order = 0;
 			while (((uint64_t)4096 << old_order) < rf->capacity) old_order++;
-			buddy_free((uint64_t)rf->data, old_order);
+			buddy_free(VIRT_TO_PHYS(rf->data), old_order);
 		}
 		rf->data     = newbuf;
 		rf->capacity = (uint64_t)4096 << new_order;
@@ -256,14 +258,56 @@ static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 	return 0;
 }
 
+static int ramfs_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
+{
+	const char *target = (const char *)inode->priv;
+	if (!target) return -1;
+	int len = 0;
+	while (target[len] && len < (int)bufsize - 1) { buf[len] = target[len]; len++; }
+	buf[len] = '\0';
+	return 0;
+}
+
+static int ramfs_symlink(vfs_inode_t *dir, const char *name, const char *target)
+{
+	ramfs_dir_t *rd = dir->priv;
+	if (!rd) return -1;
+
+	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
+		if (strcmp(e->name, name) == 0) return -1;
+
+	vfs_inode_t *in = ramfs_inode_alloc(S_IFLNK | 0777);
+	if (!in) return -1;
+
+	int tlen = 0; while (target[tlen]) tlen++;
+	char *t = kmalloc(tlen + 1);
+	if (!t) { kfree(in); return -1; }
+	for (int i = 0; i <= tlen; i++) t[i] = target[i];
+	in->priv = t;
+	in->size = tlen;
+	in->iops = &ramfs_iops;
+
+	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
+	if (!ent) { kfree(t); kfree(in); return -1; }
+	int nlen = 0; while (name[nlen] && nlen < 255) nlen++;
+	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
+	ent->inode  = in;
+	ent->next   = rd->entries;
+	rd->entries = ent;
+	rd->count++;
+	return 0;
+}
+
 static vfs_iops_t ramfs_iops = {
-	.lookup  = ramfs_lookup,
-	.create  = ramfs_create,
-	.mkdir   = ramfs_mkdir,
-	.unlink  = ramfs_unlink,
-	.readdir = ramfs_readdir,
-	.rename  = ramfs_rename,
-	.stat    = ramfs_stat,
+	.lookup   = ramfs_lookup,
+	.create   = ramfs_create,
+	.mkdir    = ramfs_mkdir,
+	.unlink   = ramfs_unlink,
+	.readdir  = ramfs_readdir,
+	.rename   = ramfs_rename,
+	.stat     = ramfs_stat,
+	.readlink = ramfs_readlink,
+	.symlink  = ramfs_symlink,
 };
 
 /* ── mount ───────────────────────────────────────────────── */

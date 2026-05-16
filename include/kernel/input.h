@@ -23,5 +23,6 @@ void input_core_init(void);
 void input_report_key(uint16_t code, int32_t value);
 void input_report_abs(uint16_t code, int32_t value);
 void input_sync(void);
+void input_inject_ascii(uint8_t c);
 
 #endif
