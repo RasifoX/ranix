@@ -1,8 +1,8 @@
 #include <kernel/block.h>
 #include <kernel/pci.h>
-#include <kernel/mm/buddy.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 /*
  * virtio-blk legacy (spec 0.9.5) over PCI.
@@ -82,6 +82,9 @@ typedef struct {
 	uint16_t last_used_idx;
 } vblk_priv_t;
 
+static uint8_t vblk_vring[3 * 4096] __attribute__((aligned(4096)));
+static uint8_t vblk_req[4096]        __attribute__((aligned(4096)));
+
 static vblk_priv_t g_priv;
 static block_device_t g_dev;
 
@@ -119,7 +122,7 @@ static int vblk_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 		hdr->sector  = lba + i;
 		*stat        = 0xFF;
 
-		uint64_t phys_req  = (uint64_t)p->req_page;   /* physical (identity mapped) */
+		uint64_t phys_req  = VIRT_TO_PHYS((uint64_t)p->req_page);
 
 		uint16_t d0 = 0, d1 = 1, d2 = 2;
 
@@ -173,8 +176,62 @@ static int vblk_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 
 static int vblk_write(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
 {
-	(void)dev; (void)lba; (void)buf; (void)count;
-	return -1; /* read-only for now */
+	vblk_priv_t    *p   = dev->priv;
+	const uint8_t  *src = buf;
+
+	for (uint64_t i = 0; i < count; i++) {
+		virtio_blk_req_t *hdr  = (virtio_blk_req_t *)p->req_page;
+		uint8_t          *data = p->req_page + 16;
+		uint8_t          *stat = p->req_page + 16 + 512;
+
+		hdr->type   = VIRTIO_BLK_T_OUT;
+		hdr->ioprio = 0;
+		hdr->sector = lba + i;
+		*stat       = 0xFF;
+		memcpy(data, src + i * 512, 512);
+
+		uint64_t phys_req = VIRT_TO_PHYS((uint64_t)p->req_page);
+		uint16_t d0 = 0, d1 = 1, d2 = 2;
+
+		p->desc[d0].addr  = phys_req;
+		p->desc[d0].len   = 16;
+		p->desc[d0].flags = VRING_DESC_F_NEXT;
+		p->desc[d0].next  = d1;
+
+		p->desc[d1].addr  = phys_req + 16;
+		p->desc[d1].len   = 512;
+		p->desc[d1].flags = VRING_DESC_F_NEXT;   /* device reads, no WRITE flag */
+		p->desc[d1].next  = d2;
+
+		p->desc[d2].addr  = phys_req + 16 + 512;
+		p->desc[d2].len   = 1;
+		p->desc[d2].flags = VRING_DESC_F_WRITE;
+		p->desc[d2].next  = 0;
+
+		uint16_t avail_idx = p->avail->idx;
+		p->avail->ring[avail_idx % VRING_Q] = d0;
+		__asm__ volatile("" ::: "memory");
+		p->avail->idx = (uint16_t)(avail_idx + 1);
+		__asm__ volatile("" ::: "memory");
+
+		vio_outw(p->iobase, VIRTIO_QUEUE_NOTIFY, 0);
+
+		uint32_t spin = 0;
+		while (p->used->idx == p->last_used_idx) {
+			__asm__ volatile("pause" ::: "memory");
+			if (++spin > 10000000) {
+				kprintf("virtio-blk: write timeout lba=%lu\n", lba + i);
+				return -1;
+			}
+		}
+		p->last_used_idx = p->used->idx;
+
+		if (*stat != 0) {
+			kprintf("virtio-blk: write error lba=%lu status=%u\n", lba + i, *stat);
+			return -1;
+		}
+	}
+	return 0;
 }
 
 /* ── init ────────────────────────────────────────────────────── */
@@ -218,20 +275,16 @@ void virtio_blk_init(void)
 	uint16_t qsz = vio_inw(iobase, VIRTIO_QUEUE_SIZE);
 	if (qsz == 0 || qsz > VRING_Q) qsz = VRING_Q;
 
-	uint8_t *p0 = buddy_alloc(2);   /* order-2 = 4 pages; covers desc+avail+used for qsz=256 */
-	if (!p0) { vio_outb(iobase, VIRTIO_STATUS, VIRTIO_STATUS_FAILED); return; }
-	memset(p0, 0, 16384);
+	memset(vblk_vring, 0, sizeof(vblk_vring));
+	memset(vblk_req,  0, sizeof(vblk_req));
 
-	vring_desc_t  *desc  = (vring_desc_t  *)p0;
-	vring_avail_t *avail = (vring_avail_t *)(p0 + 4096);   /* page 1 */
-	vring_used_t  *used  = (vring_used_t  *)(p0 + 8192);   /* page 2 */
+	vring_desc_t  *desc  = (vring_desc_t  *)vblk_vring;
+	vring_avail_t *avail = (vring_avail_t *)(vblk_vring + 4096);
+	vring_used_t  *used  = (vring_used_t  *)(vblk_vring + 8192);
+	uint8_t       *req_page = vblk_req;
 
-	uint8_t *req_page = buddy_alloc(0);
-	if (!req_page) { buddy_free((uint64_t)p0, 2); vio_outb(iobase, VIRTIO_STATUS, VIRTIO_STATUS_FAILED); return; }
-	memset(req_page, 0, 4096);
-
-	/* buddy_alloc returns physical addrs (identity mapped); use directly as DMA addr */
-	uint64_t pfn = (uint64_t)p0 / 4096;
+	uint64_t vring_phys = VIRT_TO_PHYS((uint64_t)vblk_vring);
+	uint64_t pfn = vring_phys / 4096;
 	vio_outl(iobase, VIRTIO_QUEUE_ADDR, (uint32_t)pfn);
 
 	vio_outb(iobase, VIRTIO_STATUS,
