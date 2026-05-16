@@ -40,8 +40,36 @@ static void add_range(uint64_t base, uint64_t end,
 		pmm_free_region(cur, end - cur);
 }
 
+struct _pmm_ctx {
+	uint64_t  free_start;
+	uint64_t  clip_lo, clip_hi;
+	uint64_t  exc[2][2];
+	int       n_exc;
+	uint64_t  total_free;
+};
+
+static void _pmm_add(uint64_t b, uint64_t s, void *ud)
+{
+	struct _pmm_ctx *c = ud;
+	uint64_t base = b > c->clip_lo ? b : c->clip_lo;
+	if (base < c->free_start) base = c->free_start;
+	uint64_t end = b + s;
+	if (end > c->clip_hi) end = c->clip_hi;
+	if (base >= end) return;
+	add_range(base, end, c->exc, c->n_exc);
+	c->total_free += end - base;
+}
+
+struct _max_ctx { uint64_t max; int n; };
+static void _pmm_max(uint64_t b, uint64_t s, void *ud)
+{
+	struct _max_ctx *c = ud;
+	if (b + s > c->max) c->max = b + s;
+	c->n++;
+}
+
 static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
-                                  fdt_info_t *fi, board_config_t *cfg)
+                                  board_config_t *cfg)
 {
 	uint64_t start = ((uint64_t)&__kernel_phys_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
@@ -54,35 +82,13 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		if (fb_end > start) start = fb_end;
 	}
 
-	/* Collect non-contiguous memory regions, find highest address */
-	int n_reg = 0;
-	uint64_t reg_base[FDT_MAX_MEM_REGIONS];
-	uint64_t reg_end[FDT_MAX_MEM_REGIONS];
-	uint64_t max_limit = 0;
-
-	if (fi && fi->num_mem_regions > 0) {
-		for (int i = 0; i < fi->num_mem_regions; i++) {
-			uint64_t b = fi->mem_regions[i].base;
-			uint64_t e = b + fi->mem_regions[i].size;
-			if (e > b && n_reg < FDT_MAX_MEM_REGIONS) {
-				reg_base[n_reg] = b;
-				reg_end[n_reg]  = e;
-				if (e > max_limit) max_limit = e;
-				n_reg++;
-			}
-		}
-	}
-	if (n_reg == 0) {
-		uint64_t b = cfg->mem_base;
-		uint64_t e = b + cfg->mem_size;
-		reg_base[0] = b; reg_end[0] = e;
-		max_limit = e; n_reg = 1;
-	}
+	struct _max_ctx mc = { cfg->mem_base + cfg->mem_size, 1 };
+	board_foreach_mem_region(_pmm_max, &mc);
+	uint64_t max_limit = mc.max;
 
 	uint64_t meta_size = pmm_init(start, max_limit);
 	uint64_t free_start = start + meta_size;
 
-	/* Exclusion windows: initrd and framebuffer */
 	uint64_t exc[2][2] = {0};
 	int n_exc = 0;
 	if (fb_phys && fb_phys < max_limit) {
@@ -95,7 +101,6 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		exc[n_exc][1] = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
 		n_exc++;
 	}
-	/* Sort exclusions by start address */
 	if (n_exc == 2 && exc[0][0] > exc[1][0]) {
 		uint64_t t0 = exc[0][0], t1 = exc[0][1];
 		exc[0][0] = exc[1][0]; exc[0][1] = exc[1][1];
@@ -103,32 +108,18 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	}
 
 	uint64_t dm_limit = arch_direct_map_boot_limit();
+	struct _pmm_ctx ac = { free_start, 0, dm_limit, {{0}}, n_exc, 0 };
+	ac.exc[0][0] = exc[0][0]; ac.exc[0][1] = exc[0][1];
+	ac.exc[1][0] = exc[1][0]; ac.exc[1][1] = exc[1][1];
 
-	/* First pass: regions within boot-time direct map */
-	uint64_t total_free = 0;
-	for (int r = 0; r < n_reg; r++) {
-		uint64_t base = (reg_base[r] < free_start) ? free_start : reg_base[r];
-		uint64_t end  = (reg_end[r] < dm_limit) ? reg_end[r] : dm_limit;
-		if (base >= end) continue;
-		add_range(base, end, exc, n_exc);
-		total_free += end - base;
-	}
-
-	/* Extend direct map to cover RAM above boot limit before freeing it */
+	board_foreach_mem_region(_pmm_add, &ac);
 	arch_map_high_memory(max_limit);
-
-	/* Second pass: regions beyond boot-time direct map */
-	for (int r = 0; r < n_reg; r++) {
-		uint64_t base = (reg_base[r] > dm_limit) ? reg_base[r] : dm_limit;
-		if (base < free_start) base = free_start;
-		uint64_t end  = reg_end[r];
-		if (base >= end) continue;
-		add_range(base, end, exc, n_exc);
-		total_free += end - base;
-	}
+	ac.clip_lo = dm_limit;
+	ac.clip_hi = (uint64_t)-1;
+	board_foreach_mem_region(_pmm_add, &ac);
 
 	kprintf("Memory: %d MB total across %d region(s)\n",
-	        (int)(total_free >> 20), n_reg);
+	        (int)(ac.total_free >> 20), mc.n);
 }
 
 
@@ -155,8 +146,7 @@ void kernel_main(void)
 	else
 		kprintf("Ranix — %s\n", cfg->name);
 
-	setup_physical_memory(global_fb_phys, fb_sz,
-	                      (fdt_ok == 0) ? fi : NULL, cfg);
+	setup_physical_memory(global_fb_phys, fb_sz, cfg);
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */

@@ -36,6 +36,9 @@ void board_drivers_register(void);
 
 board_config_t *board_get_config(void);
 
+/* Iterate over all physical RAM regions. Calls cb(base, size, ud) for each. */
+void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud);
+
 /* Trigger a hardware reset / system reboot. Does not return. */
 void board_reset(void);
 
