@@ -1,19 +1,28 @@
 #include <kernel/block.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/mm/heap.h>
 
-#define MAX_BLOCK_DEVICES 8
+#define BLKDEV_INIT_CAP 8
 
-static block_device_t *devices[MAX_BLOCK_DEVICES];
-static int             dev_cnt = 0;
-static spinlock_t      block_lock = SPINLOCK_INIT;
+static block_device_t **devices;
+static int              dev_cnt = 0;
+static int              dev_cap = 0;
+static spinlock_t       block_lock = SPINLOCK_INIT;
 
 int block_device_register(block_device_t *dev)
 {
     uint64_t f = spin_lock_irq(&block_lock);
-    if (dev_cnt >= MAX_BLOCK_DEVICES) {
-        spin_unlock_irq(&block_lock, f);
-        return -1;
+    if (dev_cnt >= dev_cap) {
+        int new_cap = dev_cap ? dev_cap * 2 : BLKDEV_INIT_CAP;
+        block_device_t **nb = kmalloc((size_t)new_cap * sizeof(block_device_t *));
+        if (!nb) { spin_unlock_irq(&block_lock, f); return -1; }
+        if (devices) {
+            memcpy(nb, devices, (size_t)dev_cnt * sizeof(block_device_t *));
+            kfree(devices);
+        }
+        devices = nb;
+        dev_cap = new_cap;
     }
     devices[dev_cnt++] = dev;
     spin_unlock_irq(&block_lock, f);
