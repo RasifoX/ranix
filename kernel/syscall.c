@@ -144,7 +144,6 @@ static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 
 static long sys_close(int fd)
 {
-	if (fd < 0 || fd >= FD_MAX) return -9;
 	return vfs_close(fd) == 0 ? 0 : -9;
 }
 
@@ -497,11 +496,11 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 
 	/* close O_CLOEXEC file descriptors before exec */
 	if (p->fds) {
-		for (int i = 0; i < FD_MAX; i++) {
-			if (!(p->fds->cloexec_bitmap & (1ULL << i))) continue;
+		for (int i = 0; i < p->fds->cap; i++) {
+			if (!fd_is_cloexec(p->fds, i)) continue;
 			vfs_file_t *xf = fd_get(p->fds, i);
-			if (!xf) { p->fds->cloexec_bitmap &= ~(1ULL << i); continue; }
-			fd_free(p->fds, i); /* clears cloexec_bitmap bit too */
+			if (!xf) { fd_set_cloexec(p->fds, i, 0); continue; }
+			fd_free(p->fds, i);
 			if (--xf->refcount == 0) {
 				if (xf->inode->fops && xf->inode->fops->close)
 					xf->inode->fops->close(xf);
@@ -737,7 +736,8 @@ static long sys_pipe2(int *pipefd, int flags)
 		}
 	}
 	if (flags & O_CLOEXEC) {
-		p->fds->cloexec_bitmap |= (1ULL << kfds[0]) | (1ULL << kfds[1]);
+		fd_set_cloexec(p->fds, kfds[0], 1);
+		fd_set_cloexec(p->fds, kfds[1], 1);
 	}
 	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
 	return 0;
@@ -1240,26 +1240,22 @@ static long sys_dup(int oldfd)
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, oldfd);
 	if (!f) return -9;
-	int newfd = fd_alloc(p->fds, f); /* fd_alloc increments refcount */
+	int newfd = fd_alloc(p->fds, f);
 	if (newfd < 0) return -24;
-	/* dup clears cloexec on the new fd */
-	p->fds->cloexec_bitmap &= ~(1ULL << newfd);
+	fd_set_cloexec(p->fds, newfd, 0);
 	return newfd;
 }
 
 static long sys_dup2(int oldfd, int newfd)
 {
-	if (newfd < 0 || newfd >= FD_MAX) return -9;
+	if (newfd < 0) return -9;
 	process_t *p = task_current();
-	vfs_file_t *src;
-	src = p->fds ? fd_get(p->fds, oldfd) : NULL;
+	vfs_file_t *src = p->fds ? fd_get(p->fds, oldfd) : NULL;
 	if (!src) return -9;
 	if (oldfd == newfd) return newfd;
-	if (p->fds->bitmap & (1ULL << newfd)) vfs_close(newfd);
-	src->refcount++;
-	p->fds->files[newfd] = src;
-	p->fds->bitmap       |=  (1ULL << newfd);
-	p->fds->cloexec_bitmap &= ~(1ULL << newfd); /* dup2 always clears cloexec */
+	if (fd_get(p->fds, newfd)) vfs_close(newfd);
+	if (fd_alloc_at(p->fds, src, newfd) < 0) return -24;
+	fd_set_cloexec(p->fds, newfd, 0);
 	return newfd;
 }
 
@@ -1268,10 +1264,7 @@ static long sys_dup3(int oldfd, int newfd, int flags)
 	long r = sys_dup2(oldfd, newfd);
 	if (r >= 0) {
 		process_t *p = task_current();
-		if (flags & O_CLOEXEC)
-			p->fds->cloexec_bitmap |=  (1ULL << newfd);
-		else
-			p->fds->cloexec_bitmap &= ~(1ULL << newfd);
+		fd_set_cloexec(p->fds, newfd, !!(flags & O_CLOEXEC));
 	}
 	return r;
 }
@@ -1293,28 +1286,19 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 		/* dup to first fd >= arg */
 		vfs_file_t *f = fd_get(p->fds, fd);
 		if (!f) return -9;
-		for (int i = (int)arg; i < FD_MAX; i++) {
-			if (!(p->fds->bitmap & (1ULL << i))) {
-				f->refcount++;
-				p->fds->files[i] = f;
-				p->fds->bitmap |= (1ULL << i);
-				if (cmd == F_DUPFD_CLOEXEC)
-					p->fds->cloexec_bitmap |= (1ULL << i);
-				return i;
-			}
-		}
-		return -24;
+		int nfd = fd_alloc_from(p->fds, f, (int)arg);
+		if (nfd < 0) return -24;
+		if (cmd == F_DUPFD_CLOEXEC) fd_set_cloexec(p->fds, nfd, 1);
+		return nfd;
 	}
 	case F_GETFD: {
-		if (fd < 0 || fd >= FD_MAX) return -9;
-		if (!(p->fds->bitmap & (1ULL << fd))) return -9;
-		return (p->fds->cloexec_bitmap & (1ULL << fd)) ? FD_CLOEXEC : 0;
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f) return -9;
+		return fd_is_cloexec(p->fds, fd) ? FD_CLOEXEC : 0;
 	}
 	case F_SETFD: {
-		if (fd < 0 || fd >= FD_MAX) return -9;
-		if (!(p->fds->bitmap & (1ULL << fd))) return -9;
-		if (arg & FD_CLOEXEC) p->fds->cloexec_bitmap |=  (1ULL << fd);
-		else                  p->fds->cloexec_bitmap &= ~(1ULL << fd);
+		if (!fd_get(p->fds, fd)) return -9;
+		fd_set_cloexec(p->fds, fd, !!(arg & FD_CLOEXEC));
 		return 0;
 	}
 	case F_GETFL: {
