@@ -2,24 +2,19 @@
 #include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
 
-static driver_t *drivers[DRIVER_MAX];
-static int driver_cnt = 0;
+static driver_t *driver_list = NULL;
+static int       driver_cnt  = 0;
 
 static const char *type_name(driver_type_t t)
 {
     static const char *names[] = {
-        "serial", "display", "irqchip", "timer", "mailbox", "other"
+        "serial", "display", "irqchip", "timer", "mailbox", "block", "other"
     };
-    return names[t < 6 ? t : 5];
+    return names[t < 7 ? t : 6];
 }
 
 int driver_register(driver_t *drv)
 {
-    if (driver_cnt >= DRIVER_MAX)
-        return -1;
-
-    drivers[driver_cnt++] = drv;
-
     if (drv->init) {
         int ret = drv->init();
         drv->initialized = (ret == 0) ? 1 : 0;
@@ -31,41 +26,44 @@ int driver_register(driver_t *drv)
         drv->initialized = 1;
     }
 
+    drv->next   = driver_list;
+    driver_list = drv;
+    driver_cnt++;
+
     kprintf("%s: %s\n", drv->name, type_name(drv->type));
     return 0;
 }
 
 driver_t *driver_find(const char *name)
 {
-    for (int i = 0; i < driver_cnt; i++)
-        if (strcmp(drivers[i]->name, name) == 0)
-            return drivers[i];
-    return 0;
+    for (driver_t *d = driver_list; d; d = d->next)
+        if (strcmp(d->name, name) == 0)
+            return d;
+    return NULL;
 }
 
 driver_t *driver_find_by_type(driver_type_t type)
 {
-    for (int i = 0; i < driver_cnt; i++)
-        if (drivers[i]->type == type)
-            return drivers[i];
-    return 0;
+    for (driver_t *d = driver_list; d; d = d->next)
+        if (d->type == type)
+            return d;
+    return NULL;
 }
 
 void driver_list_all(void)
 {
-    for (int i = 0; i < driver_cnt; i++) {
-        driver_t *d = drivers[i];
-        kprintf("  %s  %s  %s\n",
-                d->name, type_name(d->type),
+    for (driver_t *d = driver_list; d; d = d->next)
+        kprintf("  %s  %s  %s\n", d->name, type_name(d->type),
                 d->initialized ? "ok" : "fail");
-    }
 }
 
 int driver_count(void) { return driver_cnt; }
 
 driver_t *driver_get(int index)
 {
-    if (index < 0 || index >= driver_cnt)
-        return 0;
-    return drivers[index];
+    int i = 0;
+    for (driver_t *d = driver_list; d; d = d->next, i++)
+        if (i == index)
+            return d;
+    return NULL;
 }

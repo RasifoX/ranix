@@ -64,6 +64,7 @@ typedef struct {
     int               (*rename)(struct vfs_inode *old_dir, const char *old_name,
                                 struct vfs_inode *new_dir, const char *new_name);
     int               (*readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
+    int               (*symlink)(struct vfs_inode *dir, const char *name, const char *target);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
@@ -111,11 +112,12 @@ typedef struct vfs_dentry {
 } vfs_dentry_t;
 
 /* ── mount ───────────────────────────────────────────────── */
-typedef struct {
-    vfs_dentry_t *mountpoint;
-    vfs_dentry_t *root;
-    const char   *fstype;
-    void         *priv;
+typedef struct vfs_mount {
+    vfs_dentry_t      *mountpoint;
+    vfs_dentry_t      *root;
+    const char        *fstype;
+    void              *priv;
+    struct vfs_mount  *next;
 } vfs_mount_t;
 
 /* ── file descriptor table ───────────────────────────────── */
@@ -123,7 +125,8 @@ typedef struct {
 
 typedef struct {
     vfs_file_t *files[FD_MAX];
-    uint64_t    bitmap;   /* open fd bitmask */
+    uint64_t    bitmap;         /* open fd bitmask */
+    uint64_t    cloexec_bitmap; /* O_CLOEXEC per-fd (not stored on vfs_file_t) */
 } fd_table_t;
 
 /* ── VMA (virtual memory area) ───────────────────────────── */
@@ -151,6 +154,7 @@ off_t      vfs_seek(int fd, off_t off, int whence);
 int        vfs_mkdir(const char *path, mode_t mode);
 int        vfs_unlink(const char *path);
 int        vfs_kernel_install(const char *path, const void *data, size_t len);
+int        vfs_symlink(const char *target, const char *linkpath);
 
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
