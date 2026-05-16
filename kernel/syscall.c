@@ -1609,13 +1609,14 @@ typedef struct { uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel; } linux_winsize_
 
 static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 {
-	/* Forward to VFS if file has ioctl */
-	if (fd >= 3) {
-		process_t  *p = task_current();
-		vfs_file_t *f = fd_get(p->fds, fd);
-		if (f && f->inode->fops && f->inode->fops->ioctl)
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (f) {
+		if (f->inode && f->inode->fops && f->inode->fops->ioctl)
 			return f->inode->fops->ioctl(f, cmd, arg);
+		return -25; /* fd exists but has no ioctl (pipe, regular file…) */
 	}
+	/* fd not in table — fallback for stdin/stdout before /dev/console open */
 	switch (cmd) {
 	case TIOCGWINSZ: {
 		linux_winsize_t ws = {24, 80, 0, 0};
