@@ -102,10 +102,25 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		exc[1][0] = t0;        exc[1][1] = t1;
 	}
 
-	/* Add each RAM region separately — avoids device memory holes */
+	uint64_t dm_limit = arch_direct_map_boot_limit();
+
+	/* First pass: regions within boot-time direct map */
 	uint64_t total_free = 0;
 	for (int r = 0; r < n_reg; r++) {
 		uint64_t base = (reg_base[r] < free_start) ? free_start : reg_base[r];
+		uint64_t end  = (reg_end[r] < dm_limit) ? reg_end[r] : dm_limit;
+		if (base >= end) continue;
+		add_range(base, end, exc, n_exc);
+		total_free += end - base;
+	}
+
+	/* Extend direct map to cover RAM above boot limit before freeing it */
+	arch_map_high_memory(max_limit);
+
+	/* Second pass: regions beyond boot-time direct map */
+	for (int r = 0; r < n_reg; r++) {
+		uint64_t base = (reg_base[r] > dm_limit) ? reg_base[r] : dm_limit;
+		if (base < free_start) base = free_start;
 		uint64_t end  = reg_end[r];
 		if (base >= end) continue;
 		add_range(base, end, exc, n_exc);
@@ -146,10 +161,7 @@ void kernel_main(void)
 
 	/* framebuffer TTY needs kmalloc — init after heap */
 	if (global_fb_phys) {
-		/* PHYS_TO_VIRT overflows for phys >= 2GB (typical MMIO range); use MMIO window */
-		uint64_t va = (global_fb_phys < 0x80000000UL)
-		              ? PHYS_TO_VIRT(global_fb_phys)
-		              : MMIO_TO_VIRT(global_fb_phys);
+		uint64_t va = PHYS_TO_VIRT(global_fb_phys);
 		uint64_t aligned_sz = (fb_sz + PAGE_SIZE - 1) & PAGE_MASK;
 		for (uint64_t i = 0; i < aligned_sz; i += PAGE_SIZE) {
 			vm_map(kernel_vm_space, va + i, global_fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);
