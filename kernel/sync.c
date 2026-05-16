@@ -97,14 +97,37 @@ void wait_queue_init(wait_queue_t *q)
 void sleep_on(wait_queue_t *q)
 {
 	process_t *curr = task_current();
-	if (!curr || curr->pid == 0) return; /* idle cannot sleep */
+	if (!curr || curr->pid == 0) return;
 
 	uint64_t f = spin_lock_irq(&q->lock);
 	curr->state = PROC_SLEEPING;
-	curr->wait_next = q->tasks;
-	q->tasks = curr;
+	curr->sleeping_on_queue = 1;
+	/* Avoid duplicate entries (sched_tick may wake without removing) */
+	process_t *t = q->tasks; int found = 0;
+	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
+	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
 	spin_unlock_irq(&q->lock, f);
 
+	arch_yield();
+}
+
+void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
+{
+	process_t *curr = task_current();
+	if (!curr || curr->pid == 0) {
+		spin_unlock_irq(lock, irq_flags);
+		return;
+	}
+
+	uint64_t f = spin_lock_irq(&q->lock);
+	curr->state = PROC_SLEEPING;
+	curr->sleeping_on_queue = 1;
+	/* Avoid duplicate entries (sched_tick may wake without removing) */
+	process_t *t = q->tasks; int found = 0;
+	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
+	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
+	spin_unlock_irq(&q->lock, f);
+	spin_unlock_irq(lock, irq_flags);
 	arch_yield();
 }
 

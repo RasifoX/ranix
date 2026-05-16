@@ -47,6 +47,9 @@ typedef struct wait_queue {
 
 void wait_queue_init(wait_queue_t *q);
 void sleep_on(wait_queue_t *q);
+/* sleep_on_locked: atomically add to wait queue and release *lock before sleeping.
+ * Prevents the lost-wakeup race when the wake condition is checked under *lock. */
+void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags);
 void wake_up(wait_queue_t *q);
 
 #endif

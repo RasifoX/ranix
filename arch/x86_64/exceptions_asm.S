@@ -95,10 +95,17 @@ common_irq:
 	jz .irq_ret
 	movl $0, need_resched(%rip)
 
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+
 	call schedule
 	call vm_activate
 
 .irq_ret:
+	/* Switch to current/new task's saved context before signal delivery */
+	call sched_get_current_ctx
+	movq %rax, %rsp
 	movq %rsp, %rdi
 	call signal_dispatch
 	call sched_get_current_ctx
@@ -176,6 +183,10 @@ syscall_entry:
 	movq %rsp, %rdi
 	call syscall_handle
 
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+
 	/* signal dispatch */
 	movq %rsp, %rdi
 	call signal_dispatch
@@ -185,6 +196,11 @@ syscall_entry:
 	testl %eax, %eax
 	jz .syscall_ret
 	movl $0, need_resched(%rip)
+
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+
 	call schedule
 	call vm_activate
 	call sched_get_current_ctx
@@ -209,7 +225,10 @@ irq_stub_yield:
 	movq %r15, 16(%rax)
 	call schedule
 	call vm_activate
-	
+
+	/* Switch to new task's saved context before signal delivery */
+	call sched_get_current_ctx
+	movq %rax, %rsp
 	movq %rsp, %rdi
 	call signal_dispatch
 
