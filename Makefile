@@ -113,14 +113,8 @@ LDFLAGS = -nostdlib
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
 OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 
-BUSYBOX_URL_x86_64 = https://busybox.net/downloads/binaries/1.31.0-defconfig-multiarch-musl/busybox-x86_64
-BUSYBOX_URL_aarch64 = https://busybox.net/downloads/binaries/1.31.0-defconfig-multiarch-musl/busybox-armv8l
-
-ifeq ($(ARCH),aarch64)
-    BUSYBOX_URL = $(BUSYBOX_URL_aarch64)
-else
-    BUSYBOX_URL = $(BUSYBOX_URL_x86_64)
-endif
+BUSYBOX_APK_aarch64 = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.37.0-r14.apk
+BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/busybox-static-1.37.0-r14.apk
 
 .PHONY: all clean qemu image initramfs
 
@@ -128,19 +122,42 @@ all: initramfs $(TARGET)
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
+CACHE_DIR          = .cache
+BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
+BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
+
 $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
-	@mkdir -p $(BUILD_DIR)/initramfs/bin
+	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
 	@cp userspace/init userspace/hello $(BUILD_DIR)/initramfs/bin/
-	@if [ ! -f $(BUILD_DIR)/initramfs/bin/busybox ]; then \
+	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
-		wget -qO $(BUILD_DIR)/initramfs/bin/busybox $(BUSYBOX_URL); \
-		chmod +x $(BUILD_DIR)/initramfs/bin/busybox; \
+		if [ "$(ARCH)" = "aarch64" ]; then \
+			wget -q "$(BUSYBOX_APK_aarch64)" -O "$(BUSYBOX_APK_CACHED)" || { rm -f "$(BUSYBOX_APK_CACHED)"; echo "ERROR: busybox aarch64 download failed"; exit 1; }; \
+		else \
+			wget -q "$(BUSYBOX_APK_x86_64)"  -O "$(BUSYBOX_APK_CACHED)" || { rm -f "$(BUSYBOX_APK_CACHED)"; echo "ERROR: busybox x86_64 download failed";  exit 1; }; \
+		fi; \
+		mkdir -p "$(BUSYBOX_EXTRACT)" && \
+		tar xzf "$(BUSYBOX_APK_CACHED)" -C "$(BUSYBOX_EXTRACT)" 2>/dev/null; \
 	fi
-	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/sh
-	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/ls
-	@cp $(BUILD_DIR)/initramfs/bin/busybox $(BUILD_DIR)/initramfs/bin/cat
+	@cp "$(BUSYBOX_EXTRACT)/bin/busybox.static" $(BUILD_DIR)/initramfs/bin/busybox
+	@chmod +x $(BUILD_DIR)/initramfs/bin/busybox
+	@for cmd in sh ls cat touch mkdir rm cp mv ln chmod grep sed find \
+	            ps kill df free uname head tail wc echo printf vi \
+	            reboot poweroff halt mount umount dmesg \
+	            awk sort uniq cut tr xargs dd stat du diff \
+	            env tee seq sleep date id whoami hostname \
+	            true false dirname basename pwd uptime nproc \
+	            timeout test expr yes which readlink; do \
+		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
+	done
 	@if [ -f doomgeneric/doomgeneric ]; then \
-		cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
+		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
+		NEED_ARCH="$(ARCH)"; \
+		if [ "$$NEED_ARCH" = "x86_64" ] && [ "$$DOOM_ARCH" = "X86-64" ]; then \
+			cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
+		elif [ "$$NEED_ARCH" = "aarch64" ] && [ "$$DOOM_ARCH" = "AArch64" ]; then \
+			cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
+		fi \
 	fi
 	@if [ -f doom1.wad ]; then \
 		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
@@ -183,6 +200,17 @@ iso: initramfs $(TARGET)
 
 qemu-iso: iso
 	$(QEMU_CMD) -nographic -cdrom ranix.iso
+
+doom: doomgeneric/doomgeneric
+
+doomgeneric/doomgeneric: doomgeneric/doomgeneric_ranix.c
+	$(MAKE) -C doomgeneric -f Makefile.ranix ARCH=$(ARCH) \
+	    CC=$(MUSL_CC)
+
+qemu-doom: doom
+	rm -f $(BUILD_DIR)/initramfs.cpio
+	$(MAKE) ARCH=$(ARCH) iso
+	$(QEMU_CMD) -vga std -m 256M -cdrom ranix.iso -serial file:serial.log
 
 # Create a 32 MB ext2 test disk image with some files
 disk-image: ranix-disk.img
