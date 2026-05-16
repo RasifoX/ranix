@@ -90,11 +90,14 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			p = end; continue;
 		}
 
-		/* look in dentry children first */
-		vfs_dentry_t *child = d->child;
-		while (child) {
-			if (strcmp(child->name, tmp) == 0) break;
-			child = child->next;
+		/* look in dentry children first (skip if parent marks children volatile) */
+		vfs_dentry_t *child = NULL;
+		if (!d->inode || !d->inode->no_cache) {
+			child = d->child;
+			while (child) {
+				if (strcmp(child->name, tmp) == 0) break;
+				child = child->next;
+			}
 		}
 
 		if (!child) {
@@ -111,18 +114,29 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			/* Re-check: another task may have added this dentry while unlocked */
-			child = d->child;
-			while (child) {
-				if (strcmp(child->name, tmp) == 0) break;
-				child = child->next;
-			}
-			if (!child) {
-				child = _dentry_create(d, tmp, in);
-				if (!child) {
-					spin_unlock_irq(&vfs_lock, f);
-					return NULL;
+			if (!dir_inode->no_cache) {
+				/* Re-check: another task may have added this dentry while unlocked */
+				child = d->child;
+				while (child) {
+					if (strcmp(child->name, tmp) == 0) break;
+					child = child->next;
 				}
+				if (!child) {
+					child = _dentry_create(d, tmp, in);
+					if (!child) {
+						spin_unlock_irq(&vfs_lock, f);
+						return NULL;
+					}
+				}
+			} else {
+				/* volatile parent: use a temporary dentry, don't add to tree */
+				static vfs_dentry_t tmp_dentry;
+				tmp_dentry.inode  = in;
+				tmp_dentry.parent = d;
+				tmp_dentry.child  = NULL;
+				tmp_dentry.next   = NULL;
+				tmp_dentry.name[0] = '\0';
+				child = &tmp_dentry;
 			}
 		}
 

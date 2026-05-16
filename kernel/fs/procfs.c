@@ -177,12 +177,12 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	if (!p) { pb_u64(&b, (uint64_t)pid); pb_str(&b, " (gone) Z 0\n"); return (int)(sz - b.rem); }
 	pb_u64(&b, p->pid); pb_char(&b, ' ');
 	pb_char(&b, '('); pb_str(&b, p->name); pb_char(&b, ')');
-	/* fields 3-52 matching Linux /proc/PID/stat layout (busybox ps
-	 * scans for spaces; if we don't have enough fields the scan runs
-	 * past the buffer and faults on the next unmapped page) */
+	/* fields 3-52 matching Linux /proc/PID/stat layout */
 	pb_str(&b, " R ");
-	pb_u64(&b, p->ppid);
-	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0"  /* 5-24 */
+	pb_u64(&b, p->ppid);                   /* 4: ppid */
+	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 ");  /* 5-13: pgrp..cmajflt */
+	pb_u64(&b, p->ticks);                  /* 14: utime (CPU ticks) */
+	pb_str(&b, " 0 0 0 0 0 0 1 0 0 0"     /* 15-24: stime..itrealvalue */
 	           " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"  /* 25-44 */
 	           " 0 0 0 0 0 0 0 0\n");                       /* 45-52 */
 	return (int)(sz - b.rem);
@@ -549,12 +549,13 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 	vfs_inode_t *root_inode = kmalloc(sizeof(*root_inode));
 	if (!root_inode) return -1;
 	memset(root_inode, 0, sizeof(*root_inode));
-	root_inode->ino     = 1;
-	root_inode->mode    = S_IFDIR | 0555;
-	root_inode->nlink   = 2;
-	root_inode->refcount= 1;
-	root_inode->iops    = &procfs_root_iops;
-	root_inode->fops    = &procfs_dir_fops;
+	root_inode->ino      = 1;
+	root_inode->mode     = S_IFDIR | 0555;
+	root_inode->nlink    = 2;
+	root_inode->refcount = 1;
+	root_inode->iops     = &procfs_root_iops;
+	root_inode->fops     = &procfs_dir_fops;
+	root_inode->no_cache = 1; /* PID dirs are dynamic — never cache children */
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) { kfree(root_inode); return -1; }
