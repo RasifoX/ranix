@@ -6,11 +6,6 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
-/* ── mount table ─────────────────────────────────────────── */
-#define MOUNT_MAX 16
-
-static vfs_mount_t  mounts[MOUNT_MAX];
-static int          mount_cnt = 0;
 static vfs_dentry_t *root_dentry = NULL;
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
@@ -174,75 +169,73 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	return d;
 }
 
-/* ── mount ───────────────────────────────────────────────── */
+/* ── filesystem type registry ────────────────────────────── */
 
-typedef struct {
-	const char *name;
-	int (*fill)(vfs_mount_t *mnt, void *data);
+typedef struct vfs_fstype {
+	const char        *name;
+	int               (*fill)(vfs_mount_t *mnt, void *data);
+	struct vfs_fstype *next;
 } vfs_fstype_t;
 
-static vfs_fstype_t fstypes[16];
-static int          fstype_cnt = 0;
+static vfs_fstype_t *fstype_list = NULL;
 
 void vfs_register_fs(const char *name, int (*fill)(vfs_mount_t *, void *))
 {
+	vfs_fstype_t *ft = kmalloc(sizeof(*ft));
+	if (!ft) return;
+	ft->name = name;
+	ft->fill = fill;
 	uint64_t f = spin_lock_irq(&vfs_lock);
-	if (fstype_cnt >= 16) {
-		spin_unlock_irq(&vfs_lock, f);
-		return;
-	}
-	fstypes[fstype_cnt].name = name;
-	fstypes[fstype_cnt].fill = fill;
-	fstype_cnt++;
+	ft->next    = fstype_list;
+	fstype_list = ft;
 	spin_unlock_irq(&vfs_lock, f);
 }
+
+/* ── mount list ──────────────────────────────────────────── */
+
+static vfs_mount_t *mount_list = NULL;
 
 int vfs_mount(const char *path, const char *fstype, void *data)
 {
 	uint64_t f = spin_lock_irq(&vfs_lock);
-	if (mount_cnt >= MOUNT_MAX) {
-		spin_unlock_irq(&vfs_lock, f);
-		return -1;
-	}
 
 	int (*fill)(vfs_mount_t *, void *) = NULL;
-	for (int i = 0; i < fstype_cnt; i++) {
-		if (strcmp(fstypes[i].name, fstype) == 0) {
-			fill = fstypes[i].fill;
+	for (vfs_fstype_t *ft = fstype_list; ft; ft = ft->next) {
+		if (strcmp(ft->name, fstype) == 0) {
+			fill = ft->fill;
 			break;
 		}
 	}
-	if (!fill) {
-		spin_unlock_irq(&vfs_lock, f);
-		return -1;
-	}
-
-	vfs_mount_t *mnt = &mounts[mount_cnt];
-	mnt->fstype = fstype;
-	mnt->priv   = data;
-
-	/* Release lock during fill() as it might call other VFS functions */
 	spin_unlock_irq(&vfs_lock, f);
-	if (fill(mnt, data) != 0) return -1;
-	f = spin_lock_irq(&vfs_lock);
+	if (!fill) return -1;
 
+	vfs_mount_t *mnt = kmalloc(sizeof(*mnt));
+	if (!mnt) return -1;
+	mnt->fstype     = fstype;
+	mnt->priv       = data;
+	mnt->mountpoint = NULL;
+	mnt->root       = NULL;
+	mnt->next       = NULL;
+
+	if (fill(mnt, data) != 0) { kfree(mnt); return -1; }
+
+	f = spin_lock_irq(&vfs_lock);
 	if (strcmp(path, "/") == 0) {
 		root_dentry = mnt->root;
 	} else {
-		/* unlock to resolve path */
 		spin_unlock_irq(&vfs_lock, f);
 		vfs_dentry_t *mp = vfs_dentry_resolve(path);
 		f = spin_lock_irq(&vfs_lock);
 		if (!mp) {
 			spin_unlock_irq(&vfs_lock, f);
+			kfree(mnt);
 			return -1;
 		}
 		mnt->mountpoint = mp;
-		/* replace mountpoint's inode with fs root inode */
 		mp->inode = mnt->root->inode;
 	}
-
-	mount_cnt++;
+	mnt->next  = mount_list;
+	mount_list = mnt;
 	spin_unlock_irq(&vfs_lock, f);
 	return 0;
 }
@@ -284,6 +277,7 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 			new->bitmap |= (1ULL << i);
 		}
 	}
+	new->cloexec_bitmap = old->cloexec_bitmap;
 	return new;
 }
 
@@ -303,8 +297,9 @@ int fd_alloc(fd_table_t *t, vfs_file_t *f)
 void fd_free(fd_table_t *t, int fd)
 {
 	if (fd < 0 || fd >= FD_MAX) return;
-	t->files[fd]  = NULL;
-	t->bitmap    &= ~(1ULL << fd);
+	t->files[fd]         = NULL;
+	t->bitmap           &= ~(1ULL << fd);
+	t->cloexec_bitmap   &= ~(1ULL << fd);
 }
 
 vfs_file_t *fd_get(fd_table_t *t, int fd)
@@ -362,7 +357,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	if (!f) return -1;
 	memset(f, 0, sizeof(*f));
 	f->inode    = inode;
-	f->flags    = flags;
+	f->flags    = flags & ~O_CLOEXEC; /* cloexec is per-fd, stored in fd_table */
 	f->refcount = 0; /* incremented by fd_alloc */
 
 	if (inode->fops && inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
@@ -371,7 +366,8 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	}
 
 	int fd = fd_alloc(p->fds, f);
-	if (fd < 0) kfree(f);
+	if (fd < 0) { kfree(f); return -1; }
+	if (flags & O_CLOEXEC) p->fds->cloexec_bitmap |= (1ULL << fd);
 	return fd;
 }
 
@@ -501,6 +497,28 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 	f.flags = O_WRONLY;
 
 	return inode->fops->write(&f, data, len) == (ssize_t)len ? 0 : -1;
+}
+
+int vfs_symlink(const char *target, const char *linkpath)
+{
+	const char *slash = linkpath + strlen(linkpath) - 1;
+	while (slash > linkpath && *slash != '/') slash--;
+
+	char dir_path[256];
+	int dlen = (int)(slash - linkpath);
+	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
+	else           { memcpy(dir_path, linkpath, dlen); dir_path[dlen] = '\0'; }
+
+	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	if (!parent || !parent->inode || !parent->inode->iops) return -1;
+	if (!parent->inode->iops->symlink) return -38;
+
+	const char *fname = slash + 1;
+	if (parent->inode->iops->symlink(parent->inode, fname, target) != 0) return -1;
+
+	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
+	if (in) vfs_dentry_create(parent, fname, in);
+	return 0;
 }
 
 int vfs_stat(const char *path, vfs_stat_t *out)
