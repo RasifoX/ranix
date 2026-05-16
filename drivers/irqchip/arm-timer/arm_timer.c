@@ -2,7 +2,7 @@
 #include <kernel/board.h>
 #include <kernel/kprintf.h>
 #include <kernel/driver.h>
-#include <kernel/sched.h>
+#include <kernel/proc.h>
 
 static volatile uint64_t ticks = 0;
 static uint32_t timer_hz = 100;
@@ -18,13 +18,6 @@ void timer_handler(void) {
     __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(next));
 
     sched_tick();
-
-    /* wake sleeping tasks so they can check their conditions */
-    for (int i = 0; i < task_count(); i++) {
-        task_t *t = task_get(i);
-        if (t && t->state == TASK_SLEEPING)
-            task_wake(t);
-    }
 }
 
 void timer_init(uint32_t hz) {
