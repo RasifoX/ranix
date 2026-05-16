@@ -256,18 +256,51 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 
 /* ── fd_table ────────────────────────────────────────────── */
 
+#define BM_SET(bm, fd)  ((bm)[(fd)/64] |=  (1ULL << ((fd)%64)))
+#define BM_CLR(bm, fd)  ((bm)[(fd)/64] &= ~(1ULL << ((fd)%64)))
+#define BM_TST(bm, fd)  (!!((bm)[(fd)/64] & (1ULL << ((fd)%64))))
+
+static int fd_table_grow(fd_table_t *t)
+{
+	int new_cap = t->cap * 2;
+	int words   = new_cap / 64;
+	vfs_file_t **nf = kmalloc((size_t)new_cap * sizeof(vfs_file_t *));
+	uint64_t   *no  = kmalloc((size_t)words   * sizeof(uint64_t));
+	uint64_t   *nc  = kmalloc((size_t)words   * sizeof(uint64_t));
+	if (!nf || !no || !nc) { kfree(nf); kfree(no); kfree(nc); return -1; }
+	memcpy(nf, t->files,   (size_t)t->cap  * sizeof(vfs_file_t *));
+	memset(nf + t->cap, 0, (size_t)t->cap  * sizeof(vfs_file_t *));
+	memcpy(no, t->open_bm, (size_t)(t->cap/64) * sizeof(uint64_t));
+	memset(no + t->cap/64, 0, (size_t)(t->cap/64) * sizeof(uint64_t));
+	memcpy(nc, t->cloexec, (size_t)(t->cap/64) * sizeof(uint64_t));
+	memset(nc + t->cap/64, 0, (size_t)(t->cap/64) * sizeof(uint64_t));
+	kfree(t->files); kfree(t->open_bm); kfree(t->cloexec);
+	t->files = nf; t->open_bm = no; t->cloexec = nc; t->cap = new_cap;
+	return 0;
+}
+
 fd_table_t *fd_table_create(void)
 {
 	fd_table_t *t = kmalloc(sizeof(*t));
 	if (!t) return NULL;
-	memset(t, 0, sizeof(*t));
+	t->cap     = FD_INIT_CAP;
+	t->files   = kmalloc((size_t)FD_INIT_CAP * sizeof(vfs_file_t *));
+	t->open_bm = kmalloc((size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
+	t->cloexec = kmalloc((size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
+	if (!t->files || !t->open_bm || !t->cloexec) {
+		kfree(t->files); kfree(t->open_bm); kfree(t->cloexec); kfree(t);
+		return NULL;
+	}
+	memset(t->files,   0, (size_t)FD_INIT_CAP * sizeof(vfs_file_t *));
+	memset(t->open_bm, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
+	memset(t->cloexec, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
 	return t;
 }
 
 void fd_table_destroy(fd_table_t *t)
 {
 	if (!t) return;
-	for (int i = 0; i < FD_MAX; i++) {
+	for (int i = 0; i < t->cap; i++) {
 		if (t->files[i]) {
 			vfs_file_t *f = t->files[i];
 			if (--f->refcount == 0) {
@@ -276,50 +309,86 @@ void fd_table_destroy(fd_table_t *t)
 			}
 		}
 	}
-	kfree(t);
+	kfree(t->files); kfree(t->open_bm); kfree(t->cloexec); kfree(t);
 }
 
 fd_table_t *fd_table_copy(fd_table_t *old)
 {
 	if (!old) return NULL;
-	fd_table_t *new = fd_table_create();
-	if (!new) return NULL;
-	for (int i = 0; i < FD_MAX; i++) {
+	fd_table_t *n = kmalloc(sizeof(*n));
+	if (!n) return NULL;
+	n->cap     = old->cap;
+	n->files   = kmalloc((size_t)old->cap * sizeof(vfs_file_t *));
+	n->open_bm = kmalloc((size_t)(old->cap/64) * sizeof(uint64_t));
+	n->cloexec = kmalloc((size_t)(old->cap/64) * sizeof(uint64_t));
+	if (!n->files || !n->open_bm || !n->cloexec) {
+		kfree(n->files); kfree(n->open_bm); kfree(n->cloexec); kfree(n);
+		return NULL;
+	}
+	memset(n->files, 0, (size_t)old->cap * sizeof(vfs_file_t *));
+	memcpy(n->open_bm, old->open_bm, (size_t)(old->cap/64) * sizeof(uint64_t));
+	memcpy(n->cloexec, old->cloexec, (size_t)(old->cap/64) * sizeof(uint64_t));
+	for (int i = 0; i < old->cap; i++) {
 		if (old->files[i]) {
-			new->files[i] = old->files[i];
-			new->files[i]->refcount++;
-			new->bitmap |= (1ULL << i);
+			n->files[i] = old->files[i];
+			n->files[i]->refcount++;
 		}
 	}
-	new->cloexec_bitmap = old->cloexec_bitmap;
-	return new;
+	return n;
 }
 
 int fd_alloc(fd_table_t *t, vfs_file_t *f)
 {
-	for (int i = 0; i < FD_MAX; i++) {
-		if (!(t->bitmap & (1ULL << i))) {
-			t->files[i]  = f;
-			t->bitmap   |= (1ULL << i);
-			f->refcount++;
-			return i;
+	for (;;) {
+		for (int i = 0; i < t->cap; i++) {
+			if (!BM_TST(t->open_bm, i)) {
+				t->files[i] = f;
+				BM_SET(t->open_bm, i);
+				f->refcount++;
+				return i;
+			}
 		}
+		if (fd_table_grow(t) != 0) return -1;
 	}
-	return -1;
+}
+
+int fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start)
+{
+	for (;;) {
+		for (int i = start; i < t->cap; i++) {
+			if (!BM_TST(t->open_bm, i)) {
+				t->files[i] = f;
+				BM_SET(t->open_bm, i);
+				f->refcount++;
+				return i;
+			}
+		}
+		if (fd_table_grow(t) != 0) return -1;
+	}
+}
+
+int fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd)
+{
+	while (fd >= t->cap)
+		if (fd_table_grow(t) != 0) return -1;
+	t->files[fd] = f;
+	BM_SET(t->open_bm, fd);
+	f->refcount++;
+	return fd;
 }
 
 void fd_free(fd_table_t *t, int fd)
 {
-	if (fd < 0 || fd >= FD_MAX) return;
-	t->files[fd]         = NULL;
-	t->bitmap           &= ~(1ULL << fd);
-	t->cloexec_bitmap   &= ~(1ULL << fd);
+	if (!t || fd < 0 || fd >= t->cap) return;
+	t->files[fd] = NULL;
+	BM_CLR(t->open_bm, fd);
+	BM_CLR(t->cloexec, fd);
 }
 
 vfs_file_t *fd_get(fd_table_t *t, int fd)
 {
-	if (!t || fd < 0 || fd >= FD_MAX) return NULL;
-	if (!(t->bitmap & (1ULL << fd))) return NULL;
+	if (!t || fd < 0 || fd >= t->cap) return NULL;
+	if (!BM_TST(t->open_bm, fd)) return NULL;
 	return t->files[fd];
 }
 
@@ -381,7 +450,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 
 	int fd = fd_alloc(p->fds, f);
 	if (fd < 0) { kfree(f); return -1; }
-	if (flags & O_CLOEXEC) p->fds->cloexec_bitmap |= (1ULL << fd);
+	if (flags & O_CLOEXEC) BM_SET(p->fds->cloexec, fd);
 	return fd;
 }
 
