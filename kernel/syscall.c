@@ -1382,6 +1382,23 @@ static long sys_geteuid(void) { return (long)task_current()->uid; }
 static long sys_getgid(void)  { return (long)task_current()->gid; }
 static long sys_getegid(void) { return (long)task_current()->gid; }
 static long sys_getppid(void) { return (long)task_current()->ppid; }
+static long sys_gettid(void)  { return (long)task_current()->pid; }
+static long sys_getgroups(int size, uint64_t *list) {
+	if (size == 0) return 1;
+	if (size < 1) return -22;
+	if (!access_ok(list, (size_t)size * sizeof(uint64_t))) return -14;
+	/* single supplementary group = gid */
+	uint64_t gid = (uint64_t)task_current()->gid;
+	return copy_to_user(list, &gid, sizeof(gid)) == 0 ? 1 : -14;
+}
+static long sys_getrlimit(int res, void *rlim) {
+	if (!access_ok(rlim, 16)) return -14;
+	uint64_t inf = (uint64_t)-1;
+	if (res == 7) { uint64_t pair[2] = {FD_MAX, FD_MAX}; return copy_to_user(rlim, pair, 16) == 0 ? 0 : -14; }
+	uint64_t pair[2] = {inf, inf};
+	return copy_to_user(rlim, pair, 16) == 0 ? 0 : -14;
+}
+static long sys_setrlimit(int res, const void *rlim) { (void)res; (void)rlim; return 0; }
 static long sys_getpgrp(void) { return (long)task_current()->pgrp; }
 static long sys_getpgid(pid_t pid) {
 	process_t *p = pid ? proc_find(pid) : task_current();
@@ -2034,6 +2051,11 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETEUID:     ret = sys_geteuid(); break;
 	case SYS_ARCH_GETGID:      ret = sys_getgid(); break;
 	case SYS_ARCH_GETEGID:     ret = sys_getegid(); break;
+	case SYS_ARCH_GETTID:      ret = sys_gettid(); break;
+	case SYS_ARCH_GETGROUPS:   ret = sys_getgroups((int)arg0, (uint64_t*)arg1); break;
+	case SYS_ARCH_SETGROUPS:   ret = 0; break;
+	case SYS_ARCH_GETRLIMIT:   ret = sys_getrlimit((int)arg0, (void*)arg1); break;
+	case SYS_ARCH_SETRLIMIT:   ret = sys_setrlimit((int)arg0, (const void*)arg1); break;
 	case SYS_ARCH_SETUID:      ret = sys_setuid((uid_t)arg0); break;
 	case SYS_ARCH_SETGID:      ret = sys_setgid((gid_t)arg0); break;
 	case SYS_ARCH_SETPGID:     ret = sys_setpgid((pid_t)arg0, (pid_t)arg1); break;
@@ -2044,7 +2066,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
 	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
+#if defined(__x86_64__)
 	case SYS_ARCH_GETPGRP:    ret = (long)task_current()->pid; break;
+#endif
 	case SYS_ARCH_SCHED_YIELD: ret = sys_sched_yield(); break;
 	case SYS_ARCH_SCHED_SETAFFINITY: ret = sys_sched_setaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
 	case SYS_ARCH_SCHED_GETAFFINITY: ret = sys_sched_getaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
@@ -2114,6 +2138,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EPOLL_WAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, NULL); break;
 #endif
 	default:
+		kprintf("syscall: unimplemented %ld (pid=%u)\n",
+		        n, task_current()->pid);
 		ret = -38; /* ENOSYS */
 		break;
 	}
