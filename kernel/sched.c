@@ -13,22 +13,52 @@
 #include <kernel/lib/string.h>
 #include <asm/mmu.h>
 
-static process_t *proctab[PROC_MAX];
-static process_t  idle_proc;
-static uint8_t    idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
-static uint8_t    irq_stack[KSTACK_SIZE] __attribute__((aligned(16)));
-static int        proc_cnt  = 0;
+static process_t **proctab;
+static int         proc_cap = 0;
+static process_t   idle_proc;
+static uint8_t     idle_kstack[KSTACK_SIZE] __attribute__((aligned(16)));
+static uint8_t     irq_stack[KSTACK_SIZE] __attribute__((aligned(16)));
+static int         proc_cnt  = 0;
+
+#define PROCTAB_INIT_CAP 64
+
+static int proctab_grow(void)
+{
+	int new_cap = proc_cap ? proc_cap * 2 : PROCTAB_INIT_CAP;
+	process_t **nb = kmalloc((size_t)new_cap * sizeof(process_t *));
+	if (!nb) return -1;
+	if (proctab) {
+		memcpy(nb, proctab, (size_t)proc_cap * sizeof(process_t *));
+		kfree(proctab);
+	}
+	memset(nb + proc_cap, 0, (size_t)(new_cap - proc_cap) * sizeof(process_t *));
+	proctab = nb;
+	proc_cap = new_cap;
+	return 0;
+}
+
+static int proctab_ensure(void)
+{
+	if (proc_cnt < proc_cap) return 0;
+	return proctab_grow();
+}
 
 static spinlock_t sched_lock = SPINLOCK_INIT;
 
-/* tick callbacks */
-static tick_fn_t tick_cbs[8];
-static int       tick_cb_cnt = 0;
+static tick_fn_t *tick_cbs;
+static int        tick_cb_cnt = 0;
+static int        tick_cb_cap = 0;
 
 void tick_register(tick_fn_t fn)
 {
-	if (tick_cb_cnt < 8)
-		tick_cbs[tick_cb_cnt++] = fn;
+	if (tick_cb_cnt >= tick_cb_cap) {
+		int nc = tick_cb_cap ? tick_cb_cap * 2 : 8;
+		tick_fn_t *nb = kmalloc((size_t)nc * sizeof(tick_fn_t));
+		if (!nb) return;
+		if (tick_cbs) { memcpy(nb, tick_cbs, (size_t)tick_cb_cnt * sizeof(tick_fn_t)); kfree(tick_cbs); }
+		tick_cbs = nb; tick_cb_cap = nc;
+	}
+	tick_cbs[tick_cb_cnt++] = fn;
 }
 
 void tick_notify(void)
@@ -102,6 +132,7 @@ void sched_init(void)
 	cpu->cpu_id     = 0;
 	cpu->magic      = 0xCAFEBABE;
 
+	proctab_grow();
 	proctab[0] = p;
 	proc_cnt   = 1;
 }
@@ -139,7 +170,7 @@ void sched_tick(void)
 pid_t proc_create(const char *name, void (*fn)(void))
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proc_cnt >= PROC_MAX) {
+	if (proctab_ensure() != 0) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
 	}
@@ -196,7 +227,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proc_cnt >= PROC_MAX) {
+	if (proctab_ensure() != 0) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
 	}
@@ -316,7 +347,7 @@ fail:
 pid_t proc_fork(void)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proc_cnt >= PROC_MAX) {
+	if (proctab_ensure() != 0) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
 	}
@@ -407,7 +438,7 @@ fail:
 pid_t proc_vfork(void)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proc_cnt >= PROC_MAX) {
+	if (proctab_ensure() != 0) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
 	}
@@ -487,7 +518,7 @@ void proc_vfork_exec_notify(void)
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proc_cnt >= PROC_MAX) {
+	if (proctab_ensure() != 0) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
 	}
