@@ -90,8 +90,9 @@ typedef struct vfs_inode {
     dev_t        rdev;
     vfs_iops_t  *iops;
     vfs_fops_t  *fops;
-    void        *priv;    /* filesystem-private data */
+    void        *priv;      /* filesystem-private data */
     uint32_t     refcount;
+    uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
 } vfs_inode_t;
 
 /* ── open file instance ──────────────────────────────────── */
