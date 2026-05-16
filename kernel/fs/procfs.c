@@ -412,15 +412,55 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 
 /* ── root iops ───────────────────────────────────────────────── */
 
+static int procfs_self_readlink(vfs_inode_t *in, char *buf, size_t sz)
+{
+	(void)in;
+	process_t *cur = task_current();
+	uint64_t pid = cur ? cur->pid : 0;
+	/* build "/proc/N" */
+	char tmp[32]; int ti = 0;
+	const char *prefix = "/proc/";
+	while (prefix[ti]) { tmp[ti] = prefix[ti]; ti++; }
+	if (pid == 0) { tmp[ti++] = '0'; }
+	else {
+		char rev[20]; int ri = 0;
+		uint64_t v = pid;
+		while (v) { rev[ri++] = '0' + (int)(v % 10); v /= 10; }
+		for (int j = ri - 1; j >= 0; j--) tmp[ti++] = rev[j];
+	}
+	tmp[ti] = '\0';
+	if (sz < (size_t)ti + 1) return -1;
+	memcpy(buf, tmp, (size_t)ti + 1);
+	return 0;
+}
+
+static vfs_iops_t procfs_self_iops = {
+	.readlink = procfs_self_readlink,
+};
+
+static vfs_inode_t *procfs_self_inode(void)
+{
+	static vfs_inode_t self_inode;
+	static int init = 0;
+	if (!init) {
+		memset(&self_inode, 0, sizeof(self_inode));
+		self_inode.ino     = 0x7ffe;
+		self_inode.mode    = S_IFLNK | 0777;
+		self_inode.nlink   = 1;
+		self_inode.refcount= 1;
+		self_inode.iops    = &procfs_self_iops;
+		init = 1;
+	}
+	return &self_inode;
+}
+
 static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 
-	/* "self" → current process dir */
-	if (strcmp(name, "self") == 0) {
-		process_t *cur = task_current();
-		return procfs_piddir_inode((int)cur->pid);
-	}
+	/* "self" → symlink that resolves to /proc/<current_pid> at traversal time */
+	if (strcmp(name, "self") == 0)
+		return procfs_self_inode();
 
 	/* static files */
 	for (int i = 0; i < ROOT_FILES_N; i++)
@@ -455,8 +495,8 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 
 	/* "self" entry */
 	if (idx == 0) {
-		out->ino      = 0x7fff;
-		out->mode     = S_IFDIR | 0555;
+		out->ino      = 0x7ffe;
+		out->mode     = S_IFLNK | 0777;
 		out->next_off = ROOT_FILES_N + 1;
 		out->name[0] = 's'; out->name[1] = 'e'; out->name[2] = 'l';
 		out->name[3] = 'f'; out->name[4] = '\0';
