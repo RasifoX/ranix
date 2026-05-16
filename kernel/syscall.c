@@ -390,8 +390,8 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 }
 
 #define USER_STACK_TOP_   ARCH_USER_STACK_TOP
-#define USER_STACK_PAGES_ 8
-#define USER_MMAP_BASE_   0x10000000UL
+#define USER_STACK_PAGES_ ARCH_USER_STACK_PAGES
+#define USER_MMAP_BASE_   ARCH_USER_MMAP_BASE
 
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
@@ -479,7 +479,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		void *guard = buddy_alloc(0);
 		if (guard) {
 			memset((void *)PHYS_TO_VIRT(guard), 0, PAGE_SIZE);
-			vm_map(new_vm, USER_STACK_TOP_, (uint64_t)guard, VM_USER | VM_READ | VM_WRITE);
+			uint64_t guard_va = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ + 1) * PAGE_SIZE;
+			vm_map(new_vm, guard_va, (uint64_t)guard, VM_USER | VM_READ);
 		}
 	}
 
@@ -577,13 +578,6 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	uint64_t at_execfn_addr = sp;
 
 	sp &= ~15ULL;
-
-	/* ensure sp is 16-byte aligned after pushing everything */
-    if ((argc + envc + 3) % 2 != 0) {
-		sp -= 8;
-		*(uint64_t *)sp = 0; /* padding */
-		/* padding */
-	}
 
 /* push one auxv key/value pair (16 bytes each, stack grows down) */
 #define PUSH_AUX(k, v) do { \
