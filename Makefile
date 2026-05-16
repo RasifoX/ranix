@@ -150,6 +150,9 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
 	            timeout test expr yes which readlink; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
+	@if [ -f /usr/bin/bash-static ]; then \
+		cp /usr/bin/bash-static $(BUILD_DIR)/initramfs/bin/bash; \
+	fi
 	@if [ -f doomgeneric/doomgeneric ]; then \
 		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
 		NEED_ARCH="$(ARCH)"; \
