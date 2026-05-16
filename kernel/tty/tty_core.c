@@ -263,7 +263,8 @@ static int tty_core_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
 	(void)f;
 	if (cmd == TCGETS) {
-		uint8_t termios[60];
+		/* kernel struct termios: 4×uint32 flags + 1 c_line + 19 c_cc = 36 bytes */
+		uint8_t termios[36];
 		memset(termios, 0, sizeof(termios));
 		((uint32_t *)termios)[0] = c_iflag;
 		((uint32_t *)termios)[1] = c_oflag;
@@ -275,7 +276,7 @@ static int tty_core_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		return 0;
 	}
 	if (cmd == TCSETS || cmd == TCSETSW || cmd == TCSETSF) {
-		uint8_t termios[60];
+		uint8_t termios[36];
 		if (copy_from_user(termios, (const void *)(uintptr_t)arg, sizeof(termios)) != 0) return -14;
 		uint64_t flags = spin_lock_irq(&tty_lock);
 		c_iflag = ((uint32_t *)termios)[0];
