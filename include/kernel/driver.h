@@ -4,7 +4,6 @@
 #include <uapi/types.h>
 
 #define DRIVER_NAME_MAX 32
-#define DRIVER_MAX      32
 
 typedef enum {
     DRIVER_TYPE_SERIAL,
@@ -17,13 +16,14 @@ typedef enum {
 } driver_type_t;
 
 typedef struct driver {
-    char          name[DRIVER_NAME_MAX];
-    driver_type_t type;
-    int           (*init)(void);
-    int           (*read)(void *buf, size_t len);
-    int           (*write)(const void *buf, size_t len);
-    int           (*ioctl)(uint32_t cmd, void *arg);
-    int           initialized;
+    char           name[DRIVER_NAME_MAX];
+    driver_type_t  type;
+    int            (*init)(void);
+    int            (*read)(void *buf, size_t len);
+    int            (*write)(const void *buf, size_t len);
+    int            (*ioctl)(uint32_t cmd, void *arg);
+    int            initialized;
+    struct driver *next;
 } driver_t;
 
 int      driver_register(driver_t *drv);
