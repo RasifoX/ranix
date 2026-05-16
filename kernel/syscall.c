@@ -1233,11 +1233,8 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 	}
 
 	f->pos = (off_t)idx;
-	if (total > 0) {
-		arch_user_access_begin();
-		memcpy(buf, kbuf, offset);
-		arch_user_access_end();
-	}
+	if (total > 0)
+		copy_to_user(buf, kbuf, offset);
 	kfree(kbuf);
 	return total;
 }
@@ -1380,9 +1377,7 @@ static long sys_getcwd(char *buf, size_t size)
 	process_t *p = task_current();
 	int n = strlen(p->cwd);
 	if ((size_t)(n + 1) > size) return -34; /* ERANGE */
-	arch_user_access_begin();
-	memcpy(buf, p->cwd, n + 1);
-	arch_user_access_end();
+	copy_to_user(buf, p->cwd, n + 1);
 	return (long)(n + 1);
 }
 
