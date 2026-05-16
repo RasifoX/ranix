@@ -1,14 +1,16 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
-#define VIRT_OFFSET     0xFFFFFFFF80000000UL
-#define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
-#define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
+#define VIRT_OFFSET      0xFFFFFFFF80000000UL   /* kernel text link offset */
+#define DIRECT_MAP_BASE  0xFFFF800000000000UL   /* physical 0..N at this VA */
 
-/* MMIO window for physical addresses >= 2GB that overflow PHYS_TO_VIRT.
- * Maps phys 0..128GB → virt MMIO_VIRT_BASE..MMIO_VIRT_BASE+128GB */
-#define MMIO_VIRT_BASE  0xFFFF900000000000UL
-#define MMIO_TO_VIRT(p) (MMIO_VIRT_BASE + (uint64_t)(p))
+/* All dynamic allocations (buddy, PMM) are accessed through the direct map. */
+#define PHYS_TO_VIRT(p)  ((uint64_t)(p) + DIRECT_MAP_BASE)
+/* Kernel-text statics (VA >= 0xFFFFFFFF80000000) use VIRT_OFFSET; direct-map
+ * pointers (VA in [DIRECT_MAP_BASE, 0xFFFF900000000000)) use DIRECT_MAP_BASE. */
+#define VIRT_TO_PHYS(v)  ((uint64_t)(v) >= 0xFFFFFFFF80000000UL \
+                          ? (uint64_t)(v) - 0xFFFFFFFF80000000UL \
+                          : (uint64_t)(v) - DIRECT_MAP_BASE)
 
 /* User space layout */
 #define ARCH_USER_CODE_BASE   0x400000UL

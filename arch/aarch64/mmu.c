@@ -54,3 +54,10 @@ void mmu_init(void)
 	vm_init_kernel((uint64_t)kernel_l1_high);
 	vm_set_kernel_pt((uint64_t)kernel_l1);
 }
+
+uint64_t arch_direct_map_boot_limit(void) { return (uint64_t)-1; }
+
+void arch_map_high_memory(uint64_t max_phys)
+{
+	(void)max_phys;
+}
