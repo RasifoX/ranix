@@ -6,7 +6,7 @@
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
 
-#define PROC_MAX       256
+#define PROC_MAX       1024
 #define PROC_NAME_MAX  256
 #define KSTACK_SIZE    8192
 
@@ -62,6 +62,7 @@ typedef struct process {
 	uint64_t        brk;
 	uint64_t        mmap_next;
 	pid_t           ppid;
+	pid_t           pgrp;
 	uid_t           uid;
 	gid_t           gid;
 	int             exit_code;
@@ -81,6 +82,9 @@ typedef struct process {
 
 	/* ── arch TLS base (FS_BASE on x86_64, TPIDR_EL0 on AArch64) ── */
 	uint64_t        tls_base;
+
+	/* ── wait queue tracking ──────────────────── */
+	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
 } process_t;
 
 /* scheduler */
@@ -92,6 +96,7 @@ void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);
 void       task_signal(process_t *p, int sig);
+void       task_signal_pgrp(pid_t pgrp, int sig);
 void       signal_dispatch(arch_context_t *tf);
 void       task_exit(void);
 
@@ -105,6 +110,7 @@ pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
 pid_t      proc_fork(void);
 pid_t      proc_vfork(void);
+void       proc_vfork_exec_notify(void);
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);

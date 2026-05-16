@@ -1,6 +1,6 @@
 #include <kernel/proc.h>
 #include <kernel/hal.h>
-#include <kernel/tty/fb_tty.h>
+#include <kernel/tick.h>
 #include <kernel/elf.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/heap.h>
@@ -20,6 +20,22 @@ static uint8_t    irq_stack[KSTACK_SIZE] __attribute__((aligned(16)));
 static int        proc_cnt  = 0;
 
 static spinlock_t sched_lock = SPINLOCK_INIT;
+
+/* tick callbacks */
+static tick_fn_t tick_cbs[8];
+static int       tick_cb_cnt = 0;
+
+void tick_register(tick_fn_t fn)
+{
+	if (tick_cb_cnt < 8)
+		tick_cbs[tick_cb_cnt++] = fn;
+}
+
+void tick_notify(void)
+{
+	for (int i = 0; i < tick_cb_cnt; i++)
+		tick_cbs[i]();
+}
 
 /* O(1) Runqueue: simple head/tail linked list */
 static process_t *rq_head = NULL;
@@ -107,7 +123,17 @@ void sched_tick(void)
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
-	fb_tty_tick();
+
+	for (int i = 0; i < task_count(); i++) {
+		process_t *t = task_get(i);
+		/* Only poll-wake tasks not in a wait queue (e.g. task_sleep in waitpid).
+		 * Tasks sleeping via sleep_on_locked are woken exclusively by wake_up()
+		 * to prevent wait_next cycles when sched_tick fires mid-sleep. */
+		if (t && t->state == PROC_SLEEPING && !t->sleeping_on_queue)
+			task_wake(t);
+	}
+
+	tick_notify();
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
@@ -118,7 +144,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 		return -1;
 	}
 
-	process_t *p = buddy_alloc(0);
+	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!p) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
@@ -127,10 +153,11 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 	process_t *current = task_current();
 	p->pid   = proc_cnt;
-	p->ppid  = current->pid;
+	p->ppid  = current ? current->pid : 0;
+	p->pgrp  = (pid_t)proc_cnt;
 	p->state = PROC_READY;
-	p->uid   = current->uid;
-	p->gid   = current->gid;
+	p->uid   = current ? current->uid : 0;
+	p->gid   = current ? current->gid : 0;
 	p->entry = fn;
 	p->ticks_remaining = SCHED_QUANTUM;
 
@@ -143,8 +170,8 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	void *kstack_phys = buddy_alloc(1);
 	if (!kstack_phys) { 
 		spin_unlock_irq(&sched_lock, f);
-		buddy_free((uint64_t)p, 0); 
-		return -1; 
+		buddy_free(VIRT_TO_PHYS(p), 0);
+		return -1;
 	}
 	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
 
@@ -174,7 +201,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		return -1;
 	}
 
-	process_t *p = buddy_alloc(0);
+	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!p) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
@@ -184,6 +211,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	process_t *current = task_current();
 	p->pid   = proc_cnt;
 	p->ppid  = current->pid;
+	p->pgrp  = (pid_t)proc_cnt;
 	p->state = PROC_READY;
 	p->uid   = current->uid;
 	p->gid   = current->gid;
@@ -195,11 +223,6 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	p->vm = vm_create();
 	if (!p->vm) goto fail;
-
-	if (current->fds)
-		p->fds = fd_table_copy(current->fds);
-	else
-		p->fds = fd_table_create();
 
 	elf_info_t ei = {0};
 	if (elf_load(p->vm, elf_data, elf_len, &ei) != 0) {
@@ -218,6 +241,13 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		memset((void *)PHYS_TO_VIRT(spage_phys), 0, PAGE_SIZE);
 		uint64_t sva = ARCH_USER_STACK_TOP - (uint64_t)(ARCH_USER_STACK_PAGES - i) * PAGE_SIZE;
 		vm_map(p->vm, sva, (uint64_t)spage_phys, VM_USER | VM_READ | VM_WRITE);
+	}
+	{
+		void *guard_phys = buddy_alloc(0);
+		if (guard_phys) {
+			memset((void *)PHYS_TO_VIRT(guard_phys), 0, PAGE_SIZE);
+			vm_map(p->vm, ARCH_USER_STACK_TOP, (uint64_t)guard_phys, VM_USER | VM_READ | VM_WRITE);
+		}
 	}
 
 	void *kstack_phys = buddy_alloc(1);
@@ -279,7 +309,7 @@ fail:
 	spin_unlock_irq(&sched_lock, f);
 	if (p->vm) vm_destroy(p->vm);
 	if (p->fds) fd_table_destroy(p->fds);
-	buddy_free((uint64_t)p, 0);
+	buddy_free(VIRT_TO_PHYS(p), 0);
 	return -1;
 }
 
@@ -295,7 +325,7 @@ pid_t proc_fork(void)
 	/* tpidr_el0 may not have been saved by scheduler yet (no context switch
 	 * since EL0 last set it), so capture it now while still in parent context. */
 	arch_save_tls(parent);
-	process_t *child  = buddy_alloc(0);
+	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
@@ -304,6 +334,7 @@ pid_t proc_fork(void)
 
 	child->pid       = proc_cnt;
 	child->ppid      = parent->pid;
+	child->pgrp      = parent->pgrp;
 	child->state     = PROC_READY;
 	child->uid       = parent->uid;
 	child->gid       = parent->gid;
@@ -365,9 +396,11 @@ pid_t proc_fork(void)
 
 fail:
 	spin_unlock_irq(&sched_lock, f);
-	if (child->vm) vm_destroy(child->vm);
+	if (child->vm)  vm_destroy(child->vm);
 	if (child->fds) fd_table_destroy(child->fds);
-	buddy_free((uint64_t)child, 0);
+	/* free any partially-copied VMA list */
+	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
+	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
 }
 
@@ -381,7 +414,7 @@ pid_t proc_vfork(void)
 
 	process_t *parent = task_current();
 	arch_save_tls(parent);
-	process_t *child = buddy_alloc(0);
+	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
@@ -390,6 +423,7 @@ pid_t proc_vfork(void)
 
 	child->pid          = proc_cnt;
 	child->ppid         = parent->pid;
+	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
 	child->uid          = parent->uid;
 	child->gid          = parent->gid;
@@ -406,8 +440,8 @@ pid_t proc_vfork(void)
 	void *child_kstack_phys = buddy_alloc(1);
 	if (!child_kstack_phys) { 
 		spin_unlock_irq(&sched_lock, f);
-		buddy_free((uint64_t)child, 0); 
-		return -1; 
+		buddy_free(VIRT_TO_PHYS(child), 0);
+		return -1;
 	}
 	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
 
@@ -434,6 +468,22 @@ pid_t proc_vfork(void)
 	return child->pid;
 }
 
+void proc_vfork_exec_notify(void)
+{
+	process_t *p = task_current();
+	if (p->vfork_parent < 0) return;
+
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
+	if (pp && pp->state == PROC_SLEEPING) {
+		pp->state = PROC_READY;
+		runqueue_add(pp);
+		need_resched = 1;
+	}
+	p->vfork_parent = -1;
+	spin_unlock_irq(&sched_lock, f);
+}
+
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -443,7 +493,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	}
 
 	process_t *parent = task_current();
-	process_t *child  = buddy_alloc(0);
+	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) {
 		spin_unlock_irq(&sched_lock, f);
 		return -1;
@@ -452,6 +502,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 
 	child->pid          = proc_cnt;
 	child->ppid         = parent->pid;
+	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
 	child->uid          = parent->uid;
 	child->gid          = parent->gid;
@@ -525,7 +576,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 fail:
 	spin_unlock_irq(&sched_lock, f);
 	if (child->vm) vm_destroy(child->vm);
-	buddy_free((uint64_t)child, 0);
+	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
 }
 
@@ -644,6 +695,7 @@ void task_wake(process_t *p)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (p && p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
+		p->sleeping_on_queue = 0;
 		runqueue_add(p);
 		need_resched = 1;
 	}
@@ -661,6 +713,15 @@ void task_signal(process_t *p, int sig)
 		need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
+}
+
+void task_signal_pgrp(pid_t pgrp, int sig)
+{
+	for (int i = 0; i < proc_cnt; i++) {
+		process_t *p = proctab[i];
+		if (p && p->pgrp == pgrp && p->state != PROC_DEAD && p->state != PROC_ZOMBIE)
+			task_signal(p, sig);
+	}
 }
 
 /* Signals that kill the process by default */
@@ -685,6 +746,12 @@ static int sig_default_kill(int sig)
 
 void signal_dispatch(arch_context_t *tf)
 {
+	/* Only deliver signals when returning to user space */
+#if defined(__x86_64__)
+	if ((tf->cs & 3) != 3) return;
+#elif defined(__aarch64__)
+	if ((tf->spsr & 0xF) != 0) return;
+#endif
 	process_t *p = task_current();
 	if (!p) return;
 
@@ -716,26 +783,43 @@ void signal_dispatch(arch_context_t *tf)
 	}
 
 	/* Deliver to user handler: redirect the trap frame */
-	/* Block this signal during handler execution */
+	/* Block this signal during handler execution; save old mask for restore */
+	uint64_t old_mask = p->sig_mask;
 	p->sig_mask |= (1UL << (sig - 1));
+	p->sig_mask |= sa->sa_mask;
 
 #if defined(__aarch64__)
-	/* Set up user stack frame: save link register + align */
+	/* Set up user stack frame: save ELR, LR, and old sig_mask */
 	uint64_t usp = tf->sp;
-	usp -= 16;
+	usp -= 32;
 	usp &= ~15UL;
-	*(uint64_t *)usp        = tf->elr;   /* return address */
-	*(uint64_t *)(usp + 8)  = tf->regs[30]; /* saved LR */
+	*(uint64_t *)usp        = tf->elr;
+	*(uint64_t *)(usp + 8)  = tf->regs[30];
+	*(uint64_t *)(usp + 16) = old_mask;
 	tf->sp                  = usp;
 	tf->regs[30]            = sa->sa_restorer ? (uint64_t)sa->sa_restorer
 	                                           : tf->elr; /* fall back: resume */
 	tf->regs[0]             = (uint64_t)sig;
 	tf->elr                 = (uint64_t)handler;
 #elif defined(__x86_64__)
-	uint64_t usp = tf->rsp;
-	usp -= 8;
-	usp &= ~15UL;
-	*(uint64_t *)usp        = tf->rip;   /* return address for restorer */
+	/* Build a fixed 48-byte frame on the user stack then call the handler.
+	 * Frame layout (low → high, i.e. rsp points to [0]):
+	 *   [rsp+ 0]  return addr  = sa_restorer (calls rt_sigreturn)
+	 *   [rsp+ 8]  old_mask
+	 *   [rsp+16]  orig_rax
+	 *   [rsp+24]  orig_rip
+	 *   [rsp+32]  orig_rsp
+	 *   [rsp+40]  padding (keeps 16-byte ABI alignment)
+	 * After handler's ret, rsp = rsp+8; restorer finds old_mask at rsp+0 etc.
+	 * rt_sigreturn reads ctx->rsp which after ret = frame_base+8. */
+	uint64_t usp = tf->rsp & ~15UL;  /* align before building frame */
+	usp -= 48;
+	*(uint64_t *)(usp +  0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
+	*(uint64_t *)(usp +  8) = old_mask;
+	*(uint64_t *)(usp + 16) = tf->rax;
+	*(uint64_t *)(usp + 24) = tf->rip;
+	*(uint64_t *)(usp + 32) = tf->rsp;
+	*(uint64_t *)(usp + 40) = 0;
 	tf->rsp                 = usp;
 	tf->rdi                 = (uint64_t)sig;
 	tf->rip                 = (uint64_t)handler;
@@ -770,9 +854,18 @@ void proc_reap(process_t *child)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (cpid >= 0 && cpid < proc_cnt)
 		proctab[cpid] = NULL;
+		
+	/* remove from the global process linked list to prevent Use-After-Free */
+	process_t **p = &proctab[0]->next;
+	while (*p && *p != child) {
+		p = &(*p)->next;
+	}
+	if (*p == child) {
+		*p = child->next;
+	}
 	spin_unlock_irq(&sched_lock, f);
 
 	if (kstack)
-		buddy_free((uint64_t)VIRT_TO_PHYS(kstack), 1);
-	buddy_free((uint64_t)child, 0);
+		buddy_free(VIRT_TO_PHYS(kstack), 1);
+	buddy_free(VIRT_TO_PHYS(child), 0);
 }
