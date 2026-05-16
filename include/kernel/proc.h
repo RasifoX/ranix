@@ -6,7 +6,6 @@
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
 
-#define PROC_MAX       1024
 #define PROC_NAME_MAX  256
 #define KSTACK_SIZE    8192
 
@@ -121,7 +120,6 @@ extern volatile int need_resched;
 
 typedef process_t task_t;
 #define task_create(name, fn)  proc_create(name, fn)
-#define TASK_MAX    PROC_MAX
 #define TASK_RUNNING  PROC_RUNNING
 #define TASK_READY    PROC_READY
 #define TASK_DEAD     PROC_DEAD
