@@ -164,33 +164,15 @@ static void parse_info(void)
         uint32_t entry_size = (addr_cells + size_cells) * 4;
         int first = 1;
 
-        _info.num_mem_regions = 0;
-
         while (len >= entry_size) {
-            uint64_t base, size;
-            if (addr_cells == 2)
-                base = be64(p);
-            else
-                base = be32(p);
+            uint64_t base = (addr_cells == 2) ? be64(p) : be32(p);
             p += addr_cells * 4;
-
-            if (size_cells == 2)
-                size = be64(p);
-            else
-                size = (uint64_t)be32(p);
+            uint64_t size = (size_cells == 2) ? be64(p) : (uint64_t)be32(p);
             p += size_cells * 4;
-
-            if (size > 0) {
-                if (first) {
-                    _info.mem_base = base;
-                    _info.mem_size = size;
-                    first = 0;
-                }
-                if (_info.num_mem_regions < FDT_MAX_MEM_REGIONS) {
-                    _info.mem_regions[_info.num_mem_regions].base = base;
-                    _info.mem_regions[_info.num_mem_regions].size = size;
-                    _info.num_mem_regions++;
-                }
+            if (size > 0 && first) {
+                _info.mem_base = base;
+                _info.mem_size = size;
+                first = 0;
             }
             len -= entry_size;
         }
@@ -255,18 +237,75 @@ int fdt_init(void *dtb_addr)
 
     parse_info();
 
-    uint64_t total_ram = 0;
-    for (int i = 0; i < _info.num_mem_regions; i++)
-        total_ram += _info.mem_regions[i].size;
-    if (total_ram == 0) total_ram = _info.mem_size;
     kprintf("fdt: %s  RAM %d MB  CPUs %d\n",
-            _info.model, (int)(total_ram >> 20), (int)_info.num_cpus);
+            _info.model, (int)(_info.mem_size >> 20), (int)_info.num_cpus);
 
     return 0;
 }
 
 fdt_info_t *fdt_get_info(void) { return &_info; }
 void       *fdt_get_base(void) { return _dtb; }
+
+void fdt_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
+{
+    if (!_initialized || !_dtb) return;
+
+    uint32_t len;
+    const void *v;
+    uint32_t addr_cells = 2, size_cells = 1;
+    v = fdt_get_prop("/", "#address-cells", &len);
+    if (v && len >= 4) addr_cells = be32(v);
+    v = fdt_get_prop("/", "#size-cells", &len);
+    if (v && len >= 4) size_cells = be32(v);
+
+    fdt_header_t *hdr  = (fdt_header_t *)_dtb;
+    uint8_t      *stru = (uint8_t *)_dtb + be32(&hdr->off_dt_struct);
+    char         *strs = (char *)_dtb + be32(&hdr->off_dt_strings);
+    uint32_t      ssz  = be32(&hdr->size_dt_struct);
+    uint32_t      off  = 0;
+    int depth = 0, in_mem = 0;
+    uint32_t entry_size = (addr_cells + size_cells) * 4;
+
+    while (off < ssz) {
+        uint32_t token = be32(stru + off); off += 4;
+        switch (token) {
+        case FDT_BEGIN_NODE: {
+            const char *name = (const char *)(stru + off);
+            uint32_t nlen = strlen(name) + 1;
+            off += (nlen + 3) & ~3u;
+            if (depth == 1 && node_name_match(name, "memory")) in_mem = 1;
+            depth++;
+            break;
+        }
+        case FDT_END_NODE:
+            depth--;
+            if (in_mem && depth <= 1) in_mem = 0;
+            break;
+        case FDT_PROP: {
+            uint32_t plen    = be32(stru + off); off += 4;
+            uint32_t nameoff = be32(stru + off); off += 4;
+            const void *val  = stru + off;
+            off += (plen + 3) & ~3u;
+            if (in_mem && strcmp(strs + nameoff, "reg") == 0) {
+                const uint8_t *p = (const uint8_t *)val;
+                uint32_t rem = plen;
+                while (rem >= entry_size) {
+                    uint64_t base = (addr_cells == 2) ? be64(p) : be32(p);
+                    p += addr_cells * 4;
+                    uint64_t size = (size_cells == 2) ? be64(p) : (uint64_t)be32(p);
+                    p += size_cells * 4;
+                    rem -= entry_size;
+                    if (size > 0) cb(base, size, ud);
+                }
+            }
+            break;
+        }
+        case FDT_NOP: break;
+        case FDT_END: return;
+        default:      return;
+        }
+    }
+}
 
 uint32_t fdt_get_size(void)
 {

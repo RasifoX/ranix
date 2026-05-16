@@ -48,6 +48,10 @@ typedef struct {
 static fb_info_t mb2_fb;
 static int mb2_fb_valid = 0;
 
+static uint64_t _mmap_base = 0;
+static uint32_t _mmap_entry_sz = 0;
+static uint32_t _mmap_count = 0;
+
 int mb2_get_fb(fb_info_t *out)
 {
 	if (!mb2_fb_valid) return -1;
@@ -78,15 +82,14 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
         if (tag->type == MB2_TAG_TYPE_MMAP) {
             uint32_t entry_size = *(uint32_t *)(p + 8);
             if (entry_size == 0) break;
-            mb2_mmap_entry_t *entry = (mb2_mmap_entry_t *)(p + 16);
-            int count = (tag->size - 16) / entry_size;
-
-            for (int i = 0; i < count; i++) {
-                if (entry->type == 1) {
-                    if (entry->addr + entry->len > max_ram)
-                        max_ram = entry->addr + entry->len;
-                }
-                entry = (mb2_mmap_entry_t *)((uint8_t *)entry + entry_size);
+            uint32_t count = (tag->size - 16) / entry_size;
+            _mmap_base     = (uint64_t)(p + 16);
+            _mmap_entry_sz = entry_size;
+            _mmap_count    = count;
+            for (uint32_t i = 0; i < count; i++) {
+                mb2_mmap_entry_t *entry = (mb2_mmap_entry_t *)(_mmap_base + (uint64_t)i * entry_size);
+                if (entry->type == 1 && entry->addr + entry->len > max_ram)
+                    max_ram = entry->addr + entry->len;
             }
         } else if (tag->type == MB2_TAG_TYPE_MODULE) {
             mb2_module_t *mod = (mb2_module_t *)(p + 8);
@@ -116,4 +119,13 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
 
     if (max_ram > 0)
         *mem_size_out = max_ram;
+}
+
+void mb2_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
+{
+    for (uint32_t i = 0; i < _mmap_count; i++) {
+        mb2_mmap_entry_t *e = (mb2_mmap_entry_t *)(_mmap_base + (uint64_t)i * _mmap_entry_sz);
+        if (e->type == 1 && e->len > 0)
+            cb(e->addr, e->len, ud);
+    }
 }

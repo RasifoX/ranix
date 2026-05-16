@@ -78,6 +78,20 @@ void board_drivers_register(void)
 
 board_config_t *board_get_config(void) { return &config; }
 
+#include <kernel/fdt.h>
+
+struct _fmr { void (*cb)(uint64_t, uint64_t, void *); void *ud; int n; };
+static void _fmr_wrap(uint64_t b, uint64_t s, void *ud)
+{ struct _fmr *c = ud; c->n++; c->cb(b, s, c->ud); }
+
+void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
+{
+    struct _fmr ctx = { cb, ud, 0 };
+    fdt_foreach_mem_region(_fmr_wrap, &ctx);
+    if (!ctx.n && config.mem_size > 0)
+        cb(config.mem_base, config.mem_size, ud);
+}
+
 #define PM_BASE     PHYS_TO_VIRT(0xFE100000UL)
 #define PM_RSTC     (*(volatile uint32_t *)(PM_BASE + 0x1C))
 #define PM_WDOG     (*(volatile uint32_t *)(PM_BASE + 0x24))
