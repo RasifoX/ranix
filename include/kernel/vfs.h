@@ -122,12 +122,14 @@ typedef struct vfs_mount {
 } vfs_mount_t;
 
 /* ── file descriptor table ───────────────────────────────── */
-#define FD_MAX 64
+#define FD_MAX      1024   /* soft default for RLIMIT_NOFILE; table grows beyond this */
+#define FD_INIT_CAP 64
 
 typedef struct {
-    vfs_file_t *files[FD_MAX];
-    uint64_t    bitmap;         /* open fd bitmask */
-    uint64_t    cloexec_bitmap; /* O_CLOEXEC per-fd (not stored on vfs_file_t) */
+    vfs_file_t **files;
+    int          cap;
+    uint64_t    *open_bm;
+    uint64_t    *cloexec;
 } fd_table_t;
 
 /* ── VMA (virtual memory area) ───────────────────────────── */
@@ -166,8 +168,20 @@ fd_table_t *fd_table_create(void);
 fd_table_t *fd_table_copy(fd_table_t *old);
 void        fd_table_destroy(fd_table_t *t);
 int         fd_alloc(fd_table_t *t, vfs_file_t *f);
+int         fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd);
+int         fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start);
 void        fd_free(fd_table_t *t, int fd);
 vfs_file_t *fd_get(fd_table_t *t, int fd);
+
+static inline int fd_is_cloexec(fd_table_t *t, int fd)
+{ return fd >= 0 && fd < t->cap && !!(t->cloexec[fd/64] & (1ULL << (fd%64))); }
+
+static inline void fd_set_cloexec(fd_table_t *t, int fd, int v)
+{
+    if (fd < 0 || fd >= t->cap) return;
+    if (v) t->cloexec[fd/64] |=  (1ULL << (fd%64));
+    else   t->cloexec[fd/64] &= ~(1ULL << (fd%64));
+}
 
 /* pipe IPC */
 int vfs_pipe(int pipefd[2]);
