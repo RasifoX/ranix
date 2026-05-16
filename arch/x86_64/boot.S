@@ -56,7 +56,7 @@ _start:
 	ljmp $0x08, $long_mode_entry
 
 setup_page_tables:
-	/* identity: PML4[0] → pdpt → pd (512 × 2MB, 0-1GB) */
+	/* identity: PML4[0] → pdpt → pd (512 × 2MB, 0..1GB) */
 	mov  $pdpt, %eax
 	or   $0x3, %eax
 	mov  %eax, pml4
@@ -65,7 +65,7 @@ setup_page_tables:
 	or   $0x3, %eax
 	mov  %eax, pdpt
 
-	/* high half: PML4[511] → pdpt_hh[510] → pd */
+	/* high half: PML4[511] → pdpt_hh[510] → pd (kernel text at -2GB) */
 	mov  $pdpt_hh, %eax
 	or   $0x3, %eax
 	mov  %eax, pml4 + 511*8
@@ -74,15 +74,63 @@ setup_page_tables:
 	or   $0x3, %eax
 	mov  %eax, pdpt_hh + 510*8
 
+	/* direct map: PML4[256] → pdpt_dm[0..3] → pd0..pd3 (0..4GB) */
+	mov  $pdpt_dm, %eax
+	or   $0x3, %eax
+	mov  %eax, pml4 + 256*8
+
+	mov  $pd,  %eax; or $0x3, %eax; mov %eax, pdpt_dm
+	mov  $pd1, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 8
+	mov  $pd2, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 16
+	mov  $pd3, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 24
+
+	/* fill pd: 0..1GB (entries: i*2MB for i=0..511) */
 	mov  $0, %ecx
 .fill_pd:
 	mov  %ecx, %eax
 	shl  $21, %eax
-	or   $0x83, %eax          /* present + write + huge (2 MB) */
+	or   $0x83, %eax
 	mov  %eax, pd(, %ecx, 8)
 	inc  %ecx
 	cmp  $512, %ecx
 	jl   .fill_pd
+
+	/* fill pd1: 1..2GB */
+	mov  $0, %ecx
+.fill_pd1:
+	mov  %ecx, %eax
+	add  $512, %eax
+	shl  $21, %eax
+	or   $0x83, %eax
+	mov  %eax, pd1(, %ecx, 8)
+	inc  %ecx
+	cmp  $512, %ecx
+	jl   .fill_pd1
+
+	/* fill pd2: 2..3GB */
+	mov  $0, %ecx
+.fill_pd2:
+	mov  %ecx, %eax
+	add  $1024, %eax
+	shl  $21, %eax
+	or   $0x83, %eax
+	mov  %eax, pd2(, %ecx, 8)
+	inc  %ecx
+	cmp  $512, %ecx
+	jl   .fill_pd2
+
+	/* fill pd3: 3..4GB */
+	mov  $0, %ecx
+.fill_pd3:
+	mov  %ecx, %eax
+	add  $1536, %eax
+	shl  $21, %eax
+	or   $0x83, %eax
+	mov  %eax, pd3(, %ecx, 8)
+	inc  %ecx
+	cmp  $512, %ecx
+	jl   .fill_pd3
+
 	ret
 
 .code64
@@ -122,6 +170,11 @@ pml4:     .skip 4096
 pdpt:     .skip 4096
 pd:       .skip 4096
 pdpt_hh:  .skip 4096
+.global pdpt_dm
+pdpt_dm:  .skip 4096
+pd1:      .skip 4096
+pd2:      .skip 4096
+pd3:      .skip 4096
 
 .balign 16
 boot_stack32:     .skip 4096
