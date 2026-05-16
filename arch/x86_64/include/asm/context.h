@@ -150,5 +150,10 @@ typedef struct {
 #define SYS_ARCH_SYSLOG          103
 #define SYS_ARCH_UTIMENSAT       280
 #define SYS_ARCH_FUTIMENS        280  /* same number, used via fd path */
+#define SYS_ARCH_GETTID          186
+#define SYS_ARCH_GETGROUPS       115
+#define SYS_ARCH_SETGROUPS       116
+#define SYS_ARCH_GETRLIMIT        97
+#define SYS_ARCH_SETRLIMIT       160
 
 #endif

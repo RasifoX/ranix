@@ -111,7 +111,11 @@ typedef struct {
 #define SYS_ARCH_SET_ROBUST_LIST 99
 #define SYS_ARCH_GET_ROBUST_LIST 100
 #define SYS_ARCH_TGKILL        131
-#define SYS_ARCH_GETPGRP       158
+#define SYS_ARCH_GETGROUPS     158
+#define SYS_ARCH_SETGROUPS     159
+#define SYS_ARCH_GETRLIMIT     163
+#define SYS_ARCH_SETRLIMIT     164
+#define SYS_ARCH_GETTID        178
 #define SYS_ARCH_FORK          1079  /* not a real AArch64 syscall; clone handles it */
 #define SYS_ARCH_RT_SIGRETURN   139
 #define SYS_ARCH_SCHED_YIELD   124
