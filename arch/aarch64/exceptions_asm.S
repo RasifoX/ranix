@@ -198,6 +198,10 @@ irq_handler:
 	cbz  w20, .irq_ret
 	str  wzr, [x19, :lo12:need_resched]
 
+	bl   task_current
+	mov  x1, sp
+	str  x1, [x0, #16]
+
 	bl   schedule
 	bl   vm_activate
 
@@ -232,6 +236,11 @@ sync_handler:
 	ldr  w20, [x19, :lo12:need_resched]
 	cbz  w20, .syscall_ret
 	str  wzr, [x19, :lo12:need_resched]
+
+	bl   task_current
+	mov  x1, sp
+	str  x1, [x0, #16]
+
 	bl   schedule
 	bl   vm_activate
 

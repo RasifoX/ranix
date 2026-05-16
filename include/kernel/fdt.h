@@ -25,12 +25,18 @@ typedef struct {
 } fdt_header_t;
 
 /* parsed system info from DTB */
+#define FDT_MAX_MEM_REGIONS 8
 typedef struct {
     uint64_t mem_base;
     uint64_t mem_size;
     uint32_t num_cpus;
     char     model[64];
     char     compatible[64];
+    struct {
+        uint64_t base;
+        uint64_t size;
+    } mem_regions[FDT_MAX_MEM_REGIONS];
+    int num_mem_regions;
 } fdt_info_t;
 
 int         fdt_init(void *dtb_addr);

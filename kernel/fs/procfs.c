@@ -3,6 +3,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -47,7 +48,7 @@ static void pb_u64kib(pb_t *b, uint64_t bytes)
 static int fill_version(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
-	pb_str(&b, "Linux version 6.1.0-ranix (ranix@ranix) "
+	pb_str(&b, "Ranix version 1.0.0 (ranix@ranix) "
 	           "(gcc version 12.0) #1 SMP\n");
 	return (int)(sz - b.rem);
 }
@@ -149,12 +150,7 @@ static int fill_loadavg(char *buf, size_t sz)
 
 static process_t *find_proc(int pid)
 {
-	int n = task_count();
-	for (int i = 0; i < n; i++) {
-		process_t *p = task_get(i);
-		if (p && (int)p->pid == pid) return p;
-	}
-	return NULL;
+	return proc_find((pid_t)pid);
 }
 
 static int fill_proc_status(char *buf, size_t sz, int pid)
@@ -181,9 +177,14 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	if (!p) { pb_u64(&b, (uint64_t)pid); pb_str(&b, " (gone) Z 0\n"); return (int)(sz - b.rem); }
 	pb_u64(&b, p->pid); pb_char(&b, ' ');
 	pb_char(&b, '('); pb_str(&b, p->name); pb_char(&b, ')');
+	/* fields 3-52 matching Linux /proc/PID/stat layout (busybox ps
+	 * scans for spaces; if we don't have enough fields the scan runs
+	 * past the buffer and faults on the next unmapped page) */
 	pb_str(&b, " R ");
 	pb_u64(&b, p->ppid);
-	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0\n");
+	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0"  /* 5-24 */
+	           " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"  /* 25-44 */
+	           " 0 0 0 0 0 0 0 0\n");                       /* 45-52 */
 	return (int)(sz - b.rem);
 }
 
@@ -279,8 +280,9 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	procfs_inode_priv_t *pr = f->inode->priv;
 	if (!pr) return -1;
 
-	char *tmp = buddy_alloc(0);   /* one page */
-	if (!tmp) return -1;
+	uint64_t phys = (uint64_t)buddy_alloc(0);
+	if (!phys) return -1;
+	char *tmp = (char *)PHYS_TO_VIRT(phys);
 
 	int n = 0;
 	switch (pr->type) {
@@ -308,7 +310,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		ret = (ssize_t)len;
 	}
 
-	buddy_free((uint64_t)tmp, 0);
+	buddy_free(phys, 0);
 	return ret;
 }
 
@@ -462,20 +464,25 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	}
 	idx--;
 
-	/* per-process dirs */
-	if ((int)idx >= n_proc) return -1;
-	process_t *p = task_get((int)idx);
-	if (!p) return -1;
-	out->ino      = 0x8000 + (uint64_t)p->pid * 100 + 50;
-	out->mode     = S_IFDIR | 0555;
-	out->next_off = ROOT_FILES_N + 1 + idx + 1;
-	/* write decimal pid into name */
-	char tmp[16]; int ti = 0;
-	uint32_t pid = p->pid;
-	if (pid == 0) { tmp[ti++] = '0'; }
-	else { char rev[10]; int ri = 0; while (pid) { rev[ri++] = '0' + (pid % 10); pid /= 10; } for (int j = ri-1; j >= 0; j--) tmp[ti++] = rev[j]; }
-	memcpy(out->name, tmp, ti); out->name[ti] = '\0';
-	return 0;
+	/* per-process dirs: find the idx-th non-reaped process */
+	int live = 0;
+	for (int i = 0; i < n_proc; i++) {
+		process_t *p = task_get(i);
+		if (!p) continue;
+		if (live == (int)idx) {
+			out->ino      = 0x8000 + (uint64_t)p->pid * 100 + 50;
+			out->mode     = S_IFDIR | 0555;
+			out->next_off = ROOT_FILES_N + 1 + idx + 1;
+			char tmp[16]; int ti = 0;
+			uint32_t pid = p->pid;
+			if (pid == 0) { tmp[ti++] = '0'; }
+			else { char rev[10]; int ri = 0; while (pid) { rev[ri++] = '0' + (pid % 10); pid /= 10; } for (int j = ri-1; j >= 0; j--) tmp[ti++] = rev[j]; }
+			memcpy(out->name, tmp, ti); out->name[ti] = '\0';
+			return 0;
+		}
+		live++;
+	}
+	return -1;
 }
 
 static int procfs_root_stat(vfs_inode_t *in, vfs_stat_t *out)

@@ -50,8 +50,8 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
 	return (void *)(vaddr + offset);
 }
 
-#define USER_STACK_TOP  0x800000UL
-#define MAX_STACK_SIZE  (256 * PAGE_SIZE)  /* 1 MB */
+#define USER_STACK_TOP  ARCH_USER_STACK_TOP
+#define MAX_STACK_SIZE  (256 * PAGE_SIZE)
 
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {

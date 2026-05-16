@@ -10,6 +10,9 @@ mb2_start:
 	.long MB2_ARCH
 	.long MB2_LEN
 	.long MB2_CHECKSUM
+	/* framebuffer request: type=5, flags=0 (optional), width/height/depth=0 (any) */
+	.word 5; .word 0; .long 20; .long 0; .long 0; .long 32
+	.balign 8
 	.word 0; .word 0; .long 8
 mb2_end:
 

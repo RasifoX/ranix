@@ -124,5 +124,8 @@ typedef struct {
 #define SYS_ARCH_STATX         291
 #define SYS_ARCH_MEMBARRIER    283
 #define SYS_ARCH_RSEQ          293
+#define SYS_ARCH_REBOOT        142
+#define SYS_ARCH_SYSLOG        116
+#define SYS_ARCH_UTIMENSAT      88
 
 #endif
