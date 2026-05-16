@@ -61,13 +61,13 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 ### v0.17.0 — Gelişmiş Süreç Yönetimi ✅ TAMAMLANDI
 - [x] Thread desteği (`sys_clone` CLONE_VM+CLONE_THREAD, `proc_clone_thread`) — musl pthreads için
 - [x] Fork/exec düzeltmeleri: vm_copy kernel identity L1 kopyası, TLS kaydı, GIC timer EOI sıralaması
-- [x] Tam POSIX sinyalleri — `SIGTERM`, `SIGSEGV`, `SIGCHLD`, `SIGPIPE` ve `sigaction` semantiği
+- [x] Tam POSIX sinyalleri — `SIGTERM`, `SIGSEGV`, `SIGCHLD`, `SIGPIPE` ve `sigaction` semantiği; x86_64 `sa_restorer` + `rt_sigreturn` tam implementasyonu
 - [x] `waitpid` semantiği — `WNOHANG`, `WIFEXITED`, `WIFSIGNALED` (v0.16.17)
 - [ ] Session ve process group yönetimi — `setsid`, `setpgid`, terminal I/O
 
 ### v0.17.1 — Dosya Sistemi Genişletme
 - [ ] Ext2 yazma desteği — `create`, `mkdir`, `unlink`, `write`; journal yok, fsck ile kurtarılabilir
-- [ ] Pipe semantiği — `SIGPIPE`, `O_NONBLOCK`, doğru EOF davranışı
+- [x] Pipe semantiği — `SIGPIPE`, `O_NONBLOCK`, doğru EOF davranışı, çok aşamalı pipeline (`a|b|c|d`) çalışıyor
 - [ ] Dosya kilitleme — `flock` / `fcntl` temel implementasyonu
 - [ ] `/proc/self/fd/` dizini
 
