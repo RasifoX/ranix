@@ -4,6 +4,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <asm/mmu.h>
 
 /*
  * ext2 / ext4 read-only VFS driver.
@@ -203,6 +204,17 @@ typedef struct {
 	uint32_t        cache_clock;
 } ext2_fs_t;
 
+static inline uint8_t *ext2_alloc_page(void)
+{
+	void *p = buddy_alloc(0);
+	return p ? (uint8_t *)PHYS_TO_VIRT((uint64_t)p) : NULL;
+}
+
+static inline void ext2_free_page(uint8_t *p)
+{
+	if (p) buddy_free(VIRT_TO_PHYS((uint64_t)p), 0);
+}
+
 /* ── block I/O helpers ───────────────────────────────────────── */
 
 static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
@@ -238,7 +250,7 @@ static int read_block(ext2_fs_t *fs, uint32_t blkno, void *buf)
 	}
 
 	if (!fs->cache[victim].buf)
-		fs->cache[victim].buf = buddy_alloc(0);
+		fs->cache[victim].buf = ext2_alloc_page();
 	if (fs->cache[victim].buf) {
 		memcpy(fs->cache[victim].buf, buf, fs->block_size);
 		fs->cache[victim].blkno  = blkno;
@@ -257,7 +269,7 @@ static int read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 	uint32_t idx     = (ino - 1) % fs->inodes_per_group;
 
 	/* read block group descriptor */
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return -1;
 
 	/* BGD table starts at block first_data_block+1 */
@@ -267,7 +279,7 @@ static int read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 	uint32_t bgd_blk   = bgd_block + bgd_off / fs->block_size;
 	uint32_t bgd_boff  = bgd_off % fs->block_size;
 
-	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, bgd_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 
 	ext2_bgd_t *bgd    = (ext2_bgd_t *)(tmp + bgd_boff);
 	uint32_t inode_tbl = bgd->bg_inode_table_lo;
@@ -277,12 +289,12 @@ static int read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
 	uint32_t tbl_blk  = inode_tbl + idx / inodes_per_blk;
 	uint32_t tbl_off  = (idx % inodes_per_blk) * fs->inode_size;
 
-	if (read_block(fs, tbl_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, tbl_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 
 	memcpy(out, tmp + tbl_off,
 	       (fs->inode_size < sizeof(ext2_inode_t)) ? fs->inode_size : sizeof(ext2_inode_t));
 
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	return 0;
 }
 
@@ -320,15 +332,15 @@ static uint32_t ext4_extent_lookup(ext2_fs_t *fs, uint32_t *tree, uint32_t logic
 		if (best < 0) return 0;
 
 		uint64_t leaf_blk = ((uint64_t)idx[best].ei_leaf_hi << 32) | idx[best].ei_leaf_lo;
-		uint8_t *next_buf = buddy_alloc(0);
+		uint8_t *next_buf = ext2_alloc_page();
 		if (!next_buf) return 0;
 		if (read_block(fs, (uint32_t)leaf_blk, next_buf) != 0) {
-			buddy_free((uint64_t)next_buf, 0);
+			ext2_free_page(next_buf);
 			return 0;
 		}
 		/* copy into buf and iterate (static 4K buffer on the stack is too big) */
 		memcpy(buf, next_buf, fs->block_size);
-		buddy_free((uint64_t)next_buf, 0);
+		ext2_free_page(next_buf);
 	}
 }
 
@@ -338,11 +350,11 @@ static uint32_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logica
 	/* ext4 extent tree — use heap buffer so extent traversal can overwrite
 	   it with a full block (1024 B) without corrupting the stack */
 	if (in->i_flags & EXT4_EXTENTS_FL) {
-		uint8_t *tree = buddy_alloc(0);
+		uint8_t *tree = ext2_alloc_page();
 		if (!tree) return 0;
 		memcpy(tree, in->i_block, 15 * sizeof(uint32_t)); /* 60 bytes inline */
 		uint32_t r = ext4_extent_lookup(fs, (uint32_t *)tree, logical);
-		buddy_free((uint64_t)tree, 0);
+		ext2_free_page(tree);
 		return r;
 	}
 
@@ -353,7 +365,7 @@ static uint32_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logica
 		return in->i_block[logical];
 
 	logical -= 12;
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return 0;
 	uint32_t result = 0;
 
@@ -376,7 +388,7 @@ static uint32_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logica
 
 	/* triple indirect: not implemented — too large for kernel use */
 done:
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	return result;
 }
 
@@ -429,7 +441,7 @@ static ssize_t ext2_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)size) return 0;
 	if ((uint64_t)f->pos + len > size) len = (size_t)(size - (uint64_t)f->pos);
 
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return -1;
 
 	ssize_t done = 0;
@@ -451,7 +463,7 @@ static ssize_t ext2_read(vfs_file_t *f, void *buf, size_t len)
 		pos  += copy;
 	}
 
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	f->pos = (off_t)pos;
 	return done;
 }
@@ -487,56 +499,56 @@ static int write_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *in)
 {
 	uint32_t group = (ino - 1) / fs->inodes_per_group;
 	uint32_t idx   = (ino - 1) % fs->inodes_per_group;
-	uint8_t *tmp   = buddy_alloc(0);
+	uint8_t *tmp   = ext2_alloc_page();
 	if (!tmp) return -1;
 
 	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
 	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
-	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, bgd_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 	uint32_t inode_tbl = ((ext2_bgd_t *)(tmp + bgd_boff))->bg_inode_table_lo;
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 
-	tmp = buddy_alloc(0);
+	tmp = ext2_alloc_page();
 	if (!tmp) return -1;
 	uint32_t inodes_per_blk = fs->block_size / fs->inode_size;
 	uint32_t tbl_blk = inode_tbl + idx / inodes_per_blk;
 	uint32_t tbl_off = (idx % inodes_per_blk) * fs->inode_size;
-	if (read_block(fs, tbl_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, tbl_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 	uint32_t csz = fs->inode_size < sizeof(ext2_inode_t) ? fs->inode_size : sizeof(ext2_inode_t);
 	memcpy(tmp + tbl_off, in, csz);
 	int r = write_block(fs, tbl_blk, tmp);
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	return r;
 }
 
 static int read_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *out)
 {
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return -1;
 	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
 	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
-	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, bgd_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 	*out = *(ext2_bgd_t *)(tmp + bgd_boff);
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	return 0;
 }
 
 static int write_bgd(ext2_fs_t *fs, uint32_t group, ext2_bgd_t *bgd)
 {
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return -1;
 	uint32_t bgd_blk  = (fs->first_data_block + 1) + (group * fs->desc_size) / fs->block_size;
 	uint32_t bgd_boff = (group * fs->desc_size) % fs->block_size;
-	if (read_block(fs, bgd_blk, tmp) != 0) { buddy_free((uint64_t)tmp, 0); return -1; }
+	if (read_block(fs, bgd_blk, tmp) != 0) { ext2_free_page(tmp); return -1; }
 	*(ext2_bgd_t *)(tmp + bgd_boff) = *bgd;
 	int r = write_block(fs, bgd_blk, tmp);
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 	return r;
 }
 
 static uint32_t alloc_block(ext2_fs_t *fs, uint32_t pref_group)
 {
-	uint8_t *bmp = buddy_alloc(0);
+	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return 0;
 	for (uint32_t gi = 0; gi < fs->num_groups; gi++) {
 		uint32_t g = (pref_group + gi) % fs->num_groups;
@@ -550,12 +562,12 @@ static uint32_t alloc_block(ext2_fs_t *fs, uint32_t pref_group)
 				write_block(fs, bgd.bg_block_bitmap_lo, bmp);
 				bgd.bg_free_blocks_count_lo--;
 				write_bgd(fs, g, &bgd);
-				buddy_free((uint64_t)bmp, 0);
+				ext2_free_page(bmp);
 				return g * fs->blocks_per_group + fs->first_data_block + i;
 			}
 		}
 	}
-	buddy_free((uint64_t)bmp, 0);
+	ext2_free_page(bmp);
 	return 0;
 }
 
@@ -568,7 +580,7 @@ static void free_block(ext2_fs_t *fs, uint32_t blkno)
 	if (g >= fs->num_groups) return;
 	ext2_bgd_t bgd;
 	if (read_bgd(fs, g, &bgd) != 0) return;
-	uint8_t *bmp = buddy_alloc(0);
+	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return;
 	if (read_block(fs, bgd.bg_block_bitmap_lo, bmp) == 0) {
 		bmp[bit / 8] &= ~(1u << (bit & 7));
@@ -576,12 +588,12 @@ static void free_block(ext2_fs_t *fs, uint32_t blkno)
 		bgd.bg_free_blocks_count_lo++;
 		write_bgd(fs, g, &bgd);
 	}
-	buddy_free((uint64_t)bmp, 0);
+	ext2_free_page(bmp);
 }
 
 static uint32_t alloc_inode(ext2_fs_t *fs, uint32_t pref_group)
 {
-	uint8_t *bmp = buddy_alloc(0);
+	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return 0;
 	for (uint32_t gi = 0; gi < fs->num_groups; gi++) {
 		uint32_t g = (pref_group + gi) % fs->num_groups;
@@ -594,12 +606,12 @@ static uint32_t alloc_inode(ext2_fs_t *fs, uint32_t pref_group)
 				write_block(fs, bgd.bg_inode_bitmap_lo, bmp);
 				bgd.bg_free_inodes_count_lo--;
 				write_bgd(fs, g, &bgd);
-				buddy_free((uint64_t)bmp, 0);
+				ext2_free_page(bmp);
 				return g * fs->inodes_per_group + i + 1;
 			}
 		}
 	}
-	buddy_free((uint64_t)bmp, 0);
+	ext2_free_page(bmp);
 	return 0;
 }
 
@@ -610,7 +622,7 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino)
 	uint32_t bit = (ino - 1) % fs->inodes_per_group;
 	ext2_bgd_t bgd;
 	if (read_bgd(fs, g, &bgd) != 0) return;
-	uint8_t *bmp = buddy_alloc(0);
+	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return;
 	if (read_block(fs, bgd.bg_inode_bitmap_lo, bmp) == 0) {
 		bmp[bit / 8] &= ~(1u << (bit & 7));
@@ -618,7 +630,7 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino)
 		bgd.bg_free_inodes_count_lo++;
 		write_bgd(fs, g, &bgd);
 	}
-	buddy_free((uint64_t)bmp, 0);
+	ext2_free_page(bmp);
 }
 
 /* Allocate and link a physical block at logical position lbn in inode.
@@ -642,68 +654,68 @@ static uint32_t inode_alloc_block(ext2_fs_t *fs, ext2_inode_t *in,
 
 	/* Single indirect */
 	if (lbn < ppp) {
-		uint8_t *tmp = buddy_alloc(0);
+		uint8_t *tmp = ext2_alloc_page();
 		if (!tmp) return 0;
 		if (!in->i_block[12]) {
 			uint32_t ib = alloc_block(fs, pg);
-			if (!ib) { buddy_free((uint64_t)tmp, 0); return 0; }
+			if (!ib) { ext2_free_page(tmp); return 0; }
 			memset(tmp, 0, fs->block_size);
 			in->i_block[12] = ib;
 			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
 		} else if (read_block(fs, in->i_block[12], tmp) != 0) {
-			buddy_free((uint64_t)tmp, 0); return 0;
+			ext2_free_page(tmp); return 0;
 		}
 		uint32_t *ptrs = (uint32_t *)tmp;
 		if (!ptrs[lbn]) {
 			uint32_t b = alloc_block(fs, pg);
-			if (!b) { buddy_free((uint64_t)tmp, 0); return 0; }
+			if (!b) { ext2_free_page(tmp); return 0; }
 			ptrs[lbn] = b;
 			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
 			write_block(fs, in->i_block[12], tmp);
 		}
 		uint32_t r = ptrs[lbn];
-		buddy_free((uint64_t)tmp, 0);
+		ext2_free_page(tmp);
 		return r;
 	}
 	lbn -= ppp;
 
 	/* Double indirect */
 	if (lbn < ppp * ppp) {
-		uint8_t *t1 = buddy_alloc(0), *t2 = buddy_alloc(0);
-		if (!t1 || !t2) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+		uint8_t *t1 = ext2_alloc_page(), *t2 = ext2_alloc_page();
+		if (!t1 || !t2) { ext2_free_page(t1); ext2_free_page(t2); return 0; }
 		if (!in->i_block[13]) {
 			uint32_t ib = alloc_block(fs, pg);
-			if (!ib) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			if (!ib) { ext2_free_page(t1); ext2_free_page(t2); return 0; }
 			memset(t1, 0, fs->block_size);
 			in->i_block[13] = ib;
 			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
 			write_block(fs, ib, t1);
 		} else if (read_block(fs, in->i_block[13], t1) != 0) {
-			buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0;
+			ext2_free_page(t1); ext2_free_page(t2); return 0;
 		}
 		uint32_t *l1 = (uint32_t *)t1;
 		uint32_t l1i = lbn / ppp, l2i = lbn % ppp;
 		if (!l1[l1i]) {
 			uint32_t ib = alloc_block(fs, pg);
-			if (!ib) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			if (!ib) { ext2_free_page(t1); ext2_free_page(t2); return 0; }
 			memset(t2, 0, fs->block_size);
 			l1[l1i] = ib;
 			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
 			write_block(fs, in->i_block[13], t1);
 			write_block(fs, ib, t2);
 		} else if (read_block(fs, l1[l1i], t2) != 0) {
-			buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0;
+			ext2_free_page(t1); ext2_free_page(t2); return 0;
 		}
 		uint32_t *l2 = (uint32_t *)t2;
 		if (!l2[l2i]) {
 			uint32_t b = alloc_block(fs, pg);
-			if (!b) { buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0); return 0; }
+			if (!b) { ext2_free_page(t1); ext2_free_page(t2); return 0; }
 			l2[l2i] = b;
 			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
 			write_block(fs, l1[l1i], t2);
 		}
 		uint32_t r = l2[l2i];
-		buddy_free((uint64_t)t1, 0); buddy_free((uint64_t)t2, 0);
+		ext2_free_page(t1); ext2_free_page(t2);
 		return r;
 	}
 	return 0; /* triple indirect not supported */
@@ -721,7 +733,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 	uint64_t pos = (uint64_t)f->pos;
 	size_t done = 0;
 
-	uint8_t *blkbuf = buddy_alloc(0);
+	uint8_t *blkbuf = ext2_alloc_page();
 	if (!blkbuf) return -12;
 
 	while (done < len) {
@@ -743,7 +755,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 		pos  += chunk;
 		done += chunk;
 	}
-	buddy_free((uint64_t)blkbuf, 0);
+	ext2_free_page(blkbuf);
 
 	if (pos > (uint64_t)f->inode->size) {
 		in->i_size_lo   = (uint32_t)pos;
@@ -761,7 +773,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 {
 	uint8_t nlen = 0; while (name[nlen]) nlen++;
 	uint16_t need = (uint16_t)(((uint32_t)8 + nlen + 3u) & ~3u);
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) return -12;
 
 	uint64_t dsz = (uint64_t)dir_in->i_size_lo | ((uint64_t)dir_in->i_size_high << 32);
@@ -783,7 +795,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 				de->file_type = ftype;
 				memcpy(de->name, name, nlen);
 				write_block(fs, phys, blk);
-				buddy_free((uint64_t)blk, 0);
+				ext2_free_page(blk);
 				return 0;
 			}
 			off += de->rec_len;
@@ -792,7 +804,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 
 	/* Allocate new block for directory */
 	uint32_t phys = inode_alloc_block(fs, dir_in, dir_ino, nblk);
-	if (!phys) { buddy_free((uint64_t)blk, 0); return -28; }
+	if (!phys) { ext2_free_page(blk); return -28; }
 
 	memset(blk, 0, fs->block_size);
 	ext2_dirent_t *de = (ext2_dirent_t *)blk;
@@ -804,7 +816,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 	write_block(fs, phys, blk);
 
 	dir_in->i_size_lo = (uint32_t)(dsz + fs->block_size);
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 	return 0;
 }
 
@@ -812,7 +824,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 static uint32_t dir_remove_entry(ext2_fs_t *fs, ext2_inode_t *dir_in, const char *name)
 {
 	uint8_t nlen = 0; while (name[nlen]) nlen++;
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) return 0;
 
 	uint64_t dsz = (uint64_t)dir_in->i_size_lo | ((uint64_t)dir_in->i_size_high << 32);
@@ -834,14 +846,14 @@ static uint32_t dir_remove_entry(ext2_fs_t *fs, ext2_inode_t *dir_in, const char
 					de->inode = 0; /* mark as deleted */
 				}
 				write_block(fs, phys, blk);
-				buddy_free((uint64_t)blk, 0);
+				ext2_free_page(blk);
 				return found_ino;
 			}
 			prev = de;
 			off += de->rec_len;
 		}
 	}
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 	return 0;
 }
 
@@ -850,7 +862,7 @@ static void inode_free_blocks(ext2_fs_t *fs, ext2_inode_t *in)
 {
 	if (in->i_flags & EXT4_EXTENTS_FL) return;
 	uint32_t ppp = fs->block_size / 4;
-	uint8_t *tmp = buddy_alloc(0);
+	uint8_t *tmp = ext2_alloc_page();
 	if (!tmp) return;
 
 	/* Direct */
@@ -867,7 +879,7 @@ static void inode_free_blocks(ext2_fs_t *fs, ext2_inode_t *in)
 
 	/* Double indirect */
 	if (in->i_block[13]) {
-		uint8_t *t2 = buddy_alloc(0);
+		uint8_t *t2 = ext2_alloc_page();
 		if (t2 && read_block(fs, in->i_block[13], tmp) == 0) {
 			uint32_t *l1 = (uint32_t *)tmp;
 			for (uint32_t i = 0; i < ppp; i++) {
@@ -879,10 +891,10 @@ static void inode_free_blocks(ext2_fs_t *fs, ext2_inode_t *in)
 				free_block(fs, l1[i]);
 			}
 		}
-		buddy_free((uint64_t)t2, 0);
+		ext2_free_page(t2);
 		free_block(fs, in->i_block[13]);
 	}
-	buddy_free((uint64_t)tmp, 0);
+	ext2_free_page(tmp);
 }
 
 static int ext2_create(vfs_inode_t *dir, const char *name, mode_t mode)
@@ -927,7 +939,7 @@ static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	uint32_t phys = inode_alloc_block(fs, &in, new_ino, 0);
 	if (!phys) { free_inode(fs, new_ino); return -28; }
 
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) { free_block(fs, phys); free_inode(fs, new_ino); return -12; }
 	memset(blk, 0, fs->block_size);
 
@@ -947,7 +959,7 @@ static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	dotdot->name[1]   = '.';
 
 	write_block(fs, phys, blk);
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 
 	in.i_size_lo = fs->block_size;
 	if (write_inode(fs, new_ino, &in) != 0) { inode_free_blocks(fs, &in); free_inode(fs, new_ino); return -5; }
@@ -1001,7 +1013,7 @@ static vfs_inode_t *ext2_lookup(vfs_inode_t *dir, const char *name)
 	ext2_inode_t      *in   = &priv->raw;
 	uint64_t           size = dir->size;
 
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) return NULL;
 
 	uint32_t log_blk = 0;
@@ -1019,12 +1031,12 @@ static vfs_inode_t *ext2_lookup(vfs_inode_t *dir, const char *name)
 			    memcmp(de->name, name, de->name_len) == 0) {
 				ext2_inode_t raw;
 				if (read_inode(fs, de->inode, &raw) != 0) {
-					buddy_free((uint64_t)blk, 0);
+					ext2_free_page(blk);
 					return NULL;
 				}
 				vfs_inode_t *vi = ext2_vfs_inode(fs, de->inode, &raw);
 				if (vi && S_ISREG(vi->mode)) vi->fops = &ext2_fops;
-				buddy_free((uint64_t)blk, 0);
+				ext2_free_page(blk);
 				return vi;
 			}
 			blk_off += de->rec_len;
@@ -1032,7 +1044,7 @@ static vfs_inode_t *ext2_lookup(vfs_inode_t *dir, const char *name)
 		off += fs->block_size;
 	}
 
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 	return NULL;
 }
 
@@ -1045,7 +1057,7 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	ext2_inode_t      *in   = &priv->raw;
 	uint64_t           size = dir->size;
 
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) return -1;
 
 	uint32_t byte_off = idx;
@@ -1079,11 +1091,11 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 		case 7: out->mode = S_IFLNK; break;
 		default: out->mode = S_IFREG; break;
 		}
-		buddy_free((uint64_t)blk, 0);
+		ext2_free_page(blk);
 		return 0;
 	}
 
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 	return -1;
 }
 
@@ -1113,17 +1125,17 @@ static int ext2_readlink(vfs_inode_t *vi, char *buf, size_t bufsize)
 	}
 
 	ext2_fs_t *fs = priv->fs;
-	uint8_t *blk = buddy_alloc(0);
+	uint8_t *blk = ext2_alloc_page();
 	if (!blk) return -1;
 	uint32_t phys = inode_map_block(fs, in, 0);
 	if (read_block(fs, phys, blk) != 0) {
-		buddy_free((uint64_t)blk, 0);
+		ext2_free_page(blk);
 		return -1;
 	}
 	size_t copy = len < bufsize - 1 ? (size_t)len : bufsize - 1;
 	memcpy(buf, blk, copy);
 	buf[copy] = '\0';
-	buddy_free((uint64_t)blk, 0);
+	ext2_free_page(blk);
 	return 0;
 }
 
@@ -1147,25 +1159,25 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	if (!bdev) return -1;
 
 	/* superblock at byte 1024, i.e. LBA 2 for 512-byte sectors */
-	uint8_t *sb_buf = buddy_alloc(0);
+	uint8_t *sb_buf = ext2_alloc_page();
 	if (!sb_buf) return -1;
 
 	/* read 2 sectors to cover byte 1024..2047 */
 	if (bdev->read(bdev, 2, sb_buf, 2) != 0) {
-		buddy_free((uint64_t)sb_buf, 0);
+		ext2_free_page(sb_buf);
 		return -1;
 	}
 
 	ext2_super_t *sb = (ext2_super_t *)sb_buf;
 	if (sb->s_magic != EXT2_MAGIC) {
-		buddy_free((uint64_t)sb_buf, 0);
+		ext2_free_page(sb_buf);
 		return -1;
 	}
 
 	uint32_t bs = 1024u << sb->s_log_block_size;
 	if (bs > 4096) {
 		kprintf("ext2: block size %u not supported\n", bs);
-		buddy_free((uint64_t)sb_buf, 0);
+		ext2_free_page(sb_buf);
 		return -1;
 	}
 
@@ -1193,7 +1205,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	        (sb->s_blocks_count_lo + fs->blocks_per_group - 1) / fs->blocks_per_group,
 	        fs->inodes_per_group);
 
-	buddy_free((uint64_t)sb_buf, 0);
+	ext2_free_page(sb_buf);
 
 	/* read root inode */
 	ext2_inode_t root_raw;
