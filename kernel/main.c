@@ -107,15 +107,13 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		exc[1][0] = t0;        exc[1][1] = t1;
 	}
 
-	uint64_t dm_limit = arch_direct_map_boot_limit();
-	struct _pmm_ctx ac = { free_start, 0, dm_limit, {{0}}, n_exc, 0 };
+	/* Map high RAM (1GB huge pages, no buddy dep) before freeing it */
+	arch_map_high_memory(max_limit);
+
+	struct _pmm_ctx ac = { free_start, 0, (uint64_t)-1, {{0}}, n_exc, 0 };
 	ac.exc[0][0] = exc[0][0]; ac.exc[0][1] = exc[0][1];
 	ac.exc[1][0] = exc[1][0]; ac.exc[1][1] = exc[1][1];
 
-	board_foreach_mem_region(_pmm_add, &ac);
-	arch_map_high_memory(max_limit);
-	ac.clip_lo = dm_limit;
-	ac.clip_hi = (uint64_t)-1;
 	board_foreach_mem_region(_pmm_add, &ac);
 
 	kprintf("Memory: %d MB total across %d region(s)\n",
