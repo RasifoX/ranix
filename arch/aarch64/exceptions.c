@@ -61,8 +61,21 @@
 
         /* EL0 faults — kill the offending process instead of panicking */
         if (elr < 0xFFFF000000000000UL) {
-            kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x\n",
-                    (int)p->pid, p->name, elr, far, ec);
+            kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x ISS=0x%x\n",
+                    (int)p->pid, p->name, elr, far, ec, iss);
+            kprintf("  x0=%lx x1=%lx x2=%lx x3=%lx\n",
+                    tf->regs[0], tf->regs[1], tf->regs[2], tf->regs[3]);
+            kprintf("  x20=%lx x21=%lx x29(fp)=%lx x30(lr)=%lx sp=%lx\n",
+                    tf->regs[20], tf->regs[21], tf->regs[29], tf->regs[30], tf->sp);
+            /* Walk frame pointer chain to get call stack */
+            uint64_t fp = tf->regs[29];
+            for (int _i = 0; _i < 6 && fp && fp < 0xFFFF000000000000UL && (fp & 7) == 0; _i++) {
+                uint64_t saved_fp  = *(uint64_t *)fp;
+                uint64_t saved_lr  = *(uint64_t *)(fp + 8);
+                kprintf("  frame[%d]: fp=%lx lr=%lx\n", _i, saved_fp, saved_lr);
+                if (!saved_fp || saved_fp == fp) break;
+                fp = saved_fp;
+            }
             task_exit();
             __builtin_unreachable();
         }

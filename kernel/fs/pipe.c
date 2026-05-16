@@ -1,8 +1,9 @@
 #include <kernel/vfs.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
-#include <kernel/sched.h>
+#include <kernel/proc.h>
 #include <kernel/lib/string.h>
 
 #define PIPE_BUF_SIZE 4096
@@ -37,8 +38,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 return read ? (ssize_t)read : -11; /* EAGAIN */
             }
-            spin_unlock_irq(&pipe->lock, f);
-            sleep_on(&pipe->rd_wait);
+            sleep_on_locked(&pipe->rd_wait, &pipe->lock, f);
             continue;
         }
 
@@ -76,8 +76,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 return written ? (ssize_t)written : -11; /* EAGAIN */
             }
-            spin_unlock_irq(&pipe->lock, f);
-            sleep_on(&pipe->wr_wait);
+            sleep_on_locked(&pipe->wr_wait, &pipe->lock, f);
             continue;
         }
 
@@ -99,15 +98,15 @@ static int pipe_close(vfs_file_t *file)
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
 
-    if (file->flags == O_RDONLY) pipe->readers--;
-    else pipe->writers--;
+    if ((file->flags & 3) == O_RDONLY) pipe->readers--;
+    else                               pipe->writers--;
 
     wake_up(&pipe->rd_wait);
     wake_up(&pipe->wr_wait);
 
     if (pipe->readers == 0 && pipe->writers == 0) {
         spin_unlock_irq(&pipe->lock, f);
-        buddy_free((uint64_t)pipe->buffer, 0);
+        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
         vfs_inode_t *inode = file->inode;
         kfree(pipe);
         kfree(inode);
@@ -143,8 +142,9 @@ int vfs_pipe(int pipefd[2])
     pipe_t *pipe = kmalloc(sizeof(*pipe));
     if (!pipe) return -1;
     memset(pipe, 0, sizeof(*pipe));
-    pipe->buffer = buddy_alloc(0);
-    if (!pipe->buffer) { kfree(pipe); return -1; }
+    uint64_t buf_phys = (uint64_t)buddy_alloc(0);
+    if (!buf_phys) { kfree(pipe); return -1; }
+    pipe->buffer = (uint8_t *)PHYS_TO_VIRT(buf_phys);
     pipe->readers = 1;
     pipe->writers = 1;
     pipe->lock = (spinlock_t)SPINLOCK_INIT;
@@ -153,7 +153,7 @@ int vfs_pipe(int pipefd[2])
 
     vfs_inode_t *inode = kmalloc(sizeof(*inode));
     if (!inode) {
-        buddy_free((uint64_t)pipe->buffer, 0);
+        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
         kfree(pipe);
         return -1;
     }
@@ -168,7 +168,7 @@ int vfs_pipe(int pipefd[2])
     if (!rf || !wf) {
         kfree(rf);
         kfree(wf);
-        buddy_free((uint64_t)pipe->buffer, 0);
+        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
         kfree(pipe);
         kfree(inode);
         return -1;
@@ -177,12 +177,12 @@ int vfs_pipe(int pipefd[2])
     memset(rf, 0, sizeof(*rf));
     rf->inode = inode;
     rf->flags = O_RDONLY;
-    rf->refcount = 1;
+    rf->refcount = 0;
 
     memset(wf, 0, sizeof(*wf));
     wf->inode = inode;
     wf->flags = O_WRONLY;
-    wf->refcount = 1;
+    wf->refcount = 0;
 
     process_t *p = task_current();
     pipefd[0] = fd_alloc(p->fds, rf);

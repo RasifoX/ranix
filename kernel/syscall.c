@@ -27,11 +27,12 @@
 #define PROT_WRITE 0x2
 #define PROT_EXEC  0x4
 
-/* Linux ABI stat struct — x86_64/aarch64 layout (kernel struct stat) */
+/* Linux ABI stat struct — layout differs between x86_64 and aarch64 */
+#if defined(__x86_64__)
 typedef struct {
 	uint64_t st_dev;
 	uint64_t st_ino;
-	uint64_t st_nlink;     /* must be 8 bytes, comes before st_mode */
+	uint64_t st_nlink;   /* x86_64: nlink (8B) before mode */
 	uint32_t st_mode;
 	uint32_t st_uid;
 	uint32_t st_gid;
@@ -48,6 +49,30 @@ typedef struct {
 	uint64_t st_ctime_nsec;
 	uint64_t __unused[3];
 } linux_stat_t;
+#else /* aarch64: mode (4B) before nlink (4B), extra pad after rdev */
+typedef struct {
+	uint64_t st_dev;
+	uint64_t st_ino;
+	uint32_t st_mode;    /* aarch64: mode before nlink */
+	uint32_t st_nlink;
+	uint32_t st_uid;
+	uint32_t st_gid;
+	uint64_t st_rdev;
+	uint64_t __pad1;
+	int64_t  st_size;
+	int32_t  st_blksize;
+	int32_t  __pad2;
+	int64_t  st_blocks;
+	int64_t  st_atime_sec;
+	uint64_t st_atime_nsec;
+	int64_t  st_mtime_sec;
+	uint64_t st_mtime_nsec;
+	int64_t  st_ctime_sec;
+	uint64_t st_ctime_nsec;
+	uint32_t __unused4;
+	uint32_t __unused5;
+} linux_stat_t;
+#endif
 
 typedef struct {
 	void  *iov_base;
@@ -105,7 +130,6 @@ static long sys_open(const char *path, int flags, mode_t mode)
 	int r = resolve_path(kpath, AT_FDCWD, path);
 	if (r) return r;
 	long fd = vfs_open(kpath, flags, mode);
-	kprintf("sys_openat: %s -> %d\n", kpath, (int)fd);
 	return fd < 0 ? -2 : fd;
 }
 
@@ -114,8 +138,7 @@ static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 	char kpath[PROC_NAME_MAX];
 	int r = resolve_path(kpath, dirfd, path);
 	if (r) return r;
-	long fd = vfs_open(kpath, flags, mode); 
-	kprintf("sys_openat: %s -> %d (bitmap=%lx)\n", kpath, (int)fd, task_current()->fds ? task_current()->fds->bitmap : 0);
+	long fd = vfs_open(kpath, flags, mode);
 	return fd < 0 ? -2 : fd;
 }
 
@@ -195,6 +218,51 @@ static long sys_exit(int code)
 	return 0;
 }
 
+static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
+{
+	(void)arg;
+	kprintf("sys_reboot: magic1=%x magic2=%x cmd=%x\n",
+	        (uint32_t)magic1, (uint32_t)magic2, (uint32_t)cmd);
+	if ((uint32_t)magic1 != 0xfee1dead) { kprintf("bad magic1\n"); return -22; }
+	if ((uint32_t)magic2 != 0x28121969 &&
+	    (uint32_t)magic2 != 0x05121996 &&
+	    (uint32_t)magic2 != 0x16041998 &&
+	    (uint32_t)magic2 != 0x20112000) { kprintf("bad magic2\n"); return -22; }
+	kprintf("reboot: system going down\n");
+	board_reset();
+	for (;;) __asm__ volatile("" ::: "memory");
+	return 0;
+}
+
+static long sys_syslog(int type, char *buf, int len)
+{
+	if ((type == 2 || type == 3 || type == 4) && buf && len > 0) {
+		uint64_t phys = (uint64_t)buddy_alloc(1);
+		if (!phys) return -12;
+		char *tmp = (char *)PHYS_TO_VIRT(phys);
+		size_t cap = (size_t)len < 8192 ? (size_t)len : 8192;
+		size_t n = kprintf_read_log(tmp, cap);
+		long r = copy_to_user(buf, tmp, n) == 0 ? (long)n : -14;
+		buddy_free(phys, 1);
+		return r;
+	}
+	if (type == 10)
+		return (long)kprintf_log_len();
+	return 0;
+}
+
+static long sys_utimensat(int dirfd, const char *path, const void *times, int flags)
+{
+	(void)times; (void)flags;
+	if (!path) return 0;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	vfs_stat_t st;
+	if (vfs_stat(kp, &st) != 0) return -2; /* ENOENT */
+	return 0;
+}
+
 static long sys_getpid(void)
 {
 	return (long)task_current()->pid;
@@ -264,13 +332,14 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	/* If it's a device mapping via mmap callback */
 	if (f->inode->fops && f->inode->fops->mmap) {
 		uint64_t file_off = off;
+		uint32_t dev_vmflags = vmflags | VM_NOCACHE;
 		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 			uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
 			if (!phys) {
 				/* Mapping failed, cleanup is complex here, but we return error */
 				return -22; /* EINVAL */
 			}
-			vm_map(p->vm, v, phys, vmflags);
+			vm_map(p->vm, v, phys, dev_vmflags);
 			file_off += PAGE_SIZE;
 		}
 		{
@@ -320,7 +389,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	return (long)va;
 }
 
-#define USER_STACK_TOP_   0x800000UL
+#define USER_STACK_TOP_   ARCH_USER_STACK_TOP
 #define USER_STACK_PAGES_ 8
 #define USER_MMAP_BASE_   0x10000000UL
 
@@ -406,6 +475,13 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
 		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
 	}
+	{
+		void *guard = buddy_alloc(0);
+		if (guard) {
+			memset((void *)PHYS_TO_VIRT(guard), 0, PAGE_SIZE);
+			vm_map(new_vm, USER_STACK_TOP_, (uint64_t)guard, VM_USER | VM_READ | VM_WRITE);
+		}
+	}
 
 	/* update process name */
 	const char *last_slash = kpath;
@@ -421,17 +497,25 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* close O_CLOEXEC file descriptors before exec */
 	if (p->fds) {
 		for (int i = 0; i < FD_MAX; i++) {
+			if (!(p->fds->cloexec_bitmap & (1ULL << i))) continue;
 			vfs_file_t *xf = fd_get(p->fds, i);
-			if (xf && (xf->flags & O_CLOEXEC)) {
-				fd_free(p->fds, i);
-				if (--xf->refcount == 0) {
-					if (xf->inode->fops && xf->inode->fops->close)
-						xf->inode->fops->close(xf);
-					kfree(xf);
-				}
+			if (!xf) { p->fds->cloexec_bitmap &= ~(1ULL << i); continue; }
+			fd_free(p->fds, i); /* clears cloexec_bitmap bit too */
+			if (--xf->refcount == 0) {
+				if (xf->inode->fops && xf->inode->fops->close)
+					xf->inode->fops->close(xf);
+				kfree(xf);
 			}
 		}
 	}
+
+	/* reset signal state: SIG_IGN stays, user handlers reset to SIG_DFL */
+	for (int i = 0; i < NSIG; i++) {
+		if (p->sig_actions[i].sa_handler != (void (*)(int))1 /* SIG_IGN */)
+			p->sig_actions[i] = (sigaction_t){0};
+	}
+	p->sig_mask    = 0;
+	p->sig_pending = 0;
 
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);
@@ -494,6 +578,13 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 
 	sp &= ~15ULL;
 
+	/* ensure sp is 16-byte aligned after pushing everything */
+    if ((argc + envc + 3) % 2 != 0) {
+		sp -= 8;
+		*(uint64_t *)sp = 0; /* padding */
+		/* padding */
+	}
+
 /* push one auxv key/value pair (16 bytes each, stack grows down) */
 #define PUSH_AUX(k, v) do { \
 	sp -= 16; \
@@ -523,6 +614,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	PUSH_AUX(3,  ei.phdr_va);              /* AT_PHDR */
 #undef PUSH_AUX
 
+    /* ensure sp is 16-byte aligned after pushing everything */
+    if ((argc + envc + 3) % 2 != 0) {
+        sp -= 8;
+        *(uint64_t *)sp = 0; /* padding */
+    }
+
 	/* envp[] */
 	sp -= 8; *(uint64_t *)sp = 0;
 	for (int j = envc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uenvp[j]; }
@@ -542,6 +639,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #elif defined(__x86_64__)
 	__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"(0U), "d"(0U));
 #endif
+
+	/* wake vfork parent — child now has its own address space */
+	proc_vfork_exec_notify();
 
 	return 0;
 }
@@ -584,9 +684,9 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 		if (copy_from_user(&new_set, set, sizeof(uint64_t)) != 0)
 			return -14;
 		
-		if (how == 0) p->sig_mask = new_set;      /* SIG_BLOCK */
-		else if (how == 1) p->sig_mask |= new_set;
-		else if (how == 2) p->sig_mask &= ~new_set;
+		if (how == 0) p->sig_mask |= new_set;        /* SIG_BLOCK */
+		else if (how == 1) p->sig_mask &= ~new_set;  /* SIG_UNBLOCK */
+		else if (how == 2) p->sig_mask = new_set;    /* SIG_SETMASK */
 		else return -22;
 		
 		p->sig_mask &= ~(1UL << (SIGKILL - 1));
@@ -618,29 +718,32 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	uint64_t usp     = ctx->sp;
 	ctx->elr         = *(uint64_t *)usp;
 	ctx->regs[30]    = *(uint64_t *)(usp + 8);
-	ctx->sp          = usp + 16;
+	p->sig_mask      = *(uint64_t *)(usp + 16);
+	ctx->sp          = usp + 32;
 #elif defined(__x86_64__)
-	/* Restore saved RIP from stack */
-	ctx->rip         = *(uint64_t *)ctx->rsp;
-	ctx->rsp        += 8;
+	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
+	 * Frame: [+0]=retaddr [+8]=old_mask [+16]=orig_rax [+24]=orig_rip [+32]=orig_rsp */
+	uint64_t base    = ctx->rsp;  /* frame_base + 8 */
+	p->sig_mask      = *(uint64_t *)(base +  0);
+	ctx->rax         = *(uint64_t *)(base +  8);
+	ctx->rip         = *(uint64_t *)(base + 16);
+	ctx->rsp         = *(uint64_t *)(base + 24);
 #endif
-	/* Unblock the signal that was being handled */
-	/* We don't track which signal was being handled per-frame, so unblock all
-	   non-permanently-masked signals that were auto-blocked */
-	p->sig_mask = 0;
 }
 
 static long sys_pipe2(int *pipefd, int flags)
 {
 	int kfds[2];
 	if (vfs_pipe(kfds) != 0) return -1;
-	/* propagate O_CLOEXEC and O_NONBLOCK to the file instances */
-	if (flags & (O_CLOEXEC | O_NONBLOCK)) {
-		process_t *p = task_current();
+	process_t *p = task_current();
+	if (flags & O_NONBLOCK) {
 		for (int i = 0; i < 2; i++) {
 			vfs_file_t *f = fd_get(p->fds, kfds[i]);
-			if (f) f->flags |= flags & (O_CLOEXEC | O_NONBLOCK);
+			if (f) f->flags |= O_NONBLOCK;
 		}
+	}
+	if (flags & O_CLOEXEC) {
+		p->fds->cloexec_bitmap |= (1ULL << kfds[0]) | (1ULL << kfds[1]);
 	}
 	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
 	return 0;
@@ -689,6 +792,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 			if (!any_alive) return -10; /* ECHILD */
 			if (wnohang)    return 0;
 			task_sleep();
+			if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
 		}
 	}
 
@@ -698,6 +802,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	while (child->state != PROC_DEAD) {
 		if (wnohang) return 0;
 		task_sleep();
+		if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
 	}
 
 	child->reaped = 1;
@@ -1144,9 +1249,10 @@ static long sys_dup(int oldfd)
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, oldfd);
 	if (!f) return -9;
-	f->refcount++;
-	int newfd = fd_alloc(p->fds, f);
-	if (newfd < 0) { f->refcount--; return -24; }
+	int newfd = fd_alloc(p->fds, f); /* fd_alloc increments refcount */
+	if (newfd < 0) return -24;
+	/* dup clears cloexec on the new fd */
+	p->fds->cloexec_bitmap &= ~(1ULL << newfd);
 	return newfd;
 }
 
@@ -1161,17 +1267,20 @@ static long sys_dup2(int oldfd, int newfd)
 	if (p->fds->bitmap & (1ULL << newfd)) vfs_close(newfd);
 	src->refcount++;
 	p->fds->files[newfd] = src;
-	p->fds->bitmap |= (1ULL << newfd);
+	p->fds->bitmap       |=  (1ULL << newfd);
+	p->fds->cloexec_bitmap &= ~(1ULL << newfd); /* dup2 always clears cloexec */
 	return newfd;
 }
 
 static long sys_dup3(int oldfd, int newfd, int flags)
 {
 	long r = sys_dup2(oldfd, newfd);
-	if (r >= 0 && (flags & O_CLOEXEC)) {
+	if (r >= 0) {
 		process_t *p = task_current();
-		vfs_file_t *f = fd_get(p->fds, newfd);
-		if (f) f->flags |= O_CLOEXEC;
+		if (flags & O_CLOEXEC)
+			p->fds->cloexec_bitmap |=  (1ULL << newfd);
+		else
+			p->fds->cloexec_bitmap &= ~(1ULL << newfd);
 	}
 	return r;
 }
@@ -1198,21 +1307,23 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 				f->refcount++;
 				p->fds->files[i] = f;
 				p->fds->bitmap |= (1ULL << i);
+				if (cmd == F_DUPFD_CLOEXEC)
+					p->fds->cloexec_bitmap |= (1ULL << i);
 				return i;
 			}
 		}
 		return -24;
 	}
 	case F_GETFD: {
-		vfs_file_t *f = fd_get(p->fds, fd);
-		if (!f) return -9;
-		return (f->flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+		if (fd < 0 || fd >= FD_MAX) return -9;
+		if (!(p->fds->bitmap & (1ULL << fd))) return -9;
+		return (p->fds->cloexec_bitmap & (1ULL << fd)) ? FD_CLOEXEC : 0;
 	}
 	case F_SETFD: {
-		vfs_file_t *f = fd_get(p->fds, fd);
-		if (!f) return -9;
-		if (arg & FD_CLOEXEC) f->flags |= O_CLOEXEC;
-		else                  f->flags &= ~O_CLOEXEC;
+		if (fd < 0 || fd >= FD_MAX) return -9;
+		if (!(p->fds->bitmap & (1ULL << fd))) return -9;
+		if (arg & FD_CLOEXEC) p->fds->cloexec_bitmap |=  (1ULL << fd);
+		else                  p->fds->cloexec_bitmap &= ~(1ULL << fd);
 		return 0;
 	}
 	case F_GETFL: {
@@ -1282,10 +1393,22 @@ static long sys_geteuid(void) { return (long)task_current()->uid; }
 static long sys_getgid(void)  { return (long)task_current()->gid; }
 static long sys_getegid(void) { return (long)task_current()->gid; }
 static long sys_getppid(void) { return (long)task_current()->ppid; }
-static long sys_getpgrp(void) { return (long)task_current()->pid; }
-static long sys_getpgid(pid_t pid) { (void)pid; return (long)task_current()->pid; }
-static long sys_setsid(void)  { return (long)task_current()->pid; }
-static long sys_setpgid(pid_t pid, pid_t pgid) { (void)pid; (void)pgid; return 0; }
+static long sys_getpgrp(void) { return (long)task_current()->pgrp; }
+static long sys_getpgid(pid_t pid) {
+	process_t *p = pid ? proc_find(pid) : task_current();
+	return p ? (long)p->pgrp : -3;
+}
+static long sys_setsid(void) {
+	process_t *p = task_current();
+	p->pgrp = (pid_t)p->pid;
+	return (long)p->pid;
+}
+static long sys_setpgid(pid_t pid, pid_t pgid) {
+	process_t *p = pid ? proc_find(pid) : task_current();
+	if (!p) return -3;
+	p->pgrp = pgid ? pgid : (pid_t)p->pid;
+	return 0;
+}
 static long sys_setuid(uid_t uid) { task_current()->uid = uid; return 0; }
 static long sys_setgid(gid_t gid) { task_current()->gid = gid; return 0; }
 static long sys_umask(mode_t mask)
@@ -1312,10 +1435,10 @@ static long sys_uname(linux_utsname_t *uts)
 	if (!uts) return -14;
 	linux_utsname_t k;
 	memset(&k, 0, sizeof(k));
-	memcpy(k.sysname,    "Linux",   6);
+	memcpy(k.sysname,    "Ranix",   6);
 	memcpy(k.nodename,   "ranix",   6);
-	memcpy(k.release,    "6.1.0",   6);
-	memcpy(k.version,    "Ranix",   6);
+	memcpy(k.release,    "1.0.0",   6);
+	memcpy(k.version,    "#1 SMP",  7);
 #if defined(__x86_64__)
 	memcpy(k.machine,    "x86_64",  7);
 #else
@@ -1869,6 +1992,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_DUP3:    ret = sys_dup3((int)arg0, (int)arg1, (int)arg2); break;
 	case SYS_ARCH_FCNTL:   ret = sys_fcntl((int)arg0, (int)arg1, (uint64_t)arg2); break;
 	case SYS_ARCH_PIPE2:   ret = sys_pipe2((int*)arg0, (int)arg1); break;
+#if defined(__x86_64__)
+	case SYS_ARCH_PIPE:    ret = sys_pipe2((int*)arg0, 0); break;
+#endif
 	case SYS_ARCH_EPOLL_CREATE1: ret = sys_epoll_create1((int)arg0); break;
 	case SYS_ARCH_EPOLL_CTL:     ret = sys_epoll_ctl((int)arg0, (int)arg1, (int)arg2, (linux_epoll_event_t*)arg3); break;
 	case SYS_ARCH_EPOLL_PWAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, (void*)arg4); break;
@@ -1909,6 +2035,9 @@ void syscall_handle(arch_context_t *ctx)
 	/* ── process ─────────────────────────────────────────── */
 	case SYS_ARCH_EXIT:        ret = sys_exit((int)arg0); break;
 	case SYS_ARCH_EXIT_GROUP:  ret = sys_exit((int)arg0); break;
+	case SYS_ARCH_REBOOT:      ret = sys_reboot((int)arg0, (int)arg1, (int)arg2, (void*)arg3); break;
+	case SYS_ARCH_SYSLOG:      ret = sys_syslog((int)arg0, (char*)arg1, (int)arg2); break;
+	case SYS_ARCH_UTIMENSAT:   ret = sys_utimensat((int)arg0, (const char*)arg1, (const void*)arg2, (int)arg3); break;
 	case SYS_ARCH_GETPID:      ret = sys_getpid(); break;
 	case SYS_ARCH_GETPPID:     ret = sys_getppid(); break;
 	case SYS_ARCH_GETUID:      ret = sys_getuid(); break;
