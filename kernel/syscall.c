@@ -1623,8 +1623,8 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 		return copy_to_user((void *)(uintptr_t)arg, &ws, sizeof(ws));
 	}
 	case TCGETS: {
-		uint8_t termios[60]; memset(termios, 0, 60);
-		return copy_to_user((void *)(uintptr_t)arg, termios, 60);
+		uint8_t termios[36]; memset(termios, 0, 36);
+		return copy_to_user((void *)(uintptr_t)arg, termios, 36);
 	}
 	case TCSETS: case TCSETSW: case TCSETSF: return 0;
 	case TIOCGPGRP: { int pgid = (int)task_current()->pid; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
