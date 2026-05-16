@@ -1,6 +1,7 @@
 #include <kernel/fs/mbr.h>
 #include <kernel/block.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
@@ -34,10 +35,10 @@ typedef struct {
 	uint64_t        start;
 } part_priv_t;
 
-#define MAX_PARTS 8
-static block_device_t part_devs[MAX_PARTS];
-static part_priv_t    part_privs[MAX_PARTS];
-static int            part_cnt = 0;
+static block_device_t *part_devs;
+static part_priv_t    *part_privs;
+static int             part_cnt = 0;
+static int             part_cap = 0;
 
 static int part_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 {
@@ -71,7 +72,20 @@ int mbr_probe(block_device_t *dev)
 	for (int i = 0; i < MBR_PARTS; i++) {
 		mbr_entry_t *e = &mbr->parts[i];
 		if (e->lba_size == 0 || e->type == 0) continue;
-		if (part_cnt >= MAX_PARTS) break;
+		if (part_cnt >= part_cap) {
+			int nc = part_cap ? part_cap * 2 : 8;
+			block_device_t *nd = kmalloc((size_t)nc * sizeof(block_device_t));
+			part_priv_t    *np = kmalloc((size_t)nc * sizeof(part_priv_t));
+			if (!nd || !np) { kfree(nd); kfree(np); break; }
+			if (part_devs) {
+				memcpy(nd, part_devs,  (size_t)part_cnt * sizeof(block_device_t));
+				memcpy(np, part_privs, (size_t)part_cnt * sizeof(part_priv_t));
+				/* fix up priv pointers after move */
+				for (int j = 0; j < part_cnt; j++) nd[j].priv = &np[j];
+				kfree(part_devs); kfree(part_privs);
+			}
+			part_devs = nd; part_privs = np; part_cap = nc;
+		}
 
 		part_priv_t   *pp  = &part_privs[part_cnt];
 		block_device_t *pd = &part_devs[part_cnt];
