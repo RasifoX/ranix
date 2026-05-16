@@ -77,3 +77,15 @@ void board_drivers_register(void)
 }
 
 board_config_t *board_get_config(void) { return &config; }
+
+#define PM_BASE     PHYS_TO_VIRT(0xFE100000UL)
+#define PM_RSTC     (*(volatile uint32_t *)(PM_BASE + 0x1C))
+#define PM_WDOG     (*(volatile uint32_t *)(PM_BASE + 0x24))
+#define PM_PASSWORD 0x5A000000U
+
+void board_reset(void)
+{
+	PM_WDOG = PM_PASSWORD | 1U;
+	PM_RSTC = PM_PASSWORD | 0x00000020U; /* WRCFG_FULL_RESET */
+	for (;;) __asm__ volatile("wfe");
+}

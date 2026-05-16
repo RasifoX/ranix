@@ -5,10 +5,15 @@
 #define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
 #define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
 
+/* MMIO window for physical addresses >= 2GB that overflow PHYS_TO_VIRT.
+ * Maps phys 0..128GB → virt MMIO_VIRT_BASE..MMIO_VIRT_BASE+128GB */
+#define MMIO_VIRT_BASE  0xFFFF900000000000UL
+#define MMIO_TO_VIRT(p) (MMIO_VIRT_BASE + (uint64_t)(p))
+
 /* User space layout */
 #define ARCH_USER_CODE_BASE   0x400000UL
 #define ARCH_USER_STACK_TOP   0x800000UL
-#define ARCH_USER_STACK_PAGES 2
+#define ARCH_USER_STACK_PAGES 16
 #define ARCH_USER_MMAP_BASE   0x10000000UL
 
 #define PTE_VALID   (1UL << 0)   /* present */

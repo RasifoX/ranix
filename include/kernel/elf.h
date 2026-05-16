@@ -12,6 +12,7 @@
 #define EM_X86_64    62
 #define EM_AARCH64   183
 #define PT_LOAD      1
+#define PT_INTERP    3
 
 typedef struct {
 	uint8_t  magic[4];

@@ -13,6 +13,8 @@ typedef struct page {
 	uint32_t flags;
 } page_t;
 
+#define PG_MANAGED  (1 << 0)
+
 extern page_t *mem_map;
 
 uint64_t pmm_init(uint64_t mem_start, uint64_t mem_limit);

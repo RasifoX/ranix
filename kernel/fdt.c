@@ -162,8 +162,9 @@ static void parse_info(void)
     if (val) {
         const uint8_t *p = (const uint8_t *)val;
         uint32_t entry_size = (addr_cells + size_cells) * 4;
-        uint64_t total = 0;
         int first = 1;
+
+        _info.num_mem_regions = 0;
 
         while (len >= entry_size) {
             uint64_t base, size;
@@ -179,14 +180,20 @@ static void parse_info(void)
                 size = (uint64_t)be32(p);
             p += size_cells * 4;
 
-            if (first) {
-                _info.mem_base = base;
-                first = 0;
+            if (size > 0) {
+                if (first) {
+                    _info.mem_base = base;
+                    _info.mem_size = size;
+                    first = 0;
+                }
+                if (_info.num_mem_regions < FDT_MAX_MEM_REGIONS) {
+                    _info.mem_regions[_info.num_mem_regions].base = base;
+                    _info.mem_regions[_info.num_mem_regions].size = size;
+                    _info.num_mem_regions++;
+                }
             }
-            total += size;
             len -= entry_size;
         }
-        _info.mem_size = total;
     }
 
     /* count cpus by walking struct block for /cpus/cpu@N nodes */
@@ -248,8 +255,12 @@ int fdt_init(void *dtb_addr)
 
     parse_info();
 
+    uint64_t total_ram = 0;
+    for (int i = 0; i < _info.num_mem_regions; i++)
+        total_ram += _info.mem_regions[i].size;
+    if (total_ram == 0) total_ram = _info.mem_size;
     kprintf("fdt: %s  RAM %d MB  CPUs %d\n",
-            _info.model, (int)(_info.mem_size >> 20), (int)_info.num_cpus);
+            _info.model, (int)(total_ram >> 20), (int)_info.num_cpus);
 
     return 0;
 }

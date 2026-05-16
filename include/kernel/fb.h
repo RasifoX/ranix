@@ -11,6 +11,10 @@ typedef struct {
 	u32   depth;
 	void *fb;
 	u32   fb_size;
+	/* RGB channel bit positions (from framebuffer info) */
+	u8    red_shift;
+	u8    green_shift;
+	u8    blue_shift;
 	/* platform scroll hook: pan virtual framebuffer; NULL = software fallback */
 	int (*set_virt_offset)(u32 x, u32 y);
 } fb_info_t;

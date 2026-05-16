@@ -24,6 +24,15 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
 	if (hdr->phoff == 0 || hdr->phnum == 0) return -1;
 
 	const uint8_t *bytes = data;
+
+	/* Reject dynamically linked binaries — no dynamic linker support */
+	for (uint16_t i = 0; i < hdr->phnum; i++) {
+		if (hdr->phoff + (i + 1) * sizeof(elf64_phdr_t) > len) return -1;
+		const elf64_phdr_t *ph =
+			(const elf64_phdr_t *)(bytes + hdr->phoff + i * sizeof(elf64_phdr_t));
+		if (ph->type == PT_INTERP) return -1;
+	}
+
 	uint64_t load_end  = 0;
 	uint64_t load_bias = 0;
 

@@ -14,6 +14,8 @@ static int  kbd_head = 0;
 static int  kbd_tail = 0;
 
 static int shift_pressed = 0;
+static int ctrl_pressed  = 0;
+static int e0_prefix     = 0;
 
 /* Scancode set 1 ASCII mappings */
 static const char map_lower[] = {
@@ -30,32 +32,61 @@ static const char map_upper[] = {
     'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' '
 };
 
+static void push_str(const char *s)
+{
+    while (*s) {
+        int next = (kbd_head + 1) % KBD_BUF_SIZE;
+        if (next == kbd_tail) break;
+        kbd_buffer[kbd_head] = *s++;
+        kbd_head = next;
+    }
+}
+
 static void kbd_irq_handler(void)
 {
     uint8_t sc = inb(PS2_DATA_PORT);
 
-    int pressed = (sc & 0x80) ? 0 : 1;
-    uint16_t keycode = sc & 0x7F;
+    if (sc == 0xE0) { e0_prefix = 1; return; }
 
-    /* Report raw event to input_core */
-    input_report_key(keycode, pressed);
+    if (e0_prefix) {
+        e0_prefix = 0;
+        input_report_key(sc & 0x7F, !(sc & 0x80));
+        input_sync();
+        if (!(sc & 0x80)) {
+            switch (sc) {
+            case 0x48: push_str("\033[A"); break; /* Up    */
+            case 0x50: push_str("\033[B"); break; /* Down  */
+            case 0x4D: push_str("\033[C"); break; /* Right */
+            case 0x4B: push_str("\033[D"); break; /* Left  */
+            case 0x47: push_str("\033[H"); break; /* Home  */
+            case 0x4F: push_str("\033[F"); break; /* End   */
+            case 0x49: push_str("\033[5~"); break; /* PgUp */
+            case 0x51: push_str("\033[6~"); break; /* PgDn */
+            case 0x53: push_str("\033[3~"); break; /* Del  */
+            }
+        }
+        return;
+    }
+
+    int pressed = (sc & 0x80) ? 0 : 1;
+    input_report_key(sc & 0x7F, pressed);
     input_sync();
 
-    if (sc == 0x2A || sc == 0x36) { /* left shift or right shift pressed */
-        shift_pressed = 1;
-        return;
-    }
-    if (sc == 0xAA || sc == 0xB6) { /* left shift or right shift released */
-        shift_pressed = 0;
-        return;
-    }
+    if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; return; }
+    if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; return; }
+    if (sc == 0x1D) { ctrl_pressed = 1; return; }
+    if (sc == 0x9D) { ctrl_pressed = 0; return; }
 
-    if (sc & 0x80) { /* break code (release) */
-        return;
-    }
+    if (sc & 0x80) return;
 
     if (sc < sizeof(map_lower)) {
-        char c = shift_pressed ? map_upper[sc] : map_lower[sc];
+        char c;
+        if (ctrl_pressed) {
+            char base = map_lower[sc];
+            c = (base >= 'a' && base <= 'z') ? (char)(base - 'a' + 1) : 0;
+        } else {
+            c = shift_pressed ? map_upper[sc] : map_lower[sc];
+        }
         if (c) {
             int next = (kbd_head + 1) % KBD_BUF_SIZE;
             if (next != kbd_tail) {

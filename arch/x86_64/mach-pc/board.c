@@ -24,10 +24,11 @@ void board_early_init(void)
 	multiboot2_parse(_dtb_ptr, &config.mem_size);
 }
 
+extern int mb2_get_fb(fb_info_t *out);
+
 int board_fb_alloc(fb_info_t *out)
 {
-	(void)out;
-	return -1;
+	return mb2_get_fb(out);
 }
 
 #include <drivers/input/ps2.h>
@@ -52,3 +53,31 @@ void board_drivers_register(void)
 }
 
 board_config_t *board_get_config(void) { return &config; }
+
+static uint8_t inb_port(uint16_t port)
+{
+	uint8_t val;
+	__asm__ volatile("inb %1, %0" : "=a"(val) : "Nd"(port));
+	return val;
+}
+
+static void outb_port(uint16_t port, uint8_t val)
+{
+	__asm__ volatile("outb %0, %1" :: "a"(val), "Nd"(port));
+}
+
+void board_reset(void)
+{
+	/* Linux-style cf9 hard reset: read-modify-write with delay */
+	uint8_t cf9 = inb_port(0xcf9) & ~6;
+	outb_port(0xcf9, cf9 | 2);   /* assert RSTIN# */
+	for (volatile int i = 0; i < 100000; i++) __asm__ volatile("pause");
+	outb_port(0xcf9, cf9 | 6);   /* assert RSTIN# + HRST */
+	for (volatile int i = 0; i < 100000; i++) __asm__ volatile("pause");
+	/* Fallback: keyboard controller */
+	outb_port(0x64, 0xFE);
+	/* Last resort: triple fault */
+	static const uint8_t null_idt[10] = {0};
+	__asm__ volatile("cli; lidt %0; int3" :: "m"(null_idt) : "memory");
+	for (;;) __asm__ volatile("hlt");
+}

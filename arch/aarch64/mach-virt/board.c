@@ -60,3 +60,16 @@ void board_drivers_register(void)
 }
 
 board_config_t *board_get_config(void) { return &config; }
+
+
+void board_reset(void)
+{
+	/* PSCI SYSTEM_RESET (0x84000009) */
+	__asm__ volatile(
+		"movz x0, #0x8400, lsl #16\n"
+		"movk x0, #0x9\n"
+		"hvc #0\n"
+		::: "x0"
+	);
+	for (;;) __asm__ volatile("wfe");
+}

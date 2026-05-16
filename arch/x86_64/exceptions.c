@@ -47,8 +47,8 @@ void exc_dispatch(arch_context_t *ctx)
 	/* Ring-3 fault — kill the process, don't panic the kernel */
 	if ((ctx->cs & 3) == 3) {
 		process_t *p = task_current();
-		kprintf("segfault: pid=%d (%s) RIP=0x%lx vec=%d\n",
-		        (int)p->pid, p->name, ctx->rip, (int)ctx->vector);
+		kprintf("segfault: pid=%d (%s) RIP=0x%lx vec=%d err=0x%lx\n",
+		        (int)p->pid, p->name, ctx->rip, (int)ctx->vector, ctx->error_code);
 		if (ctx->vector == 14)
 			kprintf("  CR2=0x%lx\n", read_cr2());
 		task_exit();

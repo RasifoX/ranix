@@ -41,6 +41,7 @@ uint64_t page_to_paddr(page_t *page)
 
 static void push(int ord, uint64_t addr)
 {
+	if (addr >= paddr(_npages)) kpanic("buddy: push corrupted addr");
 	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
 	n->next = free_list[ord];
 	free_list[ord] = (struct node *)addr;
@@ -49,6 +50,7 @@ static void push(int ord, uint64_t addr)
 static uint64_t pop(int ord)
 {
 	uint64_t addr = (uint64_t)free_list[ord];
+	if (addr >= paddr(_npages)) kpanic("buddy: pop corrupted addr");
 	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
 	free_list[ord] = n->next;
 	return addr;
@@ -58,10 +60,12 @@ static void list_remove(int ord, uint64_t addr)
 {
 	struct node **p = &free_list[ord];
 	while (*p && (uint64_t)*p != addr) {
+		if ((uint64_t)*p >= paddr(_npages)) kpanic("buddy: list_remove corrupted addr");
 		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
 		p = &n->next;
 	}
 	if (*p) {
+		if ((uint64_t)*p >= paddr(_npages)) kpanic("buddy: list_remove corrupted addr");
 		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
 		*p = n->next;
 	}
@@ -128,7 +132,7 @@ void *buddy_alloc(int ord)
 		uint64_t idx = (addr + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
 		if (idx < _npages) {
 			mem_map[idx].refcount = 1;
-			mem_map[idx].flags = 0;
+			mem_map[idx].flags &= PG_MANAGED;
 		}
 	}
 
@@ -140,6 +144,11 @@ void buddy_add_region(uint64_t addr, uint64_t size)
 {
 	uint64_t end = (addr + size) & ~(uint64_t)(PAGE_SIZE - 1);
 	addr = (addr + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+	for (uint64_t a = addr; a < end; a += PAGE_SIZE) {
+		uint64_t idx = pidx(a);
+		if (idx < _npages) mem_map[idx].flags |= PG_MANAGED;
+	}
 
 	while (addr < end) {
 		int o = BUDDY_MAX_ORDER - 1;
