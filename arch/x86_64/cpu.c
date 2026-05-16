@@ -24,15 +24,8 @@ extern void syscall_entry(void);
 static cpu_context_t early_cpu_ctx;
 static uint8_t early_irq_stack[4096] __attribute__((aligned(16)));
 
-void arch_user_access_begin(void)
-{
-	__asm__ volatile("stac" ::: "memory");
-}
-
-void arch_user_access_end(void)
-{
-	__asm__ volatile("clac" ::: "memory");
-}
+void arch_user_access_begin(void) { __asm__ volatile("" ::: "memory"); }
+void arch_user_access_end(void)   { __asm__ volatile("" ::: "memory"); }
 
 void arch_set_user_kstack(uint64_t kstack_top)
 {
