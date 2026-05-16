@@ -2,7 +2,7 @@
 #include <asm/io.h>
 #include <kernel/driver.h>
 #include <kernel/kprintf.h>
-#include <kernel/sched.h>
+#include <kernel/proc.h>
 
 #define PIT_CH0   0x40
 #define PIT_CMD   0x43
@@ -14,11 +14,6 @@ void pit_handler(void)
 {
 	ticks++;
 	sched_tick();
-	for (int i = 0; i < task_count(); i++) {
-		task_t *t = task_get(i);
-		if (t && t->state == TASK_SLEEPING)
-			task_wake(t);
-	}
 }
 
 void pit_init(uint32_t hz)
