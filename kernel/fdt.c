@@ -3,6 +3,7 @@
 #include <kernel/lib/string.h>
 
 static void *_dtb;
+static uint64_t _dtb_phys;
 static fdt_info_t _info;
 static int _initialized;
 
@@ -233,6 +234,7 @@ int fdt_init(void *dtb_addr)
     	return -1;
     }
     _dtb = dtb_addr;
+    _dtb_phys = (uint64_t)(uintptr_t)dtb_addr;
     _initialized = 1;
 
     parse_info();
@@ -245,6 +247,19 @@ int fdt_init(void *dtb_addr)
 
 fdt_info_t *fdt_get_info(void) { return &_info; }
 void       *fdt_get_base(void) { return _dtb; }
+uint64_t    fdt_get_phys(void) { return _dtb_phys; }
+
+/* Call after mmu_init to remap _dtb from physical to virtual address */
+void fdt_remap(void)
+{
+    if (!_dtb) return;
+    /* Only remap if still using physical address (< 0xffff...0) */
+    if ((uint64_t)(uintptr_t)_dtb < 0xffff000000000000ULL) {
+#if defined(__aarch64__)
+        _dtb = (void *)((uint64_t)(uintptr_t)_dtb + 0xFFFFFF8000000000ULL);
+#endif
+    }
+}
 
 void fdt_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
 {
@@ -311,4 +326,60 @@ uint32_t fdt_get_size(void)
 {
     if (!_dtb) return 0;
     return be32(&((fdt_header_t *)_dtb)->totalsize);
+}
+
+void fdt_foreach_node(const char *prefix, void (*cb)(uint64_t, uint64_t, void *), void *ud)
+{
+    if (!_initialized || !_dtb) return;
+
+    uint32_t addr_cells = 1, size_cells = 1;
+    uint32_t len;
+    const void *v;
+    v = fdt_get_prop("/", "#address-cells", &len);
+    if (v && len >= 4) addr_cells = be32(v);
+    v = fdt_get_prop("/", "#size-cells", &len);
+    if (v && len >= 4) size_cells = be32(v);
+
+    fdt_header_t *hdr  = (fdt_header_t *)_dtb;
+    uint8_t      *stru = (uint8_t *)_dtb + be32(&hdr->off_dt_struct);
+    char         *strs = (char *)_dtb + be32(&hdr->off_dt_strings);
+    uint32_t      ssz  = be32(&hdr->size_dt_struct);
+    uint32_t      off  = 0;
+    int depth = 0, in_node = 0;
+    uint32_t entry_sz = (addr_cells + size_cells) * 4;
+
+    while (off < ssz) {
+        uint32_t token = be32(stru + off); off += 4;
+        switch (token) {
+        case FDT_BEGIN_NODE: {
+            const char *name = (const char *)(stru + off);
+            uint32_t nlen = strlen(name) + 1;
+            off += (nlen + 3) & ~3u;
+            if (depth == 1 && node_name_match(name, prefix)) in_node = 1;
+            depth++;
+            break;
+        }
+        case FDT_END_NODE:
+            depth--;
+            if (in_node && depth <= 1) in_node = 0;
+            break;
+        case FDT_PROP: {
+            uint32_t plen    = be32(stru + off); off += 4;
+            uint32_t nameoff = be32(stru + off); off += 4;
+            const void *val  = stru + off;
+            off += (plen + 3) & ~3u;
+            if (in_node && strcmp(strs + nameoff, "reg") == 0 && plen >= entry_sz) {
+                const uint8_t *p = (const uint8_t *)val;
+                uint64_t base = (addr_cells == 2) ? be64(p) : (uint64_t)be32(p);
+                p += addr_cells * 4;
+                uint64_t size = (size_cells == 2) ? be64(p) : (uint64_t)be32(p);
+                if (size > 0) cb(base, size, ud);
+            }
+            break;
+        }
+        case FDT_NOP: break;
+        case FDT_END: return;
+        default: return;
+        }
+    }
 }
