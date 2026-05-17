@@ -90,3 +90,5 @@ void board_reset(void)
 	);
 	for (;;) __asm__ volatile("wfe");
 }
+
+void board_get_reserved(uint64_t *base, uint32_t *size) { *base = 0; *size = 0; }

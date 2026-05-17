@@ -26,6 +26,7 @@ void board_early_init(void)
 
 extern int mb2_get_fb(fb_info_t *out);
 extern void mb2_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud);
+extern void mb2_get_reserved(uint64_t *base, uint32_t *size);
 
 int board_fb_alloc(fb_info_t *out)
 {
@@ -58,6 +59,11 @@ board_config_t *board_get_config(void) { return &config; }
 void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
 {
     mb2_foreach_mem_region(cb, ud);
+}
+
+void board_get_reserved(uint64_t *base, uint32_t *size)
+{
+    mb2_get_reserved(base, size);
 }
 
 static uint8_t inb_port(uint16_t port)
