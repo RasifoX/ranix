@@ -344,6 +344,114 @@ static vfs_inode_t *procfs_inode_file(int pid, int type)
 	return in;
 }
 
+/* ── /proc/<pid>/fd/<n> symlink ──────────────────────────────── */
+
+typedef struct { int pid; int fd_n; } procfs_fdlink_priv_t;
+
+static int procfs_fdlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+{
+	procfs_fdlink_priv_t *pr = in->priv;
+	if (!pr) return -1;
+	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
+	if (!p || !p->fds) return -1;
+	vfs_file_t *f = fd_get(p->fds, pr->fd_n);
+	if (!f || !f->inode) return -1;
+	const char *path = f->path[0] ? f->path : "anon";
+	size_t n = strlen(path);
+	if (n + 1 > sz) return -1;
+	memcpy(buf, path, n + 1);
+	return 0;
+}
+
+static vfs_iops_t procfs_fdlink_iops = { .readlink = procfs_fdlink_readlink };
+
+static vfs_inode_t *procfs_fdlink_inode(int pid, int fd_n)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_next++;
+	in->mode     = S_IFLNK | 0777;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->iops     = &procfs_fdlink_iops;
+	procfs_fdlink_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	pr->pid = pid; pr->fd_n = fd_n;
+	in->priv = pr;
+	return in;
+}
+
+/* ── /proc/<pid>/fd directory ────────────────────────────────── */
+
+typedef struct { int pid; } procfs_fddir_priv_t;
+
+static vfs_inode_t *procfs_fddir_lookup(vfs_inode_t *dir, const char *name)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	int fd_n = 0; const char *s = name;
+	if (!*s) return NULL;
+	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
+	if (*s) return NULL;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p || !p->fds) return NULL;
+	if (!fd_get(p->fds, fd_n)) return NULL;
+	return procfs_fdlink_inode(pid, fd_n);
+}
+
+static int procfs_fddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p || !p->fds) return -1;
+	uint32_t found = 0;
+	for (int i = 0; i < p->fds->cap; i++) {
+		if (!fd_get(p->fds, i)) continue;
+		if (found == idx) {
+			out->ino      = proc_ino_next;
+			out->mode     = S_IFLNK | 0777;
+			out->next_off = idx + 1;
+			char tmp[12]; int ti = 0;
+			int v = i;
+			if (v == 0) { tmp[ti++] = '0'; } else {
+				char rev[12]; int ri = 0;
+				while (v) { rev[ri++] = '0' + v % 10; v /= 10; }
+				for (int j = ri - 1; j >= 0; j--) tmp[ti++] = rev[j];
+			}
+			memcpy(out->name, tmp, (size_t)ti);
+			out->name[ti] = '\0';
+			return 0;
+		}
+		found++;
+	}
+	return -1;
+}
+
+static vfs_iops_t procfs_fddir_iops = {
+	.lookup  = procfs_fddir_lookup,
+	.readdir = procfs_fddir_readdir,
+};
+
+static vfs_inode_t *procfs_fddir_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_next++;
+	in->mode     = S_IFDIR | 0555;
+	in->nlink    = 2;
+	in->refcount = 1;
+	in->iops     = &procfs_fddir_iops;
+	in->fops     = &procfs_dir_fops;
+	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid = pid;
+	in->priv = pp;
+	return in;
+}
+
 /* ── pid-dir iops ────────────────────────────────────────────── */
 
 typedef struct {
@@ -355,6 +463,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 	procfs_piddir_priv_t *pp = dir->priv;
 	if (!pp) return NULL;
 	int pid = pp->pid;
+	if (strcmp(name, "fd") == 0)
+		return procfs_fddir_inode(pid);
 	for (int i = 0; i < PID_FILES_N; i++) {
 		if (strcmp(pid_files[i].name, name) == 0)
 			return procfs_inode_file(pid, pid_files[i].type);
@@ -364,15 +474,22 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 
 static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= PID_FILES_N) return -1;
+	if (idx >= (uint32_t)(PID_FILES_N + 1)) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	out->ino      = 0x8000 + (uint64_t)pid * 100 + idx;
-	out->mode     = S_IFREG | 0444;
-	out->next_off = idx + 1;
-	int nlen = 0; const char *n = pid_files[idx].name;
-	while (n[nlen]) nlen++;
-	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	if (idx < PID_FILES_N) {
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + idx;
+		out->mode     = S_IFREG | 0444;
+		out->next_off = idx + 1;
+		const char *n = pid_files[idx].name;
+		int nlen = 0; while (n[nlen]) nlen++;
+		memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	} else {
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + 99;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = idx + 1;
+		memcpy(out->name, "fd", 3);
+	}
 	return 0;
 }
 

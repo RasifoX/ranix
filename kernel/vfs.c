@@ -442,6 +442,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	f->inode    = inode;
 	f->flags    = flags & ~O_CLOEXEC; /* cloexec is per-fd, stored in fd_table */
 	f->refcount = 0; /* incremented by fd_alloc */
+	{ size_t pl = strlen(path); if (pl < sizeof(f->path)) memcpy(f->path, path, pl + 1); }
 
 	if (inode->fops && inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
 		kfree(f);
