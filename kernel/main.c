@@ -43,7 +43,7 @@ static void add_range(uint64_t base, uint64_t end,
 struct _pmm_ctx {
 	uint64_t  free_start;
 	uint64_t  clip_lo, clip_hi;
-	uint64_t  exc[3][2];
+	uint64_t  exc[4][2];
 	int       n_exc;
 	uint64_t  total_free;
 };
@@ -81,6 +81,16 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		uint64_t fb_end = (fb_phys + fb_size + PAGE_SIZE - 1) & PAGE_MASK;
 		if (fb_end > start) start = fb_end;
 	}
+	/* Board-specific reserved region (e.g. multiboot2 info on x86_64) must be
+	 * skipped before buddy_init writes metadata into that memory. */
+	{
+		uint64_t rsv_phys; uint32_t rsv_sz;
+		board_get_reserved(&rsv_phys, &rsv_sz);
+		if (rsv_phys && rsv_sz) {
+			uint64_t rsv_end = (rsv_phys + rsv_sz + PAGE_SIZE - 1) & PAGE_MASK;
+			if (rsv_end > start) start = rsv_end;
+		}
+	}
 
 	struct _max_ctx mc = { cfg->mem_base + cfg->mem_size, 1 };
 	board_foreach_mem_region(_pmm_max, &mc);
@@ -89,7 +99,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	uint64_t meta_size = pmm_init(start, max_limit);
 	uint64_t free_start = start + meta_size;
 
-	uint64_t exc[3][2] = {0};
+	uint64_t exc[4][2] = {0};
 	int n_exc = 0;
 	if (fb_phys && fb_phys < max_limit) {
 		exc[n_exc][0] = fb_phys;
@@ -110,6 +120,15 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 			n_exc++;
 		}
 	}
+	{
+		uint64_t rsv_phys; uint32_t rsv_sz;
+		board_get_reserved(&rsv_phys, &rsv_sz);
+		if (rsv_phys && rsv_sz && rsv_phys < max_limit) {
+			exc[n_exc][0] = rsv_phys;
+			exc[n_exc][1] = (rsv_phys + rsv_sz + PAGE_SIZE - 1) & PAGE_MASK;
+			n_exc++;
+		}
+	}
 	/* sort exclusions by start address (bubble sort, 3 elements max) */
 	for (int i = 0; i < n_exc - 1; i++)
 		for (int j = 0; j < n_exc - 1 - i; j++)
@@ -122,7 +141,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	/* Map high RAM (1GB huge pages, no buddy dep) before freeing it */
 	arch_map_high_memory(max_limit);
 
-	struct _pmm_ctx ac = { free_start, 0, (uint64_t)-1, {{0}}, n_exc, 0 };
+	struct _pmm_ctx ac = { free_start, 0, (uint64_t)-1, {{{0}}}, n_exc, 0 };
 	for (int i = 0; i < n_exc; i++) {
 		ac.exc[i][0] = exc[i][0];
 		ac.exc[i][1] = exc[i][1];

@@ -103,3 +103,5 @@ void board_reset(void)
 	PM_RSTC = PM_PASSWORD | 0x00000020U; /* WRCFG_FULL_RESET */
 	for (;;) __asm__ volatile("wfe");
 }
+
+void board_get_reserved(uint64_t *base, uint32_t *size) { *base = 0; *size = 0; }
