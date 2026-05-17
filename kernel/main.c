@@ -43,7 +43,7 @@ static void add_range(uint64_t base, uint64_t end,
 struct _pmm_ctx {
 	uint64_t  free_start;
 	uint64_t  clip_lo, clip_hi;
-	uint64_t  exc[2][2];
+	uint64_t  exc[3][2];
 	int       n_exc;
 	uint64_t  total_free;
 };
@@ -89,7 +89,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	uint64_t meta_size = pmm_init(start, max_limit);
 	uint64_t free_start = start + meta_size;
 
-	uint64_t exc[2][2] = {0};
+	uint64_t exc[3][2] = {0};
 	int n_exc = 0;
 	if (fb_phys && fb_phys < max_limit) {
 		exc[n_exc][0] = fb_phys;
@@ -101,18 +101,32 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		exc[n_exc][1] = (boot_initrd_start + boot_initrd_size + PAGE_SIZE - 1) & PAGE_MASK;
 		n_exc++;
 	}
-	if (n_exc == 2 && exc[0][0] > exc[1][0]) {
-		uint64_t t0 = exc[0][0], t1 = exc[0][1];
-		exc[0][0] = exc[1][0]; exc[0][1] = exc[1][1];
-		exc[1][0] = t0;        exc[1][1] = t1;
+	{
+		uint64_t dtb_phys = fdt_get_phys();
+		uint32_t dtb_sz   = fdt_get_size();
+		if (dtb_phys && dtb_sz && dtb_phys < max_limit) {
+			exc[n_exc][0] = dtb_phys;
+			exc[n_exc][1] = (dtb_phys + dtb_sz + PAGE_SIZE - 1) & PAGE_MASK;
+			n_exc++;
+		}
 	}
+	/* sort exclusions by start address (bubble sort, 3 elements max) */
+	for (int i = 0; i < n_exc - 1; i++)
+		for (int j = 0; j < n_exc - 1 - i; j++)
+			if (exc[j][0] > exc[j+1][0]) {
+				uint64_t t0 = exc[j][0], t1 = exc[j][1];
+				exc[j][0] = exc[j+1][0]; exc[j][1] = exc[j+1][1];
+				exc[j+1][0] = t0;        exc[j+1][1] = t1;
+			}
 
 	/* Map high RAM (1GB huge pages, no buddy dep) before freeing it */
 	arch_map_high_memory(max_limit);
 
 	struct _pmm_ctx ac = { free_start, 0, (uint64_t)-1, {{0}}, n_exc, 0 };
-	ac.exc[0][0] = exc[0][0]; ac.exc[0][1] = exc[0][1];
-	ac.exc[1][0] = exc[1][0]; ac.exc[1][1] = exc[1][1];
+	for (int i = 0; i < n_exc; i++) {
+		ac.exc[i][0] = exc[i][0];
+		ac.exc[i][1] = exc[i][1];
+	}
 
 	board_foreach_mem_region(_pmm_add, &ac);
 
@@ -137,6 +151,7 @@ void kernel_main(void)
 	}
 
 	mmu_init();
+	fdt_remap();
 	arch_cpu_init();
 
 	if (fdt_ok == 0)
@@ -172,6 +187,9 @@ void kernel_main(void)
 	/* idle process needs an fd table to use VFS during boot */
 	process_t *idle = task_current();
 	if (!idle->fds) idle->fds = fd_table_create();
+
+	extern void net_init(void);
+	net_init();
 
 	irq_enable();
 	board_drivers_register();
@@ -236,6 +254,9 @@ void kernel_main(void)
 		task_create("shell", shell_task);
 	}
 
-	while (1)
+	extern void net_poll(void);
+	while (1) {
+		net_poll();
 		arch_halt();
+	}
 }

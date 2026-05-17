@@ -94,6 +94,10 @@ typedef struct {
 #define SYS_ARCH_GETPPID      110
 #define SYS_ARCH_GETPGRP      111
 #define SYS_ARCH_SETSID       112
+#define SYS_ARCH_GETSID       124
+#define SYS_ARCH_GETPRIORITY  140
+#define SYS_ARCH_SETPRIORITY  141
+#define SYS_ARCH_SIGALTSTACK  131
 #define SYS_ARCH_FCNTL         72
 #define SYS_ARCH_VFORK         58
 #define SYS_ARCH_CLONE         56
@@ -155,5 +159,21 @@ typedef struct {
 #define SYS_ARCH_SETGROUPS       116
 #define SYS_ARCH_GETRLIMIT        97
 #define SYS_ARCH_SETRLIMIT       160
+#define SYS_ARCH_GETITIMER        36
+#define SYS_ARCH_SETITIMER        38
+#define SYS_ARCH_SOCKET           41
+#define SYS_ARCH_BIND             49
+#define SYS_ARCH_CONNECT          42
+#define SYS_ARCH_LISTEN           50
+#define SYS_ARCH_ACCEPT4         288
+#define SYS_ARCH_SENDTO           44
+#define SYS_ARCH_RECVFROM         45
+#define SYS_ARCH_GETSOCKNAME      51
+#define SYS_ARCH_GETPEERNAME      52
+#define SYS_ARCH_SETSOCKOPT       54
+#define SYS_ARCH_GETSOCKOPT       55
+#define SYS_ARCH_SHUTDOWN         48
+#define SYS_ARCH_SENDMSG          46
+#define SYS_ARCH_RECVMSG          47
 
 #endif

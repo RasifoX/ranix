@@ -25,10 +25,13 @@ ifeq ($(ARCH),aarch64)
         MACH_DIR    = arch/aarch64/mach-bcm2711
         LINKER      = arch/aarch64/linker_raspi4.ld
         QEMU_CMD    = qemu-system-aarch64 -M raspi4b -cpu cortex-a72
+        QEMU_KERNEL = $(TARGET)
     else
         MACH_DIR    = arch/aarch64/mach-virt
         LINKER      = arch/aarch64/linker.ld
         QEMU_CMD    = qemu-system-aarch64 -M virt -cpu cortex-a72
+        QEMU_KERNEL = $(BUILD_DIR)/ranix.bin
+        QEMU_NET    = -netdev user,id=n0 -device virtio-net-device,netdev=n0
     endif
     SRCS_ARCH = \
         arch/aarch64/exceptions.c \
@@ -47,11 +50,13 @@ ifeq ($(ARCH),aarch64)
         drivers/irqchip/arm-timer/arm_timer.c \
         drivers/mailbox/bcm2711_mbox.c \
         drivers/block/sdhost_pi4.c \
-        drivers/block/virtio_blk.c
+        drivers/block/virtio_blk.c \
+        drivers/net/virtio_net.c
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
     QEMU_CMD    = qemu-system-x86_64 -cpu max
+    QEMU_KERNEL = $(TARGET)
     SRCS_ARCH = \
         arch/x86_64/cpu.c \
         arch/x86_64/irq.c \
@@ -72,6 +77,16 @@ else ifeq ($(ARCH),x86_64)
         drivers/input/ps2/ps2.c \
         drivers/block/virtio_blk.c
 endif
+
+SRCS_NET = \
+    kernel/net/net.c \
+    kernel/net/eth.c \
+    kernel/net/arp.c \
+    kernel/net/ip.c \
+    kernel/net/icmp.c \
+    kernel/net/udp.c \
+    kernel/net/tcp.c \
+    kernel/net/socket.c
 
 SRCS_KERNEL = \
     kernel/main.c \
@@ -104,7 +119,7 @@ SRCS_KERNEL = \
     drivers/video/fbdev.c \
     drivers/input/input_core.c
 
-SRCS_C   = $(SRCS_KERNEL) $(SRCS_ARCH) $(SRCS_DRIVERS)
+SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
 SRCS_ASM = $(SRCS_ARCH_ASM)
 
 CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall $(ARCH_CFLAGS) $(INCLUDES)
@@ -147,7 +162,7 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
 	            awk sort uniq cut tr xargs dd stat du diff \
 	            env tee seq sleep date id whoami hostname \
 	            true false dirname basename pwd uptime nproc \
-	            timeout test expr yes which readlink; do \
+	            timeout test expr yes which readlink ping nc wget; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
 	@if [ -f /usr/bin/bash-static ]; then \
@@ -177,6 +192,9 @@ userspace/init: userspace/init.c
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
+	@if [ "$(ARCH)" = "aarch64" ] && [ "$(BOARD)" != "raspi4" ]; then \
+		llvm-objcopy -O binary $@ $(BUILD_DIR)/ranix.bin; \
+	fi
 	@echo "[OK] Ranix built → arch=$(ARCH) board=$(BOARD)"
 
 $(BUILD_DIR)/%.o: %.c
@@ -191,7 +209,7 @@ clean:
 	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
-	$(QEMU_CMD) -nographic -kernel $(TARGET) -initrd $(BUILD_DIR)/initramfs.cpio
+	$(QEMU_CMD) $(QEMU_NET) -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
 
 iso: initramfs $(TARGET)
 	@mkdir -p iso/boot/grub
