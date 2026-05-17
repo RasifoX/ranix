@@ -1,66 +1,189 @@
-# Ranix Temizlik & Geliştirme Roadmap
+# Ranix Roadmap
 
-## Tamamlananlar
+> "Ranix akar." — Hobiden çıkıyoruz.
 
-### Layer violations
-- [x] `sched.c` → `fb_tty.h` + `tty_core.h` kaldırıldı
-- [x] `include/kernel/tick.h` + `tick_register/tick_notify` sistemi eklendi
-- [x] `fb_tty_init` → `tick_register(fb_tty_tick)` kaydı
-- [x] `tty_core_init` → `tick_register(tty_poll_inputs)` kaydı
-- [x] `fb_tty.c` → `uart.h` kaldırıldı, `uart_esc` + `fb_tty_cursor_flush` silindi
-- [x] `fb_tty_tick` + `fb_tty_cursor_flush` public header'dan kaldırıldı
-- [x] `pit.c` + `arm_timer.c` → `sched.h` → `proc.h`, sleep-wake loop `sched_tick`'e taşındı
-- [x] `pipe.c` → `sched.h` → `proc.h`
-- [x] `input_core.c` → `tty_core.h` kaldırıldı, inline `tty_poll_inputs()` çağrıları silindi
+Hedef: statik binary çalıştırabilen, ağa bağlanabilen, çok çekirdekli,
+gerçek donanımda çalışan, Linux ile kıyaslanabilir bir kernel.
 
-### Dinamik yapılar
-- [x] `driver_t` → linked list (`next` pointer, `DRIVER_MAX` kaldırıldı)
-- [x] VFS fstype tablosu → `kmalloc` + linked list (limit yok)
-- [x] VFS mount tablosu → `kmalloc` + linked list (`MOUNT_MAX` kaldırıldı)
+Kural: her versiyon kendi başına anlamlı bir şey yapabilmeli.
+Kural: her versiyon hem x86_64 hem aarch64'te build edilmeli.
 
 ---
 
-## Yapılacaklar
+## Neredeyiz (v0.4 tamamlandı)
 
-### Dinamikleştirme
-- [ ] `proctab[256]` → dinamik yapı (dikkat: `exceptions_asm.S` ctx offset'i hardcode)
-- [ ] `fd_table_t` → `files[64]` sabit array → dinamik büyüyen tablo
-- [ ] `tty_core.c` → tek TTY → `tty_t` struct, `/dev/tty0` `/dev/tty1` vs çalışsın
-- [ ] `input_core.c` → tek `event_buf[256]` → input device kayıt sistemi, çok device
-- [ ] `heap.c` → 7 sabit slab class → runtime eklenebilir
-- [ ] `ioremap_free()` ekle (şu an sadece alloc var)
-- [ ] `MAX_STACK_SIZE` process başına ayarlanabilir olsun
+- Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
+- Memory: buddy + COW fork + mmap + brk
+- Process: fork/exec/wait, signals, pipes, scheduler (nice)
+- FS: ramfs, ext2 r/w, procfs, devfs, initramfs (CPIO)
+- Userspace: busybox 60+ applet, statik ELF, DOOM
+- Network: ARP + ICMP + UDP + SOCK_RAW, ping çalışıyor
+- Donanım: virtio-blk, virtio-net, sdhost (Pi4), PL011, GIC400
 
-### IPC
-- [ ] `mmap(MAP_SHARED)` → shared memory
-- [ ] eventfd / futex → userspace sync primitive
-- [x] Tam signal delivery: `SA_SIGACTION` + `sa_restorer`, x86_64 48-byte frame, `rt_sigreturn` doğru `orig_rax`/`rip`/`rsp` restore, `SIGCHLD` + `SIGPIPE` aktif
-- [x] Wait queue döngü hatası: `sleeping_on_queue` flag, `sched_tick` yalnızca poll-uyku task'larını uyandırıyor
-- [ ] `sigaltstack`, `sigprocmask` tam implementasyon
+---
+
+## v0.5 — TCP Stack  ✅ TAMAMLANDI
+
+**Neden önce TCP?**
+TCP olmadan internet yok. HTTP, SSH, wget, git, her şey TCP üzerinde.
+UDP ve ICMP'yi hallettik; TCP state machine bunların üstüne oturuyor.
+Bu olmadan SMP'yi yazsan bile ağa bağlanamazsın.
+
+### TCP state machine
+- [ ] `tcp_sock` state: CLOSED → SYN_SENT/LISTEN → ESTABLISHED → FIN_WAIT/CLOSE_WAIT → TIME_WAIT
+- [ ] 3-way handshake (SYN, SYN-ACK, ACK)
+- [ ] veri transferi: segment reassembly, seq/ack takibi
+- [ ] bağlantı kapama: FIN/FIN-ACK/ACK (aktif + pasif)
+- [ ] temel retransmit (sabit timeout, basit)
+- [ ] `connect()` TCP için gerçek SYN göndermeli
+- [ ] `listen()` + `accept()` — server socket
+
+### Syscall tamamlama
+- [ ] `recv()` / `send()` (MSG_PEEK, MSG_WAITALL temel flaglar)
+- [ ] `SO_REUSEADDR` setsockopt
+- [ ] blocking connect timeout
+
+### Test hedefleri
+- [x] `nc 10.0.2.2 9999` host listener'a bağlanıyor, veri alıyor
+- [x] `wget http://10.0.2.2:9000/` çalışıyor — gerçek HTTP GET, HTML response alındı
+- [x] RST → ECONNREFUSED doğru
+- [ ] clean FIN teardown (wget "connection closed prematurely" sorunu)
+- [ ] basit echo server userspace'te yazılabiliyor
+
+---
+
+## v0.6 — Pthreads (CLONE_THREAD + Futex)  ← ŞİMDİ
+
+**Neden SMP'den önce?**
+SMP'ye geçtiğinde atomik primitive'lerin zaten doğru olması lazım.
+Futex'i single-CPU'da yazıp test etmek çok daha kolay.
+Pthreads olmadan SMP yazsan bile userspace onu kullanamaz.
+Sıralama: önce doğruluğu garanti et, sonra paralel çalıştır.
+
+### Thread'ler
+- [ ] `clone(CLONE_THREAD | CLONE_VM | CLONE_SIGHAND)` — adres alanı paylaşımı
+- [ ] thread-local storage: x86_64 `%fs` (ARCH_SET_FS), aarch64 `TPIDR_EL0`
+- [ ] `set_tid_address` — musl thread init için gerekli
+- [ ] thread exit: grup üyesi, `SIGCHLD` sadece process group ölünce
+- [ ] `tkill` / `tgkill`
+
+### Futex
+- [ ] `futex(FUTEX_WAIT, FUTEX_WAKE)` — temel
+- [ ] `futex(FUTEX_REQUEUE)` — pthread_cond_broadcast için
+- [ ] futex hash table (kernel wait queue, userspace addr'e göre)
+
+### Bellek
+- [ ] vmalloc — kernel sanal adres alanı allocator (şu an yok)
+- [ ] thread stack: `mmap(MAP_ANONYMOUS | MAP_GROWSDOWN)`
+
+### Test hedefleri
+- [ ] musl pthreads ile derlenen basit C programı çalışıyor
+- [ ] `pthread_create / pthread_join / pthread_mutex` çalışıyor
+- [ ] `pthread_cond_wait / signal` çalışıyor
+
+---
+
+## v0.7 — SMP
+
+**Neden burada?**
+Artık doğru locking primitive'lerimiz var (futex → spinlock → atomic).
+Thread'ler zaten var, onları farklı CPU'larda çalıştırmak doğal adım.
+SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
+
+### CPU başlatma
+- [ ] aarch64: MPIDR CPU topolojisi okuma, PSCI `CPU_ON` ile secondary boot
+- [ ] x86_64: ACPI MADT'tan CPU listesi, INIT+SIPI sequence
+- [ ] per-CPU boot stack + trampoline kodu
+- [ ] per-CPU idle task
 
 ### Scheduler
-- [ ] Process priority / nice değeri
-- [ ] Scheduler policy (SCHED_FIFO, SCHED_RR, SCHED_NORMAL)
-- [ ] Per-process quantum
+- [ ] per-CPU runqueue (şu an global tek kuyruk)
+- [ ] IPI: `sched_ipi` → remote CPU'yu uyandır (`need_resched`)
+- [ ] load balancing: basit — en boş CPU'ya push (steal yok henüz)
+- [ ] `sched_setaffinity` / `sched_getaffinity` gerçek implementasyon
 
-### VFS & Proc
-- [ ] `/proc/self/fd`, `/proc/meminfo`, `/proc/cpuinfo`, `/proc/self/maps`
-- [ ] symlink desteği
-- [ ] `dup2` + `fcntl(F_DUPFD, F_GETFL, F_SETFL)`
+### Locking
+- [ ] ticket spinlock → test-and-set yerine daha fair
+- [ ] TLB shootdown IPI (fork/mmap sonrası remote flush)
+- [ ] per-CPU variables (`this_cpu_read/write`)
 
-### Device model
-- [ ] `/dev/fb0` düzgün `mmap` ile userspace erişim
-- [ ] Birden fazla FB: `/dev/fb0`, `/dev/fb1`
-- [ ] `/dev/null`, `/dev/zero`, `/dev/urandom`
-
-### Bellek yönetimi
-- [ ] vmalloc (şu an yok, sadece ioremap var)
-- [ ] Copy-on-write fork (`MAP_PRIVATE` sayfalar)
-- [ ] `mprotect` syscall
+### Test hedefleri
+- [ ] `nproc` → 4 (QEMU `-smp 4`)
+- [ ] `pthread_create` ile oluşturulan 4 thread 4 ayrı CPU'da çalışıyor
+- [ ] race condition testi geçiyor (basic stress test)
 
 ---
 
-## Notlar
-- `exceptions_asm.S` → `process_t.ctx` offset 16 hardcode. struct başındaki ilk 8 alanı değiştirme.
+## v0.8 — Dinamik Linker & Binary Uyumluluk
+
+**Neden burada?**
+TCP + pthreads + SMP olunca statik binary sınırı ciddi darboğaz.
+Go, Rust, Python gibi derlenen araçları çalıştırabilmek istiyoruz.
+musl libc dinamik versiyonu ile çalışmak hedef.
+
+### Loader
+- [ ] `PT_INTERP` ELF segment işleme — interpreter path okuma
+- [ ] `ld-musl-aarch64.so.1` / `ld-musl-x86_64.so.1` yükleme
+- [ ] `execve` sırasında interpreter'ı ELF gibi yükle
+
+### mmap & relocation altyapısı
+- [ ] `mmap(MAP_FIXED)` güvenilir (şu an temel var)
+- [ ] `mprotect` `PROT_EXEC` tam çalışmalı
+- [ ] `mremap` temel destek
+- [ ] lazy allocation: MAP_ANONYMOUS page fault on access
+
+### VDSO
+- [ ] `clock_gettime(CLOCK_REALTIME/MONOTONIC)` VDSO'dan
+- [ ] `gettimeofday` VDSO'dan
+- [ ] `AT_SYSINFO_EHDR` auxv entry
+
+### Test hedefleri
+- [ ] musl dinamik linked "hello world" çalışıyor
+- [ ] `ldd` output gösterebiliyoruz
+- [ ] basit Go/Rust binary çalışıyor
+
+---
+
+## v0.9 — Driver Ekosistemi
+
+Gerçek donanımda gerçek işler yapabilmek.
+
+### USB (temel)
+- [ ] xHCI host controller (PCIe'den detect)
+- [ ] USB HID: klavye (zaten PS/2 var, USB da lazım)
+- [ ] USB mass storage (BBB protokol) — USB bellek okuma
+
+### Depolama
+- [ ] NVMe (PCIe SSD) — modern laptop/PC için şart
+- [ ] AHCI (SATA) — eski PC için
+
+### Ağ
+- [ ] e1000 / virtio-net (zaten var) üstüne DNS resolver
+- [ ] DHCP client (şu an IP hardcode)
+- [ ] IPv6 temel (neighbor discovery, stateless autoconfig)
+
+### Terminal
+- [ ] `ptmx` / `pts` — pseudo-terminal (SSH için şart)
+- [ ] proper TTY line discipline (canonik mod, erase, kill, intr)
+- [ ] `TIOCSWINSZ` window resize
+
+---
+
+## v1.0 — "Çalışan Sistem"
+
+- [ ] SSH server çalışıyor (dropbear statik → dynamic)
+- [ ] HTTP server çalışıyor (nginx statik → dynamic)
+- [ ] Python veya Lua interpreter çalışıyor
+- [ ] Raspberry Pi 4'te SD karttan boot, ağ çalışıyor
+- [ ] x86_64 PC'de USB boot, NVMe/SATA disk, ethernet
+
+---
+
+## Teknik Notlar
+
+- `exceptions_asm.S` → `process_t.ctx` offset 16 hardcode. struct başı değişmesin.
 - Her değişiklikten sonra hem x86_64 hem aarch64 build edilmeli.
-- Doom: `make ARCH=x86_64 qemu-doom` → UART log `serial.log`'a gider.
+- aarch64 virt max RAM: 512 GB (T1SZ=25). x86_64 max RAM: 4 GB (boot.S direct map 4 entry — v0.7 öncesi genişlet).
+- SMP için spinlock'lar şu an IRQ-disable ile çalışıyor; v0.7'de atomik olmalı (LDAXR/STLXR, LOCK CMPXCHG).
+- TCP retransmit: basit sabit-timeout yeterli v0.5 için. SRTT/Karn v0.9'a bırak.
+- Doom: `make ARCH=x86_64 qemu-doom` → serial.log
