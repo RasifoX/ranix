@@ -126,6 +126,7 @@ typedef struct {
 #define SYS_ARCH_LINKAT       265
 #define SYS_ARCH_FACCESSAT    269
 #define SYS_ARCH_PSELECT6     270
+#define SYS_ARCH_FACCESSAT2   439
 #define SYS_ARCH_PPOLL        271
 #define SYS_ARCH_GETPGID      121
 #define SYS_ARCH_ARCH_PRCTL   158

@@ -54,6 +54,7 @@ typedef struct {
 #define SYS_ARCH_RENAMEAT      38
 #define SYS_ARCH_FTRUNCATE     46
 #define SYS_ARCH_FACCESSAT     48
+#define SYS_ARCH_FACCESSAT2   439
 #define SYS_ARCH_CHDIR         49
 #define SYS_ARCH_FCHMOD        52
 #define SYS_ARCH_FCHMODAT      53
