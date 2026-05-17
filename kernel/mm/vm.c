@@ -7,6 +7,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sched.h>
+#include <kernel/vfs.h>
 #include <asm/mmu.h>
 
 static uint64_t kernel_pt_phys;
@@ -75,6 +76,17 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	}
 
 	if (!is_write) return -1;
+
+	/* Check if this page belongs to a VMA_SHARED region — shared, not COW */
+	for (vma_t *v = p->vmas; v; v = v->next) {
+		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
+			if (v->flags & VMA_SHARED) {
+				vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
+				return 0;
+			}
+			break;
+		}
+	}
 
 	/* Permission fault on a mapped page — COW */
 	page_t *pg = paddr_to_page(paddr);
