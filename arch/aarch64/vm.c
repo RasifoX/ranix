@@ -29,24 +29,6 @@ vm_space_t *vm_create(void)
 	uint64_t root_phys = alloc_table();
 	vs->root = (uint64_t *)root_phys;
 
-	/* Copy kernel identity mappings so physical pointers remain accessible
-	 * in EL1 when TTBR0 is set to this user page table. */
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(root_phys);
-	uint64_t *kl1 = (uint64_t *)PHYS_TO_VIRT(kernel_l1);
-	memcpy(l1, kl1, PT_ENTRIES * sizeof(uint64_t));
-
-	/* Give each process a private copy of every L2 table so vm_map
-	 * can split 2MB blocks without affecting other processes. */
-	for (int i = 0; i < PT_ENTRIES; i++) {
-		if ((l1[i] & 3) == 3) {
-			uint64_t l2_phys = alloc_table();
-			uint64_t *priv = (uint64_t *)PHYS_TO_VIRT(l2_phys);
-			uint64_t *orig = (uint64_t *)PHYS_TO_VIRT(l1[i] & ~0xFFFUL);
-			memcpy(priv, orig, PT_ENTRIES * sizeof(uint64_t));
-			l1[i] = l2_phys | (l1[i] & 0xFFFUL);
-		}
-	}
-
 	vs->refcount = 1;
 	return vs;
 }
@@ -66,8 +48,7 @@ void vm_destroy(vm_space_t *vs)
 	uint64_t l1_phys = (uint64_t)vs->root;
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 
-	/* Only walk user space (first 1GB) */
-	for (int i = 0; i < 1; i++) {
+	for (int i = 0; i < 2; i++) {
 		if (!(l1[i] & PTE_VALID)) continue;
 		if ((l1[i] & 3) != 3) continue; /* Block mapping */
 
@@ -236,13 +217,10 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
-	/* Copy kernel identity entries (index 1+) directly — EL1 needs these
-	 * accessible via TTBR0 when this table is active. */
-	for (int i = 1; i < PT_ENTRIES; i++)
+	for (int i = 2; i < PT_ENTRIES; i++)
 		l1_new[i] = l1_old[i];
 
-	/* COW-copy user space (index 0 = first 1GB). */
-	for (int i = 0; i < 1; i++) {
+	for (int i = 0; i < 2; i++) {
 		if (!(l1_old[i] & PTE_VALID)) continue;
 		if ((l1_old[i] & 3) != 3) {
 			l1_new[i] = l1_old[i];
