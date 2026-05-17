@@ -131,7 +131,10 @@ OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
 BUSYBOX_APK_aarch64 = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.37.0-r14.apk
 BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/busybox-static-1.37.0-r14.apk
 
-.PHONY: all clean qemu image initramfs
+BASH_VER           = 5.2.37
+BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
+
+.PHONY: all clean qemu image initramfs bash-static
 
 all: initramfs $(TARGET)
 
@@ -140,8 +143,36 @@ initramfs: $(BUILD_DIR)/initramfs.cpio
 CACHE_DIR          = .cache
 BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
 BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
+BASH_CACHED        = $(CACHE_DIR)/bash-static-$(ARCH)
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
+bash-static: $(BASH_CACHED)
+
+$(BASH_CACHED):
+	@mkdir -p $(CACHE_DIR)
+	@if [ ! -f "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz" ]; then \
+		echo "Downloading bash $(BASH_VER) source..."; \
+		wget -q "$(BASH_SRC_URL)" -O "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz" || \
+		    { rm -f "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz"; echo "ERROR: bash download failed"; exit 1; }; \
+	fi
+	@echo "Building static bash for $(ARCH)..."
+	@rm -rf "$(CACHE_DIR)/bash-build-$(ARCH)"
+	@mkdir -p "$(CACHE_DIR)/bash-build-$(ARCH)"
+	@tar xzf "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz" -C "$(CACHE_DIR)/bash-build-$(ARCH)" --strip-components=1
+	@cd "$(CACHE_DIR)/bash-build-$(ARCH)" && \
+	    CC="$(MUSL_CC)" \
+	    CFLAGS="-O2" \
+	    LDFLAGS="-static" \
+	    ./configure --host=$(ARCH)-linux-musl \
+	                --without-bash-malloc \
+	                --disable-nls \
+	                --enable-static-link \
+	                > /dev/null 2>&1 && \
+	    $(MAKE) -j$$(nproc) > /dev/null 2>&1
+	@cp "$(CACHE_DIR)/bash-build-$(ARCH)/bash" "$@"
+	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
+	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
+
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello $(BASH_CACHED)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
 	@cp userspace/init userspace/hello $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
@@ -165,9 +196,8 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello
 	            timeout test expr yes which readlink ping nc wget; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
-	@if [ -f /usr/bin/bash-static ]; then \
-		cp /usr/bin/bash-static $(BUILD_DIR)/initramfs/bin/bash; \
-	fi
+	@cp "$(BASH_CACHED)" $(BUILD_DIR)/initramfs/bin/bash
+	@chmod +x $(BUILD_DIR)/initramfs/bin/bash
 	@if [ -f doomgeneric/doomgeneric ]; then \
 		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
 		NEED_ARCH="$(ARCH)"; \
