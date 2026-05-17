@@ -38,8 +38,13 @@ fdt_info_t *fdt_get_info(void);
 void        fdt_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud);
 void       *fdt_get_base(void);
 uint32_t    fdt_get_size(void);
+uint64_t    fdt_get_phys(void);
+void        fdt_remap(void);
 
 /* low-level property lookup: returns pointer to value, sets *out_len */
 const void *fdt_get_prop(const char *path, const char *prop_name, uint32_t *out_len);
+
+/* Walk all top-level nodes whose name starts with prefix; call cb(base, size, ud) for each "reg" */
+void fdt_foreach_node(const char *prefix, void (*cb)(uint64_t, uint64_t, void *), void *ud);
 
 #endif
