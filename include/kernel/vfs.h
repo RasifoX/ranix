@@ -101,6 +101,7 @@ typedef struct vfs_file {
     off_t        pos;
     int          flags;
     uint32_t     refcount;
+    char         path[256];
 } vfs_file_t;
 
 /* ── directory entry (path tree node) ───────────────────── */
@@ -138,6 +139,7 @@ typedef struct {
 #define VMA_EXEC   0x4
 #define VMA_USER   0x8
 #define VMA_ANON   0x10
+#define VMA_SHARED 0x20  /* MAP_SHARED — pages not COW'd on fork */
 
 typedef struct vma {
     uint64_t    vaddr;

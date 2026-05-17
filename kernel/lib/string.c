@@ -1,6 +1,24 @@
 #include <kernel/lib/string.h>
 #include <kernel/hal.h>
+#include <kernel/proc.h>
+#include <kernel/mm/mmu.h>
 #include <asm/mmu.h>
+
+extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+
+static int user_pages_mapped(const void *addr, size_t n)
+{
+	if (n == 0) return 1;
+	process_t *p = task_current();
+	if (!p || !p->vm) return 1;
+	uint64_t pg  = (uint64_t)addr & PAGE_MASK;
+	uint64_t end = ((uint64_t)addr + n - 1) & PAGE_MASK;
+	for (; pg <= end; pg += PAGE_SIZE) {
+		if (!arch_vm_get_paddr(p->vm->root, pg))
+			return 0;
+	}
+	return 1;
+}
 
 int access_ok(const void *addr, size_t n)
 {
@@ -16,6 +34,7 @@ int access_ok(const void *addr, size_t n)
 long copy_from_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(src, n)) return -1;
+	if (!user_pages_mapped(src, n)) return -1;
 	memcpy(dst, src, n);
 	return 0;
 }
@@ -23,8 +42,28 @@ long copy_from_user(void *dst, const void *src, size_t n)
 long copy_to_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(dst, n)) return -1;
+	if (!user_pages_mapped(dst, n)) return -1;
 	memcpy(dst, src, n);
 	return 0;
+}
+
+long strncpy_from_user(char *dst, const char *src, size_t n)
+{
+	if (!access_ok(src, 1)) return -1;
+	process_t *p = task_current();
+	uint64_t cur_pg = (uint64_t)-1;
+	for (size_t i = 0; i < n; i++) {
+		uint64_t pg = ((uint64_t)src + i) & PAGE_MASK;
+		if (pg != cur_pg) {
+			if (p && p->vm && !arch_vm_get_paddr(p->vm->root, pg))
+				return -1;
+			cur_pg = pg;
+		}
+		dst[i] = src[i];
+		if (src[i] == '\0') return (long)i;
+	}
+	dst[n - 1] = '\0';
+	return (long)n;
 }
 
 void *memcpy(void *dst, const void *src, size_t n)
