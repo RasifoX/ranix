@@ -62,12 +62,19 @@ int mb2_get_fb(fb_info_t *out)
 extern uint64_t boot_initrd_start;
 extern uint64_t boot_initrd_size;
 
+static uint64_t _mb2_base = 0;
+static uint32_t _mb2_size = 0;
+
+void mb2_get_reserved(uint64_t *base, uint32_t *size) { *base = _mb2_base; *size = _mb2_size; }
+
 void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
 {
     if (ptr == 0) return;
 
     mb2_info_t *info = (mb2_info_t *)ptr;
     uint32_t total_size = info->total_size;
+    _mb2_base = ptr;
+    _mb2_size = total_size;
 
     uint8_t *p   = (uint8_t *)(ptr + 8);
     uint8_t *end = (uint8_t *)(ptr + total_size);

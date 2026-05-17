@@ -39,6 +39,10 @@ board_config_t *board_get_config(void);
 /* Iterate over all physical RAM regions. Calls cb(base, size, ud) for each. */
 void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud);
 
+/* Return a platform-specific reserved region that must be excluded from the
+ * buddy allocator (e.g. multiboot2 info on x86_64).  *size==0 if none. */
+void board_get_reserved(uint64_t *base, uint32_t *size);
+
 /* Trigger a hardware reset / system reboot. Does not return. */
 void board_reset(void);
 
