@@ -1,7 +1,23 @@
 .section ".text.boot"
 .global _start
 
+/*
+ * ARM64 Linux kernel header — required so QEMU passes DTB in x0.
+ * code0 = branch over header; magic 0x644d5241 at offset 0x38.
+ */
 _start:
+	b    _start_code
+	.long 0
+	.quad 0x80000
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.quad 0
+	.long 0x644d5241
+	.long 0
+
+_start_code:
 	/* x0 = DTB pointer from firmware */
 	adrp x1, _dtb_ptr
 	add  x1, x1, :lo12:_dtb_ptr
@@ -69,6 +85,10 @@ _start:
 4:
 	/* set up page tables and enable MMU */
 	bl   mmu_tables_init
+
+	/* move SP from physical to TTBR1 virtual — kernel stack must be in high half */
+	ldr  x0, =0xFFFFFF8000000000
+	add  sp, sp, x0
 
 	/* jump to high-half kernel_main */
 	ldr  x0, =kernel_main
