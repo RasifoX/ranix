@@ -52,11 +52,14 @@ void board_irq_init(void)
 
 #include <drivers/block/sdcard.h>
 
+void virtio_net_init(void);
+
 void board_drivers_register(void)
 {
 	pl011_register();
 	timer_register();
 	virtio_blk_init();
+	virtio_net_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }

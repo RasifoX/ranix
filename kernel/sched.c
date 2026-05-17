@@ -157,14 +157,27 @@ void sched_tick(void)
 
 	for (int i = 0; i < task_count(); i++) {
 		process_t *t = task_get(i);
+		if (!t) continue;
+		/* ITIMER_REAL → SIGALRM */
+		if (t->itimer_value > 0) {
+			t->itimer_value--;
+			if (t->itimer_value == 0) {
+				t->itimer_value = t->itimer_interval;
+				t->sig_pending |= (1ULL << (14 - 1)); /* SIGALRM = 14 */
+				if (t->state == PROC_SLEEPING) { t->state = PROC_READY; runqueue_add(t); need_resched = 1; }
+			}
+		}
 		/* Only poll-wake tasks not in a wait queue (e.g. task_sleep in waitpid).
 		 * Tasks sleeping via sleep_on_locked are woken exclusively by wake_up()
 		 * to prevent wait_next cycles when sched_tick fires mid-sleep. */
-		if (t && t->state == PROC_SLEEPING && !t->sleeping_on_queue)
+		if (t->state == PROC_SLEEPING && !t->sleeping_on_queue)
 			task_wake(t);
 	}
 
 	tick_notify();
+
+	extern void tcp_tick(void);
+	tcp_tick();
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
@@ -648,7 +661,10 @@ void schedule(void)
 		next = &idle_proc;
 	}
 	next->state = PROC_RUNNING;
-	next->ticks_remaining = SCHED_QUANTUM;
+	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
+	int q = SCHED_QUANTUM - (next->nice * SCHED_QUANTUM) / 40;
+	if (q < 1) q = 1;
+	next->ticks_remaining = q;
 
 	arch_save_tls(prev);
 
