@@ -87,6 +87,10 @@ typedef struct {
 #define SYS_ARCH_SETPGID       154
 #define SYS_ARCH_GETPGID       155
 #define SYS_ARCH_SETSID        157
+#define SYS_ARCH_GETSID        156
+#define SYS_ARCH_GETPRIORITY   141
+#define SYS_ARCH_SETPRIORITY   140
+#define SYS_ARCH_SIGALTSTACK   132
 #define SYS_ARCH_UNAME         160
 #define SYS_ARCH_UMASK         166
 #define SYS_ARCH_GETTIMEOFDAY  169
@@ -131,5 +135,21 @@ typedef struct {
 #define SYS_ARCH_REBOOT        142
 #define SYS_ARCH_SYSLOG        116
 #define SYS_ARCH_UTIMENSAT      88
+#define SYS_ARCH_GETITIMER     102
+#define SYS_ARCH_SETITIMER     103
+#define SYS_ARCH_SOCKET        198
+#define SYS_ARCH_BIND          200
+#define SYS_ARCH_CONNECT       203
+#define SYS_ARCH_LISTEN        201
+#define SYS_ARCH_ACCEPT4       242
+#define SYS_ARCH_SENDTO        206
+#define SYS_ARCH_RECVFROM      207
+#define SYS_ARCH_GETSOCKNAME   204
+#define SYS_ARCH_GETPEERNAME   205
+#define SYS_ARCH_SETSOCKOPT    208
+#define SYS_ARCH_GETSOCKOPT    209
+#define SYS_ARCH_SHUTDOWN      210
+#define SYS_ARCH_SENDMSG       211
+#define SYS_ARCH_RECVMSG       212
 
 #endif

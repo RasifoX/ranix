@@ -5,6 +5,7 @@
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
@@ -13,6 +14,12 @@
 #include <kernel/tty/fb_tty.h>
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
+#include <kernel/net/socket.h>
+#include <kernel/net/udp.h>
+#include <kernel/net/icmp.h>
+#include <kernel/net/ip.h>
+#include <kernel/net/tcp.h>
+#include <kernel/net/net.h>
 
 #define AT_FDCWD     (-100)
 
@@ -284,7 +291,7 @@ static long sys_brk(uint64_t addr)
 
 	for (uint64_t va = p->brk; va < new_brk; va += PAGE_SIZE) {
 		void *page = buddy_alloc(0);
-		if (!page) return (long)p->brk;
+		if (!page) { kprintf("brk: ENOMEM pid=%u brk=%lx new=%lx free=%lu\n", p->pid, p->brk, new_brk, pmm_free_pages()); return (long)p->brk; }
 		memset((void *)PHYS_TO_VIRT(page), 0, PAGE_SIZE);
 		vm_map(p->vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE);
 	}
@@ -308,17 +315,24 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
 
 	if (flags & MAP_ANONYMOUS) {
-		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-			void *pg = buddy_alloc(0);
-			if (!pg) return -12;
-			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-			vm_map(p->vm, v, (uint64_t)pg, vmflags);
+		if (prot == 0) {
+			/* PROT_NONE: make pages inaccessible by unmapping them */
+			for (uint64_t v = va; v < va + len; v += PAGE_SIZE)
+				vm_unmap(p->vm, v);
+		} else {
+			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+				void *pg = buddy_alloc(0);
+				if (!pg) { kprintf("mmap: ENOMEM pid=%u va=%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
+				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+				vm_map(p->vm, v, (uint64_t)pg, vmflags);
+			}
 		}
 		{
 			uint32_t vf = VMA_USER | VMA_ANON;
 			if (prot & PROT_READ)  vf |= VMA_READ;
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+			if (flags & MAP_SHARED) vf |= VMA_SHARED;
 			vma_add(p, va, len, vf);
 		}
 		return (long)va;
@@ -578,6 +592,13 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 
 	sp &= ~15ULL;
 
+	/* padding before auxv keeps the final sp 16-byte aligned;
+	   must NOT be placed between envp[] and auxv — musl would read it as AT_NULL */
+	if ((argc + envc + 3) % 2 != 0) {
+		sp -= 8;
+		*(uint64_t *)sp = 0;
+	}
+
 /* push one auxv key/value pair (16 bytes each, stack grows down) */
 #define PUSH_AUX(k, v) do { \
 	sp -= 16; \
@@ -585,33 +606,27 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	((uint64_t *)sp)[1] = (uint64_t)(v); \
 } while (0)
 
-	PUSH_AUX(0,  0);                        /* AT_NULL */
-	PUSH_AUX(31, at_execfn_addr);           /* AT_EXECFN */
-	PUSH_AUX(25, at_random_addr);           /* AT_RANDOM */
-	PUSH_AUX(23, 0);                        /* AT_SECURE */
-	PUSH_AUX(17, TIMER_HZ);                 /* AT_CLKTCK */
+	PUSH_AUX(0,  0);
+	PUSH_AUX(31, at_execfn_addr);
+	PUSH_AUX(25, at_random_addr);
+	PUSH_AUX(23, 0);
+	PUSH_AUX(17, TIMER_HZ);
 #if defined(__aarch64__)
-	PUSH_AUX(16, 3);                        /* AT_HWCAP: FP + ASIMD */
+	PUSH_AUX(16, 3);
 #else
-	PUSH_AUX(16, 0);                        /* AT_HWCAP */
+	PUSH_AUX(16, 0);
 #endif
-	PUSH_AUX(14, 0);                        /* AT_EGID */
-	PUSH_AUX(13, 0);                        /* AT_GID */
-	PUSH_AUX(12, 0);                        /* AT_EUID */
-	PUSH_AUX(11, 0);                        /* AT_UID */
-	PUSH_AUX(9,  ei.entry);                 /* AT_ENTRY */
-	PUSH_AUX(7,  0);                        /* AT_BASE (static: no interp) */
-	PUSH_AUX(6,  PAGE_SIZE);               /* AT_PAGESZ */
-	PUSH_AUX(5,  ei.phnum);                 /* AT_PHNUM */
-	PUSH_AUX(4,  ei.phentsize);             /* AT_PHENT */
-	PUSH_AUX(3,  ei.phdr_va);              /* AT_PHDR */
+	PUSH_AUX(14, 0);
+	PUSH_AUX(13, 0);
+	PUSH_AUX(12, 0);
+	PUSH_AUX(11, 0);
+	PUSH_AUX(9,  ei.entry);
+	PUSH_AUX(7,  0);
+	PUSH_AUX(6,  PAGE_SIZE);
+	PUSH_AUX(5,  ei.phnum);
+	PUSH_AUX(4,  ei.phentsize);
+	PUSH_AUX(3,  ei.phdr_va);
 #undef PUSH_AUX
-
-    /* ensure sp is 16-byte aligned after pushing everything */
-    if ((argc + envc + 3) % 2 != 0) {
-        sp -= 8;
-        *(uint64_t *)sp = 0; /* padding */
-    }
 
 	/* envp[] */
 	sp -= 8; *(uint64_t *)sp = 0;
@@ -928,7 +943,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 	switch (option) {
 	case PR_SET_NAME: {
 		char name[16];
-		if (copy_from_user(name, (const void *)(uintptr_t)arg2, 16) == 0) {
+		if (strncpy_from_user(name, (const void *)(uintptr_t)arg2, 16) >= 0) {
 			name[15] = '\0';
 			int len = 0;
 			while (name[len] && len < PROC_NAME_MAX - 1) len++;
@@ -1025,7 +1040,7 @@ extern volatile uint64_t kernel_ticks;
 static int resolve_path(char *out, int dirfd, const char *upath)
 {
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, upath, PROC_NAME_MAX) != 0) return -14;
+	if (strncpy_from_user(kp, upath, PROC_NAME_MAX) < 0) return -14;
 	if (kp[0] == '/') { memcpy(out, kp, PROC_NAME_MAX); return 0; }
 	process_t *p = task_current();
 	const char *base = (dirfd == AT_FDCWD) ? p->cwd : "/";
@@ -1043,7 +1058,7 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 static long sys_mkdir(const char *path, mode_t mode)
 {
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
 	return vfs_mkdir(kp, mode);
 }
 
@@ -1058,7 +1073,7 @@ static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 static long sys_unlink(const char *path)
 {
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
@@ -1074,8 +1089,8 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 static long sys_rename(const char *old, const char *new)
 {
 	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
-	if (copy_from_user(ko, old, PROC_NAME_MAX) != 0) return -14;
-	if (copy_from_user(kn, new, PROC_NAME_MAX) != 0) return -14;
+	if (strncpy_from_user(ko, old, PROC_NAME_MAX) < 0) return -14;
+	if (strncpy_from_user(kn, new, PROC_NAME_MAX) < 0) return -14;
 	return vfs_rename(ko, kn) == 0 ? 0 : -2;
 }
 
@@ -1090,7 +1105,7 @@ static long sys_renameat(int olddirfd, const char *old, int newdirfd, const char
 static long sys_rmdir(const char *path)
 {
 	char kp[PROC_NAME_MAX];
-	if (copy_from_user(kp, path, PROC_NAME_MAX) != 0) return -14;
+	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
@@ -1132,7 +1147,7 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 	char kp[PROC_NAME_MAX];
 	if (flags & AT_EMPTY_PATH) {
 		/* stat the fd itself */
-		if (copy_from_user(kp, path, 1) == 0 && kp[0] == '\0')
+		if (strncpy_from_user(kp, path, 2) >= 0 && kp[0] == '\0')
 			return sys_fstat(dirfd, st);
 	}
 	int r = resolve_path(kp, dirfd, path);
@@ -1388,9 +1403,14 @@ static long sys_getpgid(pid_t pid) {
 	process_t *p = pid ? proc_find(pid) : task_current();
 	return p ? (long)p->pgrp : -3;
 }
+static long sys_getsid(pid_t pid) {
+	process_t *p = pid ? proc_find(pid) : task_current();
+	return p ? (long)p->sid : -3;
+}
 static long sys_setsid(void) {
 	process_t *p = task_current();
 	p->pgrp = (pid_t)p->pid;
+	p->sid  = (pid_t)p->pid;
 	return (long)p->pid;
 }
 static long sys_setpgid(pid_t pid, pid_t pgid) {
@@ -1401,6 +1421,44 @@ static long sys_setpgid(pid_t pid, pid_t pgid) {
 }
 static long sys_setuid(uid_t uid) { task_current()->uid = uid; return 0; }
 static long sys_setgid(gid_t gid) { task_current()->gid = gid; return 0; }
+
+static long sys_getpriority(int which, int who)
+{
+	(void)which; (void)who;
+	return 20 - task_current()->nice;  /* POSIX: returns 20 - nice */
+}
+static long sys_setpriority(int which, int who, int prio)
+{
+	(void)which; (void)who;
+	int nice = 20 - prio;
+	if (nice < -20) nice = -20;
+	if (nice >  19) nice =  19;
+	task_current()->nice = nice;
+	return 0;
+}
+
+static long sys_sigaltstack(const stack_t *uss, stack_t *uoss)
+{
+	process_t *p = task_current();
+	if (uoss) {
+		if (copy_to_user(uoss, &p->altstack, sizeof(stack_t)) != 0)
+			return -14;
+	}
+	if (uss) {
+		stack_t ss;
+		if (copy_from_user(&ss, uss, sizeof(stack_t)) != 0)
+			return -14;
+		if (ss.ss_flags & SS_DISABLE) {
+			p->altstack.ss_flags = SS_DISABLE;
+			p->altstack.ss_sp    = NULL;
+			p->altstack.ss_size  = 0;
+		} else {
+			if (!ss.ss_sp || ss.ss_size < 2048) return -22;
+			p->altstack = ss;
+		}
+	}
+	return 0;
+}
 static long sys_umask(mode_t mask)
 {
 	process_t *p = task_current();
@@ -1554,6 +1612,39 @@ static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 	return 0;
 }
 
+typedef struct { int64_t tv_sec; int64_t tv_usec; } itimerval_tv_t;
+typedef struct { itimerval_tv_t it_interval; itimerval_tv_t it_value; } itimerval_t;
+
+static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_v)
+{
+    if (which != 0 /* ITIMER_REAL */) return 0; /* ignore VIRTUAL/PROF */
+    process_t *p = task_current();
+    if (old_v) {
+        itimerval_t oval;
+        uint64_t hz = TIMER_HZ;
+        oval.it_value.tv_sec    = (int64_t)(p->itimer_value / hz);
+        oval.it_value.tv_usec   = (int64_t)((p->itimer_value % hz) * (1000000 / hz));
+        oval.it_interval.tv_sec = (int64_t)(p->itimer_interval / hz);
+        oval.it_interval.tv_usec= (int64_t)((p->itimer_interval % hz) * (1000000 / hz));
+        copy_to_user(old_v, &oval, sizeof(oval));
+    }
+    if (new_v) {
+        itimerval_t nval;
+        if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -14;
+        uint64_t hz = TIMER_HZ;
+        p->itimer_value    = (uint64_t)nval.it_value.tv_sec * hz +
+                             (uint64_t)nval.it_value.tv_usec * hz / 1000000;
+        p->itimer_interval = (uint64_t)nval.it_interval.tv_sec * hz +
+                             (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
+    }
+    return 0;
+}
+
+static long sys_getitimer(int which, itimerval_t *val)
+{
+    return sys_setitimer(which, NULL, val);
+}
+
 static long sys_times(void *buf)
 {
 	if (buf) {
@@ -1600,6 +1691,8 @@ static long sys_sysinfo(void *info)
 #define TIOCSPGRP  0x5410
 #define TIOCGPGRP  0x540F
 
+static pid_t tty_fg_pgrp = 1;
+
 typedef struct { uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel; } linux_winsize_t;
 
 static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
@@ -1622,8 +1715,8 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 		return copy_to_user((void *)(uintptr_t)arg, termios, 36);
 	}
 	case TCSETS: case TCSETSW: case TCSETSF: return 0;
-	case TIOCGPGRP: { int pgid = (int)task_current()->pid; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
-	case TIOCSPGRP: return 0;
+	case TIOCGPGRP: { int pgid = (int)tty_fg_pgrp; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4); }
+	case TIOCSPGRP: { int pgid; if (copy_from_user(&pgid, (void *)(uintptr_t)arg, 4) != 0) return -14; tty_fg_pgrp = pgid; return 0; }
 	case TIOCSPROMPT: {
 		return 0;
 	}
@@ -1958,6 +2051,365 @@ static long sys_fchown(int fd, uid_t u, gid_t g)         { (void)fd; (void)u; (v
 static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int f)
 { (void)d; (void)p; (void)u; (void)g; (void)f; return 0; }
 
+/* ── socket syscalls ─────────────────────────────────────── */
+
+static int sock_close_vfs(vfs_file_t *file)
+{
+    socket_t    *s  = (socket_t *)file->inode->priv;
+    vfs_inode_t *in = file->inode;
+    if (s->type == SOCK_STREAM) tcp_close(s);
+    sock_free(s);
+    kfree(in);
+    return 0;
+}
+
+static int sock_poll_vfs(vfs_file_t *file)
+{
+    socket_t *s = (socket_t *)file->inode->priv;
+    if (!s) return 0;
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    int readable = (s->recv_head != NULL) ? 0x0001 : 0;
+    spin_unlock_irq(&s->recv_lock, f);
+    return readable | 0x0004;  /* always writable */
+}
+
+static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
+{
+    socket_t *s = (socket_t *)file->inode->priv;
+    if (!s) return -9;
+    /* blocking read: wait for data in recv queue */
+    while (1) {
+        uint64_t f = spin_lock_irq(&s->recv_lock);
+        skb_t *skb = s->recv_head;
+        if (skb) {
+            s->recv_head = skb->next;
+            if (!s->recv_head) s->recv_tail = NULL;
+            spin_unlock_irq(&s->recv_lock, f);
+            size_t n = skb->len < len ? skb->len : len;
+            if (n) copy_to_user(buf, skb->data, n);
+            skb_free(skb);
+            return (ssize_t)(n ? n : 0);  /* 0 = EOF (FIN) */
+        }
+        /* TCP CLOSE_WAIT / CLOSED means EOF */
+        if (s->type == SOCK_STREAM &&
+            (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
+             s->tcp_state == TCP_TIME_WAIT  || s->tcp_state == TCP_LAST_ACK)) {
+            spin_unlock_irq(&s->recv_lock, f);
+            return 0; /* EOF */
+        }
+        s->recv_waiter = task_current();
+        spin_unlock_irq(&s->recv_lock, f);
+        task_sleep();
+        process_t *p = task_current();
+        if (p->sig_pending & ~p->sig_mask) { s->recv_waiter = NULL; return -4; }
+    }
+}
+
+static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
+{
+    socket_t *s = (socket_t *)file->inode->priv;
+    if (!s) return -9;
+    if (s->type == SOCK_STREAM) {
+        uint8_t *kbuf = kmalloc(len);
+        if (!kbuf) return -12;
+        if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -14; }
+        int rc = tcp_send(s, kbuf, (uint16_t)len);
+        kfree(kbuf);
+        return rc < 0 ? rc : (ssize_t)len;
+    }
+    return -38;
+}
+
+static vfs_fops_t sock_fops = {
+    .read  = sock_read_vfs,
+    .write = sock_write_vfs,
+    .close = sock_close_vfs,
+    .poll  = sock_poll_vfs,
+};
+
+static socket_t *fd_to_sock(int fd)
+{
+    process_t  *p = task_current();
+    vfs_file_t *f = fd_get(p->fds, fd);
+    if (!f || !f->inode || f->inode->fops != &sock_fops) return NULL;
+    return (socket_t *)f->inode->priv;
+}
+
+static int sock_to_fd(socket_t *s)
+{
+    vfs_inode_t *in = kmalloc(sizeof(*in));
+    if (!in) return -12;
+    memset(in, 0, sizeof(*in));
+    in->fops     = &sock_fops;
+    in->priv     = s;
+    in->refcount = 1;
+
+    vfs_file_t *f = kmalloc(sizeof(*f));
+    if (!f) { kfree(in); return -12; }
+    memset(f, 0, sizeof(*f));
+    f->inode    = in;
+    f->refcount = 1;
+
+    process_t *p = task_current();
+    int fd = fd_alloc(p->fds, f);
+    if (fd < 0) { kfree(f); kfree(in); return -12; }
+    return fd;
+}
+
+static long sys_socket(int domain, int type, int proto)
+{
+    if (domain != AF_INET) return -97; /* EAFNOSUPPORT */
+    if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
+    socket_t *s = sock_alloc(domain, type, proto);
+    if (!s) return -12;
+    s->dev = net_dev(0);
+    if (type == SOCK_RAW) sock_register(s);
+    int fd = sock_to_fd(s);
+    if (fd < 0) { sock_free(s); return fd; }
+    return fd;
+}
+
+static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
+{
+    (void)addrlen;
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+    sockaddr_in_t sa;
+    if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+    s->local_ip   = ntohl(sa.sin_addr);
+    s->local_port = ntohs(sa.sin_port);
+    sock_register(s);
+    return 0;
+}
+
+static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
+{
+    (void)addrlen;
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+    sockaddr_in_t sa;
+    if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+    s->remote_ip   = ntohl(sa.sin_addr);
+    s->remote_port = ntohs(sa.sin_port);
+    if (s->type == SOCK_DGRAM) return 0;
+    if (s->type != SOCK_STREAM) return -38;
+
+    int rc = tcp_connect(s);
+    if (rc < 0) return rc;
+
+    /* block until ESTABLISHED or RST */
+    while (s->tcp_state == TCP_SYN_SENT) {
+        s->connect_waiter = task_current();
+        task_sleep();
+        process_t *p = task_current();
+        if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; return -4; }
+    }
+    return (s->tcp_state == TCP_ESTABLISHED) ? 0 : -111; /* ECONNREFUSED */
+}
+
+static long sys_sendto(int fd, const void *buf, size_t len, int flags,
+                       const void *uaddr, uint32_t addrlen)
+{
+    (void)flags; (void)addrlen;
+    socket_t *s = fd_to_sock(fd);
+    if (!s || !s->dev) return -9;
+
+    uint32_t dst_ip; uint16_t dst_port;
+    if (uaddr) {
+        sockaddr_in_t sa;
+        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+        dst_ip   = ntohl(sa.sin_addr);
+        dst_port = ntohs(sa.sin_port);
+    } else {
+        dst_ip = s->remote_ip; dst_port = s->remote_port;
+    }
+
+    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    uint8_t *kbuf = kmalloc(len);
+    if (!kbuf) return -12;
+    if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -14; }
+
+    long r = -38;
+    if (s->type == SOCK_STREAM) {
+        /* TCP: ignore dst from uaddr, use connected remote */
+        int rc = tcp_send(s, kbuf, (uint16_t)len);
+        r = rc < 0 ? rc : (long)len;
+    } else if (s->type == SOCK_DGRAM) {
+        int rc = udp_tx(s->dev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
+        r = rc < 0 ? rc : (long)len;
+    } else if (s->type == SOCK_RAW && s->proto == 1 /* IPPROTO_ICMP */) {
+        if (len >= sizeof(icmp_hdr_t)) {
+            icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
+            ih->checksum = 0;
+            ih->checksum = inet_cksum(kbuf, len);
+            /* retry loop: first attempt sends ARP request; subsequent ones hit cached MAC */
+            for (int attempt = 0; attempt < 64; attempt++) {
+                skb_t *skb = skb_alloc();
+                if (!skb) { r = -12; break; }
+                memcpy(skb->data, kbuf, len);
+                skb->len = (uint16_t)len;
+                int rc = ip_tx(s->dev, skb, dst_ip, 1 /* IPPROTO_ICMP */);
+                if (rc >= 0) { r = (long)len; break; }
+                if (rc != -1) { r = rc; break; }
+                net_poll();  /* drain RX — ARP reply may arrive */
+            }
+        }
+    }
+    kfree(kbuf);
+    return r;
+}
+
+static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
+                         void *uaddr, uint32_t *addrlen)
+{
+    (void)addrlen;
+#define MSG_DONTWAIT 0x40
+    int nonblock = (flags & MSG_DONTWAIT);
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+
+    while (1) {
+        uint64_t f = spin_lock_irq(&s->recv_lock);
+        skb_t *skb = s->recv_head;
+        if (skb) {
+            s->recv_head = skb->next;
+            if (!s->recv_head) s->recv_tail = NULL;
+            spin_unlock_irq(&s->recv_lock, f);
+            size_t n = skb->len < len ? skb->len : len;
+            copy_to_user(buf, skb->data, n);
+            if (uaddr) {
+                sockaddr_in_t sa;
+                memset(&sa, 0, sizeof(sa));
+                sa.sin_family = AF_INET;
+                sa.sin_port   = htons(s->remote_port);
+                if (s->type == SOCK_RAW && skb->len >= 20) {
+                    /* extract src IP from the prepended IP header (network byte order) */
+                    uint32_t src_net;
+                    memcpy(&src_net, skb->data + 12, 4);
+                    sa.sin_addr = src_net;
+                } else {
+                    sa.sin_addr = htonl(s->remote_ip);
+                }
+                copy_to_user(uaddr, &sa, sizeof(sa));
+            }
+            skb_free(skb);
+            return (long)n;
+        }
+        if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
+        s->recv_waiter = task_current();
+        spin_unlock_irq(&s->recv_lock, f);
+        task_sleep();
+        process_t *p = task_current();
+        if (p->sig_pending & ~p->sig_mask) { s->recv_waiter = NULL; return -4; }
+    }
+}
+
+static long sys_getsockname(int fd, void *uaddr, uint32_t *uaddrlen)
+{
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+    sockaddr_in_t sa; memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(s->local_port);
+    sa.sin_addr   = htonl(s->local_ip ? s->local_ip : (s->dev ? s->dev->ip : 0));
+    copy_to_user(uaddr, &sa, sizeof(sa));
+    if (uaddrlen) { uint32_t l = sizeof(sa); copy_to_user(uaddrlen, &l, 4); }
+    return 0;
+}
+
+static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
+{
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+    sockaddr_in_t sa; memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(s->remote_port);
+    sa.sin_addr   = htonl(s->remote_ip);
+    copy_to_user(uaddr, &sa, sizeof(sa));
+    if (addrlen) { uint32_t l = sizeof(sa); copy_to_user(addrlen, &l, 4); }
+    return 0;
+}
+
+static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t len)
+{ (void)fd; (void)lv; (void)opt; (void)val; (void)len; return 0; }
+
+static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
+{ (void)fd; (void)lv; (void)opt; (void)val; (void)len; return -38; }
+
+static long sys_listen(int fd, int bl)
+{
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return -9;
+    if (s->type != SOCK_STREAM) return -95; /* EOPNOTSUPP */
+    return tcp_listen(s, bl);
+}
+
+static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
+{
+    (void)fl;
+    socket_t *ls = fd_to_sock(fd);
+    if (!ls) return -9;
+    if (ls->tcp_state != TCP_LISTEN) return -22;
+
+    /* wait for a completed connection */
+    while (!ls->accept_head) {
+        ls->accept_waiter = task_current();
+        task_sleep();
+        process_t *p = task_current();
+        if (p->sig_pending & ~p->sig_mask) { ls->accept_waiter = NULL; return -4; }
+    }
+
+    /* dequeue from accept list (accept_head chained via accept_head field of child) */
+    socket_t *ns = ls->accept_head;
+    ls->accept_head = ns->accept_head;
+    if (!ls->accept_head) ls->accept_tail = NULL;
+    ns->accept_head = NULL;
+
+    /* fill peer addr if requested */
+    if (ua) {
+        sockaddr_in_t sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port   = htons(ns->remote_port);
+        sa.sin_addr   = htonl(ns->remote_ip);
+        copy_to_user(ua, &sa, sizeof(sa));
+        if (al) { uint32_t l = sizeof(sa); copy_to_user(al, &l, 4); }
+    }
+
+    int nfd = sock_to_fd(ns);
+    if (nfd < 0) { sock_free(ns); return nfd; }
+    return nfd;
+}
+
+static long sys_shutdown(int fd, int how)
+{
+    (void)how;
+    socket_t *s = fd_to_sock(fd);
+    if (s && s->type == SOCK_STREAM) tcp_close(s);
+    return 0;
+}
+
+/* ── readlinkat via VFS ──────────────────────────────────── */
+
+static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t bufsiz)
+{
+    char kp[256];
+    int r = resolve_path(kp, dirfd, upath);
+    if (r) return r;
+
+    vfs_dentry_t *de = vfs_dentry_resolve(kp);
+    if (!de || !de->inode) return -2;
+    vfs_inode_t *in = de->inode;
+    if (!in->iops || !in->iops->readlink) return -22;
+
+    char kbuf[256];
+    int n = in->iops->readlink(in, kbuf, sizeof(kbuf));
+    if (n < 0) return n;
+    if ((size_t)n > bufsiz) n = (int)bufsiz;
+    copy_to_user(ubuf, kbuf, (size_t)n);
+    return n;
+}
+
 void syscall_handle(arch_context_t *ctx)
 {
 	long n    = (long)CTX_SYSCALL_N(ctx);
@@ -2008,7 +2460,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_FCHMODAT: ret = sys_fchmodat((int)arg0, (const char*)arg1, (mode_t)arg2, (int)arg3); break;
 	case SYS_ARCH_FCHOWN:   ret = sys_fchown((int)arg0, (uid_t)arg1, (gid_t)arg2); break;
 	case SYS_ARCH_FCHOWNAT: ret = sys_fchownat((int)arg0, (const char*)arg1, (uid_t)arg2, (gid_t)arg3, 0); break;
-	case SYS_ARCH_READLINKAT: ret = sys_readlinkat((int)arg0, (const char*)arg1, (char*)arg2, (size_t)arg3); break;
+	case SYS_ARCH_READLINKAT: ret = sys_readlinkat_vfs((int)arg0, (const char*)arg1, (char*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_SYMLINKAT: ret = sys_symlinkat((const char*)arg0, (int)arg1, (const char*)arg2); break;
 	case SYS_ARCH_LINKAT:   ret = sys_linkat((int)arg0, (const char*)arg1, (int)arg2, (const char*)arg3, 0); break;
 	case SYS_ARCH_FACCESSAT: ret = sys_faccessat((int)arg0, (const char*)arg1, (int)arg2, (int)arg3); break;
@@ -2017,7 +2469,9 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_PPOLL:    ret = sys_ppoll((linux_pollfd_t*)arg0, (uint64_t)arg1, (linux_timespec_t*)arg2, NULL); break;
 	/* ── memory ──────────────────────────────────────────── */
 	case SYS_ARCH_BRK:     ret = sys_brk((uint64_t)arg0); break;
-	case SYS_ARCH_MMAP:    ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, (int)arg4, (uint64_t)arg5); break;
+	case SYS_ARCH_MMAP:
+		ret = sys_mmap((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3, (int)arg4, (uint64_t)arg5);
+		break;
 	case SYS_ARCH_MUNMAP:  ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MPROTECT: ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_MADVISE: ret = sys_madvise((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
@@ -2045,6 +2499,10 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SETPGID:     ret = sys_setpgid((pid_t)arg0, (pid_t)arg1); break;
 	case SYS_ARCH_GETPGID:     ret = sys_getpgid((pid_t)arg0); break;
 	case SYS_ARCH_SETSID:      ret = sys_setsid(); break;
+	case SYS_ARCH_GETSID:      ret = sys_getsid((pid_t)arg0); break;
+	case SYS_ARCH_GETPRIORITY: ret = sys_getpriority((int)arg0, (int)arg1); break;
+	case SYS_ARCH_SETPRIORITY: ret = sys_setpriority((int)arg0, (int)arg1, (int)arg2); break;
+	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1); break;
 	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
 	case SYS_ARCH_SET_TID_ADDR: ret = (long)task_current()->pid; break;
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
@@ -2096,6 +2554,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
 	case SYS_ARCH_GETTIMEOFDAY:  ret = sys_gettimeofday((linux_timeval_t*)arg0, (void*)arg1); break;
 	case SYS_ARCH_NANOSLEEP:     ret = sys_nanosleep((linux_timespec_t*)arg0, (linux_timespec_t*)arg1); break;
+	case SYS_ARCH_GETITIMER:     ret = sys_getitimer((int)arg0, (itimerval_t*)arg1); break;
+	case SYS_ARCH_SETITIMER:     ret = sys_setitimer((int)arg0, (const itimerval_t*)arg1, (itimerval_t*)arg2); break;
 	case SYS_ARCH_TIMES:         ret = sys_times((void*)arg0); break;
 	/* ── misc ────────────────────────────────────────────── */
 	case SYS_ARCH_UNAME:   ret = sys_uname((linux_utsname_t*)arg0); break;
@@ -2121,6 +2581,19 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EPOLL_CREATE: ret = sys_epoll_create1(0); break;
 	case SYS_ARCH_EPOLL_WAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, NULL); break;
 #endif
+	/* ── sockets ─────────────────────────────────────────── */
+	case SYS_ARCH_SOCKET:      ret = sys_socket((int)arg0, (int)arg1, (int)arg2); break;
+	case SYS_ARCH_BIND:        ret = sys_bind((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
+	case SYS_ARCH_CONNECT:     ret = sys_connect((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
+	case SYS_ARCH_LISTEN:      ret = sys_listen((int)arg0, (int)arg1); break;
+	case SYS_ARCH_ACCEPT4:     ret = sys_accept4((int)arg0, (void*)arg1, (uint32_t*)arg2, (int)arg3); break;
+	case SYS_ARCH_SENDTO:      ret = sys_sendto((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t)arg5); break;
+	case SYS_ARCH_RECVFROM:    ret = sys_recvfrom((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t*)arg5); break;
+	case SYS_ARCH_GETSOCKNAME: ret = sys_getsockname((int)arg0, (void*)arg1, (uint32_t*)arg2); break;
+	case SYS_ARCH_GETPEERNAME: ret = sys_getpeername((int)arg0, (void*)arg1, (uint32_t*)arg2); break;
+	case SYS_ARCH_SETSOCKOPT:  ret = sys_setsockopt((int)arg0, (int)arg1, (int)arg2, (void*)arg3, (uint32_t)arg4); break;
+	case SYS_ARCH_GETSOCKOPT:  ret = sys_getsockopt((int)arg0, (int)arg1, (int)arg2, (void*)arg3, (uint32_t*)arg4); break;
+	case SYS_ARCH_SHUTDOWN:    ret = sys_shutdown((int)arg0, (int)arg1); break;
 	default:
 		kprintf("syscall: unimplemented %ld (pid=%u)\n",
 		        n, task_current()->pid);

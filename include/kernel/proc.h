@@ -21,6 +21,15 @@ typedef struct {
 	uint64_t sa_mask;
 } sigaction_t;
 
+typedef struct {
+	void   *ss_sp;
+	int     ss_flags;
+	size_t  ss_size;
+} stack_t;
+
+#define SS_ONSTACK  1
+#define SS_DISABLE  2
+
 typedef enum {
 	PROC_RUNNING  = 0,
 	PROC_READY    = 1,
@@ -51,17 +60,23 @@ typedef struct process {
 	/* ── scheduling ──────────────────────────── */
 	int             ticks_remaining;
 	uint64_t        ticks;
+	int             nice;          /* -20..19, default 0 */
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;
 	uint64_t        sig_mask;
 	sigaction_t     sig_actions[NSIG];
 
+	/* ── interval timer (ITIMER_REAL → SIGALRM) ─ */
+	uint64_t        itimer_value;     /* ticks until next SIGALRM (0 = disabled) */
+	uint64_t        itimer_interval;  /* reload value (0 = one-shot) */
+
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
 	uint64_t        mmap_next;
 	pid_t           ppid;
 	pid_t           pgrp;
+	pid_t           sid;           /* session id */
 	uid_t           uid;
 	gid_t           gid;
 	int             exit_code;
@@ -84,6 +99,9 @@ typedef struct process {
 
 	/* ── wait queue tracking ──────────────────── */
 	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
+
+	/* ── signal alternate stack ───────────────── */
+	stack_t         altstack;
 } process_t;
 
 /* scheduler */
