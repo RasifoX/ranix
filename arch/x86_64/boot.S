@@ -74,17 +74,17 @@ setup_page_tables:
 	or   $0x3, %eax
 	mov  %eax, pdpt_hh + 510*8
 
-	/* direct map: PML4[256] → pdpt_dm[0..3] → pd0..pd3 (0..4GB) */
+	/* direct map: PML4[256] → pdpt_dm, 1GB huge pages (PDPE1GB, no PD needed) */
 	mov  $pdpt_dm, %eax
 	or   $0x3, %eax
 	mov  %eax, pml4 + 256*8
 
-	mov  $pd,  %eax; or $0x3, %eax; mov %eax, pdpt_dm
-	mov  $pd1, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 8
-	mov  $pd2, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 16
-	mov  $pd3, %eax; or $0x3, %eax; mov %eax, pdpt_dm + 24
+	mov  $0x83,         %eax; mov %eax, pdpt_dm        /* 0..1GB  */
+	mov  $0x40000083,   %eax; mov %eax, pdpt_dm + 8    /* 1..2GB  */
+	mov  $0x80000083,   %eax; mov %eax, pdpt_dm + 16   /* 2..3GB  */
+	mov  $0xC0000083,   %eax; mov %eax, pdpt_dm + 24   /* 3..4GB  */
 
-	/* fill pd: 0..1GB (entries: i*2MB for i=0..511) */
+	/* fill pd: 0..1GB in 2MB pages (kernel text at -2GB uses pdpt_hh → pd) */
 	mov  $0, %ecx
 .fill_pd:
 	mov  %ecx, %eax
@@ -94,42 +94,6 @@ setup_page_tables:
 	inc  %ecx
 	cmp  $512, %ecx
 	jl   .fill_pd
-
-	/* fill pd1: 1..2GB */
-	mov  $0, %ecx
-.fill_pd1:
-	mov  %ecx, %eax
-	add  $512, %eax
-	shl  $21, %eax
-	or   $0x83, %eax
-	mov  %eax, pd1(, %ecx, 8)
-	inc  %ecx
-	cmp  $512, %ecx
-	jl   .fill_pd1
-
-	/* fill pd2: 2..3GB */
-	mov  $0, %ecx
-.fill_pd2:
-	mov  %ecx, %eax
-	add  $1024, %eax
-	shl  $21, %eax
-	or   $0x83, %eax
-	mov  %eax, pd2(, %ecx, 8)
-	inc  %ecx
-	cmp  $512, %ecx
-	jl   .fill_pd2
-
-	/* fill pd3: 3..4GB */
-	mov  $0, %ecx
-.fill_pd3:
-	mov  %ecx, %eax
-	add  $1536, %eax
-	shl  $21, %eax
-	or   $0x83, %eax
-	mov  %eax, pd3(, %ecx, 8)
-	inc  %ecx
-	cmp  $512, %ecx
-	jl   .fill_pd3
 
 	ret
 
@@ -166,15 +130,12 @@ long_mode_high:
 .section ".bss.boot"
 .balign 4096
 .global pml4
-pml4:     .skip 4096
-pdpt:     .skip 4096
-pd:       .skip 4096
-pdpt_hh:  .skip 4096
+pml4:    .skip 4096
+pdpt:    .skip 4096
+pd:      .skip 4096
+pdpt_hh: .skip 4096
 .global pdpt_dm
-pdpt_dm:  .skip 4096
-pd1:      .skip 4096
-pd2:      .skip 4096
-pd3:      .skip 4096
+pdpt_dm: .skip 4096
 
 .balign 16
 boot_stack32:     .skip 4096

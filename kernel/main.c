@@ -149,12 +149,7 @@ void kernel_main(void)
 
 	/* framebuffer TTY needs kmalloc — init after heap */
 	if (global_fb_phys) {
-		uint64_t va = PHYS_TO_VIRT(global_fb_phys);
-		uint64_t aligned_sz = (fb_sz + PAGE_SIZE - 1) & PAGE_MASK;
-		for (uint64_t i = 0; i < aligned_sz; i += PAGE_SIZE) {
-			vm_map(kernel_vm_space, va + i, global_fb_phys + i, VM_READ | VM_WRITE | VM_NOCACHE);
-		}
-		global_fb.fb = (void *)va;
+		global_fb.fb = ioremap(global_fb_phys, fb_sz, VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
 		fb_tty_init(&global_fb);
 		kprintf_set_fb();
 	}
