@@ -204,6 +204,8 @@ irq_handler:
 
 	bl   schedule
 	bl   vm_activate
+	bl   sched_get_current_ctx
+	mov  sp, x0
 
 .irq_ret:
 	mov  x0, sp
@@ -243,6 +245,8 @@ sync_handler:
 
 	bl   schedule
 	bl   vm_activate
+	bl   sched_get_current_ctx
+	mov  sp, x0
 
 .syscall_ret:
 	mov  x0, sp
@@ -258,6 +262,8 @@ sync_handler:
 	str  x1, [x0, #16]
 	bl   schedule
 	bl   vm_activate
+	bl   sched_get_current_ctx
+	mov  sp, x0
 	mov  x0, sp
 	bl   signal_dispatch
 	bl   sched_get_current_ctx
