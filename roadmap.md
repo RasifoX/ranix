@@ -82,6 +82,12 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 - [x] Ağ altyapısı iskeleti — `net/` alt sistemi, `AF_INET`, loopback
 - [x] Virtio-net sürücüsü — QEMU paket gönderme/alma
 
+### v0.17.4 — Çekirdek Kararlılık & Bellek Güvenliği ✅ TAMAMLANDI
+- [x] `alloc_table` OOM: `kpanic` → `ENOMEM` dönüşü — `vm_create`, `vm_copy`, `vm_map` tüm tahsis hatalarını `goto oom` / NULL ile işliyor; `vm_destroy` NULL root guard'ı (x86_64 + aarch64)
+- [x] PID geri dönüşümü: `proc_cnt` sonsuz büyüme yerine `alloc_pid()` NULL slotları tarar; uzun süreli çalışmada PID tükenmesi yok
+- [x] kstack canary: `KSTACK_CANARY = 0xDEADBEEFCAFEBABEULL` stack tabanına yazılıyor; `schedule()` her context switch öncesinde kontrol ediyor
+- [x] Dentry cache inode yaşam döngüsü: `cached` alanı eklendi; volatile inode'lar (procfs/no_cache yolu) son `close()`'da serbest bırakılıyor; geçici inode sızıntısı kapatıldı; `DENTRY_MAX=4096` sınırı aşıldığında yeni girişler volatile olarak işleniyor
+
 ---
 
 ## Test Kriterleri
