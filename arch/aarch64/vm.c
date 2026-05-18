@@ -15,7 +15,7 @@ extern uint64_t kernel_l1[];
 static uint64_t alloc_table(void)
 {
 	void *p = buddy_alloc(0);
-	if (!p) kpanic("vm: out of memory");
+	if (!p) return 0;
 	memset((void *)PHYS_TO_VIRT(p), 0, PAGE_SIZE);
 	return (uint64_t)p;
 }
@@ -23,10 +23,12 @@ static uint64_t alloc_table(void)
 vm_space_t *vm_create(void)
 {
 	void *vs_phys = buddy_alloc(0);
-	if (!vs_phys) kpanic("vm: out of memory");
+	if (!vs_phys) return NULL;
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
+	vs->root = NULL;
 
 	uint64_t root_phys = alloc_table();
+	if (!root_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
 	vs->root = (uint64_t *)root_phys;
 
 	vs->refcount = 1;
@@ -44,7 +46,9 @@ void vm_destroy(vm_space_t *vs)
 	if (!vs) return;
 	if (vs->refcount > 1) { vs->refcount--; return; }
 	vs->refcount = 0;
-	
+
+	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
+
 	uint64_t l1_phys = (uint64_t)vs->root;
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 
@@ -100,6 +104,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 		l2_phys = l1[l1i] & ~0xFFFUL;
 	} else {
 		l2_phys = alloc_table();
+		if (!l2_phys) return -1;
 		l1[l1i] = l2_phys | L12_TABLE;
 	}
 
@@ -112,6 +117,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 			uint64_t base = blk & ~0x1FFFFFUL;
 			uint64_t attr = (blk & 0xFFCUL) | PTE_VALID | (1UL << 1);
 			l3_phys = alloc_table();
+			if (!l3_phys) return -1;
 			uint64_t *l3_virt = (uint64_t *)PHYS_TO_VIRT(l3_phys);
 			for (int j = 0; j < PT_ENTRIES; j++)
 				l3_virt[j] = (base + (uint64_t)j * PAGE_SIZE) | attr;
@@ -124,6 +130,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 		}
 	} else {
 		l3_phys = alloc_table();
+		if (!l3_phys) return -1;
 		l2[l2i] = l3_phys | L12_TABLE;
 	}
 
@@ -208,10 +215,13 @@ void arch_vm_switch(uint64_t root_phys)
 vm_space_t *vm_copy(vm_space_t *vs)
 {
 	void *new_vs_phys = buddy_alloc(0);
-	if (!new_vs_phys) kpanic("vm_copy: out of memory");
+	if (!new_vs_phys) return NULL;
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
-	
+	new_vs->root = NULL;
+	new_vs->refcount = 1;
+
 	uint64_t root_phys = alloc_table();
+	if (!root_phys) goto oom;
 	new_vs->root = (uint64_t *)root_phys;
 
 	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
@@ -229,6 +239,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 		uint64_t *l2_old = (uint64_t *)PHYS_TO_VIRT(l1_old[i] & ~0xFFFUL);
 		uint64_t l2_new_phys = alloc_table();
+		if (!l2_new_phys) goto oom;
 		uint64_t *l2_new = (uint64_t *)PHYS_TO_VIRT(l2_new_phys);
 		l1_new[i] = l2_new_phys | L12_TABLE;
 
@@ -249,6 +260,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 			uint64_t *l3_old = (uint64_t *)PHYS_TO_VIRT(l2_old[j] & ~0xFFFUL);
 			uint64_t l3_new_phys = alloc_table();
+			if (!l3_new_phys) goto oom;
 			uint64_t *l3_new = (uint64_t *)PHYS_TO_VIRT(l3_new_phys);
 			l2_new[j] = l3_new_phys | L12_TABLE;
 
@@ -267,6 +279,9 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 	__asm__ volatile("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
 
-	new_vs->refcount = 1;
 	return new_vs;
+
+oom:
+	vm_destroy(new_vs);
+	return NULL;
 }
