@@ -20,6 +20,24 @@ static void vfs_inode_free(vfs_inode_t *in)
 	kfree(in);
 }
 
+/* ── permission check ────────────────────────────────────── */
+/* accmode: bitmask of MAY_READ=4, MAY_WRITE=2, MAY_EXEC=1   */
+#define MAY_READ  4
+#define MAY_WRITE 2
+#define MAY_EXEC  1
+
+static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
+{
+	if (!inode) return -13; /* EACCES */
+	if (uid == 0) return 0; /* root bypasses permission checks */
+
+	mode_t m = inode->mode & 0777;
+	int shift = (inode->uid == uid) ? 6 : (inode->gid == gid) ? 3 : 0;
+
+	if (((m >> shift) & accmode) == (unsigned)accmode) return 0;
+	return -13; /* EACCES */
+}
+
 /* ── dentry pool ─────────────────────────────────────────── */
 
 static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
@@ -428,11 +446,14 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	process_t *p = task_current();
 	if (!p->fds) return -1;
 
+	uid_t uid = p ? p->uid : 0;
+	gid_t gid = p ? p->gid : 0;
+
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	vfs_inode_t  *inode = NULL;
 
 	if (!d) {
-		if (!(flags & O_CREAT)) return -1;
+		if (!(flags & O_CREAT)) return -2; /* ENOENT */
 
 		/* find parent directory */
 		const char *slash = path + strlen(path) - 1;
@@ -449,10 +470,14 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		}
 
 		vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-		if (!parent || !parent->inode || !parent->inode->iops) return -1;
+		if (!parent || !parent->inode || !parent->inode->iops) return -2;
+
+		int pr = vfs_check_perm(parent->inode, MAY_WRITE, uid, gid);
+		if (pr) return pr;
 
 		const char *fname = slash + 1;
-		if (parent->inode->iops->create(parent->inode, fname, mode) != 0)
+		mode_t cmode = mode & ~(p ? p->umask : 022);
+		if (parent->inode->iops->create(parent->inode, fname, cmode) != 0)
 			return -1;
 
 		inode = parent->inode->iops->lookup(parent->inode, fname);
@@ -460,6 +485,13 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		d = vfs_dentry_create(parent, fname, inode);
 	} else {
 		inode = d->inode;
+		/* check read/write permission on existing file */
+		int accmode = 0;
+		int acc = flags & 3; /* O_ACCMODE */
+		if (acc == 0 || acc == 2) accmode |= MAY_READ;
+		if (acc == 1 || acc == 2) accmode |= MAY_WRITE;
+		int pr = vfs_check_perm(inode, accmode, uid, gid);
+		if (pr) return pr;
 	}
 
 	if (!inode) return -1;
@@ -557,8 +589,13 @@ int vfs_mkdir(const char *path, mode_t mode)
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
 
+	process_t *p = task_current();
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->uid : 0, p ? p->gid : 0);
+	if (pr) return pr;
+
 	const char *dname = slash + 1;
-	if (parent->inode->iops->mkdir(parent->inode, dname, mode) != 0) return -1;
+	mode_t cmode = mode & ~(p ? p->umask : 022);
+	if (parent->inode->iops->mkdir(parent->inode, dname, cmode) != 0) return -1;
 
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, dname);
 	if (in) vfs_dentry_create(parent, dname, in);
@@ -578,6 +615,23 @@ int vfs_unlink(const char *path)
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink)
 		return -1;
+
+	process_t *p = task_current();
+	uid_t uid = p ? p->uid : 0;
+	gid_t gid = p ? p->gid : 0;
+
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE, uid, gid);
+	if (pr) return pr;
+
+	/* sticky bit: only file owner or dir owner can unlink */
+	if (parent->inode->mode & 01000) { /* S_ISVTX */
+		const char *fname2 = slash + 1;
+		vfs_dentry_t *target = NULL;
+		vfs_dentry_t *ch = parent->child;
+		while (ch) { if (strcmp(ch->name, fname2) == 0) { target = ch; break; } ch = ch->next; }
+		if (target && target->inode && target->inode->uid != uid && parent->inode->uid != uid)
+			return -13; /* EACCES */
+	}
 
 	const char *fname = slash + 1;
 	return parent->inode->iops->unlink(parent->inode, fname);
