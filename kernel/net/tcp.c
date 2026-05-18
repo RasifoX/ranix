@@ -88,6 +88,14 @@ static void retx_clear(socket_t *s)
     if (s->retx_data) { kfree(s->retx_data); s->retx_data = NULL; }
     s->retx_len      = 0;
     s->retx_deadline = 0;
+    s->retx_count    = 0;
+}
+
+static void tcp_wake_close(socket_t *s)
+{
+    process_t *w = s->close_waiter;
+    s->close_waiter = NULL;
+    if (w) task_wake(w);
 }
 
 /* ── port allocation ─────────────────────────────────────── */
@@ -257,6 +265,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if (w) task_wake(w);
         w = s->recv_waiter; s->recv_waiter = NULL;
         if (w) task_wake(w);
+        tcp_wake_close(s);
         skb_free(skb); return;
     }
 
@@ -323,8 +332,12 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->rcv_nxt++;
             s->tcp_state = TCP_CLOSE_WAIT;
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            /* deliver EOF (zero-length) to wake blocking recv */
-            sock_tcp_deliver(s, NULL, 0);
+            /* wake blocked recv — sock_read_vfs sees CLOSE_WAIT and returns 0 */
+            uint64_t lf = spin_lock_irq(&s->recv_lock);
+            process_t *rw = s->recv_waiter;
+            s->recv_waiter = NULL;
+            spin_unlock_irq(&s->recv_lock, lf);
+            if (rw) task_wake(rw);
         }
         break;
 
@@ -340,6 +353,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->tcp_state = TCP_CLOSED;
             retx_clear(s);
+            tcp_wake_close(s);
         }
         break;
 
@@ -355,6 +369,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->rcv_nxt++;
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
             s->tcp_state = (s->tcp_state == TCP_FIN_WAIT2) ? TCP_TIME_WAIT : TCP_CLOSING;
+            if (s->tcp_state == TCP_TIME_WAIT) tcp_wake_close(s);
         }
         break;
 
@@ -363,6 +378,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->rcv_nxt++;
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
             s->tcp_state = TCP_TIME_WAIT;
+            tcp_wake_close(s);
         }
         break;
 
@@ -370,6 +386,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             retx_clear(s);
             s->tcp_state = TCP_TIME_WAIT;
+            tcp_wake_close(s);
         }
         break;
 
@@ -458,6 +475,16 @@ void tcp_tick(void)
         if (s->retx_deadline == 0) continue;         /* no pending retransmit */
         if (kernel_ticks < s->retx_deadline) continue;
 
+        s->retx_count++;
+        if (s->retx_count > 5) {
+            /* give up — force close and wake anyone waiting */
+            s->tcp_state = TCP_CLOSED;
+            retx_clear(s);
+            tcp_wake_close(s);
+            process_t *w = s->recv_waiter; s->recv_waiter = NULL;
+            if (w) task_wake(w);
+            continue;
+        }
         /* retransmit */
         tcp_tx_seg(s, s->retx_flags, s->retx_seq, s->rcv_nxt,
                    s->retx_data, s->retx_len);

@@ -13,6 +13,18 @@ int main(void)
     dup2(0, 1);
     dup2(0, 2);
 
+    /* start echo_server in background */
+    {
+        pid_t spid = fork();
+        if (spid == 0) {
+            setsid();
+            char *argv[] = { "/bin/echo_server", NULL };
+            char *envp[] = { NULL };
+            execve("/bin/echo_server", argv, envp);
+            _exit(1);
+        }
+    }
+
     while (1) {
         pid_t pid = fork();
         if (pid == 0) {

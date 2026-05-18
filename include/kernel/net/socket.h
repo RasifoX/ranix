@@ -73,6 +73,10 @@ typedef struct socket {
     uint32_t    retx_seq;
     uint8_t     retx_flags;
     uint64_t    retx_deadline;  /* kernel_ticks deadline */
+    int         retx_count;     /* retransmit attempts since last ack */
+
+    /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
+    process_t  *close_waiter;
 } socket_t;
 
 /* Per-process socket table — max 16 sockets per process for now */
