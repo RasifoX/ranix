@@ -1,5 +1,6 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
+#include <kernel/cmdline.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/heap.h>
@@ -188,6 +189,16 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	return (int)(sz - b.rem);
 }
 
+static int fill_cmdline(char *buf, size_t sz)
+{
+	const char *cl = cmdline_str();
+	size_t n = strlen(cl);
+	if (n >= sz) n = sz - 1;
+	memcpy(buf, cl, n);
+	buf[n++] = '\n';
+	return (int)n;
+}
+
 static int fill_proc_cmdline(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
@@ -239,6 +250,7 @@ typedef struct {
 #define PROC_F_UPTIME    4
 #define PROC_F_STAT      5
 #define PROC_F_LOADAVG   6
+#define PROC_F_CMDLINE   7
 #define PROC_F_P_STATUS  10
 #define PROC_F_P_STAT    11
 #define PROC_F_P_CMDLINE 12
@@ -256,8 +268,9 @@ static const struct {
 	{ "uptime",   PROC_F_UPTIME   },
 	{ "stat",     PROC_F_STAT     },
 	{ "loadavg",  PROC_F_LOADAVG  },
+	{ "cmdline",  PROC_F_CMDLINE  },
 };
-#define ROOT_FILES_N 7
+#define ROOT_FILES_N 8
 
 /* static file table for per-pid subdirs */
 static const struct {
@@ -293,6 +306,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_UPTIME:   n = fill_uptime(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_STAT:     n = fill_stat(tmp,     PROCFS_BUF_SIZE); break;
 	case PROC_F_LOADAVG:  n = fill_loadavg(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_CMDLINE:  n = fill_cmdline(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
@@ -566,6 +580,7 @@ static vfs_inode_t *procfs_self_inode(void)
 		self_inode.nlink   = 1;
 		self_inode.refcount= 1;
 		self_inode.iops    = &procfs_self_iops;
+		self_inode.cached  = 1; /* static — must not be freed by vfs_inode_free */
 		init = 1;
 	}
 	return &self_inode;

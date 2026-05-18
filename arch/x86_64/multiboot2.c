@@ -1,9 +1,11 @@
 #include <uapi/types.h>
 #include <kernel/kprintf.h>
 #include <kernel/fb.h>
+#include <kernel/cmdline.h>
 #include <asm/mmu.h>
 
 #define MB2_TAG_TYPE_END        0
+#define MB2_TAG_TYPE_CMDLINE    1
 #define MB2_TAG_TYPE_MODULE     3
 #define MB2_TAG_TYPE_MMAP       6
 #define MB2_TAG_TYPE_FRAMEBUFFER 8
@@ -86,7 +88,11 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
         if (tag->type == MB2_TAG_TYPE_END) break;
         if (tag->size < 8) break;
 
-        if (tag->type == MB2_TAG_TYPE_MMAP) {
+        if (tag->type == MB2_TAG_TYPE_CMDLINE) {
+            /* cmdline string starts right after the 8-byte tag header */
+            const char *cl = (const char *)(p + 8);
+            cmdline_init(cl);
+        } else if (tag->type == MB2_TAG_TYPE_MMAP) {
             uint32_t entry_size = *(uint32_t *)(p + 8);
             if (entry_size == 0) break;
             uint32_t count = (tag->size - 16) / entry_size;

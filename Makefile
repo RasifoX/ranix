@@ -92,6 +92,7 @@ SRCS_NET = \
 SRCS_KERNEL = \
     kernel/main.c \
     kernel/initrd.c \
+    kernel/cmdline.c \
     kernel/driver.c \
     kernel/fdt.c \
     kernel/irq.c \
@@ -230,7 +231,7 @@ $(TARGET): $(OBJS)
 	@if [ "$(ARCH)" = "aarch64" ] && [ "$(BOARD)" != "raspi4" ]; then \
 		llvm-objcopy -O binary $@ $(BUILD_DIR)/ranix.bin; \
 	fi
-	@echo "[OK] Ranix built → arch=$(ARCH) board=$(BOARD)"
+	@if [ "$(ARCH)" = "x86_64" ]; then echo "[OK] Ranix built → arch=$(ARCH)"; else echo "[OK] Ranix built → arch=$(ARCH) board=$(BOARD)"; fi
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)

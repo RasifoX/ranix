@@ -1,4 +1,5 @@
 #include <kernel/board.h>
+#include <kernel/cmdline.h>
 #include <kernel/driver.h>
 #include <kernel/fdt.h>
 #include <kernel/hal.h>
@@ -173,10 +174,15 @@ void kernel_main(void)
 	fdt_remap();
 	arch_cpu_init();
 
-	if (fdt_ok == 0)
+	if (fdt_ok == 0) {
+		uint32_t cl_len;
+		const void *cl_val = fdt_get_prop("chosen", "bootargs", &cl_len);
+		if (cl_val && cl_len > 0)
+			cmdline_init((const char *)cl_val);
 		kprintf("Ranix — %s (%d cores)\n", fi->model, (int)fi->num_cpus);
-	else
+	} else {
 		kprintf("Ranix — %s\n", cfg->name);
+	}
 
 	setup_physical_memory(global_fb_phys, fb_sz, cfg);
 	heap_init();
@@ -249,11 +255,28 @@ void kernel_main(void)
 	}
 
 	/* Start init (PID 1) as the primary task */
+	static const char *init_candidates[] = {
+		NULL, /* filled from cmdline init= */
+		"/sbin/init",
+		"/etc/init",
+		"/bin/init",
+		"/bin/sh",
+		NULL
+	};
+	char cmdline_init_buf[256] = {0};
+	if (cmdline_get("init", cmdline_init_buf, sizeof(cmdline_init_buf)))
+		init_candidates[0] = cmdline_init_buf;
+
 	vfs_stat_t st = {0};
-	const char *init_path = vfs_stat("/bin/init", &st) == 0 && st.size > 0
-	                        ? "/bin/init" : NULL;
-	if (!init_path && vfs_stat("/bin/sh", &st) == 0 && st.size > 0)
-		init_path = "/bin/sh";
+	const char *init_path = NULL;
+	for (int i = 0; i < 5; i++) {
+		if (!init_candidates[i]) continue;
+		if (vfs_stat(init_candidates[i], &st) == 0 && st.size > 0) {
+			init_path = init_candidates[i];
+			break;
+		}
+	}
+
 	if (init_path) {
 		uint8_t *buf = kmalloc(st.size);
 		if (buf) {
@@ -261,7 +284,8 @@ void kernel_main(void)
 			if (fd >= 0) {
 				vfs_read(fd, buf, st.size);
 				vfs_close(fd);
-				kprintf("Starting %s...\n", init_path);
+				if (!cmdline_has("quiet"))
+					kprintf("Starting %s...\n", init_path);
 				proc_exec("init", buf, st.size);
 			} else {
 				kprintf("init: vfs_open %s failed\n", init_path);
