@@ -155,23 +155,26 @@ void sched_tick(void)
 	}
 	spin_unlock_irq(&sched_lock, f);
 
-	for (int i = 0; i < task_count(); i++) {
-		process_t *t = task_get(i);
-		if (!t) continue;
-		/* ITIMER_REAL → SIGALRM */
-		if (t->itimer_value > 0) {
-			t->itimer_value--;
-			if (t->itimer_value == 0) {
-				t->itimer_value = t->itimer_interval;
-				t->sig_pending |= (1ULL << (14 - 1)); /* SIGALRM = 14 */
-				if (t->state == PROC_SLEEPING) { t->state = PROC_READY; runqueue_add(t); need_resched = 1; }
+	/* Walk circular linked list (sentinel = proctab[0]) under one lock */
+	{
+		uint64_t lf = spin_lock_irq(&sched_lock);
+		process_t *sentinel = proctab[0];
+		for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+			if (t->itimer_value > 0) {
+				t->itimer_value--;
+				if (t->itimer_value == 0) {
+					t->itimer_value = t->itimer_interval;
+					t->sig_pending |= (1ULL << (14 - 1));
+					if (t->state == PROC_SLEEPING) { t->state = PROC_READY; runqueue_add(t); need_resched = 1; }
+				}
+			}
+			if (t->state == PROC_SLEEPING && !t->sleeping_on_queue) {
+				t->state = PROC_READY;
+				runqueue_add(t);
+				need_resched = 1;
 			}
 		}
-		/* Only poll-wake tasks not in a wait queue (e.g. task_sleep in waitpid).
-		 * Tasks sleeping via sleep_on_locked are woken exclusively by wake_up()
-		 * to prevent wait_next cycles when sched_tick fires mid-sleep. */
-		if (t->state == PROC_SLEEPING && !t->sleeping_on_queue)
-			task_wake(t);
+		spin_unlock_irq(&sched_lock, lf);
 	}
 
 	tick_notify();
@@ -359,26 +362,16 @@ fail:
 
 pid_t proc_fork(void)
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proctab_ensure() != 0) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
-
 	process_t *parent = task_current();
-	/* tpidr_el0 may not have been saved by scheduler yet (no context switch
-	 * since EL0 last set it), so capture it now while still in parent context. */
 	arch_save_tls(parent);
-	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
+
+	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
+	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
 
-	child->pid       = proc_cnt;
 	child->ppid      = parent->pid;
 	child->pgrp      = parent->pgrp;
+	child->sid       = parent->sid;
 	child->state     = PROC_READY;
 	child->uid       = parent->uid;
 	child->gid       = parent->gid;
@@ -394,55 +387,61 @@ pid_t proc_fork(void)
 	child->name[nlen++] = 'c';
 	child->name[nlen] = '\0';
 
+	/* expensive ops: vm_copy (TLB flush), fd dup, VMA list — all outside sched_lock */
 	child->vm = vm_copy(parent->vm);
-	if (!child->vm) goto fail;
+	if (!child->vm) goto fail_early;
 
 	child->fds = fd_table_copy(parent->fds);
-	if (!child->fds) goto fail;
+	if (!child->fds) goto fail_early;
 	memcpy(child->cwd, parent->cwd, 256);
 	child->umask = parent->umask;
 
-	/* copy VMA list */
 	{
 		vma_t **dst = &child->vmas;
 		for (vma_t *v = parent->vmas; v; v = v->next) {
 			vma_t *nv = kmalloc(sizeof(*nv));
-			if (!nv) goto fail;
+			if (!nv) goto fail_early;
 			*nv = *v; nv->next = NULL;
 			*dst = nv; dst = &nv->next;
 		}
 	}
 
-	/* copy signal actions */
 	memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
 	child->sig_mask = parent->sig_mask;
 
 	void *child_kstack_phys = buddy_alloc(1);
-	if (!child_kstack_phys) goto fail;
+	if (!child_kstack_phys) goto fail_early;
 	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
 
-	uint8_t *ksp = child->kstack + KSTACK_SIZE;
-	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
-	
-	CTX_SYSCALL_RET(cctx, 0);
-	child->ctx = cctx;
+	{
+		uint8_t *ksp = child->kstack + KSTACK_SIZE;
+		arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+		memcpy(cctx, parent->ctx, sizeof(arch_context_t));
+		CTX_SYSCALL_RET(cctx, 0);
+		child->ctx = cctx;
+	}
 	child->tls_base        = parent->tls_base;
 	child->ticks_remaining = SCHED_QUANTUM;
 
-	child->next  = proctab[0]->next;
-	proctab[0]->next = child;
-	runqueue_add(child);
-
-	proctab[proc_cnt++] = child;
-	spin_unlock_irq(&sched_lock, f);
+	/* minimal critical section: assign pid + insert into proctab/runqueue */
+	{
+		uint64_t f = spin_lock_irq(&sched_lock);
+		if (proctab_ensure() != 0) {
+			spin_unlock_irq(&sched_lock, f);
+			goto fail_early;
+		}
+		child->pid = proc_cnt;
+		child->next = proctab[0]->next;
+		proctab[0]->next = child;
+		runqueue_add(child);
+		proctab[proc_cnt++] = child;
+		spin_unlock_irq(&sched_lock, f);
+	}
 	return child->pid;
 
-fail:
-	spin_unlock_irq(&sched_lock, f);
+fail_early:
 	if (child->vm)  vm_destroy(child->vm);
 	if (child->fds) fd_table_destroy(child->fds);
-	/* free any partially-copied VMA list */
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -722,6 +721,17 @@ void task_exit(void)
 		p->vfork_parent = -1;
 	}
 
+	/* Reparent orphaned children to init (pid 1) */
+	process_t *init_proc = (proc_cnt > 1) ? proctab[1] : NULL;
+	process_t *sentinel2 = proctab[0];
+	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next) {
+		if (c->ppid == (pid_t)p->pid && c != p) {
+			c->ppid = init_proc ? (pid_t)init_proc->pid : 0;
+			if (c->state == PROC_DEAD && init_proc)
+				init_proc->sig_pending |= (1UL << (SIGCHLD - 1));
+		}
+	}
+
 	process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
 	if (parent) {
 		if (parent->state == PROC_SLEEPING) {
@@ -764,11 +774,13 @@ void task_signal(process_t *p, int sig)
 
 void task_signal_pgrp(pid_t pgrp, int sig)
 {
-	for (int i = 0; i < proc_cnt; i++) {
-		process_t *p = proctab[i];
-		if (p && p->pgrp == pgrp && p->state != PROC_DEAD && p->state != PROC_ZOMBIE)
-			task_signal(p, sig);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->pgrp == pgrp && t->state != PROC_DEAD)
+			t->sig_pending |= (1UL << (sig - 1));
 	}
+	spin_unlock_irq(&sched_lock, f);
 }
 
 /* Signals that kill the process by default */
@@ -884,7 +896,7 @@ void signal_dispatch(arch_context_t *tf)
 	 *   [rsp+152]  orig_r15
 	 *   [rsp+160]  padding × 1  (→ total 168, rsp % 16 == 8)
 	 * rt_sigreturn reads base = ctx->rsp (= frame_base+8 after handler ret). */
-	uint64_t usp = (tf->rsp & ~15UL) - 168 + 8; /* 8 mod 16 */
+	uint64_t usp = (tf->rsp & ~15UL) - 168; /* frame below RSP, 8-mod-16 for handler entry */
 	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
 	*(uint64_t *)(usp +   8) = old_mask;
 	*(uint64_t *)(usp +  16) = tf->rip;
@@ -930,6 +942,26 @@ process_t *task_get(int i)
 	process_t *p = (i < 0 || i >= proc_cnt) ? NULL : proctab[i];
 	spin_unlock_irq(&sched_lock, f);
 	return p;
+}
+
+void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
+{
+	*out_child = NULL;
+	*out_any_alive = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
+		if (c->ppid == ppid) {
+			if (c->state == PROC_DEAD && !c->reaped) {
+				c->reaped = 1;
+				*out_child = c;
+				break;
+			}
+			if (c->state != PROC_DEAD)
+				*out_any_alive = 1;
+		}
+	}
+	spin_unlock_irq(&sched_lock, f);
 }
 
 void proc_reap(process_t *child)

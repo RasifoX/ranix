@@ -30,7 +30,7 @@
 #define VSUSP   10
 #define NCCS    19
 
-#define TTY_BUF_SIZE 1024
+#define TTY_BUF_SIZE 65536
 
 static char input_buf[TTY_BUF_SIZE];
 static int  in_head = 0;

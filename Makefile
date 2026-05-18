@@ -55,7 +55,7 @@ ifeq ($(ARCH),aarch64)
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
-    QEMU_CMD    = qemu-system-x86_64 -cpu max
+    QEMU_CMD    = qemu-system-x86_64 -cpu max -device isa-debug-exit,iobase=0x501,iosize=1
     QEMU_KERNEL = $(TARGET)
     SRCS_ARCH = \
         arch/x86_64/cpu.c \
@@ -188,10 +188,10 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	fi
 	@cp "$(BUSYBOX_EXTRACT)/bin/busybox.static" $(BUILD_DIR)/initramfs/bin/busybox
 	@chmod +x $(BUILD_DIR)/initramfs/bin/busybox
-	@for cmd in sh ls cat touch mkdir rm cp mv ln chmod grep sed find \
+	@for cmd in sh ls cat touch mkdir rmdir rm cp mv ln chmod grep sed find \
 	            ps kill df free uname head tail wc echo printf vi \
 	            reboot poweroff halt mount umount dmesg \
-	            awk sort uniq cut tr xargs dd stat du diff \
+	            awk sort uniq cut tr rev xargs dd stat du diff \
 	            env tee seq sleep date id whoami hostname \
 	            true false dirname basename pwd uptime nproc \
 	            timeout test expr yes which readlink ping nc wget; do \
@@ -211,6 +211,7 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	@if [ -f doom1.wad ]; then \
 		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
 	fi
+	@if [ -f /tmp/ranix_test.sh ]; then cp /tmp/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
 	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 

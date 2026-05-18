@@ -91,4 +91,16 @@ void board_reset(void)
 	for (;;) __asm__ volatile("wfe");
 }
 
+void board_poweroff(void)
+{
+	/* PSCI SYSTEM_OFF (0x84000008) */
+	__asm__ volatile(
+		"movz x0, #0x8400, lsl #16\n"
+		"movk x0, #0x8\n"
+		"hvc #0\n"
+		::: "x0"
+	);
+	for (;;) __asm__ volatile("wfe");
+}
+
 void board_get_reserved(uint64_t *base, uint32_t *size) { *base = 0; *size = 0; }
