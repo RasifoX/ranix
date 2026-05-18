@@ -7,6 +7,11 @@
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
 
+#if defined(__x86_64__)
+#include <kernel/pci.h>
+#include <asm/io.h>
+#endif
+
 /*
  * virtio-net MMIO (legacy transport, spec 0.9/1.0 MMIO).
  * One device per MMIO node found in FDT with DeviceID=1.
@@ -82,8 +87,9 @@ typedef struct {
     uint16_t num_buffers;
 } __attribute__((packed)) virtio_net_hdr_t;
 
-#define VNET_HDR_SZ  sizeof(virtio_net_hdr_t)
-#define VNET_BUF_SZ  (VNET_HDR_SZ + 1514)
+#define VNET_HDR_SZ      sizeof(virtio_net_hdr_t)   /* 12, with MRG_RXBUF */
+#define VNET_HDR_SZ_PCI  10                          /* PCI without MRG_RXBUF */
+#define VNET_BUF_SZ      (VNET_HDR_SZ + 1514)
 
 /* ── driver state ────────────────────────────────────────── */
 
@@ -105,9 +111,12 @@ typedef struct {
     uint16_t       tx_last;
 } vnet_priv_t;
 
+static int g_init_done;
+
+#ifndef __x86_64__
+
 static vnet_priv_t g_priv;
 static netdev_t    g_dev;
-static int         g_init_done;
 
 /* ── register accessors ──────────────────────────────────── */
 
@@ -325,3 +334,205 @@ void virtio_net_init(void)
     if (!g_init_done)
         kprintf("virtio-net: no device found\n");
 }
+
+#endif /* !__x86_64__ */
+
+/* ── PCI (legacy) init for x86_64 ───────────────────────── */
+#if defined(__x86_64__)
+
+/* virtio legacy PCI I/O register offsets */
+#define VIO_DEV_FEATURES  0x00
+#define VIO_DRV_FEATURES  0x04
+#define VIO_QUEUE_ADDR    0x08
+#define VIO_QUEUE_SIZE    0x0C
+#define VIO_QUEUE_SEL     0x0E
+#define VIO_QUEUE_NOTIFY  0x10
+#define VIO_STATUS        0x12
+#define VIO_ISR           0x13
+#define VIO_NET_MAC       0x14   /* 6 bytes, device-specific region */
+
+#define VNET_Q_PCI  64
+
+static uint8_t g_pci_vring_rx[3 * 4096] __attribute__((aligned(4096)));
+static uint8_t g_pci_vring_tx[3 * 4096] __attribute__((aligned(4096)));
+static uint8_t g_pci_rx_bufs[VNET_Q_PCI][VNET_BUF_SZ] __attribute__((aligned(64)));
+static uint8_t g_pci_tx_buf[VNET_BUF_SZ]               __attribute__((aligned(64)));
+
+typedef struct {
+    uint16_t       iobase;
+    uint16_t       qsz;       /* actual device queue size */
+    vring_desc_t  *rx_desc;
+    vring_avail_t *rx_avail;
+    vring_used_t  *rx_used;
+    uint16_t       rx_last;
+    vring_desc_t  *tx_desc;
+    vring_avail_t *tx_avail;
+    vring_used_t  *tx_used;
+    uint16_t       tx_last;
+} vnet_pci_priv_t;
+
+static vnet_pci_priv_t g_pci_priv;
+static netdev_t        g_pci_dev;
+
+static int vnet_pci_tx(netdev_t *dev, skb_t *skb)
+{
+    vnet_pci_priv_t *p = (vnet_pci_priv_t *)dev->priv;
+
+    if (skb->len + VNET_HDR_SZ_PCI > VNET_BUF_SZ) { skb_free(skb); return -1; }
+
+    memset(g_pci_tx_buf, 0, VNET_HDR_SZ_PCI);
+    memcpy(g_pci_tx_buf + VNET_HDR_SZ_PCI, skb->data, skb->len);
+    uint32_t total = (uint32_t)(VNET_HDR_SZ_PCI + skb->len);
+    skb_free(skb);
+
+    uint16_t qsz = p->qsz ? p->qsz : VNET_Q_PCI;
+    uint16_t di = 0;   /* always use descriptor slot 0 for single TX */
+    p->tx_desc[di].addr  = VIRT_TO_PHYS((uint64_t)g_pci_tx_buf);
+    p->tx_desc[di].len   = total;
+    p->tx_desc[di].flags = 0;
+
+    p->tx_avail->ring[p->tx_avail->idx % qsz] = di;
+    __asm__ volatile("" ::: "memory");
+    p->tx_avail->idx++;
+    __asm__ volatile("" ::: "memory");
+
+    outw((uint16_t)(p->iobase + VIO_QUEUE_NOTIFY), 1);
+
+    for (int i = 0; i < 100000; i++) {
+        __asm__ volatile("pause" ::: "memory");
+        if (p->tx_used->idx != p->tx_last) break;
+    }
+    p->tx_last = p->tx_used->idx;
+    return 0;
+}
+
+static void vnet_pci_poll(netdev_t *dev)
+{
+    vnet_pci_priv_t *p = (vnet_pci_priv_t *)dev->priv;
+    if (!p) return;
+
+    __asm__ volatile("" ::: "memory");
+
+    uint16_t qsz = p->qsz ? p->qsz : VNET_Q_PCI;
+    while (p->rx_last != p->rx_used->idx) {
+        vring_used_elem_t *u = &p->rx_used->ring[p->rx_last % qsz];
+        uint32_t desc_id = u->id;
+        uint32_t rcv_len = u->len;
+
+        if (desc_id < VNET_Q_PCI && rcv_len > VNET_HDR_SZ_PCI) {
+            uint8_t *pkt = g_pci_rx_bufs[desc_id] + VNET_HDR_SZ_PCI;
+            uint32_t pkt_len = rcv_len - (uint32_t)VNET_HDR_SZ_PCI;
+            skb_t *skb = skb_alloc();
+            if (skb) {
+                if (pkt_len > SKB_DATA_MAX) pkt_len = SKB_DATA_MAX;
+                memcpy(skb->data, pkt, pkt_len);
+                skb->len = (uint16_t)pkt_len;
+                netdev_rx_enqueue(dev, skb);
+            }
+        }
+
+        p->rx_avail->ring[p->rx_avail->idx % qsz] = (uint16_t)desc_id;
+        __asm__ volatile("" ::: "memory");
+        p->rx_avail->idx++;
+        __asm__ volatile("" ::: "memory");
+        outw((uint16_t)(p->iobase + VIO_QUEUE_NOTIFY), 0);
+
+        p->rx_last++;
+    }
+}
+
+static uint16_t setup_pci_queue(uint16_t iobase, int qidx,
+                                 vring_desc_t **desc_out,
+                                 vring_avail_t **avail_out,
+                                 vring_used_t  **used_out,
+                                 uint8_t *vring_buf)
+{
+    outw((uint16_t)(iobase + VIO_QUEUE_SEL), (uint16_t)qidx);
+    /* legacy PCI: QUEUE_SIZE is read-only (device max) */
+    uint16_t qsz = inw((uint16_t)(iobase + VIO_QUEUE_SIZE));
+    if (qsz == 0) qsz = 256;
+
+    memset(vring_buf, 0, 3 * 4096);
+
+    /* virtio legacy PCI layout (4096-byte page aligned):
+     *   desc  at offset 0
+     *   avail right after desc
+     *   used  at next 4096-aligned offset after avail         */
+    uint32_t desc_bytes  = (uint32_t)qsz * sizeof(vring_desc_t);
+    uint32_t avail_bytes = (uint32_t)sizeof(uint16_t) * (3 + qsz);
+    uint32_t used_off    = (desc_bytes + avail_bytes + 4095u) & ~4095u;
+
+
+    *desc_out  = (vring_desc_t  *)(vring_buf);
+    *avail_out = (vring_avail_t *)(vring_buf + desc_bytes);
+    *used_out  = (vring_used_t  *)(vring_buf + used_off);
+
+    uint64_t phys = VIRT_TO_PHYS((uint64_t)vring_buf);
+    outl((uint16_t)(iobase + VIO_QUEUE_ADDR), (uint32_t)(phys / 4096));
+    return qsz;
+}
+
+void virtio_net_pci_init(void)
+{
+    uint8_t bus, devn, fn;
+    if (pci_find(0x1AF4, 0x1000, &bus, &devn, &fn) != 0) {
+        kprintf("virtio-net: PCI not found\n");
+        return;
+    }
+
+    uint16_t cmd = pci_read16(bus, devn, fn, PCI_COMMAND);
+    pci_write16(bus, devn, fn, PCI_COMMAND, cmd | PCI_CMD_IO | PCI_CMD_MASTER);
+
+    uint32_t bar0 = pci_read32(bus, devn, fn, PCI_BAR0);
+    uint16_t iobase = (uint16_t)(bar0 & 0xFFFC);
+
+    outb((uint16_t)(iobase + VIO_STATUS), 0);
+    outb((uint16_t)(iobase + VIO_STATUS), VIRTIO_STATUS_ACK);
+    outb((uint16_t)(iobase + VIO_STATUS), VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+
+    uint32_t feat = inl((uint16_t)(iobase + VIO_DEV_FEATURES));
+    /* Don't accept MRG_RXBUF (bit 15) — keep header at 10 bytes */
+    feat &= ~(1u << 15);   /* no MRG_RXBUF → 10-byte header */
+    outl((uint16_t)(iobase + VIO_DRV_FEATURES), feat);
+
+    vnet_pci_priv_t *p = &g_pci_priv;
+    p->iobase = iobase;
+    p->qsz = setup_pci_queue(iobase, 0, &p->rx_desc, &p->rx_avail, &p->rx_used, g_pci_vring_rx);
+    setup_pci_queue(iobase, 1, &p->tx_desc, &p->tx_avail, &p->tx_used, g_pci_vring_tx);
+
+    outb((uint16_t)(iobase + VIO_STATUS),
+         VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_OK);
+
+    /* read MAC */
+    for (int i = 0; i < 6; i++)
+        g_pci_dev.mac[i] = inb((uint16_t)(iobase + VIO_NET_MAC + i));
+
+    kprintf("virtio-net: PCI found iobase=0x%x mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+            iobase,
+            g_pci_dev.mac[0], g_pci_dev.mac[1], g_pci_dev.mac[2],
+            g_pci_dev.mac[3], g_pci_dev.mac[4], g_pci_dev.mac[5]);
+
+    /* pre-fill RX descriptors */
+    for (int i = 0; i < VNET_Q_PCI; i++) {
+        p->rx_desc[i].addr  = VIRT_TO_PHYS((uint64_t)g_pci_rx_bufs[i]);
+        p->rx_desc[i].len   = VNET_BUF_SZ;
+        p->rx_desc[i].flags = VRING_DESC_F_WRITE;
+        p->rx_avail->ring[i] = (uint16_t)i;
+    }
+    __asm__ volatile("" ::: "memory");
+    p->rx_avail->idx = VNET_Q_PCI;
+    __asm__ volatile("" ::: "memory");
+    outw((uint16_t)(iobase + VIO_QUEUE_NOTIFY), 0);
+
+    memcpy(g_pci_dev.name, "eth0", 5);
+    g_pci_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u;
+    g_pci_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
+    g_pci_dev.mask = 0xffffff00u;
+    g_pci_dev.tx   = vnet_pci_tx;
+    g_pci_dev.poll = vnet_pci_poll;
+    g_pci_dev.priv = p;
+    g_pci_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
+    net_register(&g_pci_dev);
+    g_init_done = 1;
+}
+#endif /* __x86_64__ */

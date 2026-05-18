@@ -2101,7 +2101,17 @@ static int sock_close_vfs(vfs_file_t *file)
 {
     socket_t    *s  = (socket_t *)file->inode->priv;
     vfs_inode_t *in = file->inode;
-    if (s->type == SOCK_STREAM) tcp_close(s);
+    if (s->type == SOCK_STREAM &&
+        s->tcp_state != TCP_CLOSED && s->tcp_state != TCP_LISTEN) {
+        tcp_close(s);
+        /* Block until teardown reaches a terminal state; tcp_tick enforces
+         * a 5-retransmit timeout so we never hang indefinitely. */
+        while (s->tcp_state != TCP_CLOSED &&
+               s->tcp_state != TCP_TIME_WAIT) {
+            s->close_waiter = task_current();
+            task_sleep();
+        }
+    }
     sock_free(s);
     kfree(in);
     return 0;
@@ -2112,9 +2122,13 @@ static int sock_poll_vfs(vfs_file_t *file)
     socket_t *s = (socket_t *)file->inode->priv;
     if (!s) return 0;
     uint64_t f = spin_lock_irq(&s->recv_lock);
-    int readable = (s->recv_head != NULL) ? 0x0001 : 0;
+    int has_data = (s->recv_head != NULL);
     spin_unlock_irq(&s->recv_lock, f);
-    return readable | 0x0004;  /* always writable */
+    /* EOF (CLOSE_WAIT/CLOSED) is also readable */
+    int eof = (s->type == SOCK_STREAM &&
+               (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
+                s->tcp_state == TCP_LAST_ACK   || s->tcp_state == TCP_TIME_WAIT));
+    return ((has_data || eof) ? 0x0001 : 0) | 0x0004;
 }
 
 static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
@@ -2632,6 +2646,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_BIND:        ret = sys_bind((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
 	case SYS_ARCH_CONNECT:     ret = sys_connect((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
 	case SYS_ARCH_LISTEN:      ret = sys_listen((int)arg0, (int)arg1); break;
+	case SYS_ARCH_ACCEPT:      ret = sys_accept4((int)arg0, (void*)arg1, (uint32_t*)arg2, 0); break;
 	case SYS_ARCH_ACCEPT4:     ret = sys_accept4((int)arg0, (void*)arg1, (uint32_t*)arg2, (int)arg3); break;
 	case SYS_ARCH_SENDTO:      ret = sys_sendto((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t)arg5); break;
 	case SYS_ARCH_RECVFROM:    ret = sys_recvfrom((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t*)arg5); break;
