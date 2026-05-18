@@ -30,18 +30,18 @@ UDP ve ICMP'yi hallettik; TCP state machine bunların üstüne oturuyor.
 Bu olmadan SMP'yi yazsan bile ağa bağlanamazsın.
 
 ### TCP state machine
-- [ ] `tcp_sock` state: CLOSED → SYN_SENT/LISTEN → ESTABLISHED → FIN_WAIT/CLOSE_WAIT → TIME_WAIT
-- [ ] 3-way handshake (SYN, SYN-ACK, ACK)
-- [ ] veri transferi: segment reassembly, seq/ack takibi
-- [ ] bağlantı kapama: FIN/FIN-ACK/ACK (aktif + pasif)
-- [ ] temel retransmit (sabit timeout, basit)
-- [ ] `connect()` TCP için gerçek SYN göndermeli
-- [ ] `listen()` + `accept()` — server socket
+- [x] `tcp_sock` state: CLOSED → SYN_SENT/LISTEN → ESTABLISHED → FIN_WAIT/CLOSE_WAIT → TIME_WAIT
+- [x] 3-way handshake (SYN, SYN-ACK, ACK)
+- [x] veri transferi: segment reassembly, seq/ack takibi
+- [x] bağlantı kapama: FIN/FIN-ACK/ACK (aktif + pasif)
+- [x] temel retransmit (sabit timeout, basit)
+- [x] `connect()` TCP için gerçek SYN göndermeli
+- [x] `listen()` + `accept()` — server socket
 
 ### Syscall tamamlama
-- [ ] `recv()` / `send()` (MSG_PEEK, MSG_WAITALL temel flaglar)
-- [ ] `SO_REUSEADDR` setsockopt
-- [ ] blocking connect timeout
+- [x] `recv()` / `send()` (MSG_PEEK, MSG_WAITALL temel flaglar)
+- [x] `SO_REUSEADDR` setsockopt
+- [x] blocking connect timeout
 
 ### Test hedefleri
 - [x] `nc 10.0.2.2 9999` host listener'a bağlanıyor, veri alıyor
