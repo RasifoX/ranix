@@ -43,6 +43,27 @@ static int proctab_ensure(void)
 	return proctab_grow();
 }
 
+/* Scan for recycled NULL slot; extend proc_cnt only when table is full */
+static int alloc_pid(void)
+{
+	for (int i = 1; i < proc_cnt; i++) {
+		if (!proctab[i]) return i;
+	}
+	if (proctab_ensure() != 0) return -1;
+	return proc_cnt++;
+}
+
+#define KSTACK_CANARY 0xDEADBEEFCAFEBABEULL
+
+static uint8_t *kstack_alloc(void)
+{
+	void *p = buddy_alloc(1);
+	if (!p) return NULL;
+	uint8_t *ks = (uint8_t *)PHYS_TO_VIRT(p);
+	*(uint64_t *)ks = KSTACK_CANARY;
+	return ks;
+}
+
 static spinlock_t sched_lock = SPINLOCK_INIT;
 
 static tick_fn_t *tick_cbs;
@@ -185,23 +206,12 @@ void sched_tick(void)
 
 pid_t proc_create(const char *name, void (*fn)(void))
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proctab_ensure() != 0) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
-
 	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!p) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
+	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
 
 	process_t *current = task_current();
-	p->pid   = proc_cnt;
 	p->ppid  = current ? current->pid : 0;
-	p->pgrp  = (pid_t)proc_cnt;
 	p->state = PROC_READY;
 	p->uid   = current ? current->uid : 0;
 	p->gid   = current ? current->gid : 0;
@@ -213,14 +223,11 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	memcpy(p->name, name, nlen);
 	p->name[nlen] = '\0';
 
-	/* kernel stack */
-	void *kstack_phys = buddy_alloc(1);
-	if (!kstack_phys) { 
-		spin_unlock_irq(&sched_lock, f);
+	p->kstack = kstack_alloc();
+	if (!p->kstack) {
 		buddy_free(VIRT_TO_PHYS(p), 0);
 		return -1;
 	}
-	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
 
 	p->fds = fd_table_create();
 	p->cwd[0] = '/'; p->cwd[1] = '\0';
@@ -231,34 +238,32 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	arch_context_init(ctx, fn, (uint64_t)sp_top);
 	p->ctx = ctx;
 
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int pid = alloc_pid();
+	if (pid < 0) {
+		spin_unlock_irq(&sched_lock, f);
+		buddy_free(VIRT_TO_PHYS(p->kstack), 1);
+		buddy_free(VIRT_TO_PHYS(p), 0);
+		return -1;
+	}
+	p->pid  = pid;
+	p->pgrp = pid;
 	p->next = proctab[0]->next;
 	proctab[0]->next = p;
 	runqueue_add(p);
-
-	proctab[proc_cnt++] = p;
+	proctab[pid] = p;
 	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
 }
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proctab_ensure() != 0) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
-
 	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!p) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
+	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
 
 	process_t *current = task_current();
-	p->pid   = proc_cnt;
 	p->ppid  = current->pid;
-	p->pgrp  = (pid_t)proc_cnt;
 	p->state = PROC_READY;
 	p->uid   = current->uid;
 	p->gid   = current->gid;
@@ -297,9 +302,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		}
 	}
 
-	void *kstack_phys = buddy_alloc(1);
-	if (!kstack_phys) goto fail;
-	p->kstack = (uint8_t *)PHYS_TO_VIRT(kstack_phys);
+	p->kstack = kstack_alloc();
+	if (!p->kstack) goto fail;
 
 	uint8_t *ksp = p->kstack + KSTACK_SIZE;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
@@ -344,18 +348,27 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	memcpy(p->cwd, current->cwd, 256);
 	p->umask = current->umask;
 
-	p->next = proctab[0]->next;
-	proctab[0]->next = p;
-	runqueue_add(p);
-
-	proctab[proc_cnt++] = p;
-	spin_unlock_irq(&sched_lock, f);
+	{
+		uint64_t f = spin_lock_irq(&sched_lock);
+		int pid = alloc_pid();
+		if (pid < 0) {
+			spin_unlock_irq(&sched_lock, f);
+			goto fail;
+		}
+		p->pid  = pid;
+		p->pgrp = pid;
+		p->next = proctab[0]->next;
+		proctab[0]->next = p;
+		runqueue_add(p);
+		proctab[pid] = p;
+		spin_unlock_irq(&sched_lock, f);
+	}
 	return p->pid;
 
 fail:
-	spin_unlock_irq(&sched_lock, f);
 	if (p->vm) vm_destroy(p->vm);
 	if (p->fds) fd_table_destroy(p->fds);
+	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), 1);
 	buddy_free(VIRT_TO_PHYS(p), 0);
 	return -1;
 }
@@ -409,9 +422,8 @@ pid_t proc_fork(void)
 	memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
 	child->sig_mask = parent->sig_mask;
 
-	void *child_kstack_phys = buddy_alloc(1);
-	if (!child_kstack_phys) goto fail_early;
-	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
+	child->kstack = kstack_alloc();
+	if (!child->kstack) goto fail_early;
 
 	{
 		uint8_t *ksp = child->kstack + KSTACK_SIZE;
@@ -423,18 +435,19 @@ pid_t proc_fork(void)
 	child->tls_base        = parent->tls_base;
 	child->ticks_remaining = SCHED_QUANTUM;
 
-	/* minimal critical section: assign pid + insert into proctab/runqueue */
 	{
 		uint64_t f = spin_lock_irq(&sched_lock);
-		if (proctab_ensure() != 0) {
+		int pid = alloc_pid();
+		if (pid < 0) {
 			spin_unlock_irq(&sched_lock, f);
 			goto fail_early;
 		}
-		child->pid = proc_cnt;
+		child->pid  = pid;
+		child->pgrp = parent->pgrp;
 		child->next = proctab[0]->next;
 		proctab[0]->next = child;
 		runqueue_add(child);
-		proctab[proc_cnt++] = child;
+		proctab[pid] = child;
 		spin_unlock_irq(&sched_lock, f);
 	}
 	return child->pid;
@@ -450,22 +463,13 @@ fail_early:
 
 pid_t proc_vfork(void)
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proctab_ensure() != 0) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
-
 	process_t *parent = task_current();
 	arch_save_tls(parent);
+
 	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
+	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
 
-	child->pid          = proc_cnt;
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
@@ -481,13 +485,11 @@ pid_t proc_vfork(void)
 	memcpy(child->cwd, parent->cwd, 256);
 	child->umask        = parent->umask;
 
-	void *child_kstack_phys = buddy_alloc(1);
-	if (!child_kstack_phys) { 
-		spin_unlock_irq(&sched_lock, f);
+	child->kstack = kstack_alloc();
+	if (!child->kstack) {
 		buddy_free(VIRT_TO_PHYS(child), 0);
 		return -1;
 	}
-	child->kstack = (uint8_t *)PHYS_TO_VIRT(child_kstack_phys);
 
 	uint8_t *ksp = child->kstack + KSTACK_SIZE;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
@@ -496,14 +498,22 @@ pid_t proc_vfork(void)
 	child->ctx      = cctx;
 	child->tls_base = parent->tls_base;
 
-	child->next    = proctab[0]->next;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int pid = alloc_pid();
+	if (pid < 0) {
+		spin_unlock_irq(&sched_lock, f);
+		buddy_free(VIRT_TO_PHYS(child->kstack), 1);
+		buddy_free(VIRT_TO_PHYS(child), 0);
+		return -1;
+	}
+	child->pid = pid;
+	child->next = proctab[0]->next;
 	proctab[0]->next = child;
 	runqueue_add(child);
-	proctab[proc_cnt++] = child;
+	proctab[pid] = child;
 
-	if (parent->ctx) {
+	if (parent->ctx)
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
-	}
 
 	parent->state = PROC_SLEEPING;
 	need_resched  = 1;
@@ -530,21 +540,11 @@ void proc_vfork_exec_notify(void)
 
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
-	if (proctab_ensure() != 0) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
-
 	process_t *parent = task_current();
 	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) {
-		spin_unlock_irq(&sched_lock, f);
-		return -1;
-	}
+	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
 
-	child->pid          = proc_cnt;
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
@@ -576,9 +576,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 	child->umask = parent->umask;
 
-	void *ks = buddy_alloc(1);
-	if (!ks) goto fail;
-	child->kstack = (uint8_t *)PHYS_TO_VIRT(ks);
+	child->kstack = kstack_alloc();
+	if (!child->kstack) goto fail;
 
 	uint8_t *ksp = child->kstack + KSTACK_SIZE;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
@@ -609,17 +608,24 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->ctx             = cctx;
 	child->ticks_remaining = SCHED_QUANTUM;
 
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int pid = alloc_pid();
+	if (pid < 0) {
+		spin_unlock_irq(&sched_lock, f);
+		goto fail;
+	}
+	child->pid = pid;
 	child->next      = proctab[0]->next;
 	proctab[0]->next = child;
 	runqueue_add(child);
-	proctab[proc_cnt++] = child;
+	proctab[pid] = child;
 
 	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
 
 fail:
-	spin_unlock_irq(&sched_lock, f);
 	if (child->vm) vm_destroy(child->vm);
+	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), 1);
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
 }
@@ -667,6 +673,10 @@ void schedule(void)
 	next->ticks_remaining = q;
 
 	arch_save_tls(prev);
+
+	if (next->pid != 0 && next->kstack &&
+	    *(uint64_t *)next->kstack != KSTACK_CANARY)
+		kpanic("kstack overflow detected");
 
 	cpu_context_t *cpu = arch_get_cpu_ctx();
 	cpu->current = next;
