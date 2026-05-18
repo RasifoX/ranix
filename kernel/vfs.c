@@ -15,7 +15,7 @@ static int dentry_count = 0;
 
 static void vfs_inode_free(vfs_inode_t *in)
 {
-	if (!in) return;
+	if (!in || in->cached) return; /* cached=1: owned by dentry tree, pipe, or static */
 	if (in->priv) kfree(in->priv);
 	kfree(in);
 }
@@ -98,7 +98,9 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	vfs_dentry_t *d = root_dentry;
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
-	vfs_inode_t *prev_volatile = NULL; /* intermediate volatile inode pending free */
+	int d_is_volatile = 0;          /* d points to volatile_dentry (not in dentry tree) */
+	vfs_inode_t  *prev_volatile = NULL; /* previous volatile inode to free after lookup */
+	vfs_dentry_t  volatile_dentry;     /* stable for entire function; reused each volatile hop */
 
 	while (*p) {
 		/* skip consecutive slashes */
@@ -118,13 +120,20 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		/* handle . and .. */
 		if (len == 1 && tmp[0] == '.') { p = end; continue; }
 		if (len == 2 && tmp[0] == '.' && tmp[1] == '.') {
-			if (d->parent) d = d->parent;
+			if (d_is_volatile) {
+				/* step back to real parent */
+				d = volatile_dentry.parent;
+				d_is_volatile = 0;
+				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
+			} else if (d->parent) {
+				d = d->parent;
+			}
 			p = end; continue;
 		}
 
 		/* look in dentry children first (skip if parent marks children volatile) */
 		vfs_dentry_t *child = NULL;
-		if (!d->inode || !d->inode->no_cache) {
+		if (!d_is_volatile && (!d->inode || !d->inode->no_cache)) {
 			child = d->child;
 			while (child) {
 				if (strcmp(child->name, tmp) == 0) break;
@@ -135,19 +144,23 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		if (!child) {
 			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
 				spin_unlock_irq(&vfs_lock, f);
+				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 				return NULL;
 			}
 			vfs_inode_t *dir_inode = d->inode;
+			int parent_was_volatile = d_is_volatile;
 			spin_unlock_irq(&vfs_lock, f);
-			/* Free any intermediate volatile inode from the previous component */
-			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
+			/* dir_inode may equal prev_volatile — do NOT free until after lookup */
 			vfs_inode_t *in = dir_inode->iops->lookup(dir_inode, tmp);
+			/* Now free the parent volatile inode (lookup is done with it) */
+			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 			f = spin_lock_irq(&vfs_lock);
 			if (!in) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			if (!dir_inode->no_cache && dentry_count < DENTRY_MAX) {
+			/* Cache only if parent is real (in dentry tree) and caching is allowed */
+			if (!parent_was_volatile && !dir_inode->no_cache && dentry_count < DENTRY_MAX) {
 				/* Re-check: another task may have added this dentry while unlocked */
 				child = d->child;
 				while (child) {
@@ -164,21 +177,23 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				} else {
 					vfs_inode_free(in);
 				}
+				d_is_volatile = 0;
 			} else {
-				/* volatile: not added to dentry tree; inode freed when last fd closes */
-				in->cached = 0;
-				vfs_dentry_t tmp_dentry;
-				tmp_dentry.inode  = in;
-				tmp_dentry.parent = d;
-				tmp_dentry.child  = NULL;
-				tmp_dentry.next   = NULL;
-				tmp_dentry.name[0] = '\0';
-				child = &tmp_dentry;
+				/* volatile: reuse stable volatile_dentry (function-scoped) */
+				/* in->cached: keep as-is; dynamic inodes are 0 via memset; static must stay 1 */
+				volatile_dentry.inode   = in;
+				volatile_dentry.parent  = d;
+				volatile_dentry.child   = NULL;
+				volatile_dentry.next    = NULL;
+				volatile_dentry.name[0] = '\0';
+				child        = &volatile_dentry;
 				prev_volatile = in;
+				d_is_volatile = 1;
 			}
 		} else {
-			/* Found in dentry cache; free any intermediate volatile from prior step */
+			/* Found in dentry cache; free any prior volatile inode */
 			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
+			d_is_volatile = 0;
 		}
 
 		/* follow symlinks */
@@ -210,7 +225,8 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			if (target[0] == '/') {
 				d = root_dentry;
 				p = work + 1;
-				/* Absolute symlink restart — the symlink inode's volatile context ends */
+				d_is_volatile = 0;
+				/* Absolute symlink restart — free any volatile context */
 				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 			} else {
 				p = work;
