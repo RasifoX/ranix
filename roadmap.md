@@ -66,7 +66,7 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 - [ ] Session ve process group yönetimi — `setsid`, `setpgid`, terminal I/O
 
 ### v0.17.1 — Dosya Sistemi Genişletme
-- [ ] Ext2 yazma desteği — `create`, `mkdir`, `unlink`, `write`; journal yok, fsck ile kurtarılabilir
+- [x] Ext2 yazma desteği — `create`, `mkdir`, `unlink`, `write`; journal yok, fsck ile kurtarılabilir
 - [x] Pipe semantiği — `SIGPIPE`, `O_NONBLOCK`, doğru EOF davranışı, çok aşamalı pipeline (`a|b|c|d`) çalışıyor
 - [ ] Dosya kilitleme — `flock` / `fcntl` temel implementasyonu
 - [ ] `/proc/self/fd/` dizini
@@ -79,8 +79,8 @@ Hedef: doğruluk, kararlılık, tüm donanımda çalışma — sonra özellik.
 
 ### v0.17.3 — Donanım & Ağ
 - [ ] USB HID klavye desteği — RPi4 xHCI
-- [ ] Ağ altyapısı iskeleti — `net/` alt sistemi, `AF_INET`, loopback
-- [ ] Virtio-net sürücüsü — QEMU paket gönderme/alma
+- [x] Ağ altyapısı iskeleti — `net/` alt sistemi, `AF_INET`, loopback
+- [x] Virtio-net sürücüsü — QEMU paket gönderme/alma
 
 ---
 

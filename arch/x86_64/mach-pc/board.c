@@ -81,6 +81,17 @@ static void outb_port(uint16_t port, uint8_t val)
 	__asm__ volatile("outb %0, %1" :: "a"(val), "Nd"(port));
 }
 
+void board_poweroff(void)
+{
+	/* QEMU isa-debug-exit (port 0x501, any value → QEMU exits with code 2*val+1) */
+	__asm__ volatile("outb %0, %1" :: "a"((uint8_t)0x00), "Nd"((uint16_t)0x501));
+	/* QEMU ACPI shutdown PIIX4: PM1a_CNT at 0x604, SLP_EN|SLP_TYP_S5 */
+	__asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+	/* Older QEMU: port 0xb004 */
+	__asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000), "Nd"((uint16_t)0xb004));
+	for (;;) __asm__ volatile("hlt");
+}
+
 void board_reset(void)
 {
 	/* Linux-style cf9 hard reset: read-modify-write with delay */

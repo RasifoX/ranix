@@ -260,6 +260,8 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 	    (uint32_t)magic2 != 0x16041998 &&
 	    (uint32_t)magic2 != 0x20112000) { kprintf("bad magic2\n"); return -22; }
 	kprintf("reboot: system going down\n");
+	if (cmd == 0x4321fedc) /* LINUX_REBOOT_CMD_POWER_OFF */
+		board_poweroff();
 	board_reset();
 	for (;;) __asm__ volatile("" ::: "memory");
 	return 0;
@@ -823,20 +825,12 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0;
-			int count = task_count();
-			for (int i = 0; i < count; i++) {
-				process_t *c = task_get(i);
-				if (c && c->ppid == p->pid) {
-					if (c->state == PROC_DEAD && !c->reaped) { child = c; break; }
-					if (c->state != PROC_DEAD) any_alive = 1;
-				}
-			}
+			proc_find_zombie(p->pid, &child, &any_alive);
 			if (child) {
-				child->reaped = 1;
-				pid_t result = child->pid;
 				int st = child->killed_by_sig
 				       ? (child->exit_code & 0x7F)
 				       : (child->exit_code & 0xFF) << 8;
+				pid_t result = child->pid;
 				proc_reap(child);
 				if (status && (uint64_t)status > 0x1000)
 					*status = st;
@@ -845,7 +839,6 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 			if (!any_alive) return -10; /* ECHILD */
 			if (wnohang)    return 0;
 			task_sleep();
-			if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
 		}
 	}
 
@@ -855,7 +848,6 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	while (child->state != PROC_DEAD) {
 		if (wnohang) return 0;
 		task_sleep();
-		if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
 	}
 
 	child->reaped = 1;
@@ -1654,7 +1646,11 @@ static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 	uint64_t ticks = (uint64_t)k.tv_sec * TIMER_HZ +
 	                 (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
 	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
-	while (kernel_ticks < end) task_sleep();
+	process_t *cp = task_current();
+	while (kernel_ticks < end) {
+		task_sleep();
+		if (cp->sig_pending & ~cp->sig_mask) return -4; /* EINTR */
+	}
 	return 0;
 }
 
@@ -2779,6 +2775,7 @@ void syscall_handle(arch_context_t *ctx)
 	long arg5 = (long)CTX_SYSCALL_ARG5(ctx);
 	long ret  = -38;
 	(void)arg5;
+
 
 	switch (n) {
 	/* ── I/O ─────────────────────────────────────────────── */

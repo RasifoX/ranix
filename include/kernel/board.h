@@ -46,4 +46,7 @@ void board_get_reserved(uint64_t *base, uint32_t *size);
 /* Trigger a hardware reset / system reboot. Does not return. */
 void board_reset(void);
 
+/* Power off the machine. Does not return. */
+void board_poweroff(void);
+
 #endif
