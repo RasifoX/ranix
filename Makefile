@@ -75,7 +75,8 @@ else ifeq ($(ARCH),x86_64)
         drivers/irqchip/pic8259/pic8259.c \
         drivers/irqchip/pit/pit.c \
         drivers/input/ps2/ps2.c \
-        drivers/block/virtio_blk.c
+        drivers/block/virtio_blk.c \
+        drivers/net/virtio_net.c
 endif
 
 SRCS_NET = \
@@ -172,9 +173,9 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello $(BASH_CACHED)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server $(BASH_CACHED)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
-	@cp userspace/init userspace/hello $(BUILD_DIR)/initramfs/bin/
+	@cp userspace/init userspace/hello userspace/echo_server $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -219,6 +220,9 @@ userspace/hello: userspace/hello.c
 userspace/init: userspace/init.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
+userspace/echo_server: userspace/echo_server.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -236,7 +240,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio

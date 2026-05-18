@@ -167,6 +167,7 @@ typedef struct {
 #define SYS_ARCH_BIND             49
 #define SYS_ARCH_CONNECT          42
 #define SYS_ARCH_LISTEN           50
+#define SYS_ARCH_ACCEPT          43
 #define SYS_ARCH_ACCEPT4         288
 #define SYS_ARCH_SENDTO           44
 #define SYS_ARCH_RECVFROM         45
