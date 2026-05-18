@@ -10,6 +10,9 @@ static vfs_dentry_t *root_dentry = NULL;
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 
+#define DENTRY_MAX 4096
+static int dentry_count = 0;
+
 static void vfs_inode_free(vfs_inode_t *in)
 {
 	if (!in) return;
@@ -39,6 +42,9 @@ static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_
 		parent->child  = d;
 		if (inode) inode->nlink++;
 	}
+
+	if (inode) inode->cached = 1;
+	dentry_count++;
 
 	return d;
 }
@@ -74,6 +80,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	vfs_dentry_t *d = root_dentry;
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
+	vfs_inode_t *prev_volatile = NULL; /* intermediate volatile inode pending free */
 
 	while (*p) {
 		/* skip consecutive slashes */
@@ -112,16 +119,17 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			/* Release lock during I/O so timer/scheduler can run */
 			vfs_inode_t *dir_inode = d->inode;
 			spin_unlock_irq(&vfs_lock, f);
+			/* Free any intermediate volatile inode from the previous component */
+			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 			vfs_inode_t *in = dir_inode->iops->lookup(dir_inode, tmp);
 			f = spin_lock_irq(&vfs_lock);
 			if (!in) {
 				spin_unlock_irq(&vfs_lock, f);
 				return NULL;
 			}
-			if (!dir_inode->no_cache) {
+			if (!dir_inode->no_cache && dentry_count < DENTRY_MAX) {
 				/* Re-check: another task may have added this dentry while unlocked */
 				child = d->child;
 				while (child) {
@@ -136,12 +144,11 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 						return NULL;
 					}
 				} else {
-					/* concurrent task added same dentry while lock was dropped */
 					vfs_inode_free(in);
 				}
 			} else {
-				/* volatile parent: stack-local dentry, never added to tree.
-				 * Must be stack (not static) to survive re-entrant lookups. */
+				/* volatile: not added to dentry tree; inode freed when last fd closes */
+				in->cached = 0;
 				vfs_dentry_t tmp_dentry;
 				tmp_dentry.inode  = in;
 				tmp_dentry.parent = d;
@@ -149,7 +156,11 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				tmp_dentry.next   = NULL;
 				tmp_dentry.name[0] = '\0';
 				child = &tmp_dentry;
+				prev_volatile = in;
 			}
+		} else {
+			/* Found in dentry cache; free any intermediate volatile from prior step */
+			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 		}
 
 		/* follow symlinks */
@@ -181,8 +192,10 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			if (target[0] == '/') {
 				d = root_dentry;
 				p = work + 1;
+				/* Absolute symlink restart — the symlink inode's volatile context ends */
+				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 			} else {
-				p = work; /* resolve relative target from current parent d */
+				p = work;
 			}
 			continue;
 		}
@@ -191,6 +204,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		p = end;
 	}
 
+	/* prev_volatile (if set) is the FINAL component's inode — freed by vfs_close */
 	spin_unlock_irq(&vfs_lock, f);
 	return d;
 }
@@ -318,6 +332,8 @@ void fd_table_destroy(fd_table_t *t)
 			if (--f->refcount == 0) {
 				if (f->inode && f->inode->fops && f->inode->fops->close)
 					f->inode->fops->close(f);
+				if (f->inode && !f->inode->cached)
+					vfs_inode_free(f->inode);
 				kfree(f);
 			}
 		}
@@ -476,8 +492,10 @@ int vfs_close(int fd)
 
 	fd_free(p->fds, fd);
 	if (--f->refcount == 0) {
-		if (f->inode->fops && f->inode->fops->close)
+		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
+		if (f->inode && !f->inode->cached)
+			vfs_inode_free(f->inode);
 		kfree(f);
 	}
 	return 0;

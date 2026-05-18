@@ -158,10 +158,11 @@ int vfs_pipe(int pipefd[2])
         return -1;
     }
     memset(inode, 0, sizeof(*inode));
-    inode->mode = S_IFIFO | 0666;
-    inode->fops = &pipe_fops;
-    inode->priv = pipe;
+    inode->mode   = S_IFIFO | 0666;
+    inode->fops   = &pipe_fops;
+    inode->priv   = pipe;
     inode->refcount = 2;
+    inode->cached = 1; /* pipe_close handles inode lifetime internally */
 
     vfs_file_t *rf = kmalloc(sizeof(*rf));
     vfs_file_t *wf = kmalloc(sizeof(*wf));

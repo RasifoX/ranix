@@ -93,6 +93,7 @@ typedef struct vfs_inode {
     void        *priv;      /* filesystem-private data */
     uint32_t     refcount;
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
+    uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
 } vfs_inode_t;
 
 /* ── open file instance ──────────────────────────────────── */
