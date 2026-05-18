@@ -19,7 +19,7 @@ extern uint64_t pml4[];
 static uint64_t alloc_table(void)
 {
 	void *p = buddy_alloc(0);
-	if (!p) kpanic("vm: out of memory");
+	if (!p) return 0;
 	memset((void *)PHYS_TO_VIRT(p), 0, PAGE_SIZE);
 	return (uint64_t)p;
 }
@@ -27,16 +27,17 @@ static uint64_t alloc_table(void)
 vm_space_t *vm_create(void)
 {
 	void *vs_phys = buddy_alloc(0);
-	if (!vs_phys) kpanic("vm: out of memory");
+	if (!vs_phys) return NULL;
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
+	vs->root = NULL;
 
 	uint64_t root_phys = alloc_table();
+	if (!root_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
 	vs->root = (uint64_t *)root_phys;
 
 	uint64_t *root_virt = (uint64_t *)PHYS_TO_VIRT(root_phys);
 	uint64_t *kpml4_virt = (uint64_t *)PHYS_TO_VIRT(pml4);
 
-	/* User space starts clean; share kernel high-half entries only */
 	memset(root_virt, 0, PAGE_SIZE);
 	for (int i = 1; i < PT_ENTRIES; i++)
 		root_virt[i] = kpml4_virt[i];
@@ -56,7 +57,9 @@ void vm_destroy(vm_space_t *vs)
 	if (!vs) return;
 	if (vs->refcount > 1) { vs->refcount--; return; }
 	vs->refcount = 0;
-	
+
+	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
+
 	uint64_t l4_phys = (uint64_t)vs->root;
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(l4_phys);
 
@@ -111,6 +114,7 @@ static uint64_t get_or_alloc(uint64_t table_phys, uint64_t idx, uint64_t eflags)
 			uint64_t base = table[idx] & ~0x1FFFFFUL;
 			uint64_t attr = table[idx] & (PTE_P | PTE_W);
 			uint64_t pt_phys  = alloc_table();
+			if (!pt_phys) return 0;
 			uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
 			for (int j = 0; j < PT_ENTRIES; j++)
 				pt_virt[j] = (base + (uint64_t)j * 0x1000) | attr;
@@ -124,6 +128,7 @@ static uint64_t get_or_alloc(uint64_t table_phys, uint64_t idx, uint64_t eflags)
 		return table[idx] & ~0xFFFUL;
 	}
 	uint64_t child_phys = alloc_table();
+	if (!child_phys) return 0;
 	table[idx] = child_phys | eflags;
 	return child_phys;
 }
@@ -202,51 +207,52 @@ void arch_vm_switch(uint64_t root_phys)
 vm_space_t *vm_copy(vm_space_t *vs)
 {
 	void *new_vs_phys = buddy_alloc(0);
-	if (!new_vs_phys) kpanic("vm_copy: out of memory");
+	if (!new_vs_phys) return NULL;
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
-	
+	new_vs->root = NULL;
+	new_vs->refcount = 1;
+
 	uint64_t root_phys = alloc_table();
+	if (!root_phys) goto oom;
 	new_vs->root = (uint64_t *)root_phys;
 
 	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
-	/* Copy kernel upper-half entries from global PML4 (shared, no per-process copy needed) */
 	uint64_t *kpml4 = (uint64_t *)PHYS_TO_VIRT(pml4);
 	for (int i = 1; i < 512; i++)
 		l4_new[i] = kpml4[i];
 
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	/* Walk user space (PML4 index 0) */
 	for (int i = 0; i < 1; i++) {
 		if (!(l4_old[i] & PTE_P)) continue;
 
 		uint64_t *l3_old = (uint64_t *)PHYS_TO_VIRT(l4_old[i] & ~0xFFFUL);
 		uint64_t l3_new_phys = alloc_table();
+		if (!l3_new_phys) goto oom;
 		uint64_t *l3_new = (uint64_t *)PHYS_TO_VIRT(l3_new_phys);
 		l4_new[i] = l3_new_phys | eflags;
 
 		for (int j = 0; j < 512; j++) {
 			if (!(l3_old[j] & PTE_P)) continue;
 			if (l3_old[j] & PTE_PS) {
-				/* 1GB huge page - just copy for now (no COW support) */
 				l3_new[j] = l3_old[j];
 				continue;
 			}
 
 			uint64_t *l2_old = (uint64_t *)PHYS_TO_VIRT(l3_old[j] & ~0xFFFUL);
 			uint64_t l2_new_phys = alloc_table();
+			if (!l2_new_phys) goto oom;
 			uint64_t *l2_new = (uint64_t *)PHYS_TO_VIRT(l2_new_phys);
 			l3_new[j] = l2_new_phys | eflags;
 
 			for (int k = 0; k < 512; k++) {
 				if (!(l2_old[k] & PTE_P)) continue;
 				if (l2_old[k] & PTE_PS) {
-					/* 2MB huge page */
 					uint64_t entry = l2_old[k];
 					if (entry & PTE_U) {
-						entry &= ~PTE_W; /* Mark RO */
+						entry &= ~PTE_W;
 						l2_old[k] = entry;
 						uint64_t pa = entry & ~0x1FFFFFUL;
 						for (int l = 0; l < 512; l++)
@@ -258,6 +264,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 				uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(l2_old[k] & ~0xFFFUL);
 				uint64_t l1_new_phys = alloc_table();
+				if (!l1_new_phys) goto oom;
 				uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(l1_new_phys);
 				l2_new[k] = l1_new_phys | eflags;
 
@@ -265,7 +272,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 					if (!(l1_old[l] & PTE_P)) continue;
 					uint64_t entry = l1_old[l];
 					if (entry & PTE_U) {
-						entry &= ~PTE_W; /* Mark RO */
+						entry &= ~PTE_W;
 						l1_old[l] = entry;
 						pmm_hold((void *)(entry & ~0xFFFUL));
 					}
@@ -275,10 +282,12 @@ vm_space_t *vm_copy(vm_space_t *vs)
 		}
 	}
 
-	/* Reload CR3 to flush TLB on parent */
 	uint64_t cr3;
 	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
 
-	new_vs->refcount = 1;
 	return new_vs;
+
+oom:
+	vm_destroy(new_vs);
+	return NULL;
 }
