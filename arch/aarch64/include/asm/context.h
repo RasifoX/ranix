@@ -152,5 +152,36 @@ typedef struct {
 #define SYS_ARCH_SHUTDOWN      210
 #define SYS_ARCH_SENDMSG       211
 #define SYS_ARCH_RECVMSG       212
+/* ── missing batch ────────────────────────────────────── */
+#define SYS_ARCH_PREAD64        67
+#define SYS_ARCH_PWRITE64       68
+#define SYS_ARCH_MREMAP        216
+#define SYS_ARCH_FLOCK          32
+#define SYS_ARCH_FSYNC          82
+#define SYS_ARCH_FDATASYNC      83
+#define SYS_ARCH_FCHDIR         50
+#define SYS_ARCH_MKNODAT        33
+#define SYS_ARCH_GETRUSAGE     165
+#define SYS_ARCH_SETREUID      145
+#define SYS_ARCH_SETREGID      143
+#define SYS_ARCH_SETRESUID     147
+#define SYS_ARCH_GETRESUID     148
+#define SYS_ARCH_SETRESGID     149
+#define SYS_ARCH_GETRESGID     150
+#define SYS_ARCH_RT_SIGPENDING 136
+#define SYS_ARCH_RT_SIGSUSPEND 133
+#define SYS_ARCH_MLOCK         228
+#define SYS_ARCH_MUNLOCK       229
+#define SYS_ARCH_SYNC           81
+#define SYS_ARCH_MOUNT          40
+#define SYS_ARCH_SETHOSTNAME   161
+#define SYS_ARCH_TKILL         130
+#define SYS_ARCH_SOCKETPAIR    199
+#define SYS_ARCH_CLOCK_NANOSLEEP 115
+#define SYS_ARCH_WAITID         95
+#define SYS_ARCH_SPLICE         76
+#define SYS_ARCH_FALLOCATE      47
+#define SYS_ARCH_MLOCK2        284
+#define SYS_ARCH_COPY_FILE_RANGE 285
 
 #endif
