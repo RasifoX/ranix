@@ -142,7 +142,9 @@ typedef struct {
 #define SYS_ARCH_BIND          200
 #define SYS_ARCH_CONNECT       203
 #define SYS_ARCH_LISTEN        201
+#define SYS_ARCH_ACCEPT        202
 #define SYS_ARCH_ACCEPT4       242
+#define SYS_ARCH_SENDFILE       71
 #define SYS_ARCH_SENDTO        206
 #define SYS_ARCH_RECVFROM      207
 #define SYS_ARCH_GETSOCKNAME   204
