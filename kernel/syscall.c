@@ -2781,9 +2781,7 @@ void syscall_handle(arch_context_t *ctx)
 	/* ── I/O ─────────────────────────────────────────────── */
 	case SYS_ARCH_READ:     ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_WRITE:    ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
-#if defined(__x86_64__)
 	case SYS_ARCH_SENDFILE: ret = sys_sendfile((int)arg0, (int)arg1, (long*)arg2, (size_t)arg3); break;
-#endif
 	case SYS_ARCH_READV:   ret = sys_readv((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
 	case SYS_ARCH_WRITEV:  ret = sys_writev((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
 	case SYS_ARCH_CLOSE:   ret = sys_close((int)arg0); break;
@@ -2945,9 +2943,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_BIND:        ret = sys_bind((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
 	case SYS_ARCH_CONNECT:     ret = sys_connect((int)arg0, (const void*)arg1, (uint32_t)arg2); break;
 	case SYS_ARCH_LISTEN:      ret = sys_listen((int)arg0, (int)arg1); break;
-#if defined(__x86_64__)
 	case SYS_ARCH_ACCEPT:      ret = sys_accept4((int)arg0, (void*)arg1, (uint32_t*)arg2, 0); break;
-#endif
 	case SYS_ARCH_ACCEPT4:     ret = sys_accept4((int)arg0, (void*)arg1, (uint32_t*)arg2, (int)arg3); break;
 	case SYS_ARCH_SENDTO:      ret = sys_sendto((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t)arg5); break;
 	case SYS_ARCH_RECVFROM:    ret = sys_recvfrom((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t*)arg5); break;
