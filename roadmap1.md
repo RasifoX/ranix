@@ -10,15 +10,16 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.5 tamamlandı)
+## Neredeyiz (v0.5 + stabilite katmanı tamamlandı)
 
 - Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
-- Memory: buddy + COW fork + mmap + brk
-- Process: fork/exec/wait, signals, pipes, scheduler (nice)
-- FS: ramfs, ext2 read-only, procfs, devfs, initramfs (CPIO)
+- Memory: buddy + COW fork + mmap + brk; `alloc_table` OOM → ENOMEM (kpanic yok), `vm_copy` goto-oom rollback
+- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü (`alloc_pid`); kstack canary (`0xDEADBEEFCAFEBABE`)
+- FS: ramfs, ext2 read-only, procfs, devfs, initramfs (CPIO); dentry inode lifecycle fix, DENTRY_MAX=4096, volatile inode serbest bırakma
 - Userspace: busybox 60+ applet, bash, statik ELF, DOOM
 - Network: ARP + ICMP + UDP + TCP tam stack, ping + echo_server (x86_64 + aarch64)
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
+- Test: 35/35 bash test suite her iki mimaride geçiyor
 
 ---
 
@@ -60,7 +61,81 @@ Bu olmadan SMP'yi yazsan bile ağa bağlanamazsın.
 
 ---
 
-## v0.6 — Pthreads, IPC & Modern Event Loop  ← ŞİMDİ
+## v0.5.1 — Linux 1.0 Paritesi & Yapısal Dinamizm  ← ŞİMDİ
+
+**Neden önce bunlar?**
+Özellik eklemeden önce var olan şeylerin doğru çalışması lazım.
+Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
+"Hardcoded" mimari uzun vadede SMP, konteyner ve multi-user'ı imkansız kılar.
+
+### Linux 1.0 Paritesi
+
+**Permission enforcement** (Linux 0.12, 1992) ✅ TAMAMLANDI
+- [x] `vfs_check_perm(inode, flags, uid, gid)` — mode bits gerçekten kontrol edilmeli
+- [x] `vfs_open`, `vfs_mkdir`, `vfs_unlink`, `vfs_rename` → permission check
+- [x] `EACCES` / `EPERM` dönüşü yetersiz izinde
+- [x] `/tmp` sticky bit (`S_ISVTX`) — sadece sahip silebilir
+
+**Kernel cmdline & init discovery** (Linux 0.99, 1993) ✅ TAMAMLANDI
+- [x] Multiboot2 (x86_64) ve DTB `bootargs` (aarch64) cmdline parse
+- [x] `/proc/cmdline` — runtime okunabilir
+- [x] `init=` parametresi — hangi binary'nin PID 1 olacağını cmdline'dan al
+- [x] Init arama sırası: `init=` → `/sbin/init` → `/etc/init` → `/bin/init` → `/bin/sh`
+- [x] `quiet` / `debug` log seviyesi parametresi
+
+**AF_UNIX domain sockets** (Linux 1.0, 1994)
+- [ ] `AF_UNIX SOCK_STREAM` — pipe gibi ama adreslenebilir
+- [ ] `bind` + `connect` + `accept` path-based
+- [ ] `send` / `recv` — tam duplex
+- [ ] `SOCK_DGRAM` AF_UNIX — syslog, journald
+- [ ] abstract namespace (`\0` ile başlayan path)
+
+**ext2 yazma** (Linux 1.0, 1994)
+- [ ] inode tahsis — bitmap üzerinden boş inode bul
+- [ ] blok tahsis — bitmap üzerinden boş blok bul
+- [ ] `create` — dizine yeni dosya girişi ekle, inode yaz
+- [ ] `write` — dosya verisini blok(lar)a yaz, inode size güncelle
+- [ ] `mkdir` — dizin girişi + `.` ve `..` blokları
+- [ ] `unlink` — inode serbest bırak, dizin girişini sil
+- [ ] `rename` — dizin girişi taşı
+- [ ] superblock + grup tanımlayıcı güncelle (free block/inode sayıları)
+
+**ptrace** (Linux 0.99, 1993)
+- [ ] `PTRACE_ATTACH` / `PTRACE_DETACH`
+- [ ] `PTRACE_CONT` — traced process'i devam ettir
+- [ ] `PTRACE_SYSCALL` — syscall entry/exit'te dur
+- [ ] `PTRACE_GETREGS` / `PTRACE_SETREGS` — register okuma/yazma
+- [ ] x86_64: TF (trap flag) ile single-step; aarch64: MDSCR_EL1.SS
+- [ ] `wait()` → `WIFSTOPPED` / `WSTOPSIG` semantiği
+- [ ] `strace` çalışıyor
+
+### Yapısal Dinamizm (Hardcoded → Configurable)
+
+**Şu an kodda sabit olan şeyler ve çözümleri:**
+
+- [ ] **IP adresi** — `virtio_net.c`'de `10.0.2.15` hardcode. `ip=<addr>/<gw>` cmdline parametresi; yoksa `10.0.2.15` default kalır
+- [ ] **Hostname** — hiç yok. `hostname=ranix` cmdline parametresi + `/proc/sys/kernel/hostname`
+- [ ] **DTB** — `fdt.c` var ama statik C verisi. Gerçek DTB binary parse edilmeli; QEMU `-dtb` ile verilmeli
+- [ ] **KSTACK_SIZE** — 8192 sabit. `kstack_size=N` cmdline veya `include/kernel/config.h`
+- [ ] **SCHED_QUANTUM** — 10 tick sabit. `sched_quantum=N` cmdline
+- [ ] **DENTRY_MAX** — 4096 sabit. `vfs_dentry_max=N` cmdline
+- [x] **init search paths** — sadece `/bin/init` ve `/bin/sh` deneniyor. Genişlet + `init=` parametresi
+
+**Kernel config altyapısı:**
+- [ ] `include/kernel/config.h` — derleme zamanı sabitlerinin tek yeri
+- [x] `cmdline_get(key, buf, len)` — runtime parametreleri oku
+- [ ] `/proc/sys/` sysctl stüb — temel parametreleri runtime değiştir (net.ipv4.ip_forward vs.)
+
+### Test hedefleri
+- [ ] Normal kullanıcı `/etc/shadow`'u açamıyor (EACCES)
+- [ ] `strace ls` çalışıyor
+- [ ] `nc -U /tmp/test.sock` — AF_UNIX bağlantısı
+- [ ] `echo hello > /mnt/test.txt && cat /mnt/test.txt` çalışıyor (ext2 yazma)
+- [ ] `qemu ... -append "init=/bin/sh quiet"` → init path cmdline'dan alınıyor
+
+---
+
+## v0.6 — Pthreads, IPC & Modern Event Loop
 
 **Neden SMP'den önce?**
 SMP'ye geçtiğinde atomik primitive'lerin zaten doğru olması lazım.
