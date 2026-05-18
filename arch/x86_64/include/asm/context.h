@@ -178,5 +178,42 @@ typedef struct {
 #define SYS_ARCH_SHUTDOWN         48
 #define SYS_ARCH_SENDMSG          46
 #define SYS_ARCH_RECVMSG          47
+/* ── missing batch ────────────────────────────────────── */
+#define SYS_ARCH_PREAD64          17
+#define SYS_ARCH_PWRITE64         18
+#define SYS_ARCH_MREMAP           25
+#define SYS_ARCH_PAUSE            34
+#define SYS_ARCH_ALARM            37
+#define SYS_ARCH_SOCKETPAIR       53
+#define SYS_ARCH_FLOCK            73
+#define SYS_ARCH_FSYNC            74
+#define SYS_ARCH_FDATASYNC        75
+#define SYS_ARCH_FCHDIR           81
+#define SYS_ARCH_CREAT            85
+#define SYS_ARCH_LCHOWN           94
+#define SYS_ARCH_GETRUSAGE        98
+#define SYS_ARCH_SETREUID        113
+#define SYS_ARCH_SETREGID        114
+#define SYS_ARCH_SETRESUID       117
+#define SYS_ARCH_GETRESUID       118
+#define SYS_ARCH_SETRESGID       119
+#define SYS_ARCH_GETRESGID       120
+#define SYS_ARCH_RT_SIGPENDING   127
+#define SYS_ARCH_RT_SIGSUSPEND   130
+#define SYS_ARCH_MKNOD           133
+#define SYS_ARCH_MLOCK           149
+#define SYS_ARCH_MUNLOCK         150
+#define SYS_ARCH_SYNC            162
+#define SYS_ARCH_MOUNT           165
+#define SYS_ARCH_SETHOSTNAME     170
+#define SYS_ARCH_TKILL           200
+#define SYS_ARCH_TIME_SYSCALL    201
+#define SYS_ARCH_CLOCK_NANOSLEEP 230
+#define SYS_ARCH_WAITID          247
+#define SYS_ARCH_SPLICE          275
+#define SYS_ARCH_FALLOCATE       285
+#define SYS_ARCH_RENAMEAT2       316
+#define SYS_ARCH_MLOCK2          325
+#define SYS_ARCH_COPY_FILE_RANGE 326
 
 #endif
