@@ -116,6 +116,31 @@ static long sys_writev(int fd, const iovec_t *iov, int cnt)
 	return total;
 }
 
+static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
+{
+	char buf[4096];
+	size_t sent = 0;
+	if (offset) {
+		long off;
+		if (copy_from_user(&off, offset, sizeof(off)) != 0) return -14;
+		vfs_seek(in_fd, off, 0);
+	}
+	while (sent < count) {
+		size_t n = count - sent;
+		if (n > sizeof(buf)) n = sizeof(buf);
+		long r = vfs_read(in_fd, buf, n);
+		if (r <= 0) break;
+		long w = vfs_write(out_fd, buf, (size_t)r);
+		if (w < 0) return w;
+		sent += (size_t)w;
+	}
+	if (offset) {
+		long off = (long)vfs_seek(in_fd, 0, 1);
+		copy_to_user(offset, &off, sizeof(off));
+	}
+	return (long)sent;
+}
+
 static long sys_readv(int fd, const iovec_t *iov, int cnt)
 {
 	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
@@ -722,20 +747,39 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 {
 	process_t *p = task_current();
 #if defined(__aarch64__)
-	/* Restore saved ELR and LR from the mini-frame we pushed */
-	uint64_t usp     = ctx->sp;
-	ctx->elr         = *(uint64_t *)usp;
-	ctx->regs[30]    = *(uint64_t *)(usp + 8);
-	p->sig_mask      = *(uint64_t *)(usp + 16);
-	ctx->sp          = usp + 32;
+	/* Restore full frame saved by signal_dispatch */
+	uint64_t usp  = ctx->sp;
+	ctx->elr      = *(uint64_t *)(usp +   0);
+	ctx->regs[30] = *(uint64_t *)(usp +   8);
+	p->sig_mask   = *(uint64_t *)(usp +  16);
+	for (int _i = 0; _i <= 18; _i++)
+		ctx->regs[_i] = *(uint64_t *)(usp + 32 + (uint64_t)_i * 8);
+	ctx->regs[29] = *(uint64_t *)(usp + 184);
+	ctx->spsr     = *(uint64_t *)(usp + 192);
+	ctx->sp       = usp + 256;
 #elif defined(__x86_64__)
 	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
-	 * Frame: [+0]=retaddr [+8]=old_mask [+16]=orig_rax [+24]=orig_rip [+32]=orig_rsp */
-	uint64_t base    = ctx->rsp;  /* frame_base + 8 */
-	p->sig_mask      = *(uint64_t *)(base +  0);
-	ctx->rax         = *(uint64_t *)(base +  8);
-	ctx->rip         = *(uint64_t *)(base + 16);
-	ctx->rsp         = *(uint64_t *)(base + 24);
+	 * Frame layout matches signal_dispatch: offsets from frame_base+8. */
+	uint64_t base = ctx->rsp;
+	p->sig_mask   = *(uint64_t *)(base +   0);
+	ctx->rip      = *(uint64_t *)(base +   8);
+	ctx->rsp      = *(uint64_t *)(base +  16);
+	ctx->rflags   = *(uint64_t *)(base +  24);
+	ctx->rax      = *(uint64_t *)(base +  32);
+	ctx->rbx      = *(uint64_t *)(base +  40);
+	ctx->rcx      = *(uint64_t *)(base +  48);
+	ctx->rdx      = *(uint64_t *)(base +  56);
+	ctx->rsi      = *(uint64_t *)(base +  64);
+	ctx->rdi      = *(uint64_t *)(base +  72);
+	ctx->rbp      = *(uint64_t *)(base +  80);
+	ctx->r8       = *(uint64_t *)(base +  88);
+	ctx->r9       = *(uint64_t *)(base +  96);
+	ctx->r10      = *(uint64_t *)(base + 104);
+	ctx->r11      = *(uint64_t *)(base + 112);
+	ctx->r12      = *(uint64_t *)(base + 120);
+	ctx->r13      = *(uint64_t *)(base + 128);
+	ctx->r14      = *(uint64_t *)(base + 136);
+	ctx->r15      = *(uint64_t *)(base + 144);
 #endif
 }
 
@@ -2424,8 +2468,9 @@ void syscall_handle(arch_context_t *ctx)
 
 	switch (n) {
 	/* ── I/O ─────────────────────────────────────────────── */
-	case SYS_ARCH_READ:    ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
-	case SYS_ARCH_WRITE:   ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_READ:     ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_WRITE:    ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_SENDFILE: ret = sys_sendfile((int)arg0, (int)arg1, (long*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_READV:   ret = sys_readv((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
 	case SYS_ARCH_WRITEV:  ret = sys_writev((int)arg0, (const iovec_t*)arg1, (int)arg2); break;
 	case SYS_ARCH_CLOSE:   ret = sys_close((int)arg0); break;

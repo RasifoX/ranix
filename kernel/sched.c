@@ -836,40 +836,79 @@ void signal_dispatch(arch_context_t *tf)
 	p->sig_mask |= sa->sa_mask;
 
 #if defined(__aarch64__)
-	/* Set up user stack frame: save ELR, LR, and old sig_mask */
-	uint64_t usp = tf->sp;
-	usp -= 32;
-	usp &= ~15UL;
-	*(uint64_t *)usp        = tf->elr;
-	*(uint64_t *)(usp + 8)  = tf->regs[30];
-	*(uint64_t *)(usp + 16) = old_mask;
-	tf->sp                  = usp;
-	tf->regs[30]            = sa->sa_restorer ? (uint64_t)sa->sa_restorer
-	                                           : tf->elr; /* fall back: resume */
-	tf->regs[0]             = (uint64_t)sig;
-	tf->elr                 = (uint64_t)handler;
+	/* Frame layout — 256 bytes, 16-byte aligned:
+	 *   [sp+  0]  orig_elr  (PC to resume)
+	 *   [sp+  8]  orig_x30  (LR)
+	 *   [sp+ 16]  old_mask
+	 *   [sp+ 24]  padding
+	 *   [sp+ 32]  orig_x0 .. orig_x18  (19 caller-saved + indirect-result regs)
+	 *   [sp+184]  orig_x29 (frame pointer)
+	 *   [sp+192]  orig_spsr
+	 *   [sp+200]  padding × 7  (→ total 256)
+	 */
+	uint64_t usp = (tf->sp - 256) & ~15UL;
+	*(uint64_t *)(usp +   0) = tf->elr;
+	*(uint64_t *)(usp +   8) = tf->regs[30];
+	*(uint64_t *)(usp +  16) = old_mask;
+	*(uint64_t *)(usp +  24) = 0;
+	for (int _i = 0; _i <= 18; _i++)
+		*(uint64_t *)(usp + 32 + (uint64_t)_i * 8) = tf->regs[_i];
+	*(uint64_t *)(usp + 184) = tf->regs[29];
+	*(uint64_t *)(usp + 192) = tf->spsr;
+	tf->sp                   = usp;
+	tf->regs[30]             = sa->sa_restorer ? (uint64_t)sa->sa_restorer
+	                                            : tf->elr;
+	tf->regs[0]              = (uint64_t)sig;
+	tf->elr                  = (uint64_t)handler;
 #elif defined(__x86_64__)
-	/* Build a fixed 48-byte frame on the user stack then call the handler.
-	 * Frame layout (low → high, i.e. rsp points to [0]):
-	 *   [rsp+ 0]  return addr  = sa_restorer (calls rt_sigreturn)
-	 *   [rsp+ 8]  old_mask
-	 *   [rsp+16]  orig_rax
-	 *   [rsp+24]  orig_rip
-	 *   [rsp+32]  orig_rsp
-	 *   [rsp+40]  padding (keeps 16-byte ABI alignment)
-	 * After handler's ret, rsp = rsp+8; restorer finds old_mask at rsp+0 etc.
-	 * rt_sigreturn reads ctx->rsp which after ret = frame_base+8. */
-	uint64_t usp = tf->rsp & ~15UL;  /* align before building frame */
-	usp -= 48;
-	*(uint64_t *)(usp +  0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
-	*(uint64_t *)(usp +  8) = old_mask;
-	*(uint64_t *)(usp + 16) = tf->rax;
-	*(uint64_t *)(usp + 24) = tf->rip;
-	*(uint64_t *)(usp + 32) = tf->rsp;
-	*(uint64_t *)(usp + 40) = 0;
-	tf->rsp                 = usp;
-	tf->rdi                 = (uint64_t)sig;
-	tf->rip                 = (uint64_t)handler;
+	/* Frame layout — 168 bytes, rsp kept 8 mod 16 (post-call ABI convention):
+	 *   [rsp+  0]  return addr (sa_restorer → rt_sigreturn)
+	 *   [rsp+  8]  old_mask
+	 *   [rsp+ 16]  orig_rip
+	 *   [rsp+ 24]  orig_rsp
+	 *   [rsp+ 32]  orig_rflags
+	 *   [rsp+ 40]  orig_rax
+	 *   [rsp+ 48]  orig_rbx
+	 *   [rsp+ 56]  orig_rcx
+	 *   [rsp+ 64]  orig_rdx
+	 *   [rsp+ 72]  orig_rsi
+	 *   [rsp+ 80]  orig_rdi
+	 *   [rsp+ 88]  orig_rbp
+	 *   [rsp+ 96]  orig_r8
+	 *   [rsp+104]  orig_r9
+	 *   [rsp+112]  orig_r10
+	 *   [rsp+120]  orig_r11
+	 *   [rsp+128]  orig_r12
+	 *   [rsp+136]  orig_r13
+	 *   [rsp+144]  orig_r14
+	 *   [rsp+152]  orig_r15
+	 *   [rsp+160]  padding × 1  (→ total 168, rsp % 16 == 8)
+	 * rt_sigreturn reads base = ctx->rsp (= frame_base+8 after handler ret). */
+	uint64_t usp = (tf->rsp & ~15UL) - 168 + 8; /* 8 mod 16 */
+	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
+	*(uint64_t *)(usp +   8) = old_mask;
+	*(uint64_t *)(usp +  16) = tf->rip;
+	*(uint64_t *)(usp +  24) = tf->rsp;
+	*(uint64_t *)(usp +  32) = tf->rflags;
+	*(uint64_t *)(usp +  40) = tf->rax;
+	*(uint64_t *)(usp +  48) = tf->rbx;
+	*(uint64_t *)(usp +  56) = tf->rcx;
+	*(uint64_t *)(usp +  64) = tf->rdx;
+	*(uint64_t *)(usp +  72) = tf->rsi;
+	*(uint64_t *)(usp +  80) = tf->rdi;
+	*(uint64_t *)(usp +  88) = tf->rbp;
+	*(uint64_t *)(usp +  96) = tf->r8;
+	*(uint64_t *)(usp + 104) = tf->r9;
+	*(uint64_t *)(usp + 112) = tf->r10;
+	*(uint64_t *)(usp + 120) = tf->r11;
+	*(uint64_t *)(usp + 128) = tf->r12;
+	*(uint64_t *)(usp + 136) = tf->r13;
+	*(uint64_t *)(usp + 144) = tf->r14;
+	*(uint64_t *)(usp + 152) = tf->r15;
+	*(uint64_t *)(usp + 160) = 0;
+	tf->rsp                  = usp;
+	tf->rdi                  = (uint64_t)sig;
+	tf->rip                  = (uint64_t)handler;
 #endif
 }
 
