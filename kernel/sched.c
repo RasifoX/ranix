@@ -440,8 +440,9 @@ pid_t proc_fork(void)
 	return child->pid;
 
 fail_early:
-	if (child->vm)  vm_destroy(child->vm);
-	if (child->fds) fd_table_destroy(child->fds);
+	if (child->vm)     vm_destroy(child->vm);
+	if (child->fds)    fd_table_destroy(child->fds);
+	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), 1);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -722,7 +723,7 @@ void task_exit(void)
 	}
 
 	/* Reparent orphaned children to init (pid 1) */
-	process_t *init_proc = (proc_cnt > 1) ? proctab[1] : NULL;
+	process_t *init_proc = (proc_cnt > 1 && proctab[1]) ? proctab[1] : NULL;
 	process_t *sentinel2 = proctab[0];
 	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next) {
 		if (c->ppid == (pid_t)p->pid && c != p) {

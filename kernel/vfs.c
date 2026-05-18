@@ -10,6 +10,13 @@ static vfs_dentry_t *root_dentry = NULL;
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 
+static void vfs_inode_free(vfs_inode_t *in)
+{
+	if (!in) return;
+	if (in->priv) kfree(in->priv);
+	kfree(in);
+}
+
 /* ── dentry pool ─────────────────────────────────────────── */
 
 static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
@@ -124,13 +131,18 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				if (!child) {
 					child = _dentry_create(d, tmp, in);
 					if (!child) {
+						vfs_inode_free(in);
 						spin_unlock_irq(&vfs_lock, f);
 						return NULL;
 					}
+				} else {
+					/* concurrent task added same dentry while lock was dropped */
+					vfs_inode_free(in);
 				}
 			} else {
-				/* volatile parent: use a temporary dentry, don't add to tree */
-				static vfs_dentry_t tmp_dentry;
+				/* volatile parent: stack-local dentry, never added to tree.
+				 * Must be stack (not static) to survive re-entrant lookups. */
+				vfs_dentry_t tmp_dentry;
 				tmp_dentry.inode  = in;
 				tmp_dentry.parent = d;
 				tmp_dentry.child  = NULL;
@@ -304,7 +316,8 @@ void fd_table_destroy(fd_table_t *t)
 		if (t->files[i]) {
 			vfs_file_t *f = t->files[i];
 			if (--f->refcount == 0) {
-				if (f->inode->fops->close) f->inode->fops->close(f);
+				if (f->inode && f->inode->fops && f->inode->fops->close)
+					f->inode->fops->close(f);
 				kfree(f);
 			}
 		}
