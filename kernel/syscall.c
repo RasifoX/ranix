@@ -2114,11 +2114,31 @@ static int sock_close_vfs(vfs_file_t *file)
 {
     socket_t    *s  = (socket_t *)file->inode->priv;
     vfs_inode_t *in = file->inode;
+
+    if (s->domain == AF_UNIX) {
+        socket_t *peer = s->unix_peer;
+        s->unix_peer = NULL;
+        if (peer && peer->unix_peer == s) {
+            peer->unix_peer = NULL;
+            /* wake peer's blocked recv — empty queue + no peer = EOF */
+            uint64_t f = spin_lock_irq(&peer->recv_lock);
+            process_t *w = peer->recv_waiter;
+            peer->recv_waiter = NULL;
+            spin_unlock_irq(&peer->recv_lock, f);
+            if (w) task_wake(w);
+            /* wake peer's blocked send */
+            process_t *sw = peer->connect_waiter;
+            peer->connect_waiter = NULL;
+            if (sw) task_wake(sw);
+        }
+        sock_free(s);
+        kfree(in);
+        return 0;
+    }
+
     if (s->type == SOCK_STREAM &&
         s->tcp_state != TCP_CLOSED && s->tcp_state != TCP_LISTEN) {
         tcp_close(s);
-        /* Block until teardown reaches a terminal state; tcp_tick enforces
-         * a 5-retransmit timeout so we never hang indefinitely. */
         while (s->tcp_state != TCP_CLOSED &&
                s->tcp_state != TCP_TIME_WAIT) {
             s->close_waiter = task_current();
@@ -2137,8 +2157,11 @@ static int sock_poll_vfs(vfs_file_t *file)
     uint64_t f = spin_lock_irq(&s->recv_lock);
     int has_data = (s->recv_head != NULL);
     spin_unlock_irq(&s->recv_lock, f);
-    /* EOF (CLOSE_WAIT/CLOSED) is also readable */
-    int eof = (s->type == SOCK_STREAM &&
+    int eof;
+    if (s->domain == AF_UNIX)
+        eof = (s->unix_peer == NULL);
+    else
+        eof = (s->type == SOCK_STREAM &&
                (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
                 s->tcp_state == TCP_LAST_ACK   || s->tcp_state == TCP_TIME_WAIT));
     return ((has_data || eof) ? 0x0001 : 0) | 0x0004;
@@ -2161,12 +2184,15 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             skb_free(skb);
             return (ssize_t)(n ? n : 0);  /* 0 = EOF (FIN) */
         }
-        /* TCP CLOSE_WAIT / CLOSED means EOF */
-        if (s->type == SOCK_STREAM &&
-            (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
-             s->tcp_state == TCP_TIME_WAIT  || s->tcp_state == TCP_LAST_ACK)) {
+        /* EOF: TCP half-closed or AF_UNIX peer disconnected */
+        int eof = (s->domain == AF_UNIX)
+            ? (s->unix_peer == NULL)
+            : (s->type == SOCK_STREAM &&
+               (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
+                s->tcp_state == TCP_TIME_WAIT  || s->tcp_state == TCP_LAST_ACK));
+        if (eof) {
             spin_unlock_irq(&s->recv_lock, f);
-            return 0; /* EOF */
+            return 0;
         }
         s->recv_waiter = task_current();
         spin_unlock_irq(&s->recv_lock, f);
@@ -2180,11 +2206,21 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
 {
     socket_t *s = (socket_t *)file->inode->priv;
     if (!s) return -9;
-    if (s->type == SOCK_STREAM) {
+    if (s->type == SOCK_STREAM || (s->domain == AF_UNIX && s->type == SOCK_DGRAM)) {
         uint8_t *kbuf = kmalloc(len);
         if (!kbuf) return -12;
         if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -14; }
-        int rc = tcp_send(s, kbuf, (uint16_t)len);
+        int rc;
+        if (s->domain == AF_UNIX) {
+            rc = unix_send(s, kbuf, (uint16_t)len);
+        } else {
+            while ((rc = tcp_send(s, kbuf, (uint16_t)len)) == -11) {
+                s->connect_waiter = task_current();
+                task_sleep();
+                process_t *p = task_current();
+                if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
+            }
+        }
         kfree(kbuf);
         return rc < 0 ? rc : (ssize_t)len;
     }
@@ -2229,7 +2265,7 @@ static int sock_to_fd(socket_t *s)
 
 static long sys_socket(int domain, int type, int proto)
 {
-    if (domain != AF_INET) return -97; /* EAFNOSUPPORT */
+    if (domain != AF_INET && domain != AF_UNIX) return -97;
     if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
     socket_t *s = sock_alloc(domain, type, proto);
     if (!s) return -12;
@@ -2303,7 +2339,13 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
     long r = -38;
     if (s->type == SOCK_STREAM) {
         /* TCP: ignore dst from uaddr, use connected remote */
-        int rc = tcp_send(s, kbuf, (uint16_t)len);
+        int rc;
+        while ((rc = tcp_send(s, kbuf, (uint16_t)len)) == -11) {
+            s->connect_waiter = task_current();
+            task_sleep();
+            process_t *p = task_current();
+            if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
+        }
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_DGRAM) {
         int rc = udp_tx(s->dev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
@@ -2553,8 +2595,31 @@ static long sys_alarm(unsigned int seconds)
 
 static long sys_socketpair(int domain, int type, int protocol, int *sv)
 {
-	(void)domain; (void)type; (void)protocol; (void)sv;
-	return -97; /* EAFNOSUPPORT until AF_UNIX is implemented */
+    (void)protocol;
+    if (domain != AF_UNIX) return -97;
+    if (type != SOCK_STREAM && type != SOCK_DGRAM) return -22;
+
+    socket_t *s0 = sock_alloc(AF_UNIX, type, 0);
+    socket_t *s1 = sock_alloc(AF_UNIX, type, 0);
+    if (!s0 || !s1) { sock_free(s0); sock_free(s1); return -12; }
+
+    s0->unix_peer = s1;
+    s1->unix_peer = s0;
+    s0->tcp_state = TCP_ESTABLISHED;
+    s1->tcp_state = TCP_ESTABLISHED;
+
+    int fd0 = sock_to_fd(s0);
+    if (fd0 < 0) { sock_free(s0); sock_free(s1); return fd0; }
+    int fd1 = sock_to_fd(s1);
+    if (fd1 < 0) {
+        /* fd0 already allocated; free s1, let fd0 cleanup handle s0 */
+        sock_free(s1); s0->unix_peer = NULL;
+        return fd1;
+    }
+
+    int kbuf[2] = { fd0, fd1 };
+    if (copy_to_user(sv, kbuf, sizeof(kbuf)) != 0) return -14;
+    return 0;
 }
 
 static long sys_flock(int fd, int operation)
