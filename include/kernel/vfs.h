@@ -65,6 +65,7 @@ typedef struct {
                                 struct vfs_inode *new_dir, const char *new_name);
     int               (*readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
     int               (*symlink)(struct vfs_inode *dir, const char *name, const char *target);
+    int               (*truncate)(struct vfs_inode *inode, off_t len);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */

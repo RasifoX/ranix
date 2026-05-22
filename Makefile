@@ -173,7 +173,7 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server $(BASH_CACHED)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
 	@cp userspace/init userspace/hello userspace/echo_server $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \

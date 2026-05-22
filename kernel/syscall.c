@@ -1218,12 +1218,24 @@ static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 
 static long sys_truncate(const char *path, off_t len)
 {
-	(void)path; (void)len; return 0;
+	char kp[256];
+	int r = resolve_path(kp, AT_FDCWD, path);
+	if (r) return r;
+	vfs_dentry_t *de = vfs_dentry_resolve(kp);
+	if (!de || !de->inode) return -2;
+	vfs_inode_t *in = de->inode;
+	if (!in->iops || !in->iops->truncate) return -22;
+	return in->iops->truncate(in, len);
 }
 
 static long sys_ftruncate(int fd, off_t len)
 {
-	(void)fd; (void)len; return 0;
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f) return -9;
+	vfs_inode_t *in = f->inode;
+	if (!in->iops || !in->iops->truncate) return -22;
+	return in->iops->truncate(in, len);
 }
 
 /* ── getdents64 ──────────────────────────────────────────── */
@@ -2061,20 +2073,23 @@ static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevent
 	return ready;
 }
 
-/* ── symlink / link / readlink (stubs) ───────────────────── */
+/* ── symlink / readlink ───────────────────────────────────── */
 
-static long sys_readlink(const char *path, char *buf, size_t bufsiz)
+static long sys_symlink(const char *t, const char *lp)
 {
-	(void)path; (void)buf; (void)bufsiz; return -22;
+	char kt[512], klp[512];
+	if (strncpy_from_user(kt,  t,  sizeof(kt))  < 0) return -14;
+	if (strncpy_from_user(klp, lp, sizeof(klp)) < 0) return -14;
+	return vfs_symlink(kt, klp);
 }
-static long sys_readlinkat(int d, const char *path, char *buf, size_t sz)
-{
-	(void)d; return sys_readlink(path, buf, sz);
-}
-static long sys_symlink(const char *t, const char *lp) { (void)t; (void)lp; return -1; }
 static long sys_symlinkat(const char *t, int d, const char *lp)
 {
-	(void)d; return sys_symlink(t, lp);
+	char kt[512];
+	if (strncpy_from_user(kt, t, sizeof(kt)) < 0) return -14;
+	char klp[512];
+	int r = resolve_path(klp, d, lp);
+	if (r) return r;
+	return vfs_symlink(kt, klp);
 }
 static long sys_link(const char *o, const char *n) { (void)o; (void)n; return -1; }
 static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
@@ -2453,17 +2468,34 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
     int r = resolve_path(kp, dirfd, upath);
     if (r) return r;
 
-    vfs_dentry_t *de = vfs_dentry_resolve(kp);
-    if (!de || !de->inode) return -2;
-    vfs_inode_t *in = de->inode;
-    if (!in->iops || !in->iops->readlink) return -22;
+    /* Split into parent dir and filename — look up last component without following */
+    char parent_path[256];
+    const char *slash = kp + strlen(kp) - 1;
+    while (slash > kp && *slash != '/') slash--;
+    int plen = (int)(slash - kp);
+    if (plen == 0) { parent_path[0] = '/'; parent_path[1] = '\0'; }
+    else           { memcpy(parent_path, kp, plen); parent_path[plen] = '\0'; }
+    const char *fname = slash + 1;
+
+    vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
+    if (!parent || !parent->inode) return -2;
+    if (!parent->inode->iops || !parent->inode->iops->lookup) return -2;
+
+    vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
+    if (!in) return -2;
+    if (!in->iops || !in->iops->readlink) {
+        if (!in->cached) kfree(in);
+        return -22;
+    }
 
     char kbuf[256];
     int n = in->iops->readlink(in, kbuf, sizeof(kbuf));
+    if (!in->cached) kfree(in);
     if (n < 0) return n;
-    if ((size_t)n > bufsiz) n = (int)bufsiz;
-    copy_to_user(ubuf, kbuf, (size_t)n);
-    return n;
+    size_t slen = strlen(kbuf);
+    if (slen > bufsiz) slen = bufsiz;
+    copy_to_user(ubuf, kbuf, slen);
+    return (long)slen;
 }
 
 /* ── batch: missing syscalls ─────────────────────────────── */
@@ -2929,7 +2961,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_UNLINK:  ret = sys_unlink((const char*)arg0); break;
 	case SYS_ARCH_LINK:    ret = sys_link((const char*)arg0, (const char*)arg1); break;
 	case SYS_ARCH_SYMLINK: ret = sys_symlink((const char*)arg0, (const char*)arg1); break;
-	case SYS_ARCH_READLINK: ret = sys_readlink((const char*)arg0, (char*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_READLINK: ret = sys_readlinkat_vfs(AT_FDCWD, (const char*)arg0, (char*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_RENAME:  ret = sys_rename((const char*)arg0, (const char*)arg1); break;
 	case SYS_ARCH_CHMOD:   ret = sys_chmod((const char*)arg0, (mode_t)arg1); break;
 	case SYS_ARCH_CHOWN:   ret = sys_chown((const char*)arg0, (uid_t)arg1, (gid_t)arg2); break;
