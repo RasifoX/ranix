@@ -1,4 +1,5 @@
 #include <kernel/proc.h>
+#include <kernel/config.h>
 #include <kernel/hal.h>
 #include <kernel/tick.h>
 #include <kernel/elf.h>
@@ -119,7 +120,7 @@ static process_t *runqueue_pop(void)
 	return p;
 }
 
-#define SCHED_QUANTUM  10
+
 
 /* ── scheduler ───────────────────────────────────────────── */
 
