@@ -4,6 +4,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/sync.h>
 #include <asm/mmu.h>
 
 /*
@@ -32,15 +33,18 @@ typedef struct {
 	uint32_t       count;
 } ramfs_dir_t;
 
-static uint64_t next_ino = 1;
-static vfs_iops_t ramfs_iops;   /* forward declaration */
+static uint64_t    next_ino   = 1;
+static spinlock_t  ino_lock   = SPINLOCK_INIT;
+static vfs_iops_t  ramfs_iops;   /* forward declaration */
 
 static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino      = next_ino++;
+	spin_lock(&ino_lock);
+	in->ino = next_ino++;
+	spin_unlock(&ino_lock);
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;

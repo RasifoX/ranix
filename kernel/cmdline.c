@@ -1,7 +1,6 @@
 #include <kernel/cmdline.h>
 #include <kernel/lib/string.h>
-
-#define CMDLINE_MAX 512
+#include <kernel/config.h>
 
 static char _cmdline[CMDLINE_MAX];
 

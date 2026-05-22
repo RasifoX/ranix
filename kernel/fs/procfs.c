@@ -7,6 +7,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/sync.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -336,14 +337,23 @@ static vfs_fops_t procfs_dir_fops = { 0 };
 
 /* ── inode allocation ────────────────────────────────────────── */
 
-static uint64_t proc_ino_next = 0x8000;
+static uint64_t   proc_ino_next = 0x8000;
+static spinlock_t proc_ino_lock = SPINLOCK_INIT;
+
+static uint64_t proc_ino_alloc(void)
+{
+	spin_lock(&proc_ino_lock);
+	uint64_t n = proc_ino_next++;
+	spin_unlock(&proc_ino_lock);
+	return n;
+}
 
 static vfs_inode_t *procfs_inode_file(int pid, int type)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino     = proc_ino_next++;
+	in->ino     = proc_ino_alloc();
 	in->mode    = S_IFREG | 0444;
 	in->nlink   = 1;
 	in->refcount= 1;
@@ -384,7 +394,7 @@ static vfs_inode_t *procfs_fdlink_inode(int pid, int fd_n)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino      = proc_ino_next++;
+	in->ino      = proc_ino_alloc();
 	in->mode     = S_IFLNK | 0777;
 	in->nlink    = 1;
 	in->refcount = 1;
@@ -453,7 +463,7 @@ static vfs_inode_t *procfs_fddir_inode(int pid)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino      = proc_ino_next++;
+	in->ino      = proc_ino_alloc();
 	in->mode     = S_IFDIR | 0555;
 	in->nlink    = 2;
 	in->refcount = 1;
