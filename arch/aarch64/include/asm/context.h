@@ -194,5 +194,17 @@ typedef struct {
 #define SYS_ARCH_INOTIFY_RM_WATCH  28
 #define SYS_ARCH_SIGNALFD4        74
 #define SYS_ARCH_MEMFD_CREATE    279
+#define SYS_ARCH_STATFS           43
+#define SYS_ARCH_FSTATFS          44
+#define SYS_ARCH_CAPGET           90
+#define SYS_ARCH_CAPSET           91
+#define SYS_ARCH_GETXATTR          8
+#define SYS_ARCH_LGETXATTR         9
+#define SYS_ARCH_FGETXATTR        10
+#define SYS_ARCH_SETXATTR          5
+#define SYS_ARCH_LSETXATTR         6
+#define SYS_ARCH_LISTXATTR        11
+#define SYS_ARCH_LLISTXATTR       12
+#define SYS_ARCH_REMOVEXATTR      14
 
 #endif
