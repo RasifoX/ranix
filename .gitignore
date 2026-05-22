@@ -8,3 +8,8 @@ kernel8.img
 *.elf
 *.bin
 .claude/
+.vs/
+serial.log
+doom1.wad
+userspace/doom
+
