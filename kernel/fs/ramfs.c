@@ -149,6 +149,7 @@ static int ramfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	memset(rf, 0, sizeof(*rf));
 	in->priv = rf;
 	in->fops = &ramfs_fops;
+	in->iops = &ramfs_iops;
 
 	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
 	if (!ent) { kfree(rf); kfree(in); return -1; }
@@ -159,7 +160,6 @@ static int ramfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	ent->next     = rd->entries;
 	rd->entries   = ent;
 	rd->count++;
-	dir->nlink++;
 	return 0;
 }
 
@@ -302,6 +302,36 @@ static int ramfs_symlink(vfs_inode_t *dir, const char *name, const char *target)
 	return 0;
 }
 
+static int ramfs_truncate(vfs_inode_t *inode, off_t len)
+{
+	if (!S_ISREG(inode->mode)) return -22;
+	ramfs_file_t *rf = inode->priv;
+	if (!rf) return -22;
+	if (len < 0) return -22;
+	uint64_t newlen = (uint64_t)len;
+	if (newlen > rf->capacity) {
+		int new_order = 0;
+		while (((uint64_t)4096 << new_order) < newlen) new_order++;
+		uint8_t *nb = (uint8_t *)PHYS_TO_VIRT(buddy_alloc(new_order));
+		if (!nb) return -12;
+		uint64_t newcap = (uint64_t)4096 << new_order;
+		memset(nb, 0, (size_t)newcap);
+		if (rf->data) {
+			memcpy(nb, rf->data, rf->size < newlen ? (size_t)rf->size : (size_t)newlen);
+			int old_order = 0;
+			while (((uint64_t)4096 << old_order) < rf->capacity) old_order++;
+			buddy_free(VIRT_TO_PHYS(rf->data), old_order);
+		}
+		rf->data     = nb;
+		rf->capacity = newcap;
+	} else if (newlen < rf->size) {
+		memset(rf->data + newlen, 0, (size_t)(rf->size - newlen));
+	}
+	rf->size      = newlen;
+	inode->size   = newlen;
+	return 0;
+}
+
 static vfs_iops_t ramfs_iops = {
 	.lookup   = ramfs_lookup,
 	.create   = ramfs_create,
@@ -312,6 +342,7 @@ static vfs_iops_t ramfs_iops = {
 	.stat     = ramfs_stat,
 	.readlink = ramfs_readlink,
 	.symlink  = ramfs_symlink,
+	.truncate = ramfs_truncate,
 };
 
 /* ── mount ───────────────────────────────────────────────── */
