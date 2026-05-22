@@ -387,7 +387,22 @@ static uint32_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logica
 		goto done;
 	}
 
-	/* triple indirect: not implemented — too large for kernel use */
+	logical -= ptrs_per_blk * ptrs_per_blk;
+
+	/* triple indirect */
+	if (in->i_block[14]) {
+		uint8_t *t2 = ext2_alloc_page();
+		if (!t2) goto done;
+		if (read_block(fs, in->i_block[14], tmp) != 0) { ext2_free_page(t2); goto done; }
+		uint32_t l1 = ((uint32_t *)tmp)[logical / (ptrs_per_blk * ptrs_per_blk)];
+		if (!l1) { ext2_free_page(t2); goto done; }
+		if (read_block(fs, l1, tmp) != 0) { ext2_free_page(t2); goto done; }
+		uint32_t l2 = ((uint32_t *)tmp)[(logical / ptrs_per_blk) % ptrs_per_blk];
+		if (!l2) { ext2_free_page(t2); goto done; }
+		if (read_block(fs, l2, t2) != 0) { ext2_free_page(t2); goto done; }
+		result = ((uint32_t *)t2)[logical % ptrs_per_blk];
+		ext2_free_page(t2);
+	}
 done:
 	ext2_free_page(tmp);
 	return result;
@@ -722,7 +737,63 @@ static uint32_t inode_alloc_block(ext2_fs_t *fs, ext2_inode_t *in,
 		ext2_free_page(t1); ext2_free_page(t2);
 		return r;
 	}
-	return 0; /* triple indirect not supported */
+	lbn -= ppp * ppp;
+
+	/* Triple indirect */
+	{
+		uint8_t *t1 = ext2_alloc_page(), *t2 = ext2_alloc_page(), *t3 = ext2_alloc_page();
+		if (!t1 || !t2 || !t3) {
+			ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0;
+		}
+		if (!in->i_block[14]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0; }
+			memset(t1, 0, fs->block_size);
+			in->i_block[14] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, ib, t1);
+		} else if (read_block(fs, in->i_block[14], t1) != 0) {
+			ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0;
+		}
+		uint32_t *l1 = (uint32_t *)t1;
+		uint32_t l1i = lbn / (ppp * ppp);
+		uint32_t l2i = (lbn / ppp) % ppp;
+		uint32_t l3i = lbn % ppp;
+		if (!l1[l1i]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0; }
+			memset(t2, 0, fs->block_size);
+			l1[l1i] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, in->i_block[14], t1);
+			write_block(fs, ib, t2);
+		} else if (read_block(fs, l1[l1i], t2) != 0) {
+			ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0;
+		}
+		uint32_t *l2 = (uint32_t *)t2;
+		if (!l2[l2i]) {
+			uint32_t ib = alloc_block(fs, pg);
+			if (!ib) { ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0; }
+			memset(t3, 0, fs->block_size);
+			l2[l2i] = ib;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, l1[l1i], t2);
+			write_block(fs, ib, t3);
+		} else if (read_block(fs, l2[l2i], t3) != 0) {
+			ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0;
+		}
+		uint32_t *l3 = (uint32_t *)t3;
+		if (!l3[l3i]) {
+			uint32_t b = alloc_block(fs, pg);
+			if (!b) { ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3); return 0; }
+			l3[l3i] = b;
+			in->i_blocks_lo += (uint32_t)fs->sectors_per_block;
+			write_block(fs, l2[l2i], t3);
+		}
+		uint32_t r = l3[l3i];
+		ext2_free_page(t1); ext2_free_page(t2); ext2_free_page(t3);
+		return r;
+	}
 }
 
 static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
