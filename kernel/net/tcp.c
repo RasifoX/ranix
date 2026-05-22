@@ -114,8 +114,8 @@ static uint16_t alloc_port(void)
 socket_t *tcp_sock_find(uint32_t local_ip, uint16_t local_port,
                         uint32_t remote_ip, uint16_t remote_port)
 {
-    extern socket_t *gsock[];
-    for (int i = 0; i < 64; i++) {
+    
+    for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->type != SOCK_STREAM) continue;
@@ -130,8 +130,8 @@ socket_t *tcp_sock_find(uint32_t local_ip, uint16_t local_port,
 
 socket_t *tcp_listen_find(uint16_t local_port)
 {
-    extern socket_t *gsock[];
-    for (int i = 0; i < 64; i++) {
+    
+    for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->type != SOCK_STREAM) continue;
@@ -468,8 +468,8 @@ int tcp_listen(socket_t *s, int backlog)
 
 void tcp_tick(void)
 {
-    extern socket_t *gsock[];
-    for (int i = 0; i < 64; i++) {
+    
+    for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s || s->type != SOCK_STREAM) continue;
         if (s->retx_deadline == 0) continue;         /* no pending retransmit */

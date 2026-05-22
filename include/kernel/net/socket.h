@@ -94,8 +94,11 @@ void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
 void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len);
 
 /* Global socket table */
-void sock_register(socket_t *s);
-void sock_unregister(socket_t *s);
+void      sock_register(socket_t *s);
+void      sock_unregister(socket_t *s);
+int       gsock_count(void);
+extern socket_t **gsock;
+extern int        gsock_cap;
 
 /* TCP data delivery */
 void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);

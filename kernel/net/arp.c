@@ -17,33 +17,39 @@ typedef struct {
 
 /* ── ARP table ───────────────────────────────────────────── */
 
-#define ARP_TABLE_SIZE 16
+#define ARP_TABLE_SIZE 64
 
-typedef struct { uint32_t ip; uint8_t mac[6]; int valid; } arp_entry_t;
+typedef struct { uint32_t ip; uint8_t mac[6]; int valid; uint32_t age; } arp_entry_t;
 static arp_entry_t arp_table[ARP_TABLE_SIZE];
+static uint32_t    arp_clock;
 
 static void arp_table_update(uint32_t ip, const uint8_t *mac)
 {
+    arp_clock++;
     /* update existing */
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
             memcpy(arp_table[i].mac, mac, 6);
+            arp_table[i].age = arp_clock;
             return;
         }
     }
     /* insert into free slot */
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (!arp_table[i].valid) {
-            arp_table[i].ip = ip;
+            arp_table[i].ip = ip; arp_table[i].age = arp_clock;
             memcpy(arp_table[i].mac, mac, 6);
             arp_table[i].valid = 1;
             return;
         }
     }
-    /* evict slot 0 (LRU would be better, but table is tiny) */
-    arp_table[0].ip = ip;
-    memcpy(arp_table[0].mac, mac, 6);
-    arp_table[0].valid = 1;
+    /* evict oldest entry (LRU) */
+    int oldest = 0;
+    for (int i = 1; i < ARP_TABLE_SIZE; i++)
+        if (arp_table[i].age < arp_table[oldest].age) oldest = i;
+    arp_table[oldest].ip = ip; arp_table[oldest].age = arp_clock;
+    memcpy(arp_table[oldest].mac, mac, 6);
+    arp_table[oldest].valid = 1;
 }
 
 int arp_lookup(netdev_t *dev, uint32_t ip, uint8_t *mac_out)

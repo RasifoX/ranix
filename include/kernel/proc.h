@@ -5,9 +5,9 @@
 #include <asm/context.h>
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
+#include <kernel/config.h>
 
 #define PROC_NAME_MAX  256
-#define KSTACK_SIZE    8192
 
 #define NSIG           64
 #define SIGKILL        9

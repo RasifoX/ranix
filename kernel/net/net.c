@@ -4,54 +4,39 @@
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
 
-/* ── SKB pool ────────────────────────────────────────────── */
-
-#define SKB_POOL_SIZE 64
-
-static skb_t skb_pool[SKB_POOL_SIZE];
-static spinlock_t skb_lock = SPINLOCK_INIT;
-static skb_t *skb_free_list;
-
-static void skb_pool_init(void)
-{
-    for (int i = 0; i < SKB_POOL_SIZE - 1; i++)
-        skb_pool[i].next = &skb_pool[i + 1];
-    skb_pool[SKB_POOL_SIZE - 1].next = NULL;
-    skb_free_list = &skb_pool[0];
-}
+/* ── SKB allocator (heap-based, no fixed pool) ───────────── */
 
 skb_t *skb_alloc(void)
 {
-    uint64_t f = spin_lock_irq(&skb_lock);
-    skb_t *s = skb_free_list;
-    if (s) {
-        skb_free_list = s->next;
-        s->data = s->buf + SKB_HEADROOM;
-        s->len  = 0;
-        s->next = NULL;
-    }
-    spin_unlock_irq(&skb_lock, f);
+    skb_t *s = kmalloc(sizeof(*s));
+    if (!s) return NULL;
+    s->data = s->buf + SKB_HEADROOM;
+    s->len  = 0;
+    s->next = NULL;
     return s;
 }
 
 void skb_free(skb_t *skb)
 {
-    if (!skb) return;
-    uint64_t f = spin_lock_irq(&skb_lock);
-    skb->next = skb_free_list;
-    skb_free_list = skb;
-    spin_unlock_irq(&skb_lock, f);
+    kfree(skb);
 }
 
-/* ── netdev registry ─────────────────────────────────────── */
+/* ── netdev registry (dynamic) ───────────────────────────── */
 
-#define NETDEV_MAX 4
-static netdev_t *devs[NETDEV_MAX];
-static int       ndevs;
+#define NETDEV_INIT_CAP 4
+static netdev_t **devs;
+static int        ndevs;
+static int        devs_cap;
 
 void net_register(netdev_t *dev)
 {
-    if (ndevs >= NETDEV_MAX) return;
+    if (ndevs >= devs_cap) {
+        int nc = devs_cap ? devs_cap * 2 : NETDEV_INIT_CAP;
+        netdev_t **nb = kmalloc((size_t)nc * sizeof(netdev_t *));
+        if (!nb) return;
+        if (devs) { memcpy(nb, devs, (size_t)ndevs * sizeof(netdev_t *)); kfree(devs); }
+        devs = nb; devs_cap = nc;
+    }
     devs[ndevs++] = dev;
     kprintf("net: registered %s  ip=%u.%u.%u.%u  mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
         dev->name,
@@ -136,7 +121,4 @@ uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len)
 
 /* ── init ────────────────────────────────────────────────── */
 
-void net_init(void)
-{
-    skb_pool_init();
-}
+void net_init(void) { }
