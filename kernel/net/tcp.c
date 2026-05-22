@@ -8,7 +8,7 @@
 #include <kernel/sync.h>
 #include <kernel/proc.h>
 
-extern uint64_t kernel_ticks;
+extern volatile uint64_t kernel_ticks;
 extern uint32_t TIMER_HZ;
 void task_wake(process_t *p);
 
