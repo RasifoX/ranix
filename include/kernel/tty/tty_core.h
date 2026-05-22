@@ -6,5 +6,6 @@
 
 void tty_core_init(void);
 void tty_input_char(char c);
+void tty_input_str(const char *s);
 
 #endif

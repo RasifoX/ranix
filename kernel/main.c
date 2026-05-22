@@ -9,7 +9,6 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/proc.h>
-#include <kernel/shell.h>
 #include <kernel/block.h>
 #include <kernel/fs/mbr.h>
 
@@ -293,8 +292,7 @@ void kernel_main(void)
 			kfree(buf);
 		}
 	} else {
-		kprintf("init: not found, falling back to kshell\n");
-		task_create("shell", shell_task);
+		kpanic("init: no init binary found");
 	}
 
 	extern void net_poll(void);
