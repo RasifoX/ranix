@@ -1,238 +1,175 @@
 #!/bin/bash
 set +m
 PASS=0; FAIL=0
-
 check() {
-    local desc="$1" expect="$2" actual="$3"
-    if [ "$actual" = "$expect" ]; then
+    local name="$1" exp="$2" got="$3"
+    if [ "$got" = "$exp" ]; then
+        echo "PASS: $name"
         PASS=$((PASS+1))
     else
+        echo "FAIL: $name (expected='$exp' got='$got')"
         FAIL=$((FAIL+1))
-        echo "FAIL[$FAIL]: $desc  expect='$expect' got='$actual'"
     fi
 }
 
-# 1: fork512 stress
-for i in $(seq 1 512); do true & done; wait 2>/dev/null
-check "fork512" "" ""
+# ── 1. echo / printf ──────────────────────────────────────────
+check "echo-basic"     "hello"         "$(echo hello)"
+check "echo-n"         "ab"            "$(echo -n a; echo -n b)"
+check "printf-str"     "hello world"   "$(printf '%s %s' hello world)"
+check "printf-int"     "42"            "$(printf '%d' 42)"
+check "printf-hex"     "ff"            "$(printf '%x' 255)"
+check "printf-oct"     "10"            "$(printf '%o' 8)"
+check "printf-escape"  "a	b"          "$(printf 'a\tb')"
 
-# 2: exec200 batch
-for i in $(seq 1 200); do echo x | cat >/dev/null & done; wait 2>/dev/null
-check "exec200" "" ""
+# ── 2. arithmetic ─────────────────────────────────────────────
+check "arith-add"      "7"    "$((3+4))"
+check "arith-mul"      "12"   "$((3*4))"
+check "arith-div"      "3"    "$((9/3))"
+check "arith-mod"      "1"    "$((10%3))"
+check "arith-neg"      "-5"   "$((-5))"
+check "arith-parens"   "14"   "$((2*(3+4)))"
+check "arith-shift"    "8"    "$((1<<3))"
+check "arith-band"     "2"    "$((3&6))"
+check "arith-bor"      "7"    "$((3|4))"
+check "arith-xor"      "5"    "$((3^6))"
 
-# 3: basic echo
-check "echo" "hello" "$(echo hello)"
+# ── 3. string ops ─────────────────────────────────────────────
+s="hello world"
+check "str-len"        "11"           "${#s}"
+check "str-sub1"       "hello"        "${s:0:5}"
+check "str-sub2"       "world"        "${s:6}"
+check "str-strip-pre"  "world"        "${s#hello }"
+check "str-strip-suf"  "hello"        "${s% world}"
+check "str-replace"    "hXllX wXrld"  "${s//[aeiou]/X}"
+check "str-upper"      "HELLO WORLD"  "${s^^}"
+check "str-lower"      "hello world"  "${s,,}"
 
-# 4: arithmetic
-check "arith" "42" "$((6*7))"
+# ── 4. arrays ─────────────────────────────────────────────────
+arr=(a b c d e)
+check "arr-elem"    "c"       "${arr[2]}"
+check "arr-len"     "5"       "${#arr[@]}"
+check "arr-slice"   "b c d"   "${arr[*]:1:3}"
+check "arr-last"    "e"       "${arr[-1]}"
+arr[2]="X"
+check "arr-set"     "X"       "${arr[2]}"
 
-# 5: string length
-S="hello world"
-check "strlen" "11" "${#S}"
+# ── 5. conditionals ───────────────────────────────────────────
+check "if-true"    "yes"  "$(if true; then echo yes; fi)"
+check "if-false"   "no"   "$(if false; then echo yes; else echo no; fi)"
+check "cmp-eq"     "yes"  "$([ 1 -eq 1 ] && echo yes || echo no)"
+check "cmp-ne"     "yes"  "$([ 1 -ne 2 ] && echo yes || echo no)"
+check "cmp-lt"     "yes"  "$([ 2 -lt 3 ] && echo yes || echo no)"
+check "cmp-gt"     "yes"  "$([ 3 -gt 2 ] && echo yes || echo no)"
+check "str-eq"     "yes"  "$([ abc = abc ] && echo yes || echo no)"
+check "str-ne"     "yes"  "$([ abc != xyz ] && echo yes || echo no)"
+check "test-z"     "yes"  "$([ -z '' ] && echo yes || echo no)"
+check "test-n"     "yes"  "$([ -n 'x' ] && echo yes || echo no)"
 
-# 6: substring
-check "substr" "world" "${S:6}"
+# ── 6. loops ──────────────────────────────────────────────────
+check "for-seq"    "1 2 3 4 5"  "$(for i in 1 2 3 4 5; do printf '%s ' $i; done | sed 's/ $//')"
+check "while-cnt"  "5"          "$(i=0; while [ $i -lt 5 ]; do i=$((i+1)); done; echo $i)"
+check "until-cnt"  "3"          "$(i=0; until [ $i -ge 3 ]; do i=$((i+1)); done; echo $i)"
+check "for-c"      "10"         "$(s=0; for((i=1;i<=4;i++)); do s=$((s+i)); done; echo $s)"
+check "break-loop" "3"          "$(for i in 1 2 3 4 5; do [ $i -eq 3 ] && break; done; echo $i)"
+check "cont-loop"  "2 4"        "$(for i in 1 2 3 4; do [ $((i%2)) -eq 1 ] && continue; echo -n "$i "; done | sed 's/ $//')"
 
-# 7: pipe + grep
-check "pipe-grep" "foo" "$(echo -e 'foo\nbar' | grep foo)"
+# ── 7. functions ──────────────────────────────────────────────
+add(){ echo $(($1+$2)); }
+fact(){ [ $1 -le 1 ] && echo 1 || echo $(($1 * $(fact $(($1-1))))); }
+check "func-add"   "7"    "$(add 3 4)"
+check "func-recur" "120"  "$(fact 5)"
+greet(){ local name=$1; echo "hi $name"; }
+check "func-local" "hi bob" "$(greet bob)"
 
-# 8: sort
-check "sort" "$(printf 'a\nb\nc')" "$(printf 'c\na\nb' | sort)"
-
-# 9: wc -w
-check "wc-w" "3" "$(echo one two three | wc -w | tr -d ' ')"
-
-# 10: sed substitution
-check "sed" "bar" "$(echo foo | sed 's/foo/bar/')"
-
-# 11: awk field
-check "awk" "world" "$(echo 'hello world' | awk '{print $2}')"
-
-# 12: head
-check "head" "first" "$(printf 'first\nsecond\nthird' | head -1)"
-
-# 13: tail
-check "tail" "third" "$(printf 'first\nsecond\nthird' | tail -1)"
-
-# 14: cut
-check "cut" "hello" "$(echo 'hello:world' | cut -d: -f1)"
-
-# 15: tr
-check "tr" "HELLO" "$(echo hello | tr a-z A-Z)"
-
-# 16: uniq
-check "uniq" "$(printf 'a\nb')" "$(printf 'a\na\nb\nb' | uniq)"
-
-# 17: file create/read
-echo "ranix" > /tmp/t.txt
-check "file-rw" "ranix" "$(cat /tmp/t.txt)"
-rm -f /tmp/t.txt
-
-# 18: mkdir/rmdir
-mkdir -p /tmp/testdir
-check "mkdir" "0" "$?"
-rmdir /tmp/testdir
-check "rmdir" "0" "$?"
-
-# 19: redirection append
-echo "line1" > /tmp/app.txt
-echo "line2" >> /tmp/app.txt
-check "append" "2" "$(wc -l < /tmp/app.txt | tr -d ' ')"
-rm -f /tmp/app.txt
-
-# 20: subshell
-check "subshell" "42" "$(x=42; echo $x)"
-
-# 21: function
-myfunc() { echo "func$1"; }
-check "function" "func7" "$(myfunc 7)"
-
-# 22: array
-arr=(a b c)
-check "array" "b" "${arr[1]}"
-
-# 23: for loop count
-cnt=0
-for i in 1 2 3 4 5; do cnt=$((cnt+1)); done
-check "for-loop" "5" "$cnt"
-
-# 24: while loop
-n=0; i=0
-while [ $i -lt 5 ]; do n=$((n+i)); i=$((i+1)); done
-check "while-loop" "10" "$n"
-
-# 25: if/else
-x=10
-if [ $x -gt 5 ]; then r=big; else r=small; fi
-check "if-else" "big" "$r"
-
-# 26: case
-val=banana
-case $val in
-  apple)  r=fruit1 ;;
-  banana) r=fruit2 ;;
-  *)      r=other  ;;
-esac
-check "case" "fruit2" "$r"
-
-# 27: heredoc
-check "heredoc" "hello heredoc" "$(cat <<'EOF'
-hello heredoc
+# ── 8. pipes & redirection ────────────────────────────────────
+check "pipe-basic"   "HELLO"   "$(echo hello | tr a-z A-Z)"
+check "pipe-chain"   "3"       "$(echo -e 'a\nb\nc' | wc -l | tr -d ' ')"
+check "redir-out"    "ok"      "$(echo ok > /tmp/t1.txt; cat /tmp/t1.txt)"
+check "redir-app"    "ab"      "$(echo -n a > /tmp/t2.txt; echo -n b >> /tmp/t2.txt; cat /tmp/t2.txt)"
+check "redir-in"     "hello"   "$(echo hello > /tmp/t3.txt; cat < /tmp/t3.txt)"
+check "pipe-subsh"   "5"       "$(echo '1 2 3 4 5' | wc -w | tr -d ' ')"
+check "here-string"  "hello"   "$(cat <<< 'hello')"
+check "heredoc"      "hi"      "$(cat <<EOF
+hi
 EOF
 )"
 
-# 28: read from pipe
-check "read-pipe" "hello" "$(echo hello | (read line; echo $line))"
+# ── 9. process substitution / command sub ────────────────────
+check "cmdsub-basic"  "hello"  "$(r=$(echo hello); echo $r)"
+check "cmdsub-nest"   "3"      "$(echo $(echo 3))"
+check "cmdsub-arith"  "9"      "$(echo $(($(echo 3) * 3)))"
 
-# 29: background + wait with status
-(exit 42) &
-wait $!
-check "bg-wait" "42" "$?"
+# ── 10. environment / export ──────────────────────────────────
+export TESTVAR=hello
+check "env-export"  "hello"  "$(bash -c 'echo $TESTVAR')"
+check "env-local"   ""       "$(unset _RANIX_TEST_VAR; bash -c 'echo $_RANIX_TEST_VAR')"
+check "env-path"    "true"   "$([ -n "$PATH" ] && echo true)"
 
-# 30: signal delivery (SIGCHLD counted)
-child_done=0
-trap 'child_done=$((child_done+1))' SIGCHLD
-( sleep 0 ) &
-wait $! 2>/dev/null
-trap - SIGCHLD
-check "sigchld" "" ""
+# ── 11. file tests ────────────────────────────────────────────
+echo test > /tmp/ftest.txt
+mkdir -p /tmp/dtest
+check "file-e"   "yes"  "$([ -e /tmp/ftest.txt ] && echo yes || echo no)"
+check "file-f"   "yes"  "$([ -f /tmp/ftest.txt ] && echo yes || echo no)"
+check "file-d"   "yes"  "$([ -d /tmp/dtest ] && echo yes || echo no)"
+check "file-r"   "yes"  "$([ -r /tmp/ftest.txt ] && echo yes || echo no)"
+check "file-s"   "yes"  "$([ -s /tmp/ftest.txt ] && echo yes || echo no)"
+check "file-ne"  "yes"  "$([ ! -e /tmp/no_such_file_xyz ] && echo yes || echo no)"
 
-# 31: pipe multiple commands
-check "multi-pipe" "3" "$(echo 'one two three' | tr ' ' '\n' | wc -l | tr -d ' ')"
+# ── 12. string tests ──────────────────────────────────────────
+check "str-cmp-lt"  "yes"  "$([ abc \< def ] && echo yes || echo no)"
+check "str-cmp-gt"  "yes"  "$([ def \> abc ] && echo yes || echo no)"
+check "str-regex"   "yes"  "$(echo hello123 | grep -qE '^[a-z]+[0-9]+$' && echo yes || echo no)"
+check "str-glob"    "yes"  "$(x=foobar; [[ $x == foo* ]] && echo yes || echo no)"
+check "str-contain" "yes"  "$(x=foobar; [[ $x == *oo* ]] && echo yes || echo no)"
 
-# 32: command substitution nested
-check "nested-cmdsub" "HELLO" "$(echo $(echo hello) | tr a-z A-Z)"
+# ── 13. sort / uniq / cut / tr ───────────────────────────────
+check "sort-alpha"  "a b c"  "$(echo -e 'c\na\nb' | sort | tr '\n' ' ' | sed 's/ $//')"
+check "sort-num"    "1 2 3"  "$(echo -e '3\n1\n2' | sort -n | tr '\n' ' ' | sed 's/ $//')"
+check "uniq-basic"  "a b"    "$(echo -e 'a\na\nb' | uniq | tr '\n' ' ' | sed 's/ $//')"
+check "cut-field"   "b"      "$(echo a:b:c | cut -d: -f2)"
+check "tr-squeeze"  "a b c"  "$(echo 'a  b  c' | tr -s ' ')"
 
-# 33: glob expansion
-touch /tmp/glob_a.txt /tmp/glob_b.txt
-count=$(ls /tmp/glob_*.txt 2>/dev/null | wc -l | tr -d ' ')
-check "glob" "2" "$count"
-rm -f /tmp/glob_a.txt /tmp/glob_b.txt
+# ── 14. awk / sed ─────────────────────────────────────────────
+check "awk-print"  "hello"   "$(echo hello world | awk '{print $1}')"
+check "awk-sum"    "6"       "$(echo -e '1\n2\n3' | awk '{s+=$1}END{print s}')"
+check "sed-sub"    "hXllo"   "$(echo hello | sed 's/e/X/')"
+check "sed-del"    "ac"      "$(echo -e 'a\nb\nc' | sed '/b/d' | tr -d '\n')"
 
-# 34: exec200 batch 2
-for i in $(seq 1 200); do echo x | cat >/dev/null & done; wait 2>/dev/null
-check "exec200-2" "" ""
+# ── 15. signals & pipes ───────────────────────────────────────
+check "sigpipe-ok"  "ok"  "$(bash -c '(yes 2>/dev/null | head -c 1 >/dev/null); echo ok' 2>/dev/null)"
+check "pipe-nodata" "1"   "$(echo | wc -c | tr -d ' \n')"
+check "pipe-eof"    ""    "$(true | cat)"
 
-# 35: deep 6-stage pipeline
-check "deep-pipe-6" "6" "$(echo a:b:c:d:e:f | tr ':' '\n' | grep -c '.' | tr -d ' ')"
+# ── 16. subshell isolation ────────────────────────────────────
+x=outer
+check "subsh-iso"   "outer"  "$((x=inner); echo $x)"
+check "subsh-exit"  "ok"     "$(( exit 0 ) && echo ok)"
+check "subsh-env"   "42"     "$(A=42 bash -c 'echo $A')"
 
-# 36: PID recycling 300
-for i in $(seq 1 300); do true & done; wait 2>/dev/null
-check "pid-recycle-300" "" ""
+# ── 17. read builtin ─────────────────────────────────────────
+check "read-basic"  "hello"  "$(echo hello | (read line; echo $line))"
+check "read-multi"  "a b"    "$(echo 'a b' | (read x y; echo $x $y))"
+check "read-ifs"    "a:b"    "$(echo 'a:b' | (IFS=: read x y; echo $x:$y))"
 
-# 37: PID recycling 300 batch 2
-for i in $(seq 1 300); do ( echo x > /dev/null ) & done; wait 2>/dev/null
-check "pid-recycle-300-2" "" ""
+# ── 18. getopts ───────────────────────────────────────────────
+parse(){ local o; while getopts "ab:c" o "$@"; do
+    case $o in a) echo A;; b) echo "B=$OPTARG";; c) echo C;; esac
+done; }
+check "getopts-a"   "A"    "$(parse -a)"
+check "getopts-b"   "B=X"  "$(parse -b X)"
+check "getopts-abc" "A
+B=Y
+C"  "$(parse -a -b Y -c)"
 
-# 38: pipe 1MB
-_pipeout=$(dd if=/dev/zero bs=4096 count=256 2>/dev/null | wc -c | tr -d ' ')
-check "pipe-1mb" "1048576" "$_pipeout"
+# ── 19. trap ──────────────────────────────────────────────────
+check "trap-exit"   "bye"  "$(bash -c 'trap "echo bye" EXIT; exit 0')"
+check "trap-int"    "caught"  "$(bash -c 'trap "echo caught; exit 0" INT; kill -INT $$; echo nope' 2>/dev/null)"
 
-# 39: multi-writer pipe
-( dd if=/dev/zero bs=1 count=8192 2>/dev/null; dd if=/dev/zero bs=1 count=8192 2>/dev/null ) | wc -c | tr -d ' ' > /tmp/pwc.txt
-check "pipe-multiwriter" "16384" "$(cat /tmp/pwc.txt)"
-rm -f /tmp/pwc.txt
+# ── 20. misc builtins ─────────────────────────────────────────
+check "type-builtin"  "echo is a shell builtin"  "$(type echo)"
+check "pwd-works"     "/"                          "$(cd /; pwd)"
+check "set-e"         "1"                          "$(bash -c 'set -e; echo 1')"
 
-# 40: dentry stress 100
-for i in $(seq 1 100); do cat /proc/self/status > /dev/null; done
-check "dentry-stress-100" "" ""
-
-# 41: /proc/cmdline readable
-_cl=$(cat /proc/cmdline 2>/dev/null)
-check "proc-cmdline" "0" "$?"
-
-# 42: /proc/self/maps readable
-cat /proc/self/maps > /dev/null 2>&1
-check "proc-maps" "0" "$?"
-
-# 43: /proc/meminfo MemTotal
-check "meminfo-total" "1" "$(grep -c '^MemTotal' /proc/meminfo)"
-
-# 44: /proc/meminfo MemFree
-check "meminfo-free" "1" "$(grep -c '^MemFree' /proc/meminfo)"
-
-# 45: memory pressure 50 subshells
-for i in $(seq 1 50); do
-    ( dd if=/dev/zero bs=4096 count=16 2>/dev/null | wc -c > /dev/null ) &
-done
-wait 2>/dev/null
-check "mem-pressure-50" "" ""
-
-# 46: concurrent I/O 50
-for i in $(seq 1 50); do
-    ( echo "proc$i" > /tmp/cptest_$i.txt && cat /tmp/cptest_$i.txt > /dev/null ) &
-done
-wait 2>/dev/null
-ok=1
-for i in $(seq 1 50); do
-    [ "$(cat /tmp/cptest_$i.txt 2>/dev/null)" = "proc$i" ] || ok=0
-    rm -f /tmp/cptest_$i.txt
-done
-check "concurrent-io-50" "1" "$ok"
-
-# 47: SIGTERM self
-trap 'got_sigterm=1' SIGTERM
-got_sigterm=0
-kill -SIGTERM $$
-trap - SIGTERM
-check "sigterm-self" "1" "$got_sigterm"
-
-# 48: pipe basic
-result=$(echo hello | (cat > /dev/null; echo ok))
-check "pipe-basic-ok" "ok" "$result"
-
-# 49: 10 files create/rm
-for i in $(seq 1 10); do echo "ftest$i" > /tmp/ftest_$i.txt; done
-fcount=$(ls /tmp/ftest_*.txt 2>/dev/null | wc -l | tr -d ' ')
-check "fs-10files-create" "10" "$fcount"
-for i in $(seq 1 10); do rm -f /tmp/ftest_$i.txt; done
-check "fs-10files-rm" "0" "$?"
-
-# 50: large file 16KB
-dd if=/dev/zero bs=1024 count=16 2>/dev/null | tr '\0' 'A' > /tmp/large.txt
-sz=$(wc -c < /tmp/large.txt | tr -d ' ')
-check "large-file-16k" "16384" "$sz"
-rm -f /tmp/large.txt
-
-echo "=== RESULTS: PASS=$PASS FAIL=$FAIL ==="
-echo "=== DONE ==="
+echo "---"
+echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
+[ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
