@@ -2933,6 +2933,84 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
     return (long)slen;
 }
 
+/* ── statfs ──────────────────────────────────────────────── */
+
+typedef struct {
+	long    f_type;
+	long    f_bsize;
+	uint64_t f_blocks;
+	uint64_t f_bfree;
+	uint64_t f_bavail;
+	uint64_t f_files;
+	uint64_t f_ffree;
+	uint64_t f_fsid[2];
+	long    f_namelen;
+	long    f_frsize;
+	long    f_flags;
+	long    f_spare[4];
+} kernel_statfs_t;
+
+static long sys_statfs(const char *path, kernel_statfs_t *buf)
+{
+	(void)path;
+	if (!access_ok(buf, sizeof(*buf))) return -14;
+	kernel_statfs_t st;
+	memset(&st, 0, sizeof(st));
+	st.f_type    = 0x858458f6; /* RAMFS_MAGIC */
+	st.f_bsize   = 4096;
+	st.f_blocks  = 1024;
+	st.f_bfree   = 512;
+	st.f_bavail  = 512;
+	st.f_files   = 1024;
+	st.f_ffree   = 512;
+	st.f_namelen = 255;
+	copy_to_user(buf, &st, sizeof(st));
+	return 0;
+}
+
+static long sys_fstatfs(int fd, kernel_statfs_t *buf)
+{
+	(void)fd;
+	return sys_statfs(NULL, buf);
+}
+
+/* ── capabilities (root always has all) ─────────────────── */
+
+static long sys_capget(void *hdrp, void *datap)
+{
+	if (!hdrp) return -14;
+	/* write back version = 0x20080522, pid = 0 */
+	uint32_t hdr[2] = { 0x20080522, 0 };
+	if (access_ok(hdrp, 8)) copy_to_user(hdrp, hdr, 8);
+	if (datap && access_ok(datap, 24)) {
+		/* two sets (effective, permitted, inheritable) x2 (32-bit halves) */
+		uint32_t data[6] = { 0xffffffff, 0xffffffff, 0xffffffff,
+		                     0xffffffff, 0xffffffff, 0xffffffff };
+		copy_to_user(datap, data, 24);
+	}
+	return 0;
+}
+static long sys_capset(void *hdrp, const void *datap)
+{ (void)hdrp; (void)datap; return 0; }
+
+/* ── xattr (stubs: ENODATA) ──────────────────────────────── */
+static long sys_getxattr(const char *p, const char *n, void *v, size_t s)
+{ (void)p;(void)n;(void)v;(void)s; return -61; } /* ENODATA */
+static long sys_lgetxattr(const char *p, const char *n, void *v, size_t s)
+{ (void)p;(void)n;(void)v;(void)s; return -61; }
+static long sys_fgetxattr(int fd, const char *n, void *v, size_t s)
+{ (void)fd;(void)n;(void)v;(void)s; return -61; }
+static long sys_setxattr(const char *p, const char *n, const void *v, size_t s, int f)
+{ (void)p;(void)n;(void)v;(void)s;(void)f; return -1; }
+static long sys_lsetxattr(const char *p, const char *n, const void *v, size_t s, int f)
+{ (void)p;(void)n;(void)v;(void)s;(void)f; return -1; }
+static long sys_listxattr(const char *p, char *l, size_t s)
+{ (void)p;(void)l;(void)s; return 0; }
+static long sys_llistxattr(const char *p, char *l, size_t s)
+{ (void)p;(void)l;(void)s; return 0; }
+static long sys_removexattr(const char *p, const char *n)
+{ (void)p;(void)n; return -1; }
+
 /* ── batch: missing syscalls ─────────────────────────────── */
 
 static long sys_pread64(int fd, void *buf, size_t count, off_t offset)
@@ -3521,6 +3599,18 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MKNODAT:     ret = sys_mknodat((int)arg0, (const char*)arg1, (mode_t)arg2, (uint64_t)arg3); break;
 	case SYS_ARCH_RENAMEAT2:   ret = sys_renameat2((int)arg0, (const char*)arg1, (int)arg2, (const char*)arg3, (unsigned int)arg4); break;
 #endif
+	case SYS_ARCH_STATFS:    ret = sys_statfs((const char*)arg0, (kernel_statfs_t*)arg1); break;
+	case SYS_ARCH_FSTATFS:   ret = sys_fstatfs((int)arg0, (kernel_statfs_t*)arg1); break;
+	case SYS_ARCH_CAPGET:    ret = sys_capget((void*)arg0, (void*)arg1); break;
+	case SYS_ARCH_CAPSET:    ret = sys_capset((void*)arg0, (const void*)arg1); break;
+	case SYS_ARCH_GETXATTR:  ret = sys_getxattr((const char*)arg0,(const char*)arg1,(void*)arg2,(size_t)arg3); break;
+	case SYS_ARCH_LGETXATTR: ret = sys_lgetxattr((const char*)arg0,(const char*)arg1,(void*)arg2,(size_t)arg3); break;
+	case SYS_ARCH_FGETXATTR: ret = sys_fgetxattr((int)arg0,(const char*)arg1,(void*)arg2,(size_t)arg3); break;
+	case SYS_ARCH_SETXATTR:  ret = sys_setxattr((const char*)arg0,(const char*)arg1,(const void*)arg2,(size_t)arg3,(int)arg4); break;
+	case SYS_ARCH_LSETXATTR: ret = sys_lsetxattr((const char*)arg0,(const char*)arg1,(const void*)arg2,(size_t)arg3,(int)arg4); break;
+	case SYS_ARCH_LISTXATTR: ret = sys_listxattr((const char*)arg0,(char*)arg1,(size_t)arg2); break;
+	case SYS_ARCH_LLISTXATTR:ret = sys_llistxattr((const char*)arg0,(char*)arg1,(size_t)arg2); break;
+	case SYS_ARCH_REMOVEXATTR:ret = sys_removexattr((const char*)arg0,(const char*)arg1); break;
 	default:
 		kprintf("syscall: unimplemented %ld (pid=%u)\n",
 		        n, task_current()->pid);
