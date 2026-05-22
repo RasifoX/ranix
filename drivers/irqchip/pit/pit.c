@@ -2,7 +2,7 @@
 #include <asm/io.h>
 #include <kernel/driver.h>
 #include <kernel/kprintf.h>
-#include <kernel/proc.h>
+#include <kernel/tick.h>
 
 #define PIT_CH0   0x40
 #define PIT_CMD   0x43
@@ -13,7 +13,7 @@ static volatile uint64_t ticks;
 void pit_handler(void)
 {
 	ticks++;
-	sched_tick();
+	tick_notify();
 }
 
 void pit_init(uint32_t hz)

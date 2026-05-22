@@ -156,6 +156,11 @@ void sched_init(void)
 	proctab_grow();
 	proctab[0] = p;
 	proc_cnt   = 1;
+
+	tick_register(sched_tick);
+
+	extern void tcp_tick(void);
+	tick_register(tcp_tick);
 }
 
 void sched_tick(void)
@@ -198,10 +203,6 @@ void sched_tick(void)
 		spin_unlock_irq(&sched_lock, lf);
 	}
 
-	tick_notify();
-
-	extern void tcp_tick(void);
-	tcp_tick();
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
