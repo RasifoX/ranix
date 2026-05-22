@@ -76,6 +76,16 @@ void sock_free(socket_t *s)
     kfree(s);
 }
 
+/* ── AF_UNIX send ────────────────────────────────────────── */
+
+int unix_send(socket_t *s, const void *data, uint16_t len)
+{
+    socket_t *peer = s->unix_peer;
+    if (!peer) return -32; /* EPIPE */
+    sock_tcp_deliver(peer, data, len);
+    return (int)len;
+}
+
 /* ── ICMP delivery to RAW sockets ───────────────────────── */
 
 void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len)

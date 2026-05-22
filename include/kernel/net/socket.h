@@ -9,6 +9,7 @@ struct process;
 typedef struct process process_t;
 
 /* AF / type / proto */
+#define AF_UNIX     1
 #define AF_INET     2
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
@@ -59,7 +60,8 @@ typedef struct socket {
     uint32_t    rcv_nxt;
     uint32_t    snd_una;
     uint16_t    rcv_wnd;        /* advertised receive window */
-    process_t  *connect_waiter; /* blocking connect() */
+    uint16_t    snd_wnd;        /* remote receive window (flow control) */
+    process_t  *connect_waiter; /* blocking connect() / send() */
 
     /* TCP listen: incoming connection queue */
     int         backlog;
@@ -77,6 +79,9 @@ typedef struct socket {
 
     /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
     process_t  *close_waiter;
+
+    /* AF_UNIX: peer socket for socketpair() */
+    struct socket *unix_peer;
 } socket_t;
 
 /* Per-process socket table — max 16 sockets per process for now */
@@ -102,5 +107,8 @@ extern int        gsock_cap;
 
 /* TCP data delivery */
 void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
+
+/* AF_UNIX send */
+int unix_send(socket_t *s, const void *data, uint16_t len);
 
 #endif

@@ -280,6 +280,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             if (ack != s->snd_nxt) { skb_free(skb); return; }
             s->rcv_nxt    = seq + 1;
             s->snd_una    = ack;
+            s->snd_wnd    = ntohs(th->window);
             s->tcp_state  = TCP_ESTABLISHED;
             retx_clear(s);
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
@@ -313,13 +314,13 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if (flags & TCP_ACK) {
             if (ack > s->snd_una) {
                 s->snd_una = ack;
-                /* if all data acked, clear retransmit */
                 if (s->snd_una == s->snd_nxt) retx_clear(s);
-                /* wake a blocked send() if we cleared retransmit */
-                process_t *w = s->connect_waiter; /* reuse for send block */
-                s->connect_waiter = NULL;
-                if (w) task_wake(w);
             }
+            s->snd_wnd = ntohs(th->window);
+            /* wake a blocked send() on any ACK (window or snd_una advance) */
+            process_t *w = s->connect_waiter;
+            s->connect_waiter = NULL;
+            if (w) task_wake(w);
         }
         /* deliver data */
         if (dlen > 0 && seq == s->rcv_nxt) {
@@ -346,10 +347,13 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         break;
 
     case TCP_CLOSE_WAIT:
-        /* we're still sending; absorb any ACKs */
         if ((flags & TCP_ACK) && ack > s->snd_una) {
             s->snd_una = ack;
             if (s->snd_una == s->snd_nxt) retx_clear(s);
+            s->snd_wnd = ntohs(th->window);
+            process_t *w = s->connect_waiter;
+            s->connect_waiter = NULL;
+            if (w) task_wake(w);
         }
         break;
 
@@ -416,6 +420,7 @@ int tcp_connect(socket_t *s)
     s->snd_nxt   = 0xAB000000;
     s->snd_una   = s->snd_nxt;
     s->rcv_nxt   = 0;
+    s->snd_wnd   = 1024;
     s->tcp_state = TCP_SYN_SENT;
     sock_register(s);
 
@@ -433,8 +438,15 @@ int tcp_connect(socket_t *s)
 int tcp_send(socket_t *s, const void *data, uint16_t len)
 {
     if (s->tcp_state != TCP_ESTABLISHED) return -107; /* ENOTCONN */
-    if (len > (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14))
-        len = (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14);
+
+    /* clamp to MSS */
+    uint16_t mss = (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14);
+    if (len > mss) len = mss;
+
+    /* flow control: block caller if previous segment unACKed or window exhausted */
+    uint32_t in_flight = s->snd_nxt - s->snd_una;
+    if (s->retx_data || in_flight >= (uint32_t)s->snd_wnd)
+        return -11; /* EAGAIN — caller must block and retry */
 
     int rc = tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, len);
     if (rc < 0) return rc;
