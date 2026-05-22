@@ -3152,8 +3152,28 @@ static long sys_sync(void) { return 0; }
 static long sys_mount(const char *source, const char *target, const char *fstype,
                       unsigned long flags, const void *data)
 {
-	(void)source; (void)target; (void)fstype; (void)flags; (void)data;
-	return -1; /* EPERM — no userspace mount yet */
+	(void)source; (void)flags; (void)data;
+	char ktarget[256]; char kfstype[64];
+	if (strncpy_from_user(ktarget, target, sizeof(ktarget)) < 0) return -14;
+	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
+
+	/* map tmpfs → ramfs; sysfs/cgroup/devtmpfs → accept silently */
+	const char *fsname = kfstype;
+	if (strcmp(kfstype, "tmpfs") == 0)   fsname = "ramfs";
+	if (strcmp(kfstype, "sysfs") == 0)   return 0;
+	if (strcmp(kfstype, "cgroup") == 0)  return 0;
+	if (strcmp(kfstype, "cgroup2") == 0) return 0;
+	if (strcmp(kfstype, "devtmpfs") == 0) fsname = "devfs";
+	if (strcmp(kfstype, "mqueue") == 0)  return 0;
+	if (strcmp(kfstype, "hugetlbfs") == 0) return 0;
+	if (strcmp(kfstype, "binfmt_misc") == 0) return 0;
+	if (strcmp(kfstype, "pstore") == 0)  return 0;
+	if (strcmp(kfstype, "efivarfs") == 0) return 0;
+	if (strcmp(kfstype, "securityfs") == 0) return 0;
+	if (strcmp(kfstype, "configfs") == 0) return 0;
+
+	int r = vfs_mount(ktarget, fsname, NULL);
+	return r == 0 ? 0 : -1;
 }
 
 static long sys_sethostname(const char *name, size_t len)
