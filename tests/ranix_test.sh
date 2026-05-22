@@ -192,6 +192,10 @@ check "etc-hosts"    "localhost"     "$(grep localhost /etc/hosts | awk '{print 
 check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 
+# ── 25. statfs / df ───────────────────────────────────────────
+check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
+check "df-nonzero"   "1"    "$(df / 2>/dev/null | awk 'NR==2{print ($2>0)?1:0}')"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
