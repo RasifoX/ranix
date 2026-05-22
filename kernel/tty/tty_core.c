@@ -19,7 +19,7 @@
 #define ECHOKE  0x00000800
 #define IEXTEN  0x00008000
 
-/* c_cc indices (Linux AArch64) */
+/* c_cc indices (Linux AArch64/x86_64) */
 #define VINTR    0
 #define VQUIT    1
 #define VERASE   2
@@ -32,225 +32,211 @@
 
 #define TTY_BUF_SIZE 65536
 
-static char input_buf[TTY_BUF_SIZE];
-static int  in_head = 0;
-static int  in_tail = 0;
+typedef struct {
+    char     input_buf[TTY_BUF_SIZE];
+    int      in_head, in_tail;
 
-static char line_buf[TTY_BUF_SIZE];
-static int  line_pos = 0;
-static int  icanon_esc = 0;
+    char     line_buf[TTY_BUF_SIZE];
+    int      line_pos;
+    int      esc_state;     /* 0=none 1=got-ESC 2=got-ESC-[ */
 
-static uint32_t c_iflag = 0x0500;   /* ICRNL | IXON */
-static uint32_t c_oflag = 0x0005;   /* OPOST | ONLCR */
-static uint32_t c_cflag = 0x04BF;   /* B38400 | CS8 | CREAD | HUPCL | CLOCAL */
-static uint32_t c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN;
-static uint8_t  c_line  = 0;
-static uint8_t  c_cc[NCCS] = {
-	0x03, 0x1C, 0x7F, 0x15, 0x04,   /* VINTR VQUIT VERASE VKILL VEOF */
-	0x00, 0x01, 0x00, 0x11, 0x13,   /* VTIME VMIN VSWTC VSTART VSTOP */
-	0x1A, 0x00, 0x12, 0x0F, 0x17,   /* VSUSP VEOL VREPRINT VDISCARD VWERASE */
-	0x16, 0x00, 0x00, 0x00,          /* VLNEXT VEOL2 ... */
+    uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[NCCS];
+
+    pid_t    fg_pgrp;
+    spinlock_t lock;
+} tty_t;
+
+static tty_t tty0 = {
+    .c_iflag = 0x0500,
+    .c_oflag = 0x0005,
+    .c_cflag = 0x04BF,
+    .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN,
+    .c_cc    = { 0x03, 0x1C, 0x7F, 0x15, 0x04,
+                 0x00, 0x01, 0x00, 0x11, 0x13,
+                 0x1A, 0x00, 0x12, 0x0F, 0x17,
+                 0x16, 0x00, 0x00, 0x00 },
+    .fg_pgrp = 1,
+    .lock    = SPINLOCK_INIT,
 };
 
-static pid_t fg_pgrp = 1;
-
-static spinlock_t tty_lock = SPINLOCK_INIT;
-
-static void tty_echo_str(const char *s, int len)
+static void tty_echo_str(tty_t *t, const char *s, int len)
 {
-	fb_tty_write(s, len);
-	for (int i = 0; i < len; i++) {
-		if (s[i] == '\n') uart_putc('\r');
-		uart_putc(s[i]);
-	}
+    (void)t;
+    fb_tty_write(s, len);
+    for (int i = 0; i < len; i++) {
+        if (s[i] == '\n') uart_putc('\r');
+        uart_putc(s[i]);
+    }
 }
 
-static void tty_echo_char(char c)
+static void tty_echo_char(tty_t *t, char c)
 {
-	tty_echo_str(&c, 1);
+    tty_echo_str(t, &c, 1);
+}
+
+static void buf_push(tty_t *t, char c)
+{
+    int next = (t->in_head + 1) % TTY_BUF_SIZE;
+    if (next != t->in_tail) {
+        t->input_buf[t->in_head] = c;
+        t->in_head = next;
+    }
 }
 
 void tty_input_char(char c)
 {
-	uint64_t f = spin_lock_irq(&tty_lock);
-	
-	/* Signal generation (both canonical and raw modes) */
-	if (c_lflag & ISIG) {
-		unsigned char uc2 = (unsigned char)c;
-		if (uc2 == c_cc[VINTR] || uc2 == c_cc[VQUIT] || uc2 == c_cc[VSUSP]) {
-			int sig = (uc2 == c_cc[VINTR]) ? 2 :
-			          (uc2 == c_cc[VQUIT]) ? 3 : 20;
-			spin_unlock_irq(&tty_lock, f);
-			task_signal_pgrp(fg_pgrp, sig);
-			return;
-		}
-	}
+    tty_t *t = &tty0;
+    uint64_t f = spin_lock_irq(&t->lock);
 
-	input_inject_ascii((uint8_t)c);
+    if (t->c_lflag & ISIG) {
+        unsigned char uc = (unsigned char)c;
+        if (uc == t->c_cc[VINTR] || uc == t->c_cc[VQUIT] || uc == t->c_cc[VSUSP]) {
+            int sig = (uc == t->c_cc[VINTR]) ? 2 :
+                      (uc == t->c_cc[VQUIT]) ? 3 : 20;
+            spin_unlock_irq(&t->lock, f);
+            task_signal_pgrp(t->fg_pgrp, sig);
+            return;
+        }
+    }
 
-	if (!(c_lflag & ICANON)) {
-		int next = (in_head + 1) % TTY_BUF_SIZE;
-		if (next != in_tail) {
-			input_buf[in_head] = c;
-			in_head = next;
-		}
-		spin_unlock_irq(&tty_lock, f);
-		return;
-	}
+    input_inject_ascii((uint8_t)c);
 
-	/* Discard terminal responses (e.g. \033[row;colR from PuTTY) in ICANON */
-	unsigned char uc = (unsigned char)c;
-	if (icanon_esc == 1) {
-		icanon_esc = (uc == '[' || uc == ']') ? 2 : 0;
-		spin_unlock_irq(&tty_lock, f);
-		return;
-	}
-	if (icanon_esc == 2) {
-		if ((uc >= 0x40 && uc <= 0x7E) || uc == 0x07) icanon_esc = 0;
-		spin_unlock_irq(&tty_lock, f);
-		return;
-	}
-	if (uc == 0x1B) {
-		icanon_esc = 1;
-		spin_unlock_irq(&tty_lock, f);
-		return;
-	}
+    if (!(t->c_lflag & ICANON)) {
+        buf_push(t, c);
+        spin_unlock_irq(&t->lock, f);
+        return;
+    }
 
-	if (c == 127 || c == '\b') {
-		if (line_pos > 0) {
-			int n_bytes = 1;
-			while (n_bytes < line_pos && (line_buf[line_pos - n_bytes] & 0xC0) == 0x80)
-				n_bytes++;
-			line_pos -= n_bytes;
-			if (c_lflag & ECHO) tty_echo_str("\b \b", 3);
-		}
-	} else if (c == '\r' || c == '\n') {
-		if (c_lflag & ECHO) tty_echo_char('\n');
-		line_buf[line_pos++] = '\n';
-		for (int i = 0; i < line_pos; i++) {
-			int next = (in_head + 1) % TTY_BUF_SIZE;
-			if (next != in_tail) {
-				input_buf[in_head] = line_buf[i];
-				in_head = next;
-			}
-		}
-		line_pos = 0;
-	} else {
-		if (line_pos < TTY_BUF_SIZE - 1) {
-			line_buf[line_pos++] = c;
-			if (c_lflag & ECHO) tty_echo_char(c);
-		}
-	}
-	spin_unlock_irq(&tty_lock, f);
+    /* Filter terminal escape responses (e.g. \033[row;colR) */
+    unsigned char uc = (unsigned char)c;
+    if (t->esc_state == 1) {
+        t->esc_state = (uc == '[' || uc == ']') ? 2 : 0;
+        spin_unlock_irq(&t->lock, f);
+        return;
+    }
+    if (t->esc_state == 2) {
+        if ((uc >= 0x40 && uc <= 0x7E) || uc == 0x07) t->esc_state = 0;
+        spin_unlock_irq(&t->lock, f);
+        return;
+    }
+    if (uc == 0x1B) {
+        t->esc_state = 1;
+        spin_unlock_irq(&t->lock, f);
+        return;
+    }
+
+    if (c == 127 || c == '\b') {
+        if (t->line_pos > 0) {
+            int n = 1;
+            while (n < t->line_pos && (t->line_buf[t->line_pos - n] & 0xC0) == 0x80)
+                n++;
+            t->line_pos -= n;
+            if (t->c_lflag & ECHO) tty_echo_str(t, "\b \b", 3);
+        }
+    } else if (c == '\r' || c == '\n') {
+        if (t->c_lflag & ECHO) tty_echo_char(t, '\n');
+        t->line_buf[t->line_pos++] = '\n';
+        for (int i = 0; i < t->line_pos; i++)
+            buf_push(t, t->line_buf[i]);
+        t->line_pos = 0;
+    } else {
+        if (t->line_pos < TTY_BUF_SIZE - 1) {
+            t->line_buf[t->line_pos++] = c;
+            if (t->c_lflag & ECHO) tty_echo_char(t, c);
+        }
+    }
+    spin_unlock_irq(&t->lock, f);
 }
 
-#if defined(__x86_64__)
-extern char ps2_kbd_getc(void);
-extern int  ps2_kbd_has_data(void);
-#endif
-
-void tty_poll_inputs(void)
+void tty_input_str(const char *s)
 {
-	int got = 0;
-	while (uart_has_data()) {
-		char c = uart_getc();
-		tty_input_char(c);
-		got = 1;
-	}
-#if defined(__x86_64__)
-	while (ps2_kbd_has_data()) {
-		char c = ps2_kbd_getc();
-		tty_input_char(c);
-		got = 1;
-	}
-#endif
-	if (got) fb_tty_flush();
+    while (*s) tty_input_char(*s++);
 }
 
-static ssize_t tty_core_read(vfs_file_t *f, void *buf, size_t len)
+static void tty_poll_uart(void)
 {
-	(void)f;
-	char *b = buf;
-	size_t copied = 0;
-
-	while (copied < len) {
-		tty_poll_inputs();
-		
-		uint64_t flags = spin_lock_irq(&tty_lock);
-		if (in_head != in_tail) {
-			b[copied++] = input_buf[in_tail];
-			in_tail = (in_tail + 1) % TTY_BUF_SIZE;
-			spin_unlock_irq(&tty_lock, flags);
-		} else {
-			spin_unlock_irq(&tty_lock, flags);
-			if (copied > 0) break;
-			if (f->flags & O_NONBLOCK) return -11; /* EAGAIN */
-			fb_tty_flush(); /* display pending text before sleeping */
-			task_sleep();
-		}
-	}
-	return copied;
+    int got = 0;
+    while (uart_has_data()) {
+        tty_input_char(uart_getc());
+        got = 1;
+    }
+    if (got) fb_tty_flush();
 }
 
-static void tty_inject_str(const char *s)
+static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
 {
-	while (*s) {
-		int next = (in_head + 1) % TTY_BUF_SIZE;
-		if (next == in_tail) break;
-		input_buf[in_head] = *s++;
-		in_head = next;
-	}
+    (void)f;
+    tty_t *t = &tty0;
+    char *b = buf;
+    size_t copied = 0;
+
+    while (copied < len) {
+        tty_poll_uart();
+
+        uint64_t flags = spin_lock_irq(&t->lock);
+        if (t->in_head != t->in_tail) {
+            b[copied++] = t->input_buf[t->in_tail];
+            t->in_tail = (t->in_tail + 1) % TTY_BUF_SIZE;
+            spin_unlock_irq(&t->lock, flags);
+        } else {
+            spin_unlock_irq(&t->lock, flags);
+            if (copied > 0) break;
+            if (f->flags & O_NONBLOCK) return -11;
+            fb_tty_flush();
+            task_sleep();
+        }
+    }
+    return copied;
 }
 
-static void tty_inject_uint(unsigned int v)
+static void tty_inject_uint(tty_t *t, unsigned int v)
 {
-	char tmp[12]; int i = 0;
-	if (v == 0) { tty_inject_str("0"); return; }
-	while (v > 0 && i < 12) { tmp[i++] = (char)('0' + v % 10); v /= 10; }
-	for (int j = i - 1; j >= 0; j--) {
-		int next = (in_head + 1) % TTY_BUF_SIZE;
-		if (next == in_tail) break;
-		input_buf[in_head] = tmp[j];
-		in_head = next;
-	}
+    char tmp[12]; int i = 0;
+    if (v == 0) { buf_push(t, '0'); return; }
+    while (v > 0 && i < 12) { tmp[i++] = (char)('0' + v % 10); v /= 10; }
+    for (int j = i - 1; j >= 0; j--) buf_push(t, tmp[j]);
 }
 
-static ssize_t tty_core_write(vfs_file_t *f, const void *buf, size_t len)
+static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
 {
-	(void)f;
-	const char *p = buf;
-	/* scan for \033[6n (cursor position query) and inject response */
-	for (size_t i = 0; i + 2 < len; i++) {
-		if (p[i] == '\033' && p[i+1] == '[' && p[i+2] == '6' &&
-		    i + 3 < len && p[i+3] == 'n') {
-			int col = 1, row = 1;
-			fb_tty_get_cursor(&col, &row);
-			uint64_t flags = spin_lock_irq(&tty_lock);
-			tty_inject_str("\033[");
-			tty_inject_uint((unsigned int)(row + 1));
-			tty_inject_str(";");
-			tty_inject_uint((unsigned int)(col + 1));
-			tty_inject_str("R");
-			spin_unlock_irq(&tty_lock, flags);
-			break;
-		}
-	}
-	tty_echo_str(buf, len);
-	fb_tty_flush();
-	return len;
+    (void)f;
+    tty_t *t = &tty0;
+    const char *p = buf;
+
+    for (size_t i = 0; i + 3 < len; i++) {
+        if (p[i] == '\033' && p[i+1] == '[' && p[i+2] == '6' && p[i+3] == 'n') {
+            int col = 1, row = 1;
+            fb_tty_get_cursor(&col, &row);
+            uint64_t flags = spin_lock_irq(&t->lock);
+            const char *pre = "\033[";
+            for (const char *s = pre; *s; s++) buf_push(t, *s);
+            tty_inject_uint(t, (unsigned int)(row + 1));
+            buf_push(t, ';');
+            tty_inject_uint(t, (unsigned int)(col + 1));
+            buf_push(t, 'R');
+            spin_unlock_irq(&t->lock, flags);
+            break;
+        }
+    }
+    tty_echo_str(t, buf, len);
+    fb_tty_flush();
+    return len;
 }
 
-static int tty_core_poll(vfs_file_t *f)
+static int tty_poll(vfs_file_t *f)
 {
-	(void)f;
-	tty_poll_inputs();
-	return (in_head != in_tail) ? 1 : 0;
+    (void)f;
+    tty_poll_uart();
+    tty_t *t = &tty0;
+    return (t->in_head != t->in_tail) ? 1 : 0;
 }
 
 extern int copy_to_user(void *dst, const void *src, size_t size);
 extern int copy_from_user(void *dst, const void *src, size_t size);
 
-#define TCGETS   0x5401
+#define TCGETS     0x5401
 #define TCSETS     0x5402
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
@@ -259,68 +245,64 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
 
-static int tty_core_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
+static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
-	(void)f;
-	if (cmd == TCGETS) {
-		/* kernel struct termios: 4×uint32 flags + 1 c_line + 19 c_cc = 36 bytes */
-		uint8_t termios[36];
-		memset(termios, 0, sizeof(termios));
-		((uint32_t *)termios)[0] = c_iflag;
-		((uint32_t *)termios)[1] = c_oflag;
-		((uint32_t *)termios)[2] = c_cflag;
-		((uint32_t *)termios)[3] = c_lflag;
-		termios[16] = c_line;
-		memcpy(termios + 17, c_cc, NCCS);
-		if (copy_to_user((void *)(uintptr_t)arg, termios, sizeof(termios)) != 0) return -14;
-		return 0;
-	}
-	if (cmd == TCSETS || cmd == TCSETSW || cmd == TCSETSF) {
-		uint8_t termios[36];
-		if (copy_from_user(termios, (const void *)(uintptr_t)arg, sizeof(termios)) != 0) return -14;
-		uint64_t flags = spin_lock_irq(&tty_lock);
-		c_iflag = ((uint32_t *)termios)[0];
-		c_oflag = ((uint32_t *)termios)[1];
-		c_cflag = ((uint32_t *)termios)[2];
-		c_lflag = ((uint32_t *)termios)[3];
-		c_line  = termios[16];
-		memcpy(c_cc, termios + 17, NCCS);
-		spin_unlock_irq(&tty_lock, flags);
-		return 0;
-	}
-	if (cmd == TIOCGWINSZ) {
-		int cols = 80, rows = 24;
-		fb_tty_get_size(&cols, &rows);
-		uint16_t ws[4] = {(uint16_t)rows, (uint16_t)cols, 0, 0};
-		if (copy_to_user((void *)(uintptr_t)arg, ws, sizeof(ws)) != 0) return -14;
-		return 0;
-	}
-	if (cmd == TIOCGPGRP) {
-		if (copy_to_user((void *)(uintptr_t)arg, &fg_pgrp, sizeof(fg_pgrp)) != 0) return -14;
-		return 0;
-	}
-	if (cmd == TIOCSPGRP) {
-		pid_t pgrp;
-		if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp)) != 0) return -14;
-		fg_pgrp = pgrp;
-		return 0;
-	}
-	if (cmd == TIOCSCTTY)
-		return 0;
-	return -25;
+    (void)f;
+    tty_t *t = &tty0;
+
+    if (cmd == TCGETS) {
+        uint8_t termios[36];
+        memset(termios, 0, sizeof(termios));
+        ((uint32_t *)termios)[0] = t->c_iflag;
+        ((uint32_t *)termios)[1] = t->c_oflag;
+        ((uint32_t *)termios)[2] = t->c_cflag;
+        ((uint32_t *)termios)[3] = t->c_lflag;
+        termios[16] = t->c_line;
+        memcpy(termios + 17, t->c_cc, NCCS);
+        return copy_to_user((void *)(uintptr_t)arg, termios, sizeof(termios)) ? -14 : 0;
+    }
+    if (cmd == TCSETS || cmd == TCSETSW || cmd == TCSETSF) {
+        uint8_t termios[36];
+        if (copy_from_user(termios, (const void *)(uintptr_t)arg, sizeof(termios))) return -14;
+        uint64_t flags = spin_lock_irq(&t->lock);
+        t->c_iflag = ((uint32_t *)termios)[0];
+        t->c_oflag = ((uint32_t *)termios)[1];
+        t->c_cflag = ((uint32_t *)termios)[2];
+        t->c_lflag = ((uint32_t *)termios)[3];
+        t->c_line  = termios[16];
+        memcpy(t->c_cc, termios + 17, NCCS);
+        spin_unlock_irq(&t->lock, flags);
+        return 0;
+    }
+    if (cmd == TIOCGWINSZ) {
+        int cols = 80, rows = 24;
+        fb_tty_get_size(&cols, &rows);
+        uint16_t ws[4] = { (uint16_t)rows, (uint16_t)cols, 0, 0 };
+        return copy_to_user((void *)(uintptr_t)arg, ws, sizeof(ws)) ? -14 : 0;
+    }
+    if (cmd == TIOCGPGRP)
+        return copy_to_user((void *)(uintptr_t)arg, &t->fg_pgrp, sizeof(t->fg_pgrp)) ? -14 : 0;
+    if (cmd == TIOCSPGRP) {
+        pid_t pgrp;
+        if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
+        t->fg_pgrp = pgrp;
+        return 0;
+    }
+    if (cmd == TIOCSCTTY) return 0;
+    return -25;
 }
 
-static vfs_fops_t tty_core_fops = {
-	.read   = tty_core_read,
-	.write  = tty_core_write,
-	.poll   = tty_core_poll,
-	.ioctl  = tty_core_ioctl,
+static vfs_fops_t tty_fops = {
+    .read  = tty_read,
+    .write = tty_write,
+    .poll  = tty_poll,
+    .ioctl = tty_ioctl,
 };
 
 void tty_core_init(void)
 {
-	devfs_register_device("tty", S_IFCHR | 0666, 0x0500, &tty_core_fops);
-	devfs_register_device("console", S_IFCHR | 0600, 0x0501, &tty_core_fops);
-	devfs_register_device("tty0", S_IFCHR | 0666, 0x0400, &tty_core_fops);
-	tick_register(tty_poll_inputs);
+    devfs_register_device("tty",     S_IFCHR | 0666, 0x0500, &tty_fops);
+    devfs_register_device("console", S_IFCHR | 0600, 0x0501, &tty_fops);
+    devfs_register_device("tty0",    S_IFCHR | 0666, 0x0400, &tty_fops);
+    tick_register(tty_poll_uart);
 }
