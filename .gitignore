@@ -12,4 +12,7 @@ kernel8.img
 serial.log
 doom1.wad
 userspace/doom
+userspace/hello
+userspace/init
+userspace/echo_server
 
