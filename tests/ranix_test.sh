@@ -187,6 +187,11 @@ check "sys-file-max"     "65536"   "$(cat /proc/sys/fs/file-max)"
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
 check "mount-write"  "hi"  "$(echo hi > /tmp/x && cat /tmp/x)"
 
+# ── 24. /etc files ────────────────────────────────────────────
+check "etc-hosts"    "localhost"     "$(grep localhost /etc/hosts | awk '{print $2}')"
+check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
+check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL

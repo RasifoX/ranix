@@ -3,7 +3,6 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <sys/reboot.h>
-#include <sys/stat.h>
 
 #define TIOCSPGRP 0x5410
 
@@ -16,10 +15,6 @@ static void do_poweroff(void)
 
 int main(void)
 {
-    mkdir("/tmp", 0777);
-    mkdir("/run", 0755);
-    mkdir("/root", 0700);
-
     close(0); close(1); close(2);
     int tfd = open("/dev/console", O_RDWR);
     if (tfd != 0) { dup2(tfd, 0); close(tfd); }
