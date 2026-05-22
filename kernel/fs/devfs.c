@@ -5,6 +5,7 @@
 #include <kernel/sync.h>
 #include <drivers/serial/uart.h>
 #include <kernel/tty/fb_tty.h>
+#include <kernel/proc.h>
 
 /*
  * devfs — virtual device filesystem at /dev.
@@ -100,6 +101,54 @@ typedef struct devfs_entry {
 	dev_t               rdev;
 	struct devfs_entry *next;
 } devfs_entry_t;
+
+/* ── /dev/stdin, /dev/stdout, /dev/stderr fd-proxy devices ──── */
+
+typedef struct {
+	const char *link_target; /* for readlink() */
+	int         fd_n;        /* process fd to proxy */
+} devfs_fdproxy_t;
+
+static ssize_t fdproxy_read(vfs_file_t *f, void *buf, size_t len)
+{
+	devfs_fdproxy_t *dp = f->inode->priv;
+	process_t *cur = task_current();
+	if (!cur || !cur->fds) return -9;
+	vfs_file_t *target = fd_get(cur->fds, dp->fd_n);
+	if (!target || !target->inode || !target->inode->fops ||
+	    !target->inode->fops->read) return -9;
+	return target->inode->fops->read(target, buf, len);
+}
+
+static ssize_t fdproxy_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	devfs_fdproxy_t *dp = f->inode->priv;
+	process_t *cur = task_current();
+	if (!cur || !cur->fds) return -9;
+	vfs_file_t *target = fd_get(cur->fds, dp->fd_n);
+	if (!target || !target->inode || !target->inode->fops ||
+	    !target->inode->fops->write) return -9;
+	return target->inode->fops->write(target, buf, len);
+}
+
+static vfs_fops_t fdproxy_fops = {
+	.read  = fdproxy_read,
+	.write = fdproxy_write,
+};
+
+static devfs_fdproxy_t fdproxy_stdin  = { "/proc/self/fd/0", 0 };
+static devfs_fdproxy_t fdproxy_stdout = { "/proc/self/fd/1", 1 };
+static devfs_fdproxy_t fdproxy_stderr = { "/proc/self/fd/2", 2 };
+
+typedef struct {
+	const char *name;
+	const char *target;
+} devfs_symlink_t;
+
+static devfs_symlink_t devfs_symlinks[] = {
+	{ "fd", "/proc/self/fd" },
+};
+#define DEVFS_NSYMLINKS 1
 
 static devfs_entry_t devfs_builtins[] = {
 	{ "null",    S_IFCHR | 0666, &null_fops,    0x0101, &devfs_builtins[1] },
@@ -205,9 +254,90 @@ static vfs_iops_t devfs_subdir_iops = {
 	.stat    = devfs_stat,
 };
 
+static vfs_iops_t devfs_symlink_iops; /* forward */
+
+static vfs_inode_t *devfs_symlink_inode(const devfs_symlink_t *sl)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	spin_lock(&dev_ino_lock);
+	in->ino = dev_ino_next++;
+	spin_unlock(&dev_ino_lock);
+	in->mode     = S_IFLNK | 0777;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->priv     = (void *)sl->target;
+	in->size     = (uint64_t)strlen(sl->target);
+	in->iops     = &devfs_symlink_iops;
+	return in;
+}
+
+static int devfs_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
+{
+	const char *tgt = (const char *)inode->priv;
+	if (!tgt) return -1;
+	size_t len = strlen(tgt);
+	if (len >= bufsize) len = bufsize - 1;
+	memcpy(buf, tgt, len);
+	buf[len] = '\0';
+	return 0;
+}
+
+static vfs_iops_t devfs_symlink_iops = {
+	.readlink = devfs_readlink,
+	.stat     = devfs_stat,
+};
+
+static int fdproxy_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
+{
+	devfs_fdproxy_t *dp = inode->priv;
+	if (!dp) return -1;
+	size_t len = strlen(dp->link_target);
+	if (len >= bufsize) len = bufsize - 1;
+	memcpy(buf, dp->link_target, len);
+	buf[len] = '\0';
+	return 0;
+}
+
+static vfs_iops_t devfs_fdproxy_iops = {
+	.readlink = fdproxy_readlink,
+	.stat     = devfs_stat,
+};
+
+static vfs_inode_t *devfs_fdproxy_inode(devfs_fdproxy_t *dp)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	spin_lock(&dev_ino_lock);
+	in->ino = dev_ino_next++;
+	spin_unlock(&dev_ino_lock);
+	in->mode     = S_IFCHR | 0666;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->priv     = dp;
+	in->fops     = &fdproxy_fops;
+	in->iops     = &devfs_fdproxy_iops;
+	return in;
+}
+
+static struct { const char *name; devfs_fdproxy_t *dp; } devfs_fdproxies[] = {
+	{ "stdin",  &fdproxy_stdin  },
+	{ "stdout", &fdproxy_stdout },
+	{ "stderr", &fdproxy_stderr },
+};
+#define DEVFS_NFDPROXIES 3
+
 static vfs_inode_t *devfs_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
+	for (int i = 0; i < DEVFS_NFDPROXIES; i++)
+		if (strcmp(devfs_fdproxies[i].name, name) == 0)
+			return devfs_fdproxy_inode(devfs_fdproxies[i].dp);
+	for (int i = 0; i < DEVFS_NSYMLINKS; i++)
+		if (strcmp(devfs_symlinks[i].name, name) == 0)
+			return devfs_symlink_inode(&devfs_symlinks[i]);
 	int nlen = 0; while (name[nlen]) nlen++;
 	for (devfs_entry_t *e = devfs_list; e; e = e->next) {
 		if (strncmp(e->name, name, (size_t)nlen) == 0 && e->name[nlen] == '/')
@@ -223,6 +353,33 @@ static int devfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
 	uint32_t count = 0;
+
+	/* emit fd-proxy devices (stdin/stdout/stderr) */
+	for (int i = 0; i < DEVFS_NFDPROXIES; i++, count++) {
+		if (count == idx) {
+			out->ino      = 0xd700 + (uint64_t)i;
+			out->mode     = S_IFCHR | 0666;
+			out->next_off = idx + 1;
+			int nlen = 0; while (devfs_fdproxies[i].name[nlen]) nlen++;
+			memcpy(out->name, devfs_fdproxies[i].name, (size_t)nlen);
+			out->name[nlen] = '\0';
+			return 0;
+		}
+	}
+
+	/* emit symlinks (fd → /proc/self/fd) */
+	for (int i = 0; i < DEVFS_NSYMLINKS; i++, count++) {
+		if (count == idx) {
+			out->ino      = 0xd800 + (uint64_t)i;
+			out->mode     = S_IFLNK | 0777;
+			out->next_off = idx + 1;
+			int nlen = 0; while (devfs_symlinks[i].name[nlen]) nlen++;
+			memcpy(out->name, devfs_symlinks[i].name, (size_t)nlen);
+			out->name[nlen] = '\0';
+			return 0;
+		}
+	}
+
 	uint64_t ino = 0xd000;
 	for (devfs_entry_t *e = devfs_list; e; e = e->next, ino++) {
 		int slash = -1;

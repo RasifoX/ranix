@@ -170,6 +170,13 @@ check "type-builtin"  "echo is a shell builtin"  "$(type echo)"
 check "pwd-works"     "/"                          "$(cd /; pwd)"
 check "set-e"         "1"                          "$(bash -c 'set -e; echo 1')"
 
+# ── 21. /dev symlinks ─────────────────────────────────────────
+check "dev-stdin-link"   "/proc/self/fd/0"  "$(readlink /dev/stdin)"
+check "dev-stdout-link"  "/proc/self/fd/1"  "$(readlink /dev/stdout)"
+check "dev-stderr-link"  "/proc/self/fd/2"  "$(readlink /dev/stderr)"
+check "dev-fd-link"      "/proc/self/fd"    "$(readlink /dev/fd)"
+check "dev-stdin-read"   "hello"            "$(echo hello | cat /dev/stdin)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
