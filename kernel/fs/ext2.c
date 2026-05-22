@@ -4,6 +4,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/sync.h>
 #include <asm/mmu.h>
 
 /*
@@ -400,7 +401,8 @@ typedef struct {
 	uint32_t     ino;
 } ext2_inode_priv_t;
 
-static uint64_t ext2_ino_counter = 0;
+static uint64_t   ext2_ino_counter = 0;
+static spinlock_t ext2_ino_lock    = SPINLOCK_INIT;
 static vfs_iops_t ext2_iops;
 
 static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *raw)
@@ -425,7 +427,9 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *ra
 	vi->priv     = priv;
 	vi->iops     = &ext2_iops;
 
+	spin_lock(&ext2_ino_lock);
 	ext2_ino_counter++;
+	spin_unlock(&ext2_ino_lock);
 	return vi;
 }
 

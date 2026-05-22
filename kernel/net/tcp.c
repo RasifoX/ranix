@@ -5,6 +5,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
+#include <kernel/sync.h>
 #include <kernel/proc.h>
 
 extern uint64_t kernel_ticks;
@@ -100,12 +101,15 @@ static void tcp_wake_close(socket_t *s)
 
 /* ── port allocation ─────────────────────────────────────── */
 
-static uint16_t next_ephemeral = 49152;
+static uint16_t   next_ephemeral  = 49152;
+static spinlock_t ephemeral_lock  = SPINLOCK_INIT;
 
 static uint16_t alloc_port(void)
 {
+    spin_lock(&ephemeral_lock);
     uint16_t p = next_ephemeral++;
     if (next_ephemeral == 0) next_ephemeral = 49152;
+    spin_unlock(&ephemeral_lock);
     return p;
 }
 

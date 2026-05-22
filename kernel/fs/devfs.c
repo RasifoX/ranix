@@ -2,6 +2,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
+#include <kernel/sync.h>
 #include <drivers/serial/uart.h>
 #include <kernel/tty/fb_tty.h>
 
@@ -69,18 +70,21 @@ static vfs_fops_t full_fops = {
 
 /* ── /dev/urandom ────────────────────────────────────────────── */
 
-static uint64_t rand_state = 0xdeadbeefcafebabe;
+static uint64_t   rand_state = 0xdeadbeefcafebabe;
+static spinlock_t rand_lock  = SPINLOCK_INIT;
 
 static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
 	extern volatile uint64_t kernel_ticks;
-	rand_state ^= kernel_ticks;
 	uint8_t *b = buf;
+	spin_lock(&rand_lock);
+	rand_state ^= kernel_ticks;
 	for (size_t i = 0; i < len; i++) {
 		rand_state = rand_state * 6364136223846793005ULL + 1442695040888963407ULL;
 		b[i] = (uint8_t)(rand_state >> 33);
 	}
+	spin_unlock(&rand_lock);
 	return (ssize_t)len;
 }
 
@@ -120,14 +124,17 @@ void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t
 
 /* ── iops ────────────────────────────────────────────────────── */
 
-static uint64_t dev_ino_next = 0xd000;
+static uint64_t   dev_ino_next = 0xd000;
+static spinlock_t dev_ino_lock = SPINLOCK_INIT;
 
 static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino     = dev_ino_next++;
+	spin_lock(&dev_ino_lock);
+	in->ino = dev_ino_next++;
+	spin_unlock(&dev_ino_lock);
 	in->mode    = e->mode;
 	in->nlink   = 1;
 	in->rdev    = e->rdev;

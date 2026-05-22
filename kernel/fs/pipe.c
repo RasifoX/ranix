@@ -5,8 +5,7 @@
 #include <kernel/sync.h>
 #include <kernel/proc.h>
 #include <kernel/lib/string.h>
-
-#define PIPE_BUF_SIZE 4096
+#include <kernel/config.h>
 
 typedef struct {
     uint8_t      *buffer;

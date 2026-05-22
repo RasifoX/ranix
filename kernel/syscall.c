@@ -20,6 +20,7 @@
 #include <kernel/net/ip.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/net.h>
+#include <kernel/config.h>
 
 #define AT_FDCWD     (-100)
 
@@ -1545,7 +1546,6 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 #define FUTEX_WAKE         1
 #define FUTEX_PRIVATE_FLAG 128
 
-#define FUTEX_SLOTS 256
 static struct {
 	uint32_t  *uaddr;
 	process_t *waiter;
