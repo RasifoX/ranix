@@ -8,6 +8,8 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
+#include <kernel/net/socket.h>
+#include <kernel/net/net.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -256,6 +258,17 @@ typedef struct {
 #define PROC_F_P_STAT    11
 #define PROC_F_P_CMDLINE 12
 #define PROC_F_P_MAPS    13
+#define PROC_F_NET_DEV   20
+#define PROC_F_NET_TCP   21
+#define PROC_F_NET_UDP   22
+#define PROC_F_NET_ROUTE 23
+#define PROC_F_NET_IF6   24
+
+static int fill_net_dev(char *buf, size_t sz);
+static int fill_net_tcp(char *buf, size_t sz);
+static int fill_net_udp(char *buf, size_t sz);
+static int fill_net_route(char *buf, size_t sz);
+static int fill_net_if_inet6(char *buf, size_t sz);
 
 /* static file table for root dir */
 static const struct {
@@ -312,6 +325,11 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_MAPS:   n = fill_proc_maps(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
+	case PROC_F_NET_DEV:   n = fill_net_dev(tmp,   PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_TCP:   n = fill_net_tcp(tmp,   PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_UDP:   n = fill_net_udp(tmp,   PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
 	default: n = 0; break;
 	}
 
@@ -551,6 +569,190 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 	return in;
 }
 
+/* ── /proc/net fill functions ────────────────────────────────── */
+
+static void pb_hex8(pb_t *b, uint32_t v)
+{
+	static const char hx[] = "0123456789ABCDEF";
+	for (int i = 7; i >= 0; i--)
+		pb_char(b, hx[(v >> (i * 4)) & 0xF]);
+}
+
+static void pb_hex4(pb_t *b, uint16_t v)
+{
+	static const char hx[] = "0123456789ABCDEF";
+	pb_char(b, hx[(v >> 12) & 0xF]);
+	pb_char(b, hx[(v >>  8) & 0xF]);
+	pb_char(b, hx[(v >>  4) & 0xF]);
+	pb_char(b, hx[(v      ) & 0xF]);
+}
+
+static int fill_net_dev(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	pb_str(&b, "Inter-|   Receive                                                |  Transmit\n");
+	pb_str(&b, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+	/* lo */
+	pb_str(&b, "    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n");
+	/* eth0 */
+	netdev_t *dev = net_dev(0);
+	if (dev) {
+		pb_str(&b, "  eth0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n");
+	}
+	return (int)(sz - b.rem);
+}
+
+static int fill_net_tcp(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	pb_str(&b, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+	int sl = 0;
+	for (int i = 0; i < gsock_cap; i++) {
+		socket_t *s = gsock[i];
+		if (!s || s->type != SOCK_STREAM || s->domain != AF_INET) continue;
+		/* format: "   N: LLLLLLLL:PPPP RRRRRRRR:PPPP SS 00000000:00000000 ..." */
+		pb_str(&b, "   ");
+		pb_u64(&b, (uint64_t)sl);
+		pb_str(&b, ": ");
+		/* local addr in network byte order (little-endian hex = host byte order reversed) */
+		uint32_t la = s->local_ip;
+		pb_hex8(&b, ((la & 0xFF) << 24) | (((la >> 8) & 0xFF) << 16) |
+		             (((la >> 16) & 0xFF) << 8) | ((la >> 24) & 0xFF));
+		pb_char(&b, ':');
+		pb_hex4(&b, s->local_port);
+		pb_str(&b, " ");
+		uint32_t ra = s->remote_ip;
+		pb_hex8(&b, ((ra & 0xFF) << 24) | (((ra >> 8) & 0xFF) << 16) |
+		             (((ra >> 16) & 0xFF) << 8) | ((ra >> 24) & 0xFF));
+		pb_char(&b, ':');
+		pb_hex4(&b, s->remote_port);
+		pb_str(&b, " ");
+		pb_hex4(&b, (uint16_t)s->tcp_state);
+		pb_str(&b, " 00000000:00000000 00:00000000 00000000     0        0 ");
+		pb_u64(&b, (uint64_t)(0x10000 + i));
+		pb_str(&b, " 1 0000000000000000 100 0 0 10 0\n");
+		sl++;
+	}
+	return (int)(sz - b.rem);
+}
+
+static int fill_net_udp(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	pb_str(&b, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+	int sl = 0;
+	for (int i = 0; i < gsock_cap; i++) {
+		socket_t *s = gsock[i];
+		if (!s || s->type != SOCK_DGRAM || s->domain != AF_INET) continue;
+		pb_str(&b, "   ");
+		pb_u64(&b, (uint64_t)sl);
+		pb_str(&b, ": ");
+		uint32_t la = s->local_ip;
+		pb_hex8(&b, ((la & 0xFF) << 24) | (((la >> 8) & 0xFF) << 16) |
+		             (((la >> 16) & 0xFF) << 8) | ((la >> 24) & 0xFF));
+		pb_char(&b, ':');
+		pb_hex4(&b, s->local_port);
+		pb_str(&b, " 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 ");
+		pb_u64(&b, (uint64_t)(0x10000 + i));
+		pb_str(&b, " 1 0000000000000000\n");
+		sl++;
+	}
+	return (int)(sz - b.rem);
+}
+
+static int fill_net_route(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	pb_str(&b, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+	netdev_t *dev = net_dev(0);
+	if (dev) {
+		/* default route */
+		pb_str(&b, "eth0\t00000000\t");
+		uint32_t gw = dev->gw;
+		pb_hex8(&b, ((gw & 0xFF) << 24) | (((gw >> 8) & 0xFF) << 16) |
+		             (((gw >> 16) & 0xFF) << 8) | ((gw >> 24) & 0xFF));
+		pb_str(&b, "\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+		/* local subnet */
+		pb_str(&b, "eth0\t");
+		uint32_t net = dev->ip & dev->mask;
+		pb_hex8(&b, ((net & 0xFF) << 24) | (((net >> 8) & 0xFF) << 16) |
+		             (((net >> 16) & 0xFF) << 8) | ((net >> 24) & 0xFF));
+		pb_str(&b, "\t00000000\t0001\t0\t0\t0\t");
+		pb_hex8(&b, ((dev->mask & 0xFF) << 24) | (((dev->mask >> 8) & 0xFF) << 16) |
+		             (((dev->mask >> 16) & 0xFF) << 8) | ((dev->mask >> 24) & 0xFF));
+		pb_str(&b, "\t0\t0\t0\n");
+	}
+	return (int)(sz - b.rem);
+}
+
+static int fill_net_if_inet6(char *buf, size_t sz)
+{
+	(void)buf; (void)sz; return 0; /* no IPv6 */
+}
+
+static const struct { const char *name; int type; } net_files[] = {
+	{ "dev",     PROC_F_NET_DEV   },
+	{ "tcp",     PROC_F_NET_TCP   },
+	{ "udp",     PROC_F_NET_UDP   },
+	{ "route",   PROC_F_NET_ROUTE },
+	{ "if_inet6",PROC_F_NET_IF6   },
+};
+#define NET_FILES_N 5
+
+static vfs_inode_t *procfs_netdir_inode(void);
+
+static vfs_inode_t *procfs_netdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < NET_FILES_N; i++)
+		if (strcmp(net_files[i].name, name) == 0)
+			return procfs_inode_file(-1, net_files[i].type);
+	return NULL;
+}
+
+static int procfs_netdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)NET_FILES_N) return -1;
+	out->ino      = 0x9000 + idx;
+	out->mode     = S_IFREG | 0444;
+	out->next_off = idx + 1;
+	const char *n = net_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+
+static int procfs_netdir_stat(vfs_inode_t *in, vfs_stat_t *out)
+{
+	out->ino = in->ino; out->mode = in->mode; out->nlink = 2; out->size = 0;
+	return 0;
+}
+
+static vfs_iops_t procfs_netdir_iops = {
+	.lookup  = procfs_netdir_lookup,
+	.readdir = procfs_netdir_readdir,
+	.stat    = procfs_netdir_stat,
+};
+
+static vfs_inode_t *procfs_netdir_inode(void)
+{
+	static vfs_inode_t ndir;
+	static int init = 0;
+	if (!init) {
+		memset(&ndir, 0, sizeof(ndir));
+		ndir.ino      = 0x9000;
+		ndir.mode     = S_IFDIR | 0555;
+		ndir.nlink    = 2;
+		ndir.refcount = 1;
+		ndir.iops     = &procfs_netdir_iops;
+		ndir.fops     = &procfs_dir_fops;
+		ndir.cached   = 1;
+		init = 1;
+	}
+	return &ndir;
+}
+
 /* ── root iops ───────────────────────────────────────────────── */
 
 static int procfs_self_readlink(vfs_inode_t *in, char *buf, size_t sz)
@@ -604,6 +806,10 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "self") == 0)
 		return procfs_self_inode();
 
+	/* "net" subdirectory */
+	if (strcmp(name, "net") == 0)
+		return procfs_netdir_inode();
+
 	/* static files */
 	for (int i = 0; i < ROOT_FILES_N; i++)
 		if (strcmp(root_files[i].name, name) == 0)
@@ -642,6 +848,17 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 		out->next_off = ROOT_FILES_N + 1;
 		out->name[0] = 's'; out->name[1] = 'e'; out->name[2] = 'l';
 		out->name[3] = 'f'; out->name[4] = '\0';
+		return 0;
+	}
+	idx--;
+
+	/* "net" dir entry */
+	if (idx == 0) {
+		out->ino      = 0x9000;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 2;
+		out->name[0] = 'n'; out->name[1] = 'e'; out->name[2] = 't';
+		out->name[3] = '\0';
 		return 0;
 	}
 	idx--;
