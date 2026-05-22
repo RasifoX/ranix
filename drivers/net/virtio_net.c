@@ -5,12 +5,27 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/cmdline.h>
 #include <asm/mmu.h>
 
 #if defined(__x86_64__)
 #include <kernel/pci.h>
 #include <asm/io.h>
 #endif
+
+static int parse_ipv4(const char *s, unsigned *a, unsigned *b, unsigned *c, unsigned *d)
+{
+    unsigned v[4] = {0,0,0,0};
+    int i = 0;
+    while (i < 4) {
+        while (*s >= '0' && *s <= '9') { v[i] = v[i]*10 + (unsigned)(*s++ - '0'); }
+        if (v[i] > 255) return -1;
+        i++;
+        if (i < 4) { if (*s != '.') return -1; s++; }
+    }
+    *a = v[0]; *b = v[1]; *c = v[2]; *d = v[3];
+    return 0;
+}
 
 /*
  * virtio-net MMIO (legacy transport, spec 0.9/1.0 MMIO).
@@ -296,10 +311,29 @@ static void virtio_net_setup(volatile uint32_t *regs)
 
     /* register netdev */
     memcpy(g_dev.name, "eth0", 5);
-    /* QEMU slirp default: 10.0.2.15 */
+    /* Default: QEMU slirp 10.0.2.15/24 gw 10.0.2.2
+     * Override with cmdline: ip=<a.b.c.d>/<gw> e.g. ip=192.168.1.10/192.168.1.1 */
     g_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u;
     g_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
     g_dev.mask = 0xffffff00u;
+    {
+        char ipbuf[48];
+        if (cmdline_get("ip", ipbuf, sizeof(ipbuf))) {
+            /* parse a.b.c.d/e.f.g.h or a.b.c.d/prefix */
+            unsigned a,b,c,d;
+            char *p = ipbuf;
+            if (parse_ipv4(p, &a,&b,&c,&d) == 0) {
+                g_dev.ip = (a<<24)|(b<<16)|(c<<8)|d;
+                while (*p && *p != '/') p++;
+                if (*p == '/') {
+                    p++;
+                    unsigned ga,gb,gc,gd;
+                    if (parse_ipv4(p, &ga,&gb,&gc,&gd) == 0)
+                        g_dev.gw = (ga<<24)|(gb<<16)|(gc<<8)|gd;
+                }
+            }
+        }
+    }
     g_dev.tx   = vnet_tx;
     g_dev.poll = vnet_poll;
     g_dev.priv = p;
@@ -528,6 +562,23 @@ void virtio_net_pci_init(void)
     g_pci_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u;
     g_pci_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
     g_pci_dev.mask = 0xffffff00u;
+    {
+        char ipbuf[48];
+        if (cmdline_get("ip", ipbuf, sizeof(ipbuf))) {
+            unsigned a,b,c,d;
+            char *p = ipbuf;
+            if (parse_ipv4(p, &a,&b,&c,&d) == 0) {
+                g_pci_dev.ip = (a<<24)|(b<<16)|(c<<8)|d;
+                while (*p && *p != '/') p++;
+                if (*p == '/') {
+                    p++;
+                    unsigned ga,gb,gc,gd;
+                    if (parse_ipv4(p, &ga,&gb,&gc,&gd) == 0)
+                        g_pci_dev.gw = (ga<<24)|(gb<<16)|(gc<<8)|gd;
+                }
+            }
+        }
+    }
     g_pci_dev.tx   = vnet_pci_tx;
     g_pci_dev.poll = vnet_pci_poll;
     g_pci_dev.priv = p;

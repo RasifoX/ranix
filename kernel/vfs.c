@@ -1,5 +1,6 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
+#include <kernel/config.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
@@ -9,8 +10,6 @@
 static vfs_dentry_t *root_dentry = NULL;
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
-
-#define DENTRY_MAX 4096
 static int dentry_count = 0;
 
 static void vfs_inode_free(vfs_inode_t *in)

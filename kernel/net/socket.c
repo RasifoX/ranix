@@ -5,18 +5,41 @@
 #include <kernel/kprintf.h>
 #include <kernel/proc.h>
 
-/* ── global socket table (for UDP delivery by dst_port) ─── */
+/* ── global socket table (dynamic) ──────────────────────── */
 
-#define GSOCK_MAX 64
+#define GSOCK_INIT_CAP 64
 
-socket_t *gsock[GSOCK_MAX];   /* exported — tcp.c reads this directly */
+socket_t **gsock;
+int        gsock_cap;
+int        gsock_cnt;
 static spinlock_t gsock_lock = SPINLOCK_INIT;
+
+int gsock_count(void) { return gsock_cnt; }
+
+static void gsock_ensure(void)
+{
+    if (gsock_cnt < gsock_cap) return;
+    int nc = gsock_cap ? gsock_cap * 2 : GSOCK_INIT_CAP;
+    socket_t **nb = kmalloc((size_t)nc * sizeof(socket_t *));
+    if (!nb) return;
+    memset(nb, 0, (size_t)nc * sizeof(socket_t *));
+    if (gsock) { memcpy(nb, gsock, (size_t)gsock_cap * sizeof(socket_t *)); kfree(gsock); }
+    gsock = nb; gsock_cap = nc;
+}
 
 void sock_register(socket_t *s)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
-    for (int i = 0; i < GSOCK_MAX; i++) {
-        if (!gsock[i]) { gsock[i] = s; break; }
+    /* find empty slot */
+    for (int i = 0; i < gsock_cap; i++) {
+        if (!gsock[i]) { gsock[i] = s; spin_unlock_irq(&gsock_lock, f); return; }
+    }
+    /* no empty slot — grow */
+    gsock_ensure();
+    if (gsock_cap > gsock_cnt) {
+        for (int i = 0; i < gsock_cap; i++) {
+            if (!gsock[i]) { gsock[i] = s; gsock_cnt++; break; }
+        }
     }
     spin_unlock_irq(&gsock_lock, f);
 }
@@ -24,8 +47,8 @@ void sock_register(socket_t *s)
 void sock_unregister(socket_t *s)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
-    for (int i = 0; i < GSOCK_MAX; i++) {
-        if (gsock[i] == s) { gsock[i] = NULL; break; }
+    for (int i = 0; i < gsock_cap; i++) {
+        if (gsock[i] == s) { gsock[i] = NULL; gsock_cnt--; break; }
     }
     spin_unlock_irq(&gsock_lock, f);
 }
@@ -59,7 +82,7 @@ void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
     socket_t *found = NULL;
-    for (int i = 0; i < GSOCK_MAX; i++) {
+    for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->type != SOCK_RAW) continue;
@@ -106,7 +129,7 @@ void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
     socket_t *found = NULL;
-    for (int i = 0; i < GSOCK_MAX; i++) {
+    for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->type != SOCK_DGRAM) continue;
