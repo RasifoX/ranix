@@ -10,5 +10,10 @@
 
 /* VFS */
 #define FD_TABLE_INIT   16      /* initial fd table capacity */
+#define PIPE_BUF_SIZE   4096    /* pipe ring buffer size (bytes) */
+#define CMDLINE_MAX     512     /* kernel command line max length */
+
+/* IPC */
+#define FUTEX_SLOTS     256     /* max simultaneous futex waiters */
 
 #endif
