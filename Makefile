@@ -98,7 +98,6 @@ SRCS_KERNEL = \
     kernel/irq.c \
     kernel/kprintf.c \
     kernel/sched.c \
-    kernel/shell.c \
     kernel/tty/fb_tty.c \
     kernel/sync.c \
     kernel/elf.c \
@@ -212,7 +211,7 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	@if [ -f doom1.wad ]; then \
 		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
 	fi
-	@if [ -f /tmp/ranix_test.sh ]; then cp /tmp/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
+	@if [ -f tests/ranix_test.sh ]; then cp tests/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
 	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 
@@ -260,7 +259,7 @@ qemu-iso: iso
 
 doom: doomgeneric/doomgeneric
 
-doomgeneric/doomgeneric: doomgeneric/doomgeneric_ranix.c
+doomgeneric/doomgeneric: doomgeneric/doomgeneric_linuxvt.c
 	$(MAKE) -C doomgeneric -f Makefile.ranix ARCH=$(ARCH) \
 	    CC=$(MUSL_CC)
 
