@@ -183,6 +183,10 @@ check "sys-pid-max"      "32768"   "$(cat /proc/sys/kernel/pid_max)"
 check "sys-somaxconn"    "128"     "$(cat /proc/sys/net/core/somaxconn)"
 check "sys-file-max"     "65536"   "$(cat /proc/sys/fs/file-max)"
 
+# ── 23. mount ─────────────────────────────────────────────────
+check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
+check "mount-write"  "hi"  "$(echo hi > /tmp/x && cat /tmp/x)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
