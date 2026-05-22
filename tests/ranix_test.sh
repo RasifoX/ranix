@@ -177,6 +177,12 @@ check "dev-stderr-link"  "/proc/self/fd/2"  "$(readlink /dev/stderr)"
 check "dev-fd-link"      "/proc/self/fd"    "$(readlink /dev/fd)"
 check "dev-stdin-read"   "hello"            "$(echo hello | cat /dev/stdin)"
 
+# ── 22. /proc/sys ─────────────────────────────────────────────
+check "sys-hostname"     "ranix"   "$(cat /proc/sys/kernel/hostname)"
+check "sys-pid-max"      "32768"   "$(cat /proc/sys/kernel/pid_max)"
+check "sys-somaxconn"    "128"     "$(cat /proc/sys/net/core/somaxconn)"
+check "sys-file-max"     "65536"   "$(cat /proc/sys/fs/file-max)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
