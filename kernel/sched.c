@@ -162,6 +162,9 @@ void sched_init(void)
 
 	extern void tcp_tick(void);
 	tick_register(tcp_tick);
+
+	extern void timerfd_tick(void);
+	tick_register(timerfd_tick);
 }
 
 void sched_tick(void)

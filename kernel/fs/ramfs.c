@@ -373,3 +373,18 @@ void ramfs_register(void)
 	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("ramfs", ramfs_mount);
 }
+
+/* ── anonymous file for memfd_create ─────────────────────── */
+
+vfs_inode_t *ramfs_create_anon(void)
+{
+	vfs_inode_t *in = ramfs_inode_alloc(S_IFREG | 0600);
+	if (!in) return NULL;
+	ramfs_file_t *rf = kmalloc(sizeof(*rf));
+	if (!rf) { kfree(in); return NULL; }
+	memset(rf, 0, sizeof(*rf));
+	in->priv = rf;
+	in->fops = &ramfs_fops;
+	in->iops = &ramfs_iops;
+	return in;
+}
