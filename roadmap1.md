@@ -10,16 +10,20 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.5 + stabilite katmanı tamamlandı)
+## Neredeyiz (v0.5.1 + v0.6 event loop + birçok v0.8 maddesi tamamlandı)
 
 - Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
-- Memory: buddy + COW fork + mmap + brk; `alloc_table` OOM → ENOMEM (kpanic yok), `vm_copy` goto-oom rollback
-- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü (`alloc_pid`); kstack canary (`0xDEADBEEFCAFEBABE`)
-- FS: ramfs, ext2 read-only, procfs, devfs, initramfs (CPIO); dentry inode lifecycle fix, DENTRY_MAX=4096, volatile inode serbest bırakma
-- Userspace: busybox 60+ applet, bash, statik ELF, DOOM
-- Network: ARP + ICMP + UDP + TCP tam stack, ping + echo_server (x86_64 + aarch64)
+- Memory: buddy + COW fork + mmap + brk; `alloc_table` OOM → ENOMEM (kpanic yok), `vm_copy` goto-oom rollback; heap slab serbest bırakma
+- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü; kstack canary; `sys_mount` (tmpfs→ramfs, devtmpfs→devfs)
+- FS: ramfs, ext2 read+write (direct+single+double+triple indirect), procfs, devfs, initramfs (CPIO); VFS permission enforcement + umask + sticky bit; dentry inode lifecycle fix; `/dev/stdin`, `/dev/stdout`, `/dev/stderr` (fd-proxy); `/dev/fd` symlink
+- /proc: `/proc/cmdline`, `/proc/net/{dev,tcp,udp,route}`, `/proc/sys/{kernel,net/core,fs}` tree; statfs/df çalışıyor
+- /etc: `/etc/passwd`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/environment` (initrd.c'den)
+- Userspace: busybox 60+ applet, bash-5.2, statik ELF, DOOM
+- Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control (snd_wnd); AF_UNIX socketpair; ping + echo_server (x86_64 + aarch64)
+- Syscall: eventfd2, timerfd, memfd_create, signalfd, epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; syscall.c → kernel/sys/ Unity Build split (6 sub-file)
+- Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); `/proc/cmdline`; `init=` parametresi; `quiet/debug`
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
-- Test: 35/35 bash test suite her iki mimaride geçiyor
+- Test: **116/116** bash test suite her iki mimaride geçiyor
 
 ---
 
@@ -84,21 +88,20 @@ Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
 - [x] `quiet` / `debug` log seviyesi parametresi
 
 **AF_UNIX domain sockets** (Linux 1.0, 1994)
-- [ ] `AF_UNIX SOCK_STREAM` — pipe gibi ama adreslenebilir
-- [ ] `bind` + `connect` + `accept` path-based
-- [ ] `send` / `recv` — tam duplex
-- [ ] `SOCK_DGRAM` AF_UNIX — syslog, journald
+- [x] `AF_UNIX SOCK_STREAM` — socketpair (inter-process, bash pipes)
+- [x] `SOCK_DGRAM` AF_UNIX — unix_send/recv
+- [ ] `bind` + `connect` + `accept` path-based (filesystem-addressed)
 - [ ] abstract namespace (`\0` ile başlayan path)
 
 **ext2 yazma** (Linux 1.0, 1994)
-- [ ] inode tahsis — bitmap üzerinden boş inode bul
-- [ ] blok tahsis — bitmap üzerinden boş blok bul
-- [ ] `create` — dizine yeni dosya girişi ekle, inode yaz
-- [ ] `write` — dosya verisini blok(lar)a yaz, inode size güncelle
-- [ ] `mkdir` — dizin girişi + `.` ve `..` blokları
-- [ ] `unlink` — inode serbest bırak, dizin girişini sil
-- [ ] `rename` — dizin girişi taşı
-- [ ] superblock + grup tanımlayıcı güncelle (free block/inode sayıları)
+- [x] inode tahsis — bitmap üzerinden boş inode bul
+- [x] blok tahsis — bitmap üzerinden boş blok bul
+- [x] `create` — dizine yeni dosya girişi ekle, inode yaz
+- [x] `write` — dosya verisini blok(lar)a yaz, inode size güncelle; direct+single+double+triple indirect
+- [x] `mkdir` — dizin girişi + `.` ve `..` blokları
+- [x] `unlink` — inode serbest bırak, dizin girişini sil
+- [x] `rename` — dizin girişi taşı
+- [x] superblock + grup tanımlayıcı güncelle (free block/inode sayıları)
 
 **ptrace** (Linux 0.99, 1993)
 - [ ] `PTRACE_ATTACH` / `PTRACE_DETACH`
@@ -114,17 +117,17 @@ Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
 **Şu an kodda sabit olan şeyler ve çözümleri:**
 
 - [ ] **IP adresi** — `virtio_net.c`'de `10.0.2.15` hardcode. `ip=<addr>/<gw>` cmdline parametresi; yoksa `10.0.2.15` default kalır
-- [ ] **Hostname** — hiç yok. `hostname=ranix` cmdline parametresi + `/proc/sys/kernel/hostname`
+- [x] **Hostname** — `/proc/sys/kernel/hostname` (okuma + `sethostname` syscall)
 - [ ] **DTB** — `fdt.c` var ama statik C verisi. Gerçek DTB binary parse edilmeli; QEMU `-dtb` ile verilmeli
 - [ ] **KSTACK_SIZE** — 8192 sabit. `kstack_size=N` cmdline veya `include/kernel/config.h`
 - [ ] **SCHED_QUANTUM** — 10 tick sabit. `sched_quantum=N` cmdline
 - [ ] **DENTRY_MAX** — 4096 sabit. `vfs_dentry_max=N` cmdline
-- [x] **init search paths** — sadece `/bin/init` ve `/bin/sh` deneniyor. Genişlet + `init=` parametresi
+- [x] **init search paths** — `init=` parametresi; `/sbin/init` → `/etc/init` → `/bin/init` → `/bin/sh`
 
 **Kernel config altyapısı:**
 - [ ] `include/kernel/config.h` — derleme zamanı sabitlerinin tek yeri
 - [x] `cmdline_get(key, buf, len)` — runtime parametreleri oku
-- [ ] `/proc/sys/` sysctl stüb — temel parametreleri runtime değiştir (net.ipv4.ip_forward vs.)
+- [x] `/proc/sys/kernel/`, `/proc/sys/net/core/`, `/proc/sys/fs/` — okuma; yazma henüz yok
 
 ### Test hedefleri
 - [ ] Normal kullanıcı `/etc/shadow`'u açamıyor (EACCES)
@@ -166,17 +169,18 @@ dbus, X11, postgres, redis, nginx hepsi bunların üstünde.
 - [ ] `SCM_CREDENTIALS` — peer uid/gid doğrulama
 
 ### Modern Event Loop Syscall'ları
-- [ ] `eventfd` / `eventfd2` — libuv, tokio, Go runtime kullanıyor
-- [ ] `timerfd_create` / `timerfd_settime` / `timerfd_gettime`
-- [ ] `signalfd` — signal'ı fd üzerinden okuma (systemd kullanıyor)
-- [ ] `epoll` edge-trigger (EPOLLET) + `EPOLLONESHOT` — libuv/nginx
-- [ ] `epoll_pwait` — atomik signal mask + wait
+- [x] `eventfd` / `eventfd2` — tam implementasyon (semaphore mod dahil)
+- [x] `timerfd_create` / `timerfd_settime` / `timerfd_gettime` — tam implementasyon
+- [x] `signalfd4` — stub (fd döner, event göndermiyor)
+- [x] `epoll_create1` / `epoll_ctl` / `epoll_pwait` — level-trigger çalışıyor
+- [ ] `epoll` edge-trigger (EPOLLET) + `EPOLLONESHOT` — henüz yok
+- [x] `ppoll` / `pselect6` — signal mask ile bekleme
 
 ### Bellek
 - [ ] vmalloc — kernel sanal adres alanı allocator (şu an yok)
 - [ ] thread stack: `mmap(MAP_ANONYMOUS | MAP_GROWSDOWN)`
-- [ ] `mlock` / `munlock` — bellek kilitleme (database'ler kullanıyor)
-- [ ] `memfd_create` — isimsiz dosya, dinamik loader + IPC için lazım
+- [x] `mlock` / `munlock` / `mlock2` — stub (no-op, başarı döner)
+- [x] `memfd_create` — ramfs üzerinden anonymous file
 
 ### Test hedefleri
 - [ ] musl pthreads ile derlenen basit C programı çalışıyor
@@ -340,19 +344,23 @@ musl libc dinamik versiyonu ile çalışmak hedef.
 - [ ] `clock_nanosleep` — precise sleep
 
 ### Filesystem: tmpfs & ext4
-- [ ] **tmpfs** — `/tmp` ve `/run` için RAM backed FS (birçok program şart koşuyor)
-- [ ] **ext2 write** tamamlanmalı (şu an read-only)
+- [x] **tmpfs** — `mount -t tmpfs` → ramfs olarak mount edilir
+- [x] **ext2 write** tamamlandı — direct+single+double+triple indirect
 - [ ] **ext4** journal (ext2 üstüne writeback journal) — gerçek disk güvenliği
-- [ ] `fallocate` — disk alanı önceden rezerve (database'ler kullanıyor)
-- [ ] `flock` + `fcntl(F_SETLK)` — dosya kilitleme (SQLite, Postgres)
-- [ ] `inotify_init1` / `inotify_add_watch` — FS event notification
+- [x] `fallocate` — stub (başarı döner)
+- [x] `flock` — stub (no-op)
+- [ ] `fcntl(F_SETLK)` — gerçek dosya kilitleme (SQLite, Postgres)
+- [ ] `inotify_init1` / `inotify_add_watch` — FS event notification (stub: fd döner, event yok)
 
 ### Eksik Syscall'lar (gerçek binary'leri kıran)
-- [ ] `statx` — extended stat (glibc ve modern araçlar kullanıyor)
+- [x] `statx` — tam implementasyon
 - [ ] `openat2` — openat + resolve flags
 - [ ] `close_range` — fd aralığını kapat
-- [ ] `splice` / `tee` — zero-copy (nginx, cat)
-- [ ] `copy_file_range` — kernel içi dosya kopyalama
+- [x] `splice` — fd→fd copy (zero-copy-like)
+- [x] `copy_file_range` — kernel içi dosya kopyalama
+- [x] `pread64` / `pwrite64` — offset'li okuma/yazma
+- [x] `statfs` / `fstatfs` — df komutu çalışıyor
+- [x] `capget` / `capset` — root tüm capability'lere sahip
 
 ### IPC (eksikler)
 - [ ] SysV shared memory: `shmget` / `shmat` / `shmdt`
