@@ -264,6 +264,22 @@ typedef struct {
 #define PROC_F_NET_ROUTE 23
 #define PROC_F_NET_IF6   24
 
+/* /proc/sys entries */
+#define PROC_F_SYS_HZ            30
+#define PROC_F_SYS_HOSTNAME      31
+#define PROC_F_SYS_DOMAINNAME    32
+#define PROC_F_SYS_OVERCOMMIT    33
+#define PROC_F_SYS_NGROUPS_MAX   34
+#define PROC_F_SYS_PID_MAX       35
+#define PROC_F_SYS_FILE_MAX      36
+#define PROC_F_SYS_SOMAXCONN     37
+#define PROC_F_SYS_RMEM_DEFAULT  38
+#define PROC_F_SYS_WMEM_DEFAULT  39
+#define PROC_F_SYS_RMEM_MAX      40
+#define PROC_F_SYS_WMEM_MAX      41
+#define PROC_F_SYS_NFILE         42
+#define PROC_F_SYS_RANDOMIZE_VA  43
+
 static int fill_net_dev(char *buf, size_t sz);
 static int fill_net_tcp(char *buf, size_t sz);
 static int fill_net_udp(char *buf, size_t sz);
@@ -330,6 +346,20 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_UDP:   n = fill_net_udp(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"ranix\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"(none)\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_OVERCOMMIT:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_NGROUPS_MAX:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_PID_MAX:      { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"32768\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_FILE_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_SOMAXCONN:    { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"128\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_RMEM_DEFAULT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"212992\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_WMEM_DEFAULT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"212992\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_RMEM_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"134217728\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_WMEM_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"134217728\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_NFILE:        { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"4096\t0\t65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -753,6 +783,230 @@ static vfs_inode_t *procfs_netdir_inode(void)
 	return &ndir;
 }
 
+/* ── /proc/sys ───────────────────────────────────────────────── */
+
+typedef struct { const char *name; int type; } procfs_sysfile_t;
+
+static procfs_sysfile_t sys_kernel_files[] = {
+	{ "ostype",        PROC_F_SYS_HOSTNAME    }, /* reuse hostname slot for "Linux\n" below */
+	{ "hostname",      PROC_F_SYS_HOSTNAME    },
+	{ "domainname",    PROC_F_SYS_DOMAINNAME  },
+	{ "ngroups_max",   PROC_F_SYS_NGROUPS_MAX },
+	{ "pid_max",       PROC_F_SYS_PID_MAX     },
+	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT },
+	{ "randomize_va_space", PROC_F_SYS_RANDOMIZE_VA },
+};
+#define SYS_KERNEL_N 7
+
+static procfs_sysfile_t sys_net_core_files[] = {
+	{ "somaxconn",       PROC_F_SYS_SOMAXCONN    },
+	{ "rmem_default",    PROC_F_SYS_RMEM_DEFAULT },
+	{ "wmem_default",    PROC_F_SYS_WMEM_DEFAULT },
+	{ "rmem_max",        PROC_F_SYS_RMEM_MAX     },
+	{ "wmem_max",        PROC_F_SYS_WMEM_MAX     },
+};
+#define SYS_NET_CORE_N 5
+
+static procfs_sysfile_t sys_fs_files[] = {
+	{ "file-max",    PROC_F_SYS_FILE_MAX },
+	{ "file-nr",     PROC_F_SYS_NFILE    },
+};
+#define SYS_FS_N 2
+
+/* forward declarations */
+static vfs_inode_t *procfs_sysdir_inode(void);
+static vfs_inode_t *procfs_syskerneldir_inode(void);
+static vfs_inode_t *procfs_sysnetcoredir_inode(void);
+static vfs_inode_t *procfs_sysfsdir_inode(void);
+/* generic sysfile inode (read-only value) */
+static vfs_inode_t *procfs_sysfile_inode(int type)
+{
+	return procfs_inode_file(-1, type);
+}
+
+/* /proc/sys/kernel */
+static vfs_inode_t *procfs_syskerneldir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < SYS_KERNEL_N; i++)
+		if (strcmp(sys_kernel_files[i].name, name) == 0)
+			return procfs_sysfile_inode(sys_kernel_files[i].type);
+	return NULL;
+}
+static int procfs_syskerneldir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)SYS_KERNEL_N) return -1;
+	out->ino = 0xa100 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	const char *n = sys_kernel_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+static int procfs_syssubdir_stat(vfs_inode_t *in, vfs_stat_t *out)
+{
+	out->ino = in->ino; out->mode = in->mode; out->nlink = 2; out->size = 0;
+	return 0;
+}
+static vfs_iops_t procfs_syskerneldir_iops = {
+	.lookup  = procfs_syskerneldir_lookup,
+	.readdir = procfs_syskerneldir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_syskerneldir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa100; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_syskerneldir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
+/* /proc/sys/net/core */
+static vfs_inode_t *procfs_sysnetcoredir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < SYS_NET_CORE_N; i++)
+		if (strcmp(sys_net_core_files[i].name, name) == 0)
+			return procfs_sysfile_inode(sys_net_core_files[i].type);
+	return NULL;
+}
+static int procfs_sysnetcoredir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)SYS_NET_CORE_N) return -1;
+	out->ino = 0xa200 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	const char *n = sys_net_core_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+static vfs_iops_t procfs_sysnetcoredir_iops = {
+	.lookup  = procfs_sysnetcoredir_lookup,
+	.readdir = procfs_sysnetcoredir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_sysnetcoredir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa200; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_sysnetcoredir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
+/* /proc/sys/net — contains core/ */
+static vfs_inode_t *procfs_sysnetdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "core") == 0) return procfs_sysnetcoredir_inode();
+	return NULL;
+}
+static int procfs_sysnetdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = 0xa210; out->mode = S_IFDIR | 0555; out->next_off = 1;
+	out->name[0] = 'c'; out->name[1] = 'o'; out->name[2] = 'r';
+	out->name[3] = 'e'; out->name[4] = '\0';
+	return 0;
+}
+static vfs_iops_t procfs_sysnetdir_iops = {
+	.lookup  = procfs_sysnetdir_lookup,
+	.readdir = procfs_sysnetdir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_sysnetdir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa210; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_sysnetdir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
+/* /proc/sys/fs */
+static vfs_inode_t *procfs_sysfsdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < SYS_FS_N; i++)
+		if (strcmp(sys_fs_files[i].name, name) == 0)
+			return procfs_sysfile_inode(sys_fs_files[i].type);
+	return NULL;
+}
+static int procfs_sysfsdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)SYS_FS_N) return -1;
+	out->ino = 0xa300 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	const char *n = sys_fs_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+static vfs_iops_t procfs_sysfsdir_iops = {
+	.lookup  = procfs_sysfsdir_lookup,
+	.readdir = procfs_sysfsdir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_sysfsdir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa300; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_sysfsdir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
+/* /proc/sys root — contains kernel/, net/, fs/ */
+static vfs_inode_t *procfs_sysdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "kernel") == 0) return procfs_syskerneldir_inode();
+	if (strcmp(name, "net")    == 0) return procfs_sysnetdir_inode();
+	if (strcmp(name, "fs")     == 0) return procfs_sysfsdir_inode();
+	return NULL;
+}
+static int procfs_sysdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	static const char *subdirs[] = { "kernel", "net", "fs" };
+	if (idx >= 3) return -1;
+	out->ino = 0xa000 + idx; out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	const char *n = subdirs[idx];
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+static int procfs_sysdir_stat(vfs_inode_t *in, vfs_stat_t *out)
+{
+	out->ino = in->ino; out->mode = in->mode; out->nlink = 5; out->size = 0;
+	return 0;
+}
+static vfs_iops_t procfs_sysdir_iops = {
+	.lookup  = procfs_sysdir_lookup,
+	.readdir = procfs_sysdir_readdir,
+	.stat    = procfs_sysdir_stat,
+};
+static vfs_inode_t *procfs_sysdir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa000; d.mode = S_IFDIR | 0555;
+		d.nlink = 5; d.refcount = 1; d.iops = &procfs_sysdir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
 /* ── root iops ───────────────────────────────────────────────── */
 
 static int procfs_self_readlink(vfs_inode_t *in, char *buf, size_t sz)
@@ -810,6 +1064,10 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "net") == 0)
 		return procfs_netdir_inode();
 
+	/* "sys" subdirectory */
+	if (strcmp(name, "sys") == 0)
+		return procfs_sysdir_inode();
+
 	/* static files */
 	for (int i = 0; i < ROOT_FILES_N; i++)
 		if (strcmp(root_files[i].name, name) == 0)
@@ -858,6 +1116,17 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 		out->mode     = S_IFDIR | 0555;
 		out->next_off = ROOT_FILES_N + 2;
 		out->name[0] = 'n'; out->name[1] = 'e'; out->name[2] = 't';
+		out->name[3] = '\0';
+		return 0;
+	}
+	idx--;
+
+	/* "sys" dir entry */
+	if (idx == 0) {
+		out->ino      = 0xa000;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 3;
+		out->name[0] = 's'; out->name[1] = 'y'; out->name[2] = 's';
 		out->name[3] = '\0';
 		return 0;
 	}
