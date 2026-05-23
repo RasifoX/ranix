@@ -302,6 +302,26 @@ static int ramfs_symlink(vfs_inode_t *dir, const char *name, const char *target)
 	return 0;
 }
 
+static int ramfs_link(vfs_inode_t *dir, const char *name, vfs_inode_t *target)
+{
+	if (S_ISDIR(target->mode)) return -21;
+	ramfs_dir_t *rd = dir->priv;
+	if (!rd) return -1;
+	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
+		if (strcmp(e->name, name) == 0) return -17;
+	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
+	if (!ent) return -12;
+	int nlen = 0;
+	while (name[nlen] && nlen < 255) nlen++;
+	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
+	ent->inode = target;
+	ent->next  = rd->entries;
+	rd->entries = ent;
+	rd->count++;
+	target->nlink++;
+	return 0;
+}
+
 static int ramfs_truncate(vfs_inode_t *inode, off_t len)
 {
 	if (!S_ISREG(inode->mode)) return -22;
@@ -343,6 +363,7 @@ static vfs_iops_t ramfs_iops = {
 	.readlink = ramfs_readlink,
 	.symlink  = ramfs_symlink,
 	.truncate = ramfs_truncate,
+	.link     = ramfs_link,
 };
 
 /* ── mount ───────────────────────────────────────────────── */

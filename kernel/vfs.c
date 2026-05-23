@@ -9,6 +9,8 @@
 
 static vfs_dentry_t *root_dentry = NULL;
 
+vfs_inotify_fn_t vfs_inotify_hook = NULL;
+
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static int dentry_count = 0;
 
@@ -304,12 +306,47 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 			kfree(mnt);
 			return -1;
 		}
-		mnt->mountpoint = mp;
+		mnt->mountpoint  = mp;
+		mnt->orig_inode  = mp->inode;
 		mp->inode = mnt->root->inode;
 	}
 	mnt->next  = mount_list;
 	mount_list = mnt;
 	spin_unlock_irq(&vfs_lock, f);
+	return 0;
+}
+
+int vfs_umount(const char *path)
+{
+	if (!path || path[0] != '/') return -22;
+
+	vfs_dentry_t *mp = vfs_dentry_resolve(path);
+	if (!mp || !mp->inode) return -2;
+
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	vfs_mount_t *prev = NULL;
+	vfs_mount_t *mnt  = mount_list;
+	while (mnt) {
+		if (mnt->mountpoint == mp) break;
+		prev = mnt;
+		mnt  = mnt->next;
+	}
+	if (!mnt) { spin_unlock_irq(&vfs_lock, f); return -22; }
+
+	if (prev) prev->next = mnt->next;
+	else      mount_list = mnt->next;
+
+	mp->inode = mnt->orig_inode;
+	/* flush stale children cached from the now-unmounted fs */
+	vfs_dentry_t *ch = mp->child;
+	mp->child = NULL;
+	spin_unlock_irq(&vfs_lock, f);
+	while (ch) {
+		vfs_dentry_t *nx = ch->next;
+		kfree(ch);
+		ch = nx;
+	}
+	kfree(mnt);
 	return 0;
 }
 
@@ -353,7 +390,20 @@ fd_table_t *fd_table_create(void)
 	memset(t->files,   0, (size_t)FD_INIT_CAP * sizeof(vfs_file_t *));
 	memset(t->open_bm, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
 	memset(t->cloexec, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
+	t->refcount = 1;
 	return t;
+}
+
+fd_table_t *fd_table_get(fd_table_t *t)
+{
+	if (t) t->refcount++;
+	return t;
+}
+
+void fd_table_put(fd_table_t *t)
+{
+	if (!t) return;
+	if (--t->refcount <= 0) fd_table_destroy(t);
 }
 
 void fd_table_destroy(fd_table_t *t)
@@ -387,6 +437,7 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 		kfree(n->files); kfree(n->open_bm); kfree(n->cloexec); kfree(n);
 		return NULL;
 	}
+	n->refcount = 1;
 	memset(n->files, 0, (size_t)old->cap * sizeof(vfs_file_t *));
 	memcpy(n->open_bm, old->open_bm, (size_t)(old->cap/64) * sizeof(uint64_t));
 	memcpy(n->cloexec, old->cloexec, (size_t)(old->cap/64) * sizeof(uint64_t));
@@ -498,6 +549,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		inode = parent->inode->iops->lookup(parent->inode, fname);
 		if (!inode) return -1;
 		d = vfs_dentry_create(parent, fname, inode);
+		if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
 	} else {
 		inode = d->inode;
 		/* check read/write permission on existing file */
@@ -593,6 +645,8 @@ off_t vfs_seek(int fd, off_t off, int whence)
 
 int vfs_mkdir(const char *path, mode_t mode)
 {
+	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
+
 	const char *slash = path + strlen(path) - 1;
 	while (slash > path && *slash != '/') slash--;
 
@@ -649,7 +703,23 @@ int vfs_unlink(const char *path)
 	}
 
 	const char *fname = slash + 1;
-	return parent->inode->iops->unlink(parent->inode, fname);
+	int r = parent->inode->iops->unlink(parent->inode, fname);
+	if (r == 0 && vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000200 /*IN_DELETE*/, fname);
+	if (r == 0) {
+		uint64_t lf = spin_lock_irq(&vfs_lock);
+		vfs_dentry_t **dp = &parent->child;
+		while (*dp) {
+			if (strcmp((*dp)->name, fname) == 0) {
+				vfs_dentry_t *dead = *dp;
+				*dp = dead->next;
+				kfree(dead);
+				break;
+			}
+			dp = &(*dp)->next;
+		}
+		spin_unlock_irq(&vfs_lock, lf);
+	}
+	return r;
 }
 
 /* write a file from kernel data without going through the fd table */
@@ -751,6 +821,10 @@ int vfs_rename(const char *old_path, const char *new_path)
 
 	int ret = old_parent->inode->iops->rename(
 		old_parent->inode, old_name, new_parent->inode, new_name);
+	if (ret == 0 && vfs_inotify_hook) {
+		vfs_inotify_hook(old_dir, 0x00000040 /*IN_MOVED_FROM*/, old_name);
+		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/,   new_name);
+	}
 	if (ret == 0) {
 		/* update dentry name in the tree */
 		uint64_t f = spin_lock_irq(&vfs_lock);
@@ -777,6 +851,35 @@ int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 	if (d->inode->iops && d->inode->iops->readdir)
 		return d->inode->iops->readdir(d->inode, idx, out);
 	return -1;
+}
+
+int vfs_chmod(const char *path, mode_t mode)
+{
+	vfs_dentry_t *d = vfs_dentry_resolve(path);
+	if (!d || !d->inode) return -2;
+	d->inode->mode = (d->inode->mode & 0xF000) | (mode & 07777);
+	return 0;
+}
+
+int vfs_link(const char *oldpath, const char *newpath)
+{
+	vfs_dentry_t *od = vfs_dentry_resolve(oldpath);
+	if (!od || !od->inode) return -2;
+	if (S_ISDIR(od->inode->mode)) return -21;
+
+	const char *s = newpath + strlen(newpath) - 1;
+	while (s > newpath && *s != '/') s--;
+	char new_dir[256];
+	int dlen = (int)(s - newpath);
+	if (dlen == 0) { new_dir[0] = '/'; new_dir[1] = '\0'; }
+	else           { memcpy(new_dir, newpath, dlen); new_dir[dlen] = '\0'; }
+	const char *new_name = s + 1;
+
+	vfs_dentry_t *nd = vfs_dentry_resolve(new_dir);
+	if (!nd || !nd->inode) return -2;
+	if (!nd->inode->iops || !nd->inode->iops->link) return -1;
+
+	return nd->inode->iops->link(nd->inode, new_name, od->inode);
 }
 
 /* ── init ────────────────────────────────────────────────── */

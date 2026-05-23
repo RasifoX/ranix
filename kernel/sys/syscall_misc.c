@@ -319,6 +319,15 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	return r == 0 ? 0 : -1;
 }
 
+static long sys_umount2(const char *target, int flags)
+{
+	(void)flags;
+	char kpath[256];
+	if (strncpy_from_user(kpath, target, sizeof(kpath)) < 0) return -14;
+	int r = vfs_umount(kpath);
+	return r == 0 ? 0 : -22;
+}
+
 static long sys_sethostname(const char *name, size_t len)
 {
 	if (len >= sizeof(ranix_hostname)) return -22;

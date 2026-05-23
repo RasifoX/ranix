@@ -6,10 +6,12 @@
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
 
-struct node { struct node *next; };
+/* Doubly-linked free list — O(1) insertion and removal.
+ * next/prev store physical addresses (0 = NULL). */
+struct node { uint64_t next; uint64_t prev; };
 
-static struct node *free_list[BUDDY_MAX_ORDER];
-static uint8_t     *blk_order; /* order of the free/alloc block at this page */
+static uint64_t    free_list[BUDDY_MAX_ORDER]; /* physical addr of head, 0 = empty */
+static uint8_t     *blk_order;
 static uint8_t     *free_bm;
 static uint64_t    _base;
 static uint64_t    _npages;
@@ -26,6 +28,11 @@ static int  bm_get(uint64_t p) { return  free_bm[p >> 3] &  (1 << (p & 7)); }
 static uint64_t pidx(uint64_t addr) { return (addr - _base) >> PAGE_SHIFT; }
 static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
+static inline struct node *node_at(uint64_t phys)
+{
+	return (struct node *)PHYS_TO_VIRT(phys);
+}
+
 page_t *paddr_to_page(uint64_t p)
 {
 	uint64_t idx = p >> PAGE_SHIFT;
@@ -35,40 +42,38 @@ page_t *paddr_to_page(uint64_t p)
 uint64_t page_to_paddr(page_t *page)
 {
 	if (!page) return 0;
-	/* simple pointer math, no lock needed */
 	return (uint64_t)(page - mem_map) << PAGE_SHIFT;
 }
 
 static void push(int ord, uint64_t addr)
 {
-	if (addr >= paddr(_npages)) kpanic("buddy: push corrupted addr");
-	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
+	struct node *n = node_at(addr);
+	n->prev = 0;
 	n->next = free_list[ord];
-	free_list[ord] = (struct node *)addr;
+	if (free_list[ord])
+		node_at(free_list[ord])->prev = addr;
+	free_list[ord] = addr;
 }
 
 static uint64_t pop(int ord)
 {
-	uint64_t addr = (uint64_t)free_list[ord];
-	if (addr >= paddr(_npages)) kpanic("buddy: pop corrupted addr");
-	struct node *n = (struct node *)PHYS_TO_VIRT(addr);
+	uint64_t addr = free_list[ord];
+	struct node *n = node_at(addr);
 	free_list[ord] = n->next;
+	if (n->next)
+		node_at(n->next)->prev = 0;
 	return addr;
 }
 
 static void list_remove(int ord, uint64_t addr)
 {
-	struct node **p = &free_list[ord];
-	while (*p && (uint64_t)*p != addr) {
-		if ((uint64_t)*p >= paddr(_npages)) kpanic("buddy: list_remove corrupted addr");
-		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
-		p = &n->next;
-	}
-	if (*p) {
-		if ((uint64_t)*p >= paddr(_npages)) kpanic("buddy: list_remove corrupted addr");
-		struct node *n = (struct node *)PHYS_TO_VIRT(*p);
-		*p = n->next;
-	}
+	struct node *n = node_at(addr);
+	if (n->prev)
+		node_at(n->prev)->next = n->next;
+	else
+		free_list[ord] = n->next;
+	if (n->next)
+		node_at(n->next)->prev = n->prev;
 }
 
 void buddy_free(uint64_t addr, int ord)
@@ -125,7 +130,6 @@ void *buddy_alloc(int ord)
 
 	blk_order[p] = (uint8_t)ord;
 
-	/* Initialize refcounts for allocated block */
 	uint64_t npg = 1ul << ord;
 	_free_pages -= npg;
 	for (uint64_t i = 0; i < npg; i++) {
@@ -165,15 +169,14 @@ void buddy_add_region(uint64_t addr, uint64_t size)
 
 uint64_t buddy_init(uint64_t base, uint64_t limit)
 {
-	/* buddy_init is called early during boot, so no lock needed yet */
 	uint64_t total_pages = limit >> PAGE_SHIFT;
 
 	uint64_t blk_order_sz = total_pages * sizeof(uint8_t);
 	uint64_t free_bm_sz   = (total_pages + 7) / 8;
 	uint64_t mem_map_sz   = total_pages * sizeof(page_t);
-	
-	uint64_t meta_sz      = blk_order_sz + free_bm_sz + mem_map_sz;
-	uint64_t meta_pages   = (meta_sz + PAGE_SIZE - 1) >> PAGE_SHIFT;
+
+	uint64_t meta_sz    = blk_order_sz + free_bm_sz + mem_map_sz;
+	uint64_t meta_pages = (meta_sz + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	if (meta_pages >= total_pages) return 0;
 

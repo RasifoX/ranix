@@ -36,6 +36,12 @@ typedef struct {
     uint8_t  sin_zero[8];
 } __attribute__((packed)) sockaddr_in_t;
 
+/* sockaddr_un */
+typedef struct {
+    uint16_t sun_family;
+    char     sun_path[108];
+} __attribute__((packed)) sockaddr_un_t;
+
 typedef struct socket {
     int       type;         /* SOCK_STREAM / SOCK_DGRAM */
     int       domain;       /* AF_INET */
@@ -80,8 +86,9 @@ typedef struct socket {
     /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
     process_t  *close_waiter;
 
-    /* AF_UNIX: peer socket for socketpair() */
+    /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;
+    char           unix_path[108];  /* bound path, empty if not bound */
 } socket_t;
 
 /* Per-process socket table — max 16 sockets per process for now */
