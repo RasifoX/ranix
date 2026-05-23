@@ -123,11 +123,13 @@ SRCS_KERNEL = \
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
 SRCS_ASM = $(SRCS_ARCH_ASM)
 
-CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall $(ARCH_CFLAGS) $(INCLUDES)
+CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
 LDFLAGS = -nostdlib
 
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
 OBJS += $(SRCS_ASM:%.S=$(BUILD_DIR)/%.o)
+DEPS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.d)
+-include $(DEPS)
 
 BUSYBOX_APK_aarch64 = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.37.0-r14.apk
 BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/busybox-static-1.37.0-r14.apk
@@ -173,9 +175,11 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
-	@cp userspace/init userspace/hello userspace/echo_server $(BUILD_DIR)/initramfs/bin/
+	@cp userspace/init userspace/hello userspace/echo_server \
+	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
+	    $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -224,6 +228,18 @@ userspace/init: userspace/init.c
 userspace/echo_server: userspace/echo_server.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
+userspace/test_threads: userspace/test_threads.c
+	$(MUSL_CC) -static -no-pie -O2 -pthread -o $@ $<
+
+userspace/test_inotify: userspace/test_inotify.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
+userspace/test_ptrace: userspace/test_ptrace.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
+userspace/test_unix: userspace/test_unix.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -241,10 +257,10 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
-	$(QEMU_CMD) $(QEMU_NET) -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
+	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
 
 iso: initramfs $(TARGET)
 	@mkdir -p iso/boot/grub
@@ -255,7 +271,7 @@ iso: initramfs $(TARGET)
 	@echo "[OK] ranix.iso hazır"
 
 qemu-iso: iso
-	$(QEMU_CMD) -nographic -cdrom ranix.iso
+	$(QEMU_CMD) -m 512M -nographic -cdrom ranix.iso
 
 doom: doomgeneric/doomgeneric
 
