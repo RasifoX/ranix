@@ -846,6 +846,12 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	if (!child || child->ppid != p->pid) return -10;
 
 	while (child->state != PROC_DEAD) {
+		if (child->ptrace_stop && !child->ptrace_stop_reported) {
+			child->ptrace_stop_reported = 1;
+			if (status && (uint64_t)status > 0x1000)
+				*status = (5 << 8) | 0x7f; /* WIFSTOPPED | SIGTRAP */
+			return (long)pid;
+		}
 		if (wnohang) return 0;
 		task_sleep();
 	}
@@ -1086,6 +1092,7 @@ static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask,
 #include "sys/syscall_event.c"
 #include "sys/syscall_net.c"
 #include "sys/syscall_misc.c"
+#include "sys/syscall_ptrace.c"
 
 void syscall_handle(arch_context_t *ctx)
 {
@@ -1098,6 +1105,9 @@ void syscall_handle(arch_context_t *ctx)
 	long arg5 = (long)CTX_SYSCALL_ARG5(ctx);
 	long ret  = -38;
 	(void)arg5;
+
+	task_current()->ctx = ctx;
+	ptrace_stop_check(ctx, 0);
 
 
 	switch (n) {
@@ -1347,6 +1357,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_LISTXATTR: ret = sys_listxattr((const char*)arg0,(char*)arg1,(size_t)arg2); break;
 	case SYS_ARCH_LLISTXATTR:ret = sys_llistxattr((const char*)arg0,(char*)arg1,(size_t)arg2); break;
 	case SYS_ARCH_REMOVEXATTR:ret = sys_removexattr((const char*)arg0,(const char*)arg1); break;
+	case SYS_ARCH_PTRACE:    ret = sys_ptrace((long)arg0, (pid_t)arg1, (uint64_t)arg2, (uint64_t)arg3); break;
 	default:
 		kprintf("syscall: unimplemented %ld (pid=%u)\n",
 		        n, task_current()->pid);
@@ -1356,4 +1367,5 @@ void syscall_handle(arch_context_t *ctx)
 
 	CTX_SYSCALL_RET(ctx, ret);
 	task_current()->ctx = ctx;
+	ptrace_stop_check(ctx, 1);
 }
