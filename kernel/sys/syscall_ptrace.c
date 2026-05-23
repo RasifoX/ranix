@@ -30,17 +30,19 @@ static void ptrace_do_stop(process_t *p)
 	if (tracer)
 		task_wake(tracer);
 	task_sleep();
+	p->ptrace_in_syscall = 0;
 }
 
-/* Called from syscall_handle at entry and exit when ptrace_opts == 1 */
 static void ptrace_stop_check(arch_context_t *ctx, int is_exit)
 {
 	process_t *p = task_current();
 	if (!p->tracer || p->ptrace_opts != 1)
 		return;
-	p->ptrace_stop = is_exit ? 2 : 1;
-	p->ctx = ctx;
+	p->ptrace_stop          = is_exit ? 2 : 1;
+	p->ptrace_stop_reported = 0;
 	ptrace_do_stop(p);
+	p->ptrace_stop          = 0;
+	p->ptrace_stop_reported = 0;
 }
 
 static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
@@ -61,7 +63,7 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	case PTRACE_ATTACH:
 		if (tracee->tracer != 0)
 			return -1; /* EPERM */
-		tracee->tracer     = p->pid;
+		tracee->tracer      = p->pid;
 		tracee->ptrace_opts = 0;
 		task_signal(tracee, 19); /* SIGSTOP */
 		return 0;
@@ -69,9 +71,10 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	case PTRACE_DETACH:
 		if (tracee->tracer != (pid_t)p->pid)
 			return -1;
-		tracee->tracer      = 0;
-		tracee->ptrace_opts = 0;
-		tracee->ptrace_stop = 0;
+		tracee->tracer              = 0;
+		tracee->ptrace_opts         = 0;
+		tracee->ptrace_stop         = 0;
+		tracee->ptrace_stop_reported = 0;
 		if (tracee->ptrace_in_syscall) {
 			tracee->ptrace_in_syscall = 0;
 			task_wake(tracee);
@@ -82,8 +85,9 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	case PTRACE_SYSCALL:
 		if (tracee->tracer != (pid_t)p->pid)
 			return -1;
-		tracee->ptrace_opts = (request == PTRACE_SYSCALL) ? 1 : 0;
-		tracee->ptrace_stop = 0;
+		tracee->ptrace_opts          = (request == PTRACE_SYSCALL) ? 1 : 0;
+		tracee->ptrace_stop          = 0;
+		tracee->ptrace_stop_reported = 0;
 		if (tracee->ptrace_in_syscall) {
 			tracee->ptrace_in_syscall = 0;
 			task_wake(tracee);
@@ -139,7 +143,6 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	}
 
 	case PTRACE_PEEKDATA: {
-		/* Temporarily switch to tracee's address space */
 		uint64_t val = 0;
 		arch_vm_switch((uint64_t)tracee->vm->root);
 		val = *(volatile uint64_t *)addr;

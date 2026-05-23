@@ -103,6 +103,13 @@ typedef struct process {
 
 	/* ── signal alternate stack ───────────────── */
 	stack_t         altstack;
+
+	/* ── ptrace ──────────────────────────────── */
+	pid_t           tracer;
+	int             ptrace_opts;          /* 0=none, 1=trace syscalls */
+	int             ptrace_stop;          /* 0=running, 1=entry stop, 2=exit stop */
+	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
+	int             ptrace_in_syscall;    /* currently sleeping in ptrace_do_stop */
 } process_t;
 
 /* scheduler */
