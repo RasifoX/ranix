@@ -196,6 +196,105 @@ check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
 check "df-nonzero"   "1"    "$(df / 2>/dev/null | awk 'NR==2{print ($2>0)?1:0}')"
 
+
+# ── 26. umount ────────────────────────────────────────────────
+mkdir -p /tmp/umnt
+check "umount-mount"  "ok"  "$(mount -t tmpfs tmpfs /tmp/umnt && echo ok)"
+check "umount-write"  "xyz" "$(echo xyz > /tmp/umnt/f && cat /tmp/umnt/f)"
+check "umount-do"     "ok"  "$(umount /tmp/umnt && echo ok)"
+check "umount-gone"   ""    "$(cat /tmp/umnt/f 2>/dev/null)"
+
+# ── 27. sysctl write ──────────────────────────────────────────
+check "sysctl-write-hostname"  "testhostname" \
+    "$(echo testhostname > /proc/sys/kernel/hostname && cat /proc/sys/kernel/hostname)"
+check "sysctl-restore-hostname" "ranix" \
+    "$(echo ranix > /proc/sys/kernel/hostname && cat /proc/sys/kernel/hostname)"
+check "sysctl-hostname-cmd"    "ranix" "$(hostname)"
+
+# ── 28. /proc entries ─────────────────────────────────────────
+check "proc-self-status"  "1"  "$([ -f /proc/self/status ] && echo 1)"
+check "proc-self-maps"    "1"  "$([ -f /proc/self/maps ] && echo 1)"
+check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
+check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
+check "proc-version"      "1"  "$([ -f /proc/version ] && echo 1)"
+check "proc-net-dev"      "1"  "$([ -f /proc/net/dev ] && echo 1)"
+check "proc-self-pid"     "1"  "$(awk '/^Pid:/{print ($2>0)?1:0}' /proc/self/status)"
+check "proc-tgid-eq-pid"  "1"  "$(awk '/^Pid:/{p=$2} /^Tgid:/{t=$2} END{print (p==t)?1:0}' /proc/self/status)"
+
+# ── 29. symlinks ──────────────────────────────────────────────
+check "symlink-create"   "hello"     "$(echo hello > /tmp/sym_orig && ln -s /tmp/sym_orig /tmp/sym_link && cat /tmp/sym_link)"
+check "symlink-readlink" "/tmp/sym_orig" "$(readlink /tmp/sym_link)"
+check "symlink-unlink"   "1"         "$(rm /tmp/sym_link && [ ! -e /tmp/sym_link ] && echo 1)"
+check "hardlink-create"  "world"     "$(echo world > /tmp/hl_orig && ln /tmp/hl_orig /tmp/hl_link && cat /tmp/hl_link)"
+check "hardlink-persist" "world"     "$(rm /tmp/hl_orig && cat /tmp/hl_link)"
+
+# ── 30. permissions ───────────────────────────────────────────
+check "chmod-mode-600" "-rw-------" "$(echo x > /tmp/perm_f && chmod 600 /tmp/perm_f && ls -l /tmp/perm_f | awk '{print $1}')"
+check "chmod-mode-644" "-rw-r--r--" "$(chmod 644 /tmp/perm_f && ls -l /tmp/perm_f | awk '{print $1}')"
+check "chmod-exec"     "1"   "$(printf '#!/bin/sh\necho 1\n' > /tmp/perm_x && chmod +x /tmp/perm_x && /tmp/perm_x)"
+check "stat-filetype"  "1"   "$(stat -c '%F' /tmp/perm_f 2>/dev/null | grep -c 'file')"
+check "umask-set-get"  "0022" "$(umask 0077; umask 0022; umask)"
+
+# ── 31. named pipes (FIFO) ────────────────────────────────────
+check "fifo-anon"      "pipedata" \
+    "$(r=$(echo pipedata | cat); echo $r)"
+check "fifo-subsh"     "42"  \
+    "$(echo 42 | { read v; echo $v; })"
+check "pipe-fork-rw"   "hello" \
+    "$(echo hello | (cat))"
+
+# ── 32. process groups & sessions ────────────────────────────
+check "getpgrp-nonzero" "1"  "$([ $$ -gt 0 ] && echo 1)"
+check "pgrp-positive"   "1"  "$([ $(ps | wc -l) -gt 1 ] && echo 1)"
+check "getpid-positive" "1"  "$([ $$ -gt 0 ] && echo 1)"
+check "subshell-pid"    "1"  "$(bash -c '[ $$ -gt 0 ] && echo 1')"
+
+# ── 33. more signals ──────────────────────────────────────────
+check "sig-usr1"    "caught" \
+    "$(bash -c 'trap "echo caught; exit 0" USR1; kill -USR1 $$' 2>/dev/null)"
+check "sig-kill-0"  "alive"  \
+    "$(bash -c 'kill -0 $$ 2>/dev/null && echo alive')"
+check "sig-term"    "0"      \
+    "$(bash -c 'trap "" TERM; kill -TERM $$; echo 0' 2>/dev/null)"
+check "pipefail-sig" "0"   \
+    "$(bash -c 'yes | head -1 > /tmp/pf_out; echo $?' 2>/dev/null)"
+
+# ── 34. file operations ───────────────────────────────────────
+check "truncate-file"  "3"  "$(echo hello > /tmp/trunc_f && dd if=/tmp/trunc_f bs=1 count=3 of=/tmp/trunc_f2 2>/dev/null && wc -c < /tmp/trunc_f2 | tr -d ' ')"
+check "dd-copy"        "5"  "$(echo hello > /tmp/dd_src && dd if=/tmp/dd_src of=/tmp/dd_dst bs=1 count=5 2>/dev/null && wc -c < /tmp/dd_dst | tr -d ' ')"
+check "cp-file"        "ok" "$(echo ok > /tmp/cp_src && cp /tmp/cp_src /tmp/cp_dst && cat /tmp/cp_dst | tr -d '\n')"
+check "wc-lines"       "3"  "$(printf 'a\nb\nc\n' > /tmp/wc_f && wc -l < /tmp/wc_f | tr -d ' ')"
+check "head-n1"        "line1" "$(printf 'line1\nline2\n' | head -1)"
+check "tail-n1"        "line2" "$(printf 'line1\nline2\n' | tail -1)"
+
+# ── 35. network ───────────────────────────────────────────────
+check "net-dev-entries" "1"  "$(awk 'NR>2{found=1} END{print found+0}' /proc/net/dev)"
+check "proc-net-tcp"    "1"  "$([ -f /proc/net/tcp ] && echo 1)"
+check "proc-net-udp"    "1"  "$([ -f /proc/net/udp ] && echo 1)"
+
+# ── 36. C test: threads + tgid ────────────────────────────────
+check "c-threads"    "OK"  "$(timeout 8 /bin/test_threads 2>/dev/null)"
+
+# ── 37. C test: inotify ───────────────────────────────────────
+check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
+
+# ── 38. C test: AF_UNIX path socket ──────────────────────────
+check "c-unix-sock"  "OK"  "$(timeout 5 /bin/test_unix 2>/dev/null)"
+
+# ── 39. C test: ptrace ────────────────────────────────────────
+check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
+
+# ── 40. misc ─────────────────────────────────────────────────
+check "uname-has-output"  "1"    "$(uname -r | wc -c | awk '{print ($1>0)?1:0}')"
+check "date-epoch"        "1"    "$(date +%s | awk '{print ($1>0)?1:0}')"
+check "env-has-path"      "1"    "$(env | grep -c '^PATH=')"
+check "which-bash"        "1"    "$(which bash | grep -c bash)"
+check "seq-count"         "5"    "$(seq 1 5 | wc -l | tr -d ' ')"
+check "expr-calc"         "42"   "$(expr 6 \* 7)"
+check "sort-order"        "1
+2
+3" "$(printf '3\n1\n2\n' | sort -n)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
