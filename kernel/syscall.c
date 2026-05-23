@@ -162,8 +162,7 @@ static long sys_open(const char *path, int flags, mode_t mode)
 	char kpath[PROC_NAME_MAX];
 	int r = resolve_path(kpath, AT_FDCWD, path);
 	if (r) return r;
-	long fd = vfs_open(kpath, flags, mode);
-	return fd < 0 ? -2 : fd;
+	return vfs_open(kpath, flags, mode);
 }
 
 static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
@@ -299,7 +298,8 @@ static long sys_utimensat(int dirfd, const char *path, const void *times, int fl
 
 static long sys_getpid(void)
 {
-	return (long)task_current()->pid;
+	process_t *p = task_current();
+	return (long)(p->tgid ? p->tgid : p->pid);
 }
 
 static long sys_brk(uint64_t addr)
@@ -336,7 +336,6 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	uint64_t va;
 	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	else { va = p->mmap_next; p->mmap_next += len; }
-
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
@@ -917,7 +916,17 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
 		uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
-		if (pa) vm_map(p->vm, va, pa, vmflags);
+		if (pa) {
+			if (prot == 0)
+				vm_unmap(p->vm, va);
+			else
+				vm_map(p->vm, va, pa, vmflags);
+		} else if (prot != 0) {
+			void *pg = buddy_alloc(0);
+			if (!pg) return -12;
+			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+			vm_map(p->vm, va, (uint64_t)pg, vmflags);
+		}
 	}
 	return 0;
 }
@@ -1241,7 +1250,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MKDIR:   ret = sys_mkdir((const char*)arg0, (mode_t)arg1); break;
 	case SYS_ARCH_RMDIR:   ret = sys_rmdir((const char*)arg0); break;
 	case SYS_ARCH_UNLINK:  ret = sys_unlink((const char*)arg0); break;
-	case SYS_ARCH_LINK:    ret = sys_link((const char*)arg0, (const char*)arg1); break;
+	case SYS_ARCH_LINK:    ret = sys_linkat(AT_FDCWD, (const char*)arg0, AT_FDCWD, (const char*)arg1, 0); break;
 	case SYS_ARCH_SYMLINK: ret = sys_symlink((const char*)arg0, (const char*)arg1); break;
 	case SYS_ARCH_READLINK: ret = sys_readlinkat_vfs(AT_FDCWD, (const char*)arg0, (char*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_RENAME:  ret = sys_rename((const char*)arg0, (const char*)arg1); break;
@@ -1288,6 +1297,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MLOCK2:      ret = sys_mlock2((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_SYNC:        ret = sys_sync(); break;
 	case SYS_ARCH_MOUNT:       ret = sys_mount((const char*)arg0, (const char*)arg1, (const char*)arg2, (unsigned long)arg3, (const void*)arg4); break;
+	case SYS_ARCH_UMOUNT2:     ret = sys_umount2((const char*)arg0, (int)arg1); break;
 	case SYS_ARCH_SETHOSTNAME: ret = sys_sethostname((const char*)arg0, (size_t)arg1); break;
 	case SYS_ARCH_TKILL:       ret = sys_tkill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_CLOCK_NANOSLEEP: ret = sys_clock_nanosleep((int)arg0, (int)arg1, (linux_timespec_t*)arg2, (linux_timespec_t*)arg3); break;
@@ -1307,9 +1317,9 @@ void syscall_handle(arch_context_t *ctx)
 #if defined(__x86_64__)
 	case SYS_ARCH_INOTIFY_INIT:
 #endif
-	case SYS_ARCH_INOTIFY_INIT1:   ret = sys_eventfd2(0, 0); break; /* stub: never readable */
-	case SYS_ARCH_INOTIFY_ADD_WATCH: ret = 1; break;  /* stub: wd=1 */
-	case SYS_ARCH_INOTIFY_RM_WATCH:  ret = 0; break;
+	case SYS_ARCH_INOTIFY_INIT1:      ret = sys_inotify_init1((int)arg0); break;
+	case SYS_ARCH_INOTIFY_ADD_WATCH:  ret = sys_inotify_add_watch((int)arg0, (const char*)arg1, (uint32_t)arg2); break;
+	case SYS_ARCH_INOTIFY_RM_WATCH:   ret = sys_inotify_rm_watch((int)arg0, (int)arg1); break;
 	case SYS_ARCH_SIGNALFD4:   ret = sys_signalfd4((int)arg0, (const uint64_t*)arg1, (size_t)arg2, (int)arg3); break;
 	case SYS_ARCH_MEMFD_CREATE: ret = sys_memfd_create((const char*)arg0, (unsigned int)arg1); break;
 	/* ── arch-specific ───────────────────────────────────────── */
