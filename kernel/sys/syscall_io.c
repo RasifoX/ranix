@@ -355,18 +355,38 @@ static long sys_symlinkat(const char *t, int d, const char *lp)
 	if (r) return r;
 	return vfs_symlink(kt, klp);
 }
-static long sys_link(const char *o, const char *n) { (void)o; (void)n; return -1; }
 static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
 {
-	(void)od; (void)nd; (void)f; return sys_link(o, n);
+	(void)od; (void)nd; (void)f;
+	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
+	if (strncpy_from_user(ko, o, PROC_NAME_MAX) < 0) return -14;
+	if (strncpy_from_user(kn, n, PROC_NAME_MAX) < 0) return -14;
+	return vfs_link(ko, kn);
 }
 
-/* ── chmod / chown (stubs) ───────────────────────────────── */
+/* ── chmod / chown ───────────────────────────────────────── */
 
-static long sys_chmod(const char *p, mode_t m)  { (void)p; (void)m; return 0; }
-static long sys_fchmod(int fd, mode_t m)         { (void)fd; (void)m; return 0; }
+static long sys_chmod(const char *p, mode_t m)
+{
+	char kp[PROC_NAME_MAX];
+	if (strncpy_from_user(kp, p, PROC_NAME_MAX) < 0) return -14;
+	return vfs_chmod(kp, m);
+}
+static long sys_fchmod(int fd, mode_t m)
+{
+	process_t *proc = task_current();
+	vfs_file_t *f = fd_get(proc->fds, fd);
+	if (!f || !f->inode) return -9;
+	f->inode->mode = (f->inode->mode & 0xF000) | (m & 07777);
+	return 0;
+}
 static long sys_fchmodat(int d, const char *p, mode_t m, int f)
-{ (void)d; (void)p; (void)m; (void)f; return 0; }
+{
+	(void)d; (void)f;
+	char kp[PROC_NAME_MAX];
+	if (strncpy_from_user(kp, p, PROC_NAME_MAX) < 0) return -14;
+	return vfs_chmod(kp, m);
+}
 static long sys_chown(const char *p, uid_t u, gid_t g)  { (void)p; (void)u; (void)g; return 0; }
 static long sys_fchown(int fd, uid_t u, gid_t g)         { (void)fd; (void)u; (void)g; return 0; }
 static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int f)

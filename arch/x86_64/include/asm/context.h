@@ -205,6 +205,7 @@ typedef struct {
 #define SYS_ARCH_MUNLOCK         150
 #define SYS_ARCH_SYNC            162
 #define SYS_ARCH_MOUNT           165
+#define SYS_ARCH_UMOUNT2         166
 #define SYS_ARCH_SETHOSTNAME     170
 #define SYS_ARCH_TKILL           200
 #define SYS_ARCH_TIME_SYSCALL    201
@@ -238,5 +239,7 @@ typedef struct {
 #define SYS_ARCH_LISTXATTR       194
 #define SYS_ARCH_LLISTXATTR      195
 #define SYS_ARCH_REMOVEXATTR     197
+
+#define SYS_ARCH_PTRACE          101
 
 #endif

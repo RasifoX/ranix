@@ -66,6 +66,7 @@ typedef struct {
     int               (*readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
     int               (*symlink)(struct vfs_inode *dir, const char *name, const char *target);
     int               (*truncate)(struct vfs_inode *inode, off_t len);
+    int               (*link)(struct vfs_inode *dir, const char *name, struct vfs_inode *target);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
@@ -121,6 +122,7 @@ typedef struct vfs_mount {
     vfs_dentry_t      *root;
     const char        *fstype;
     void              *priv;
+    vfs_inode_t       *orig_inode;
     struct vfs_mount  *next;
 } vfs_mount_t;
 
@@ -133,6 +135,7 @@ typedef struct {
     int          cap;
     uint64_t    *open_bm;
     uint64_t    *cloexec;
+    int          refcount;  /* number of threads sharing this table */
 } fd_table_t;
 
 /* ── VMA (virtual memory area) ───────────────────────────── */
@@ -153,6 +156,7 @@ typedef struct vma {
 /* ── VFS interface ───────────────────────────────────────── */
 void       vfs_init(void);
 int        vfs_mount(const char *path, const char *fstype, void *data);
+int        vfs_umount(const char *path);
 int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_close(int fd);
 ssize_t    vfs_read(int fd, void *buf, size_t len);
@@ -166,11 +170,15 @@ int        vfs_symlink(const char *target, const char *linkpath);
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
+int        vfs_chmod(const char *path, mode_t mode);
+int        vfs_link(const char *oldpath, const char *newpath);
 
 /* fd_table helpers */
 fd_table_t *fd_table_create(void);
 fd_table_t *fd_table_copy(fd_table_t *old);
-void        fd_table_destroy(fd_table_t *t);
+fd_table_t *fd_table_get(fd_table_t *t);   /* increment refcount, return t */
+void        fd_table_put(fd_table_t *t);    /* decrement refcount; destroy when 0 */
+void        fd_table_destroy(fd_table_t *t); /* unconditional destroy (legacy) */
 int         fd_alloc(fd_table_t *t, vfs_file_t *f);
 int         fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd);
 int         fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start);
@@ -179,6 +187,10 @@ vfs_file_t *fd_get(fd_table_t *t, int fd);
 
 static inline int fd_is_cloexec(fd_table_t *t, int fd)
 { return fd >= 0 && fd < t->cap && !!(t->cloexec[fd/64] & (1ULL << (fd%64))); }
+
+/* inotify VFS hook — set by inotify subsystem at first init */
+typedef void (*vfs_inotify_fn_t)(const char *path, uint32_t mask, const char *name);
+extern vfs_inotify_fn_t vfs_inotify_hook;
 
 static inline void fd_set_cloexec(fd_table_t *t, int fd, int v)
 {
