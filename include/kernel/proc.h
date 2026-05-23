@@ -75,6 +75,7 @@ typedef struct process {
 	uint64_t        brk;
 	uint64_t        mmap_next;
 	pid_t           ppid;
+	pid_t           tgid;          /* thread group id (== pid for main thread) */
 	pid_t           pgrp;
 	pid_t           sid;           /* session id */
 	uid_t           uid;
