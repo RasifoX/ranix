@@ -252,6 +252,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 		return -1;
 	}
 	p->pid  = pid;
+	p->tgid = pid;
 	p->pgrp = pid;
 	p->next = proctab[0]->next;
 	proctab[0]->next = p;
@@ -361,6 +362,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 			goto fail;
 		}
 		p->pid  = pid;
+		p->tgid = pid;
 		p->pgrp = pid;
 		p->next = proctab[0]->next;
 		proctab[0]->next = p;
@@ -448,6 +450,7 @@ pid_t proc_fork(void)
 			goto fail_early;
 		}
 		child->pid  = pid;
+		child->tgid = pid;
 		child->pgrp = parent->pgrp;
 		child->next = proctab[0]->next;
 		proctab[0]->next = child;
@@ -511,7 +514,8 @@ pid_t proc_vfork(void)
 		buddy_free(VIRT_TO_PHYS(child), 0);
 		return -1;
 	}
-	child->pid = pid;
+	child->pid  = pid;
+	child->tgid = pid;
 	child->next = proctab[0]->next;
 	proctab[0]->next = child;
 	runqueue_add(child);
@@ -568,15 +572,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->vm = vm_get(parent->vm);
 	if (!child->vm) goto fail;
 
-	/* Threads share the fd table */
-	child->fds = parent->fds;
-	/* bump refcounts for each open fd so close() works correctly */
-	if (child->fds) {
-		for (int i = 0; i < FD_MAX; i++) {
-			if (child->fds->files[i])
-				child->fds->files[i]->refcount++;
-		}
-	}
+	/* Threads share the fd table — bump the table's refcount */
+	child->fds = fd_table_get(parent->fds);
 
 	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 	child->umask = parent->umask;
@@ -619,7 +616,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 		spin_unlock_irq(&sched_lock, f);
 		goto fail;
 	}
-	child->pid = pid;
+	child->pid  = pid;
+	child->tgid = parent->tgid;
 	child->next      = proctab[0]->next;
 	proctab[0]->next = child;
 	runqueue_add(child);
@@ -715,7 +713,7 @@ void task_exit(void)
 	spin_unlock_irq(&sched_lock, f);
 
 	/* Free resources — process is still schedulable during this. */
-	if (dying_fds) fd_table_destroy(dying_fds);
+	if (dying_fds) fd_table_put(dying_fds);
 	if (dying_vm) {
 		vm_activate();
 		vm_destroy(dying_vm);
