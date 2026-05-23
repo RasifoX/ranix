@@ -378,6 +378,233 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
     return fd;
 }
 
+/* ── inotify ─────────────────────────────────────────────── */
+
+#define IN_ACCESS        0x00000001u
+#define IN_MODIFY        0x00000002u
+#define IN_CREATE        0x00000100u
+#define IN_DELETE        0x00000200u
+#define IN_MOVED_FROM    0x00000040u
+#define IN_MOVED_TO      0x00000080u
+#define IN_ALL_EVENTS    0x00000ffffu
+
+#define INOT_MAX         8    /* max inotify instances */
+#define INOT_WATCH_MAX   32
+#define INOT_EVT_MAX     64
+
+typedef struct {
+    int      wd;
+    char     path[256];
+    uint32_t mask;
+} inot_watch_t;
+
+typedef struct {
+    int        wd;
+    uint32_t   mask;
+    char       name[256];
+} inot_evt_t;
+
+typedef struct {
+    int          active;
+    int          wd_next;
+    inot_watch_t watches[INOT_WATCH_MAX];
+    spinlock_t   lock;
+    wait_queue_t rd_wait;
+    inot_evt_t   evts[INOT_EVT_MAX];
+    int          evt_head;
+    int          evt_tail;
+} inotify_t;
+
+static inotify_t inot_pool[INOT_MAX];
+static spinlock_t inot_pool_lock = SPINLOCK_INIT;
+
+static void inotify_deliver_event(const char *path, uint32_t mask, const char *name)
+{
+    uint64_t pl = spin_lock_irq(&inot_pool_lock);
+    for (int i = 0; i < INOT_MAX; i++) {
+        inotify_t *inst = &inot_pool[i];
+        if (!inst->active) continue;
+        uint64_t f = spin_lock_irq(&inst->lock);
+        for (int w = 0; w < INOT_WATCH_MAX; w++) {
+            if (!inst->watches[w].wd) continue;
+            if (!(inst->watches[w].mask & mask)) continue;
+            if (strncmp(inst->watches[w].path, path, 255) != 0) continue;
+            int next = (inst->evt_tail + 1) % INOT_EVT_MAX;
+            if (next != inst->evt_head) { /* queue not full */
+                inst->evts[inst->evt_tail].wd   = inst->watches[w].wd;
+                inst->evts[inst->evt_tail].mask  = mask;
+                if (name) strncpy(inst->evts[inst->evt_tail].name, name, 255);
+                else      inst->evts[inst->evt_tail].name[0] = '\0';
+                inst->evt_tail = next;
+                wake_up(&inst->rd_wait);
+            }
+        }
+        spin_unlock_irq(&inst->lock, f);
+    }
+    spin_unlock_irq(&inot_pool_lock, pl);
+}
+
+static ssize_t inotify_read_vfs(vfs_file_t *file, void *buf, size_t len)
+{
+    inotify_t *inst = (inotify_t *)file->inode->priv;
+    if (!inst) return -9;
+
+    while (1) {
+        uint64_t f = spin_lock_irq(&inst->lock);
+        if (inst->evt_head != inst->evt_tail) {
+            inot_evt_t *e = &inst->evts[inst->evt_head];
+            /* format: struct inotify_event { int wd; u32 mask; u32 cookie; u32 len; char name[]; } */
+            uint32_t namelen = e->name[0] ? (uint32_t)(strlen(e->name) + 1) : 0;
+            /* align namelen to 4 */
+            uint32_t namelen_aligned = (namelen + 3) & ~3u;
+            size_t evsize = 16 + namelen_aligned; /* 4+4+4+4 + name */
+            if (len < evsize) { spin_unlock_irq(&inst->lock, f); return -22; }
+            uint8_t *p = (uint8_t *)buf;
+            copy_to_user(p,      &e->wd,   4);
+            copy_to_user(p +  4, &e->mask, 4);
+            uint32_t zero = 0;
+            copy_to_user(p +  8, &zero, 4); /* cookie */
+            copy_to_user(p + 12, &namelen_aligned, 4);
+            if (namelen_aligned > 0) {
+                char nbuf[256]; memset(nbuf, 0, namelen_aligned < 256 ? namelen_aligned : 256);
+                memcpy(nbuf, e->name, namelen < 256 ? namelen : 255);
+                copy_to_user(p + 16, nbuf, namelen_aligned < 256 ? namelen_aligned : 255);
+            }
+            inst->evt_head = (inst->evt_head + 1) % INOT_EVT_MAX;
+            spin_unlock_irq(&inst->lock, f);
+            return (ssize_t)evsize;
+        }
+        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&inst->lock, f); return -11; }
+        sleep_on_locked(&inst->rd_wait, &inst->lock, f);
+        if (task_current()->sig_pending & ~task_current()->sig_mask) return -4;
+    }
+}
+
+static int inotify_poll_vfs(vfs_file_t *file)
+{
+    inotify_t *inst = (inotify_t *)file->inode->priv;
+    if (!inst) return 0;
+    uint64_t f = spin_lock_irq(&inst->lock);
+    int r = (inst->evt_head != inst->evt_tail) ? 1 : 0;
+    spin_unlock_irq(&inst->lock, f);
+    return r;
+}
+
+static int inotify_close_vfs(vfs_file_t *file)
+{
+    inotify_t *inst = (inotify_t *)file->inode->priv;
+    if (inst) {
+        uint64_t f = spin_lock_irq(&inot_pool_lock);
+        inst->active = 0;
+        spin_unlock_irq(&inot_pool_lock, f);
+    }
+    kfree(file->inode);
+    return 0;
+}
+
+static vfs_fops_t inotify_fops = {
+    .read  = inotify_read_vfs,
+    .poll  = inotify_poll_vfs,
+    .close = inotify_close_vfs,
+};
+
+static long sys_inotify_init1(int flags)
+{
+    /* register the VFS hook on first call */
+    extern vfs_inotify_fn_t vfs_inotify_hook;
+    if (!vfs_inotify_hook) vfs_inotify_hook = inotify_deliver_event;
+
+    uint64_t pl = spin_lock_irq(&inot_pool_lock);
+    inotify_t *inst = NULL;
+    for (int i = 0; i < INOT_MAX; i++) {
+        if (!inot_pool[i].active) { inst = &inot_pool[i]; break; }
+    }
+    if (inst) {
+        memset(inst, 0, sizeof(*inst));
+        inst->active  = 1;
+        inst->wd_next = 1;
+        inst->lock    = (spinlock_t)SPINLOCK_INIT;
+    }
+    spin_unlock_irq(&inot_pool_lock, pl);
+    if (!inst) return -24; /* EMFILE */
+
+    vfs_inode_t *in = kmalloc(sizeof(*in));
+    if (!in) { inst->active = 0; return -12; }
+    memset(in, 0, sizeof(*in));
+    in->fops     = &inotify_fops;
+    in->priv     = inst;
+    in->refcount = 1;
+
+    vfs_file_t *f = kmalloc(sizeof(*f));
+    if (!f) { kfree(in); inst->active = 0; return -12; }
+    memset(f, 0, sizeof(*f));
+    f->inode    = in;
+    f->refcount = 1;
+    f->flags    = flags & O_NONBLOCK;
+
+    process_t *p = task_current();
+    int fd = fd_alloc(p->fds, f);
+    if (fd < 0) { kfree(f); kfree(in); inst->active = 0; return -12; }
+    if (flags & O_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
+    return fd;
+}
+
+static long sys_inotify_add_watch(int ifd, const char *upath, uint32_t mask)
+{
+    process_t  *p = task_current();
+    vfs_file_t *ff = fd_get(p->fds, ifd);
+    if (!ff || !ff->inode || ff->inode->fops != &inotify_fops) return -9;
+    inotify_t *inst = (inotify_t *)ff->inode->priv;
+    if (!inst) return -9;
+
+    char kpath[256];
+    if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0) return -14;
+
+    uint64_t f = spin_lock_irq(&inst->lock);
+    /* check if path already watched — update mask */
+    for (int i = 0; i < INOT_WATCH_MAX; i++) {
+        if (inst->watches[i].wd && strcmp(inst->watches[i].path, kpath) == 0) {
+            inst->watches[i].mask = mask;
+            int wd = inst->watches[i].wd;
+            spin_unlock_irq(&inst->lock, f);
+            return wd;
+        }
+    }
+    /* find free slot */
+    int slot = -1;
+    for (int i = 0; i < INOT_WATCH_MAX; i++) {
+        if (!inst->watches[i].wd) { slot = i; break; }
+    }
+    if (slot < 0) { spin_unlock_irq(&inst->lock, f); return -28; }
+    int wd = inst->wd_next++;
+    inst->watches[slot].wd   = wd;
+    inst->watches[slot].mask = mask;
+    strncpy(inst->watches[slot].path, kpath, 255);
+    inst->watches[slot].path[255] = '\0';
+    spin_unlock_irq(&inst->lock, f);
+    return wd;
+}
+
+static long sys_inotify_rm_watch(int ifd, int wd)
+{
+    process_t  *p = task_current();
+    vfs_file_t *ff = fd_get(p->fds, ifd);
+    if (!ff || !ff->inode || ff->inode->fops != &inotify_fops) return -9;
+    inotify_t *inst = (inotify_t *)ff->inode->priv;
+    if (!inst) return -9;
+
+    uint64_t f = spin_lock_irq(&inst->lock);
+    for (int i = 0; i < INOT_WATCH_MAX; i++) {
+        if (inst->watches[i].wd == wd) {
+            inst->watches[i].wd = 0;
+            spin_unlock_irq(&inst->lock, f);
+            return 0;
+        }
+    }
+    spin_unlock_irq(&inst->lock, f);
+    return -22;
+}
+
 /* ── signalfd (stub: returns fd that is never readable) ─── */
 
 static long sys_signalfd4(int fd, const uint64_t *mask, size_t sigsetsize, int flags)

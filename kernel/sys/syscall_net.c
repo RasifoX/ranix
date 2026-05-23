@@ -1,11 +1,14 @@
 /* ── socket syscalls ─────────────────────────────────────── */
 
+static void unix_reg_remove(socket_t *s); /* forward */
+
 static int sock_close_vfs(vfs_file_t *file)
 {
     socket_t    *s  = (socket_t *)file->inode->priv;
     vfs_inode_t *in = file->inode;
 
     if (s->domain == AF_UNIX) {
+        if (s->unix_path[0]) unix_reg_remove(s);
         socket_t *peer = s->unix_peer;
         s->unix_peer = NULL;
         if (peer && peer->unix_peer == s) {
@@ -153,6 +156,51 @@ static int sock_to_fd(socket_t *s)
     return fd;
 }
 
+/* ── AF_UNIX path registry ───────────────────────────────── */
+
+#define UNIX_REG_MAX 64
+static struct { char path[108]; socket_t *sock; } unix_reg[UNIX_REG_MAX];
+static spinlock_t unix_reg_lock = SPINLOCK_INIT;
+
+static socket_t *unix_reg_find(const char *path)
+{
+    uint64_t f = spin_lock_irq(&unix_reg_lock);
+    socket_t *found = NULL;
+    for (int i = 0; i < UNIX_REG_MAX; i++) {
+        if (unix_reg[i].sock && strcmp(unix_reg[i].path, path) == 0) {
+            found = unix_reg[i].sock;
+            break;
+        }
+    }
+    spin_unlock_irq(&unix_reg_lock, f);
+    return found;
+}
+
+static int unix_reg_add(const char *path, socket_t *s)
+{
+    uint64_t f = spin_lock_irq(&unix_reg_lock);
+    int slot = -1;
+    for (int i = 0; i < UNIX_REG_MAX; i++) {
+        if (!unix_reg[i].sock) { slot = i; break; }
+    }
+    if (slot >= 0) {
+        strncpy(unix_reg[slot].path, path, 107);
+        unix_reg[slot].path[107] = '\0';
+        unix_reg[slot].sock = s;
+    }
+    spin_unlock_irq(&unix_reg_lock, f);
+    return slot >= 0 ? 0 : -28; /* ENOSPC */
+}
+
+static void unix_reg_remove(socket_t *s)
+{
+    uint64_t f = spin_lock_irq(&unix_reg_lock);
+    for (int i = 0; i < UNIX_REG_MAX; i++) {
+        if (unix_reg[i].sock == s) { unix_reg[i].sock = NULL; unix_reg[i].path[0] = '\0'; break; }
+    }
+    spin_unlock_irq(&unix_reg_lock, f);
+}
+
 static long sys_socket(int domain, int type, int proto)
 {
     if (domain != AF_INET && domain != AF_UNIX) return -97;
@@ -171,6 +219,20 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
     (void)addrlen;
     socket_t *s = fd_to_sock(fd);
     if (!s) return -9;
+
+    uint16_t family = 0;
+    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -14;
+
+    if (family == AF_UNIX) {
+        sockaddr_un_t su;
+        if (copy_from_user(&su, uaddr, sizeof(su)) != 0) return -14;
+        su.sun_path[107] = '\0';
+        if (unix_reg_find(su.sun_path)) return -98; /* EADDRINUSE */
+        strncpy(s->unix_path, su.sun_path, 107);
+        s->unix_path[107] = '\0';
+        return unix_reg_add(s->unix_path, s);
+    }
+
     sockaddr_in_t sa;
     if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
     s->local_ip   = ntohl(sa.sin_addr);
@@ -184,6 +246,39 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     (void)addrlen;
     socket_t *s = fd_to_sock(fd);
     if (!s) return -9;
+
+    uint16_t family = 0;
+    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -14;
+
+    if (family == AF_UNIX) {
+        sockaddr_un_t su;
+        if (copy_from_user(&su, uaddr, sizeof(su)) != 0) return -14;
+        su.sun_path[107] = '\0';
+        socket_t *ls = unix_reg_find(su.sun_path);
+        if (!ls) return -111; /* ECONNREFUSED */
+        if (ls->tcp_state != TCP_LISTEN) return -111;
+
+        /* allocate server-side peer socket */
+        socket_t *peer = sock_alloc(AF_UNIX, s->type, 0);
+        if (!peer) return -12;
+        peer->unix_peer = s;
+        s->unix_peer    = peer;
+        peer->tcp_state = TCP_ESTABLISHED;
+        s->tcp_state    = TCP_ESTABLISHED;
+
+        /* enqueue peer onto listener's accept queue */
+        uint64_t f = spin_lock_irq(&ls->recv_lock);
+        if (!ls->accept_head) ls->accept_head = peer;
+        else                  ls->accept_tail->accept_head = peer;
+        ls->accept_tail = peer;
+        peer->accept_head = NULL;
+        process_t *w = ls->accept_waiter;
+        ls->accept_waiter = NULL;
+        spin_unlock_irq(&ls->recv_lock, f);
+        if (w) task_wake(w);
+        return 0;
+    }
+
     sockaddr_in_t sa;
     if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
     s->remote_ip   = ntohl(sa.sin_addr);
@@ -344,6 +439,11 @@ static long sys_listen(int fd, int bl)
     socket_t *s = fd_to_sock(fd);
     if (!s) return -9;
     if (s->type != SOCK_STREAM) return -95; /* EOPNOTSUPP */
+    if (s->domain == AF_UNIX) {
+        s->backlog   = bl;
+        s->tcp_state = TCP_LISTEN;
+        return 0;
+    }
     return tcp_listen(s, bl);
 }
 
@@ -370,13 +470,21 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
 
     /* fill peer addr if requested */
     if (ua) {
-        sockaddr_in_t sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_port   = htons(ns->remote_port);
-        sa.sin_addr   = htonl(ns->remote_ip);
-        copy_to_user(ua, &sa, sizeof(sa));
-        if (al) { uint32_t l = sizeof(sa); copy_to_user(al, &l, 4); }
+        if (ls->domain == AF_UNIX) {
+            sockaddr_un_t su;
+            memset(&su, 0, sizeof(su));
+            su.sun_family = AF_UNIX;
+            copy_to_user(ua, &su, sizeof(su));
+            if (al) { uint32_t l = sizeof(su); copy_to_user(al, &l, 4); }
+        } else {
+            sockaddr_in_t sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port   = htons(ns->remote_port);
+            sa.sin_addr   = htonl(ns->remote_ip);
+            copy_to_user(ua, &sa, sizeof(sa));
+            if (al) { uint32_t l = sizeof(sa); copy_to_user(al, &l, 4); }
+        }
     }
 
     int nfd = sock_to_fd(ns);

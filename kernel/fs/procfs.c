@@ -10,6 +10,9 @@
 #include <kernel/sync.h>
 #include <kernel/net/socket.h>
 #include <kernel/net/net.h>
+#include <kernel/hal.h>
+
+extern char ranix_hostname[65];
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -347,7 +350,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
-	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"ranix\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,ranix_hostname); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"(none)\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_OVERCOMMIT:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_NGROUPS_MAX:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -377,8 +380,30 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	return ret;
 }
 
+static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	procfs_inode_priv_t *pr = f->inode->priv;
+	if (!pr) return -1;
+
+	if (pr->type == PROC_F_SYS_HOSTNAME) {
+		if (len == 0 || len >= 65) return -22;
+		char tmp[65];
+		if (copy_from_user(tmp, buf, len) != 0) return -14;
+		size_t n = len;
+		if (n > 0 && tmp[n-1] == '\n') n--;
+		if (n >= 65) return -22;
+		if (n > 0) {
+			memcpy(ranix_hostname, tmp, n);
+			ranix_hostname[n] = '\0';
+		}
+		return (ssize_t)len;
+	}
+	return -1;
+}
+
 static vfs_fops_t procfs_fops = {
-	.read = procfs_file_read,
+	.read  = procfs_file_read,
+	.write = procfs_sysctl_write,
 };
 
 static vfs_fops_t procfs_dir_fops = { 0 };
@@ -818,10 +843,13 @@ static vfs_inode_t *procfs_sysdir_inode(void);
 static vfs_inode_t *procfs_syskerneldir_inode(void);
 static vfs_inode_t *procfs_sysnetcoredir_inode(void);
 static vfs_inode_t *procfs_sysfsdir_inode(void);
-/* generic sysfile inode (read-only value) */
+/* generic sysfile inode */
 static vfs_inode_t *procfs_sysfile_inode(int type)
 {
-	return procfs_inode_file(-1, type);
+	vfs_inode_t *in = procfs_inode_file(-1, type);
+	if (in && type == PROC_F_SYS_HOSTNAME)
+		in->mode = S_IFREG | 0644;
+	return in;
 }
 
 /* /proc/sys/kernel */
@@ -1140,7 +1168,7 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 		if (live == (int)idx) {
 			out->ino      = 0x8000 + (uint64_t)p->pid * 100 + 50;
 			out->mode     = S_IFDIR | 0555;
-			out->next_off = ROOT_FILES_N + 1 + idx + 1;
+			out->next_off = ROOT_FILES_N + 3 + idx + 1;
 			char tmp[16]; int ti = 0;
 			uint32_t pid = p->pid;
 			if (pid == 0) { tmp[ti++] = '0'; }
