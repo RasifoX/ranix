@@ -10,20 +10,22 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.5.1 tamamlandı — ptrace + thread + futex REQUEUE + fd_table refcount + exit_group)
+## Neredeyiz (v0.6 tamamlandı — pthreads + inotify + 172-test suite)
+
+**Linux karşılaştırması**: Syscall arayüzü ~Linux 2.6.22 (2007) seviyesi (timerfd/eventfd/inotify/epoll/futex/clone var), ama mimari olarak Linux 1.x (single-core, statik binary, ext2, dinamik linker yok).
 
 - Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
-- Memory: buddy + COW fork + mmap + brk; `alloc_table` OOM → ENOMEM (kpanic yok), `vm_copy` goto-oom rollback; heap slab serbest bırakma
-- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü; kstack canary; `sys_mount` + `sys_umount2` (tmpfs→ramfs, devtmpfs→devfs); ptrace (ATTACH/DETACH/CONT/SYSCALL/GETREGS/SETREGS/PEEKDATA/POKEDATA); tgid/tid thread group; futex REQUEUE+WAIT_BITSET; exit_group; fd_table refcount (thread-safe)
-- FS: ramfs, ext2 read+write (direct+single+double+triple indirect), procfs, devfs, initramfs (CPIO); VFS permission enforcement + umask + sticky bit; dentry inode lifecycle fix; `/dev/stdin`, `/dev/stdout`, `/dev/stderr` (fd-proxy); `/dev/fd` symlink
-- /proc: `/proc/cmdline`, `/proc/net/{dev,tcp,udp,route}`, `/proc/sys/{kernel,net/core,fs}` tree; statfs/df çalışıyor; `/proc/sys/kernel/hostname` yazılabilir (sysctl)
-- /etc: `/etc/passwd`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/environment` (initrd.c'den)
-- Userspace: busybox 60+ applet, bash-5.2, statik ELF, DOOM
-- Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control (snd_wnd); AF_UNIX socketpair + path-based (bind/connect/listen/accept); ping + echo_server (x86_64 + aarch64)
-- Syscall: eventfd2, timerfd, memfd_create, signalfd, epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; inotify gerçek implementasyon (IN_CREATE/DELETE/MOVED_FROM/TO); syscall.c → kernel/sys/ Unity Build split (7 sub-file incl. syscall_ptrace.c)
-- Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); `/proc/cmdline`; `init=` parametresi; `quiet/debug`
+- Memory: buddy + COW fork + mmap + brk + mprotect (on-demand page alloc); `alloc_table` OOM → ENOMEM; heap slab; `-MMD` header dep tracking
+- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü; kstack canary; `sys_mount` + `sys_umount2`; ptrace (ATTACH/DETACH/CONT/SYSCALL/GETREGS/SETREGS/PEEKDATA/POKEDATA); tgid/tid thread group (musl pthread uyumlu); futex REQUEUE+WAIT_BITSET; exit_group; fd_table refcount (thread-safe shared fd table)
+- FS: ramfs, ext2 read+write (direct+single+double+triple indirect), procfs, devfs, initramfs (CPIO); VFS permission enforcement + umask + sticky bit; dentry inode lifecycle fix; `/dev/stdin/stdout/stderr` (fd-proxy); `/dev/fd` symlink
+- /proc: `/proc/cmdline`, `/proc/net/{dev,tcp,udp,route}`, `/proc/sys/{kernel,net/core,fs}` tree; statfs/df; `/proc/sys/kernel/hostname` yazılabilir (sysctl)
+- /etc: `/etc/passwd`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/environment`
+- Userspace: busybox 60+ applet, bash-5.2, statik ELF, DOOM; musl pthreads (create/join/mutex) çalışıyor
+- Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control; AF_UNIX socketpair + path-based; ping + echo_server
+- Syscall: eventfd2, timerfd, memfd_create, signalfd, epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; **inotify gerçek** (IN_CREATE/DELETE/MOVED_FROM/TO, VFS hook); syscall.c → kernel/sys/ Unity Build split
+- Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); `/proc/cmdline`; `init=`; `quiet/debug`
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
-- Test: **116/116** bash test suite her iki mimaride geçiyor
+- Test: **172/172 ALL_PASS** — ptrace (syscall tracing + waitpid WIFSTOPPED) tamamlandı
 
 ---
 
