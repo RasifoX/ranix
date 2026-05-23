@@ -10,17 +10,17 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.5.1 + v0.6 event loop + birçok v0.8 maddesi tamamlandı)
+## Neredeyiz (v0.5.1 tamamlandı — ptrace + thread + futex REQUEUE + fd_table refcount + exit_group)
 
 - Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
 - Memory: buddy + COW fork + mmap + brk; `alloc_table` OOM → ENOMEM (kpanic yok), `vm_copy` goto-oom rollback; heap slab serbest bırakma
-- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü; kstack canary; `sys_mount` (tmpfs→ramfs, devtmpfs→devfs)
+- Process: fork/exec/wait, signals, pipes, scheduler (nice); PID geri dönüşümü; kstack canary; `sys_mount` + `sys_umount2` (tmpfs→ramfs, devtmpfs→devfs); ptrace (ATTACH/DETACH/CONT/SYSCALL/GETREGS/SETREGS/PEEKDATA/POKEDATA); tgid/tid thread group; futex REQUEUE+WAIT_BITSET; exit_group; fd_table refcount (thread-safe)
 - FS: ramfs, ext2 read+write (direct+single+double+triple indirect), procfs, devfs, initramfs (CPIO); VFS permission enforcement + umask + sticky bit; dentry inode lifecycle fix; `/dev/stdin`, `/dev/stdout`, `/dev/stderr` (fd-proxy); `/dev/fd` symlink
-- /proc: `/proc/cmdline`, `/proc/net/{dev,tcp,udp,route}`, `/proc/sys/{kernel,net/core,fs}` tree; statfs/df çalışıyor
+- /proc: `/proc/cmdline`, `/proc/net/{dev,tcp,udp,route}`, `/proc/sys/{kernel,net/core,fs}` tree; statfs/df çalışıyor; `/proc/sys/kernel/hostname` yazılabilir (sysctl)
 - /etc: `/etc/passwd`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/environment` (initrd.c'den)
 - Userspace: busybox 60+ applet, bash-5.2, statik ELF, DOOM
-- Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control (snd_wnd); AF_UNIX socketpair; ping + echo_server (x86_64 + aarch64)
-- Syscall: eventfd2, timerfd, memfd_create, signalfd, epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; syscall.c → kernel/sys/ Unity Build split (6 sub-file)
+- Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control (snd_wnd); AF_UNIX socketpair + path-based (bind/connect/listen/accept); ping + echo_server (x86_64 + aarch64)
+- Syscall: eventfd2, timerfd, memfd_create, signalfd, epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; inotify gerçek implementasyon (IN_CREATE/DELETE/MOVED_FROM/TO); syscall.c → kernel/sys/ Unity Build split (7 sub-file incl. syscall_ptrace.c)
 - Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); `/proc/cmdline`; `init=` parametresi; `quiet/debug`
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
 - Test: **116/116** bash test suite her iki mimaride geçiyor
@@ -90,7 +90,7 @@ Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
 **AF_UNIX domain sockets** (Linux 1.0, 1994)
 - [x] `AF_UNIX SOCK_STREAM` — socketpair (inter-process, bash pipes)
 - [x] `SOCK_DGRAM` AF_UNIX — unix_send/recv
-- [ ] `bind` + `connect` + `accept` path-based (filesystem-addressed)
+- [x] `bind` + `connect` + `accept` path-based (filesystem-addressed)
 - [ ] abstract namespace (`\0` ile başlayan path)
 
 **ext2 yazma** (Linux 1.0, 1994)
@@ -103,14 +103,16 @@ Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
 - [x] `rename` — dizin girişi taşı
 - [x] superblock + grup tanımlayıcı güncelle (free block/inode sayıları)
 
-**ptrace** (Linux 0.99, 1993)
-- [ ] `PTRACE_ATTACH` / `PTRACE_DETACH`
-- [ ] `PTRACE_CONT` — traced process'i devam ettir
-- [ ] `PTRACE_SYSCALL` — syscall entry/exit'te dur
-- [ ] `PTRACE_GETREGS` / `PTRACE_SETREGS` — register okuma/yazma
+**ptrace** (Linux 0.99, 1993) ✅ TAMAMLANDI
+- [x] `PTRACE_ATTACH` / `PTRACE_DETACH`
+- [x] `PTRACE_CONT` — traced process'i devam ettir
+- [x] `PTRACE_SYSCALL` — syscall entry/exit'te dur
+- [x] `PTRACE_GETREGS` / `PTRACE_SETREGS` — register okuma/yazma (x86_64 + aarch64)
+- [x] `PTRACE_PEEKDATA` / `PTRACE_POKEDATA` — cross-process memory access
+- [x] `wait()` → `WIFSTOPPED` / `WSTOPSIG` semantiği
+- [x] `PTRACE_TRACEME` — child kendi tracer'ını ilan eder
 - [ ] x86_64: TF (trap flag) ile single-step; aarch64: MDSCR_EL1.SS
-- [ ] `wait()` → `WIFSTOPPED` / `WSTOPSIG` semantiği
-- [ ] `strace` çalışıyor
+- [ ] `strace` çalışıyor (binary uyumluluğu tamamlanınca)
 
 ### Yapısal Dinamizm (Hardcoded → Configurable)
 
@@ -127,7 +129,7 @@ Linux 1.0'da olan temel güvenlik ve yapı bileşenleri eksik.
 **Kernel config altyapısı:**
 - [ ] `include/kernel/config.h` — derleme zamanı sabitlerinin tek yeri
 - [x] `cmdline_get(key, buf, len)` — runtime parametreleri oku
-- [x] `/proc/sys/kernel/`, `/proc/sys/net/core/`, `/proc/sys/fs/` — okuma; yazma henüz yok
+- [x] `/proc/sys/kernel/`, `/proc/sys/net/core/`, `/proc/sys/fs/` — okuma; `/proc/sys/kernel/hostname` yazma (sysctl)
 
 ### Test hedefleri
 - [ ] Normal kullanıcı `/etc/shadow`'u açamıyor (EACCES)
@@ -350,7 +352,7 @@ musl libc dinamik versiyonu ile çalışmak hedef.
 - [x] `fallocate` — stub (başarı döner)
 - [x] `flock` — stub (no-op)
 - [ ] `fcntl(F_SETLK)` — gerçek dosya kilitleme (SQLite, Postgres)
-- [ ] `inotify_init1` / `inotify_add_watch` — FS event notification (stub: fd döner, event yok)
+- [x] `inotify_init1` / `inotify_add_watch` / `inotify_rm_watch` — gerçek implementasyon (IN_CREATE/DELETE/MOVED_FROM/TO, VFS hook)
 
 ### Eksik Syscall'lar (gerçek binary'leri kıran)
 - [x] `statx` — tam implementasyon
@@ -383,8 +385,8 @@ Gerçek donanımda gerçek işler yapabilmek.
 Debugging olmadan gerçek uygulama geliştirmek kör uçuş.
 
 ### Debugging & Tracing
-- [ ] **ptrace** — `PTRACE_TRACEME`, `PTRACE_CONT`, `PTRACE_SYSCALL`, `PTRACE_GETREGS`
-- [ ] `strace` ile syscall trace çalışıyor
+- [x] **ptrace** — `PTRACE_TRACEME/ATTACH/DETACH/CONT/SYSCALL/GETREGS/SETREGS/PEEKDATA/POKEDATA` (v0.5.1'de tamamlandı)
+- [ ] `strace` ile syscall trace çalışıyor (binary uyumluluğu tamamlanınca)
 - [ ] `gdb` ile temel breakpoint + step çalışıyor
 - [ ] core dump: `ulimit -c unlimited` → SIGSEGV'de core file
 - [ ] `/proc/sys/kernel/core_pattern` — dump path
