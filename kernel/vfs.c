@@ -31,14 +31,29 @@ static void vfs_inode_free(vfs_inode_t *in)
 
 static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 {
-	if (!inode) return -13; /* EACCES */
-	if (uid == 0) return 0; /* root bypasses permission checks */
+	if (!inode) return -13;
+	if (uid == 0) return 0; /* root bypasses all permission checks */
 
 	mode_t m = inode->mode & 0777;
-	int shift = (inode->uid == uid) ? 6 : (inode->gid == gid) ? 3 : 0;
+	int shift;
+	if (inode->uid == uid) {
+		shift = 6;
+	} else {
+		/* check egid and supplementary groups */
+		int in_group = (inode->gid == gid);
+		if (!in_group) {
+			process_t *p = task_current();
+			if (p) {
+				for (int i = 0; i < p->ngroups; i++) {
+					if (p->groups[i] == inode->gid) { in_group = 1; break; }
+				}
+			}
+		}
+		shift = in_group ? 3 : 0;
+	}
 
 	if (((m >> shift) & accmode) == (unsigned)accmode) return 0;
-	return -13; /* EACCES */
+	return -13;
 }
 
 /* ── dentry pool ─────────────────────────────────────────── */

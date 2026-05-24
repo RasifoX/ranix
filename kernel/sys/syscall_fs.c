@@ -360,12 +360,30 @@ static long sys_getegid(void) { return (long)task_current()->egid; }
 static long sys_getppid(void) { return (long)task_current()->ppid; }
 static long sys_gettid(void)  { return (long)task_current()->pid; }
 static long sys_getgroups(int size, uint64_t *list) {
-	if (size == 0) return 1;
-	if (size < 1) return -22;
-	if (!access_ok(list, (size_t)size * sizeof(uint64_t))) return -14;
-	/* single supplementary group = egid */
-	uint64_t gid = (uint64_t)task_current()->egid;
-	return copy_to_user(list, &gid, sizeof(gid)) == 0 ? 1 : -14;
+	process_t *p = task_current();
+	int n = p->ngroups;
+	if (size == 0) return n;
+	if (size < n) return -22; /* EINVAL */
+	if (!access_ok(list, (size_t)n * sizeof(gid_t))) return -14;
+	for (int i = 0; i < n; i++) {
+		gid_t g = p->groups[i];
+		if (copy_to_user(list + i, &g, sizeof(g))) return -14;
+	}
+	return n;
+}
+
+static long sys_setgroups(int size, const gid_t *list) {
+	process_t *p = task_current();
+	if (p->euid != 0) return -1; /* EPERM: only root */
+	if (size < 0 || size > 32) return -22; /* EINVAL */
+	if (size > 0 && !access_ok(list, (size_t)size * sizeof(gid_t))) return -14;
+	for (int i = 0; i < size; i++) {
+		gid_t g;
+		if (copy_from_user(&g, list + i, sizeof(g))) return -14;
+		p->groups[i] = g;
+	}
+	p->ngroups = size;
+	return 0;
 }
 static long sys_getrlimit(int res, void *rlim) {
 	if (!access_ok(rlim, 16)) return -14;
