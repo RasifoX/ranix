@@ -34,7 +34,17 @@ static uint32_t parse_hex8(const char *str) {
     return val;
 }
 
-static void install(const char *path, const uint8_t *data, unsigned int len, uint32_t mode)
+static void inode_apply_meta(const char *path, uint32_t uid, uint32_t gid, uint32_t mode)
+{
+    vfs_dentry_t *d = vfs_dentry_resolve(path);
+    if (!d || !d->inode) return;
+    d->inode->uid  = uid;
+    d->inode->gid  = gid;
+    d->inode->mode = (d->inode->mode & 0170000) | (mode & 07777);
+}
+
+static void install(const char *path, const uint8_t *data, unsigned int len,
+                    uint32_t mode, uint32_t uid, uint32_t gid)
 {
     /* CPIO contains full paths like "bin/sh". Prepend "/" if missing */
     char fullpath[256];
@@ -50,20 +60,18 @@ static void install(const char *path, const uint8_t *data, unsigned int len, uin
     }
 
     if ((mode & 0170000) == 0040000) {
-        /* Directory */
         vfs_mkdir(path, mode & 0777);
     } else if ((mode & 0170000) == 0120000) {
-        /* Symlink: data is the target path */
         char target[256];
         int tlen = (len < 255) ? (int)len : 255;
         memcpy(target, data, tlen);
         target[tlen] = '\0';
         vfs_symlink(target, path);
     } else if ((mode & 0170000) == 0100000) {
-        /* Regular file */
         if (vfs_kernel_install(path, data, len) != 0)
             kprintf("initrd: failed to install file: %s\n", path);
     }
+    inode_apply_meta(path, uid, gid, mode);
 }
 
 void initrd_init(void)
@@ -98,11 +106,13 @@ void initrd_init(void)
         uint32_t namesize = parse_hex8(hdr->c_namesize);
         uint32_t filesize = parse_hex8(hdr->c_filesize);
         uint32_t mode     = parse_hex8(hdr->c_mode);
+        uint32_t uid      = parse_hex8(hdr->c_uid);
+        uint32_t gid      = parse_hex8(hdr->c_gid);
 
         if (ptr + sizeof(*hdr) + namesize > end) break;
 
         const char *name = (const char *)(ptr + sizeof(*hdr));
-        
+
         /* Stop on TRAILER!!! */
         if (strcmp(name, "TRAILER!!!") == 0) break;
 
@@ -116,7 +126,7 @@ void initrd_init(void)
 
         if (strcmp(name, ".") != 0) {
             kprintf("initrd: extracted %s (size %u)\n", name, filesize);
-            install(name, data, filesize, mode);
+            install(name, data, filesize, mode, uid, gid);
         }
 
         /* Next header is after data, rounded up to 4 bytes */
@@ -126,18 +136,21 @@ void initrd_init(void)
 
     kprintf("initrd: unpack complete\n");
 
-    /* /etc skeleton */
+    /* /etc skeleton — only install if not already provided by initramfs */
     vfs_mkdir("/etc", 0755);
-    static const char passwd[]  = "root:x:0:0:root:/root:/bin/bash\n";
-    static const char group[]   = "root:x:0:\n";
     static const char hosts[]   = "127.0.0.1\tlocalhost\n";
     static const char resolv[]  = "nameserver 8.8.8.8\n";
     static const char environ[] = "LANG=C\nPATH=/bin:/usr/bin\nTERM=linux\n";
-    vfs_kernel_install("/etc/passwd",      (const uint8_t *)passwd,  sizeof(passwd)  - 1);
-    vfs_kernel_install("/etc/group",       (const uint8_t *)group,   sizeof(group)   - 1);
-    vfs_kernel_install("/etc/hosts",       (const uint8_t *)hosts,   sizeof(hosts)   - 1);
-    vfs_kernel_install("/etc/resolv.conf", (const uint8_t *)resolv,  sizeof(resolv)  - 1);
-    vfs_kernel_install("/etc/environment", (const uint8_t *)environ, sizeof(environ) - 1);
+    if (!vfs_dentry_resolve("/etc/passwd"))
+        vfs_kernel_install("/etc/passwd",      (const uint8_t *)"root:x:0:0:root:/root:/bin/bash\n", 32);
+    if (!vfs_dentry_resolve("/etc/group"))
+        vfs_kernel_install("/etc/group",       (const uint8_t *)"root:x:0:\n", 10);
+    if (!vfs_dentry_resolve("/etc/hosts"))
+        vfs_kernel_install("/etc/hosts",       (const uint8_t *)hosts,   sizeof(hosts)   - 1);
+    if (!vfs_dentry_resolve("/etc/resolv.conf"))
+        vfs_kernel_install("/etc/resolv.conf", (const uint8_t *)resolv,  sizeof(resolv)  - 1);
+    if (!vfs_dentry_resolve("/etc/environment"))
+        vfs_kernel_install("/etc/environment", (const uint8_t *)environ, sizeof(environ) - 1);
     /* standard directories */
     vfs_mkdir("/root", 0700);
     vfs_mkdir("/tmp",  0777);
