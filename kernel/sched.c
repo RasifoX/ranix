@@ -57,9 +57,12 @@ static int alloc_pid(void)
 
 #define KSTACK_CANARY 0xDEADBEEFCAFEBABEULL
 
+static int kstack_size_val  = KSTACK_SIZE;
+static int kstack_order_val = 1; /* buddy order; 1 = 2 pages = 8192 bytes */
+
 static uint8_t *kstack_alloc(void)
 {
-	void *p = buddy_alloc(1);
+	void *p = buddy_alloc(kstack_order_val);
 	if (!p) return NULL;
 	uint8_t *ks = (uint8_t *)PHYS_TO_VIRT(p);
 	*(uint64_t *)ks = KSTACK_CANARY;
@@ -168,6 +171,19 @@ void sched_init(void)
 				v = v * 10 + (*s - '0');
 			if (v > 0) sched_quantum_val = v;
 		}
+		if (cmdline_get("kstack_size", buf, sizeof(buf))) {
+			int v = 0;
+			for (const char *s = buf; *s >= '0' && *s <= '9'; s++)
+				v = v * 10 + (*s - '0');
+			/* must be a multiple of PAGE_SIZE and at least 4096 */
+			if (v >= 4096 && (v & (v - 1)) == 0) {
+				int pages = v / 4096;
+				int order = 0;
+				while ((1 << order) < pages) order++;
+				kstack_size_val  = (1 << order) * 4096;
+				kstack_order_val = order;
+			}
+		}
 	}
 
 	tick_register(sched_tick);
@@ -250,7 +266,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->cwd[0] = '/'; p->cwd[1] = '\0';
 	p->umask = 022;
 
-	uint8_t *sp_top = p->kstack + KSTACK_SIZE;
+	uint8_t *sp_top = p->kstack + kstack_size_val;
 	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
 	arch_context_init(ctx, fn, (uint64_t)sp_top);
 	p->ctx = ctx;
@@ -259,7 +275,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	int pid = alloc_pid();
 	if (pid < 0) {
 		spin_unlock_irq(&sched_lock, f);
-		buddy_free(VIRT_TO_PHYS(p->kstack), 1);
+		buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
 		buddy_free(VIRT_TO_PHYS(p), 0);
 		return -1;
 	}
@@ -323,7 +339,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->kstack = kstack_alloc();
 	if (!p->kstack) goto fail;
 
-	uint8_t *ksp = p->kstack + KSTACK_SIZE;
+	uint8_t *ksp = p->kstack + kstack_size_val;
 	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 
 	/* Switch to new VM to write to user stack */
@@ -387,7 +403,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 fail:
 	if (p->vm) vm_destroy(p->vm);
 	if (p->fds) fd_table_destroy(p->fds);
-	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), 1);
+	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(p), 0);
 	return -1;
 }
@@ -445,7 +461,7 @@ pid_t proc_fork(void)
 	if (!child->kstack) goto fail_early;
 
 	{
-		uint8_t *ksp = child->kstack + KSTACK_SIZE;
+		uint8_t *ksp = child->kstack + kstack_size_val;
 		arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 		memcpy(cctx, parent->ctx, sizeof(arch_context_t));
 		CTX_SYSCALL_RET(cctx, 0);
@@ -475,7 +491,7 @@ pid_t proc_fork(void)
 fail_early:
 	if (child->vm)     vm_destroy(child->vm);
 	if (child->fds)    fd_table_destroy(child->fds);
-	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), 1);
+	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -511,7 +527,7 @@ pid_t proc_vfork(void)
 		return -1;
 	}
 
-	uint8_t *ksp = child->kstack + KSTACK_SIZE;
+	uint8_t *ksp = child->kstack + kstack_size_val;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
 	CTX_SYSCALL_RET(cctx, 0);
@@ -522,7 +538,7 @@ pid_t proc_vfork(void)
 	int pid = alloc_pid();
 	if (pid < 0) {
 		spin_unlock_irq(&sched_lock, f);
-		buddy_free(VIRT_TO_PHYS(child->kstack), 1);
+		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 		buddy_free(VIRT_TO_PHYS(child), 0);
 		return -1;
 	}
@@ -593,7 +609,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->kstack = kstack_alloc();
 	if (!child->kstack) goto fail;
 
-	uint8_t *ksp = child->kstack + KSTACK_SIZE;
+	uint8_t *ksp = child->kstack + kstack_size_val;
 	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 	memcpy(cctx, parent->ctx, sizeof(arch_context_t));
 
@@ -640,7 +656,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 
 fail:
 	if (child->vm) vm_destroy(child->vm);
-	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), 1);
+	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
 }
@@ -696,7 +712,7 @@ void schedule(void)
 	cpu_context_t *cpu = arch_get_cpu_ctx();
 	cpu->current = next;
 	/* IMPORTANT: update the syscall kstack pointer */
-	cpu->kstack_top = next->kstack + KSTACK_SIZE;
+	cpu->kstack_top = next->kstack + kstack_size_val;
 
 	arch_restore_tls(next);
 
@@ -1021,6 +1037,6 @@ void proc_reap(process_t *child)
 	spin_unlock_irq(&sched_lock, f);
 
 	if (kstack)
-		buddy_free(VIRT_TO_PHYS(kstack), 1);
+		buddy_free(VIRT_TO_PHYS(kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(child), 0);
 }
