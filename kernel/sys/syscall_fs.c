@@ -354,17 +354,17 @@ static long sys_getcwd(char *buf, size_t size)
 /* ── process info ────────────────────────────────────────── */
 
 static long sys_getuid(void)  { return (long)task_current()->uid; }
-static long sys_geteuid(void) { return (long)task_current()->uid; }
+static long sys_geteuid(void) { return (long)task_current()->euid; }
 static long sys_getgid(void)  { return (long)task_current()->gid; }
-static long sys_getegid(void) { return (long)task_current()->gid; }
+static long sys_getegid(void) { return (long)task_current()->egid; }
 static long sys_getppid(void) { return (long)task_current()->ppid; }
 static long sys_gettid(void)  { return (long)task_current()->pid; }
 static long sys_getgroups(int size, uint64_t *list) {
 	if (size == 0) return 1;
 	if (size < 1) return -22;
 	if (!access_ok(list, (size_t)size * sizeof(uint64_t))) return -14;
-	/* single supplementary group = gid */
-	uint64_t gid = (uint64_t)task_current()->gid;
+	/* single supplementary group = egid */
+	uint64_t gid = (uint64_t)task_current()->egid;
 	return copy_to_user(list, &gid, sizeof(gid)) == 0 ? 1 : -14;
 }
 static long sys_getrlimit(int res, void *rlim) {
@@ -396,8 +396,31 @@ static long sys_setpgid(pid_t pid, pid_t pgid) {
 	p->pgrp = pgid ? pgid : (pid_t)p->pid;
 	return 0;
 }
-static long sys_setuid(uid_t uid) { task_current()->uid = uid; return 0; }
-static long sys_setgid(gid_t gid) { task_current()->gid = gid; return 0; }
+static long sys_setuid(uid_t uid)
+{
+	process_t *p = task_current();
+	if (p->euid == 0) {
+		p->uid = p->euid = p->suid = uid;
+	} else if (uid == p->uid || uid == p->suid) {
+		p->euid = uid;
+	} else {
+		return -1; /* EPERM */
+	}
+	return 0;
+}
+
+static long sys_setgid(gid_t gid)
+{
+	process_t *p = task_current();
+	if (p->egid == 0) {
+		p->gid = p->egid = p->sgid = gid;
+	} else if (gid == p->gid || gid == p->sgid) {
+		p->egid = gid;
+	} else {
+		return -1; /* EPERM */
+	}
+	return 0;
+}
 
 static long sys_getpriority(int which, int who)
 {

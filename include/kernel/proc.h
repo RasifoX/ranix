@@ -78,8 +78,12 @@ typedef struct process {
 	pid_t           tgid;          /* thread group id (== pid for main thread) */
 	pid_t           pgrp;
 	pid_t           sid;           /* session id */
-	uid_t           uid;
-	gid_t           gid;
+	uid_t           uid;   /* ruid */
+	uid_t           euid;  /* effective uid */
+	uid_t           suid;  /* saved set-uid */
+	gid_t           gid;   /* rgid */
+	gid_t           egid;  /* effective gid */
+	gid_t           sgid;  /* saved set-gid */
 	int             exit_code;
 	int             killed_by_sig; /* non-zero if exited due to signal */
 

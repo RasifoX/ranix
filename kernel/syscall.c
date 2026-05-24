@@ -486,6 +486,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (vfs_stat(kpath, &st) != 0) { kfree(kstrs); return -2; }
 	if (st.size == 0)              { kfree(kstrs); return -2; }
 
+	/* resolve credentials for the new image */
+	uid_t new_euid = p->euid;
+	gid_t new_egid = p->egid;
+	if (st.mode & S_ISUID) new_euid = st.uid;
+	if (st.mode & S_ISGID) new_egid = st.gid;
+
 	uint8_t *buf = kmalloc(st.size);
 	if (!buf) { kfree(kstrs); return -12; }
 
@@ -557,6 +563,10 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	p->sig_mask    = 0;
 	p->sig_pending = 0;
+
+	/* apply credentials: suid/sgid set to new euid/egid after exec */
+	p->euid = new_euid; p->suid = new_euid;
+	p->egid = new_egid; p->sgid = new_egid;
 
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);

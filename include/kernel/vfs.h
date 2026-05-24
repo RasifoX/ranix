@@ -10,6 +10,10 @@
 #define S_IFBLK  0x6000
 #define S_IFIFO  0x1000
 #define S_IFLNK  0xA000
+#define S_ISUID  04000
+#define S_ISGID  02000
+#define S_ISVTX  01000
+
 #define S_ISREG(m)  (((m) & 0xF000) == S_IFREG)
 #define S_ISDIR(m)  (((m) & 0xF000) == S_IFDIR)
 #define S_ISCHR(m)  (((m) & 0xF000) == S_IFCHR)

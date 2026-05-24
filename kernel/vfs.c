@@ -514,8 +514,8 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	process_t *p = task_current();
 	if (!p->fds) return -1;
 
-	uid_t uid = p ? p->uid : 0;
-	gid_t gid = p ? p->gid : 0;
+	uid_t uid = p ? p->euid : 0;
+	gid_t gid = p ? p->egid : 0;
 
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	vfs_inode_t  *inode = NULL;
@@ -661,7 +661,7 @@ int vfs_mkdir(const char *path, mode_t mode)
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
 
 	process_t *p = task_current();
-	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->uid : 0, p ? p->gid : 0);
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
 	if (pr) return pr;
 
 	const char *dname = slash + 1;
@@ -688,8 +688,8 @@ int vfs_unlink(const char *path)
 		return -1;
 
 	process_t *p = task_current();
-	uid_t uid = p ? p->uid : 0;
-	gid_t gid = p ? p->gid : 0;
+	uid_t uid = p ? p->euid : 0;
+	gid_t gid = p ? p->egid : 0;
 
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE, uid, gid);
 	if (pr) return pr;
