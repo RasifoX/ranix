@@ -86,6 +86,7 @@ typedef struct process {
 	gid_t           sgid;  /* saved set-gid */
 	gid_t           groups[32]; /* supplementary groups */
 	int             ngroups;
+	int             dumpable;  /* 0=not dumpable, 1=dumpable (default) */
 	int             exit_code;
 	int             killed_by_sig; /* non-zero if exited due to signal */
 
