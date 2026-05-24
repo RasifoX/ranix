@@ -1093,6 +1093,7 @@ static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask,
 #include "sys/syscall_net.c"
 #include "sys/syscall_misc.c"
 #include "sys/syscall_ptrace.c"
+#include "sys/syscall_ipc.c"
 
 void syscall_handle(arch_context_t *ctx)
 {
@@ -1365,6 +1366,20 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_LLISTXATTR:ret = sys_llistxattr((const char*)arg0,(char*)arg1,(size_t)arg2); break;
 	case SYS_ARCH_REMOVEXATTR:ret = sys_removexattr((const char*)arg0,(const char*)arg1); break;
 	case SYS_ARCH_PTRACE:    ret = sys_ptrace((long)arg0, (pid_t)arg1, (uint64_t)arg2, (uint64_t)arg3); break;
+	/* SysV IPC */
+	case SYS_ARCH_SHMGET:   ret = sys_shmget((key_t)arg0, (size_t)arg1, (int)arg2); break;
+	case SYS_ARCH_SHMAT:    ret = sys_shmat((int)arg0, (const void*)arg1, (int)arg2); break;
+	case SYS_ARCH_SHMDT:    ret = sys_shmdt((const void*)arg0); break;
+	case SYS_ARCH_SHMCTL:   ret = sys_shmctl((int)arg0, (int)arg1, (void*)arg2); break;
+	case SYS_ARCH_SEMGET:   ret = sys_semget((key_t)arg0, (int)arg1, (int)arg2); break;
+	case SYS_ARCH_SEMOP:    ret = sys_semop((int)arg0, (const sembuf_t*)arg1, (size_t)arg2); break;
+	case SYS_ARCH_SEMCTL:   ret = sys_semctl((int)arg0, (int)arg1, (int)arg2, (uint64_t)arg3); break;
+	/* POSIX IPC */
+	case SYS_ARCH_MQ_OPEN:         ret = sys_mq_open((const char*)arg0,(int)arg1,(mode_t)arg2,(mq_attr_t*)arg3); break;
+	case SYS_ARCH_MQ_UNLINK:       ret = sys_mq_unlink((const char*)arg0); break;
+	case SYS_ARCH_MQ_TIMEDSEND:    ret = sys_mq_timedsend((int)arg0,(const char*)arg1,(size_t)arg2,(uint32_t)arg3,(const void*)arg4); break;
+	case SYS_ARCH_MQ_TIMEDRECEIVE: ret = sys_mq_timedreceive((int)arg0,(char*)arg1,(size_t)arg2,(uint32_t*)arg3,(const void*)arg4); break;
+	case SYS_ARCH_MQ_GETSETATTR:   ret = sys_mq_getsetattr((int)arg0,(const mq_attr_t*)arg1,(mq_attr_t*)arg2); break;
 	default:
 		kprintf("syscall: unimplemented %ld (pid=%u)\n",
 		        n, task_current()->pid);
