@@ -134,23 +134,23 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 ### Güvenlik & Çok Kullanıcı
 
 **Kullanıcı/Grup Yönetimi**
-- [ ] ruid/euid/suid üçlüsü (process_t'de şu an tek uid var)
-- [ ] setuid / setgid / setreuid / setregid / setresuid / setresuid
-- [ ] getgroups / setgroups — supplementary groups
-- [ ] setuid-bit ELF exec: execve sırasında euid = file owner
+- [x] ruid/euid/suid üçlüsü — process_t'e euid/suid/egid/sgid eklendi
+- [x] setuid / setgid / setreuid / setregid / setresuid / setresgid — Linux semantiği
+- [x] getgroups / setgroups — groups[32] + ngroups, VFS group match güncellendi
+- [x] setuid-bit ELF exec — S_ISUID/S_ISGID: euid/egid = file owner/group
 - [ ] su çalışması (passwd hash doğrulama)
 
 **Yetenekler (Capabilities)**
-- [ ] CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN
-- [ ] capget / capset gerçek implementasyon (şu an stub — root hepsine sahip)
-- [ ] capability inheritable/permitted/effective üçlüsü
-- [ ] /proc/[pid]/status → CapPrm/CapEff satırları
+- [x] CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN — capabilities.h'de tanımlı
+- [x] capget / capset — v3 ABI, gerçek triplet okuma/yazma, EPERM kontrolü
+- [x] capability inheritable/permitted/effective üçlüsü — fork + exec transition
+- [x] /proc/[pid]/status → CapInh/CapPrm/CapEff satırları + gerçek Uid/Gid/Groups
 
 **Bellek Güvenliği**
-- [ ] ASLR: mmap + stack için randomization
-- [ ] AT_RANDOM'ı getrandom ile güçlendir (şu an LCG PRNG — yeterli değil)
-- [ ] prctl(PR_SET_NAME) — /proc/[pid]/comm
-- [ ] prctl(PR_SET_DUMPABLE)
+- [x] ASLR: mmap_next 1 GB window içinde randomize; stack top sayfa içi randomize
+- [x] AT_RANDOM splitmix64 ile güçlendirildi (LCG kaldırıldı)
+- [x] prctl(PR_SET_NAME) — zaten çalışıyordu
+- [x] prctl(PR_SET_DUMPABLE) — implement edildi
 
 ### Test hedefleri
 - [ ] `su` ile kullanıcı değiştiriliyor; yanlış şifre reddediliyor
