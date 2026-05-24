@@ -27,6 +27,53 @@ static int parse_ipv4(const char *s, unsigned *a, unsigned *b, unsigned *c, unsi
     return 0;
 }
 
+/* Parse ip=<addr>/<prefix>/<gw> cmdline into dev fields.
+ * prefix can be CIDR (e.g. 24) or dotted mask (e.g. 255.255.255.0).
+ * Second and third fields are optional; missing fields keep defaults. */
+static void parse_ip_cmdline(netdev_t *dev)
+{
+    char buf[64];
+    if (!cmdline_get("ip", buf, sizeof(buf))) return;
+
+    unsigned a, b, c, d;
+    char *p = buf;
+    if (parse_ipv4(p, &a, &b, &c, &d) != 0) return;
+    dev->ip = (a << 24) | (b << 16) | (c << 8) | d;
+
+    while (*p && *p != '/') p++;
+    if (*p != '/') return;
+    p++;
+
+    /* prefix field: CIDR integer or dotted mask */
+    if (*p >= '0' && *p <= '9') {
+        /* check if it's a bare integer (CIDR) or dotted */
+        const char *q = p;
+        while (*q >= '0' && *q <= '9') q++;
+        if (*q == '/' || *q == '\0') {
+            /* CIDR prefix length */
+            unsigned prefix = 0;
+            while (*p >= '0' && *p <= '9') prefix = prefix * 10 + (unsigned)(*p++ - '0');
+            if (prefix <= 32)
+                dev->mask = prefix ? (~0u << (32 - prefix)) : 0u;
+        } else {
+            /* dotted mask */
+            unsigned ma, mb, mc, md;
+            if (parse_ipv4(p, &ma, &mb, &mc, &md) == 0) {
+                dev->mask = (ma << 24) | (mb << 16) | (mc << 8) | md;
+                while (*p && *p != '/') p++;
+            }
+        }
+    }
+
+    while (*p && *p != '/') p++;
+    if (*p != '/') return;
+    p++;
+
+    unsigned ga, gb, gc, gd;
+    if (parse_ipv4(p, &ga, &gb, &gc, &gd) == 0)
+        dev->gw = (ga << 24) | (gb << 16) | (gc << 8) | gd;
+}
+
 /*
  * virtio-net MMIO (legacy transport, spec 0.9/1.0 MMIO).
  * One device per MMIO node found in FDT with DeviceID=1.
@@ -311,29 +358,10 @@ static void virtio_net_setup(volatile uint32_t *regs)
 
     /* register netdev */
     memcpy(g_dev.name, "eth0", 5);
-    /* Default: QEMU slirp 10.0.2.15/24 gw 10.0.2.2
-     * Override with cmdline: ip=<a.b.c.d>/<gw> e.g. ip=192.168.1.10/192.168.1.1 */
-    g_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u;
+    g_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u; /* QEMU slirp default */
     g_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
     g_dev.mask = 0xffffff00u;
-    {
-        char ipbuf[48];
-        if (cmdline_get("ip", ipbuf, sizeof(ipbuf))) {
-            /* parse a.b.c.d/e.f.g.h or a.b.c.d/prefix */
-            unsigned a,b,c,d;
-            char *p = ipbuf;
-            if (parse_ipv4(p, &a,&b,&c,&d) == 0) {
-                g_dev.ip = (a<<24)|(b<<16)|(c<<8)|d;
-                while (*p && *p != '/') p++;
-                if (*p == '/') {
-                    p++;
-                    unsigned ga,gb,gc,gd;
-                    if (parse_ipv4(p, &ga,&gb,&gc,&gd) == 0)
-                        g_dev.gw = (ga<<24)|(gb<<16)|(gc<<8)|gd;
-                }
-            }
-        }
-    }
+    parse_ip_cmdline(&g_dev);
     g_dev.tx   = vnet_tx;
     g_dev.poll = vnet_poll;
     g_dev.priv = p;
@@ -559,26 +587,10 @@ void virtio_net_pci_init(void)
     outw((uint16_t)(iobase + VIO_QUEUE_NOTIFY), 0);
 
     memcpy(g_pci_dev.name, "eth0", 5);
-    g_pci_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u;
+    g_pci_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u; /* QEMU slirp default */
     g_pci_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
     g_pci_dev.mask = 0xffffff00u;
-    {
-        char ipbuf[48];
-        if (cmdline_get("ip", ipbuf, sizeof(ipbuf))) {
-            unsigned a,b,c,d;
-            char *p = ipbuf;
-            if (parse_ipv4(p, &a,&b,&c,&d) == 0) {
-                g_pci_dev.ip = (a<<24)|(b<<16)|(c<<8)|d;
-                while (*p && *p != '/') p++;
-                if (*p == '/') {
-                    p++;
-                    unsigned ga,gb,gc,gd;
-                    if (parse_ipv4(p, &ga,&gb,&gc,&gd) == 0)
-                        g_pci_dev.gw = (ga<<24)|(gb<<16)|(gc<<8)|gd;
-                }
-            }
-        }
-    }
+    parse_ip_cmdline(&g_pci_dev);
     g_pci_dev.tx   = vnet_pci_tx;
     g_pci_dev.poll = vnet_pci_poll;
     g_pci_dev.priv = p;

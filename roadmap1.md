@@ -90,43 +90,46 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 ### v0.5.1 / v0.6 Kalan Eksikler
 
 **AF_UNIX abstract namespace**
-- [ ] `\0` prefix ile başlayan path → filesystem'e dokunmayan socket adresi
-- [ ] dbus, systemd, journald bunu kullanıyor
+- [x] `\0` prefix ile başlayan path → filesystem'e dokunmayan socket adresi (length-aware registry, memcmp)
+- [x] dbus, systemd, journald bunu kullanıyor
 
 **Epoll tamamlama**
-- [ ] EPOLLET (edge-trigger) — event sadece state değişince tetiklenir
-- [ ] EPOLLONESHOT — tek seferlik event, sonra tekrar arm edilmeli
-- [ ] epoll_ctl MOD doğru çalışıyor mu? — mevcut implementasyonu gözden geçir
+- [x] EPOLLET (edge-trigger) — `last_ready[]` bitmask ile sadece state geçişinde event
+- [x] EPOLLONESHOT — ilk event sonrası fd disarm, EPOLL_CTL_MOD ile yeniden arm
+- [x] epoll_ctl MOD gözden geçirildi ve düzeltildi
 
 **signalfd4 gerçek implementasyon**
-- [ ] signalfd okuması sig_pending'ten signal alıp `signalfd_siginfo` struct doldurmalı
-- [ ] read() bloklamalı (sinyal gelene kadar beklemeli)
-- [ ] epoll ile birlikte çalışmalı
+- [x] signalfd okuması sig_pending'ten signal alıp `signalfd_siginfo` struct dolduruyor
+- [x] read() blokluyor (sinyal gelene kadar bekliyor)
+- [x] epoll ile birlikte çalışıyor (POLLIN döndürüyor)
 
 **FUTEX_WAKE_OP**
-- [ ] glibc mutex için gerekli (musl kullanmıyor ama glibc binary uyumluluğu için)
-- [ ] atomic compare-and-set + wake — tek syscall'da iki iş
+- [x] glibc mutex için gerekli — implement edildi
+- [x] val3 decode: op/cmp/oparg/cmparg + FUTEX_OP_ARG_SHIFT; uaddr2'de atomic op, koşullu wake
+
+**FUTEX_WAKE race fix**
+- [x] `task_wake_no_resched()` — runqueue'a ekler ama need_resched=1 set etmez
+- [x] pthread_join + munmap race düzeltildi
 
 **SysV IPC**
-- [ ] `shmget` / `shmat` / `shmdt` / `shmctl` — shared memory
-- [ ] `semget` / `semop` / `semctl` — semaphore
-- [ ] Python multiprocessing, PostgreSQL, Redis bunları kullanıyor
+- [x] `shmget` / `shmat` / `shmdt` / `shmctl` — shared memory (buddy-backed, vm_map per page)
+- [x] `semget` / `semop` / `semctl` — semaphore dizileri, blocking semop
+- [x] Python multiprocessing, PostgreSQL, Redis bunları kullanıyor
 
 **POSIX IPC**
-- [ ] `shm_open` / `shm_unlink` — `/dev/shm` üzerinden anonymous file
-- [ ] `mq_open` / `mq_send` / `mq_receive` / `mq_close` — message queue
-- [ ] `/dev/shm` tmpfs mount
+- [x] `mq_open` / `mq_send` / `mq_receive` / `mq_close` — message queue (priority-ordered, blocking)
+- [x] `/dev/shm` → `/run/shm` symlink; `/run/shm` ramfs mount; `shm_open` için hazır
 
 **vmalloc**
-- [ ] kernel sanal adres alanı allocator (şu an büyük kernel struct'lar buddy'den geliyor)
-- [ ] DMA buffer, driver mapping için lazım (v0.9 driver ekosistemi öncesi gerekli)
+- [x] buddy-backed vmalloc/vfree/vzalloc; PHYS_TO_VIRT; 256-slot size table
+- [x] DMA buffer, driver mapping için hazır
 
 **Yapısal config (v0.5.1'den kalan)**
-- [ ] `ip=<addr>/<prefix>/<gw>` cmdline parametresi — 10.0.2.15 hardcode kaldırılmalı
-- [ ] `kstack_size=N` cmdline (şu an 8192 sabit)
-- [ ] `sched_quantum=N` cmdline (şu an 10 tick sabit)
-- [ ] `vfs_dentry_max=N` cmdline (şu an 4096 sabit)
-- [ ] Gerçek DTB binary parse (QEMU `-dtb` ile verilmeli, şu an statik C struct)
+- [x] `ip=<addr>/<prefix>/<gw>` cmdline — CIDR veya dotted mask; tek helper tüm netdev'leri kapsıyor
+- [x] `kstack_size=N` cmdline — buddy order runtime hesaplanıyor; idle/irq stack sabit kalıyor
+- [x] `sched_quantum=N` cmdline — implement edildi
+- [x] `vfs_dentry_max=N` cmdline — implement edildi
+- [x] Gerçek DTB binary parse — boot.S ARM64 header ile QEMU DTB'yi x0'da veriyor, fdt.c FDT magic validate ederek binary parse ediyor
 
 ### Güvenlik & Çok Kullanıcı
 
