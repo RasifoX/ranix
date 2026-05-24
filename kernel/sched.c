@@ -299,8 +299,13 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	process_t *current = task_current();
 	p->ppid  = current->pid;
 	p->state = PROC_READY;
-	p->uid   = current->uid;
-	p->gid   = current->gid;
+	/* exec: inherit ruid/rgid; suid/sgid become new euid/egid (no setuid-bit here) */
+	p->uid  = current->uid;
+	p->euid = current->euid;
+	p->suid = current->euid; /* suid = euid after exec */
+	p->gid  = current->gid;
+	p->egid = current->egid;
+	p->sgid = current->egid;
 
 	int nlen = 0;
 	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
@@ -421,8 +426,8 @@ pid_t proc_fork(void)
 	child->pgrp      = parent->pgrp;
 	child->sid       = parent->sid;
 	child->state     = PROC_READY;
-	child->uid       = parent->uid;
-	child->gid       = parent->gid;
+	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
+	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->brk       = parent->brk;
 	child->mmap_next = parent->mmap_next;
 	child->reaped    = 0;
@@ -509,8 +514,8 @@ pid_t proc_vfork(void)
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
-	child->uid          = parent->uid;
-	child->gid          = parent->gid;
+	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
+	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
@@ -585,8 +590,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
 	child->state        = PROC_READY;
-	child->uid          = parent->uid;
-	child->gid          = parent->gid;
+	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
+	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = -1;

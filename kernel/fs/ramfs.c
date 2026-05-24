@@ -1,5 +1,6 @@
 #include <kernel/fs/ramfs.h>
 #include <kernel/vfs.h>
+#include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
@@ -48,6 +49,9 @@ static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;
+	process_t *p = task_current();
+	in->uid = p ? p->euid : 0;
+	in->gid = p ? p->egid : 0;
 	return in;
 }
 
