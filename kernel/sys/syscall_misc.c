@@ -200,52 +200,82 @@ static long sys_getrusage(int who, void *usage)
 static long sys_setreuid(uid_t ruid, uid_t euid)
 {
 	process_t *p = task_current();
-	if (ruid != (uid_t)-1) p->uid = ruid;
-	if (euid != (uid_t)-1) p->uid = euid;
+	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
+	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
+	/* unprivileged: new values must come from the current triplet */
+	if (p->euid != 0) {
+		if (new_r != p->uid && new_r != p->euid && new_r != p->suid) return -1;
+		if (new_e != p->uid && new_e != p->euid && new_e != p->suid) return -1;
+	}
+	p->uid  = new_r;
+	p->euid = new_e;
+	/* setreuid: if ruid set or euid != old euid, update suid to new euid */
+	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != p->euid))
+		p->suid = new_e;
 	return 0;
 }
 
 static long sys_setregid(gid_t rgid, gid_t egid)
 {
 	process_t *p = task_current();
-	if (rgid != (gid_t)-1) p->gid = rgid;
-	if (egid != (gid_t)-1) p->gid = egid;
+	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
+	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
+	if (p->egid != 0) {
+		if (new_r != p->gid && new_r != p->egid && new_r != p->sgid) return -1;
+		if (new_e != p->gid && new_e != p->egid && new_e != p->sgid) return -1;
+	}
+	p->gid  = new_r;
+	p->egid = new_e;
+	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != p->egid))
+		p->sgid = new_e;
 	return 0;
 }
 
 static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
 	process_t *p = task_current();
-	if (ruid != (uid_t)-1) p->uid = ruid;
-	if (euid != (uid_t)-1) p->uid = euid;
-	(void)suid;
+	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
+	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
+	uid_t new_s = (suid != (uid_t)-1) ? suid : p->suid;
+	if (p->euid != 0) {
+		if (new_r != p->uid && new_r != p->euid && new_r != p->suid) return -1;
+		if (new_e != p->uid && new_e != p->euid && new_e != p->suid) return -1;
+		if (new_s != p->uid && new_s != p->euid && new_s != p->suid) return -1;
+	}
+	p->uid = new_r; p->euid = new_e; p->suid = new_s;
 	return 0;
 }
 
 static long sys_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
 {
-	uid_t u = task_current()->uid;
-	if (copy_to_user(ruid, &u, sizeof(u))) return -14;
-	if (copy_to_user(euid, &u, sizeof(u))) return -14;
-	if (copy_to_user(suid, &u, sizeof(u))) return -14;
+	process_t *p = task_current();
+	if (copy_to_user(ruid, &p->uid,  sizeof(uid_t))) return -14;
+	if (copy_to_user(euid, &p->euid, sizeof(uid_t))) return -14;
+	if (copy_to_user(suid, &p->suid, sizeof(uid_t))) return -14;
 	return 0;
 }
 
 static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 {
 	process_t *p = task_current();
-	if (rgid != (gid_t)-1) p->gid = rgid;
-	if (egid != (gid_t)-1) p->gid = egid;
-	(void)sgid;
+	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
+	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
+	gid_t new_s = (sgid != (gid_t)-1) ? sgid : p->sgid;
+	if (p->egid != 0) {
+		if (new_r != p->gid && new_r != p->egid && new_r != p->sgid) return -1;
+		if (new_e != p->gid && new_e != p->egid && new_e != p->sgid) return -1;
+		if (new_s != p->gid && new_s != p->egid && new_s != p->sgid) return -1;
+	}
+	p->gid = new_r; p->egid = new_e; p->sgid = new_s;
 	return 0;
 }
 
 static long sys_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
 {
-	gid_t g = task_current()->gid;
-	if (copy_to_user(rgid, &g, sizeof(g))) return -14;
-	if (copy_to_user(egid, &g, sizeof(g))) return -14;
-	if (copy_to_user(sgid, &g, sizeof(g))) return -14;
+	process_t *p = task_current();
+	if (copy_to_user(rgid, &p->gid,  sizeof(gid_t))) return -14;
+	if (copy_to_user(egid, &p->egid, sizeof(gid_t))) return -14;
+	if (copy_to_user(sgid, &p->sgid, sizeof(gid_t))) return -14;
 	return 0;
 }
 
