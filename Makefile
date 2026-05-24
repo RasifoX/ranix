@@ -176,11 +176,12 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
-	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
+	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp userspace/init userspace/hello userspace/echo_server \
 	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
-	    userspace/test_creds userspace/test_aslr \
+	    userspace/test_creds userspace/test_aslr userspace/test_signalfd \
 	    $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
@@ -200,9 +201,11 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	            awk sort uniq cut tr rev xargs dd stat du diff \
 	            env tee seq sleep date id whoami hostname \
 	            true false dirname basename pwd uptime nproc \
-	            timeout test expr yes which readlink ping nc wget; do \
+	            timeout test expr yes which readlink ping nc wget \
+	            su login passwd; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
+	@chmod u+s $(BUILD_DIR)/initramfs/bin/su
 	@cp "$(BASH_CACHED)" $(BUILD_DIR)/initramfs/bin/bash
 	@chmod +x $(BUILD_DIR)/initramfs/bin/bash
 	@if [ -f doomgeneric/doomgeneric ]; then \
@@ -218,7 +221,14 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
 	fi
 	@if [ -f tests/ranix_test.sh ]; then cp tests/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
-	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc > ../initramfs.cpio 2>/dev/null
+	@printf 'root:x:0:0:root:/root:/bin/bash\ntest:x:1000:1000:Test User:/home/test:/bin/sh\n' \
+	    > $(BUILD_DIR)/initramfs/etc/passwd
+	@rm -f $(BUILD_DIR)/initramfs/etc/shadow
+	@printf 'root:$$6$$ranixsalt$$.hGbivmRHVhZxfxORfv1MD0sy40LgabzFqZTIyXG4KhrIN/YF.rMrSGyJrMMXSi8loXADZl.uX7/8UWcfZA2q1:19900:0:99999:7:::\ntest:$$6$$testsalt1$$6cTOkKTn8ZS0yaLedMWewUyP2wRoYelzbeIvjGKJ4GsHcHnp0m2DU87odsL9e90OCGfvadlarpnMVWZoOMysH0:19900:0:99999:7:::\n' \
+	    > $(BUILD_DIR)/initramfs/etc/shadow
+	@chmod 640 $(BUILD_DIR)/initramfs/etc/shadow
+	@printf 'root:x:0:\ntest:x:1000:\n' > $(BUILD_DIR)/initramfs/etc/group
+	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 
 userspace/hello: userspace/hello.c
@@ -248,6 +258,9 @@ userspace/test_creds: userspace/test_creds.c
 userspace/test_aslr: userspace/test_aslr.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
+userspace/test_signalfd: userspace/test_signalfd.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -265,7 +278,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
