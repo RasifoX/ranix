@@ -84,6 +84,8 @@ typedef struct process {
 	gid_t           gid;   /* rgid */
 	gid_t           egid;  /* effective gid */
 	gid_t           sgid;  /* saved set-gid */
+	gid_t           groups[32]; /* supplementary groups */
+	int             ngroups;
 	int             exit_code;
 	int             killed_by_sig; /* non-zero if exited due to signal */
 

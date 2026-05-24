@@ -428,6 +428,8 @@ pid_t proc_fork(void)
 	child->state     = PROC_READY;
 	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
+	child->ngroups = parent->ngroups;
+	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
 	child->brk       = parent->brk;
 	child->mmap_next = parent->mmap_next;
 	child->reaped    = 0;
@@ -516,6 +518,8 @@ pid_t proc_vfork(void)
 	child->state        = PROC_READY;
 	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
+	child->ngroups = parent->ngroups;
+	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
@@ -592,6 +596,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->state        = PROC_READY;
 	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
+	child->ngroups = parent->ngroups;
+	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = -1;
