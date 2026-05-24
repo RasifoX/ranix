@@ -176,10 +176,11 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(CACHE_DIR)
 	@cp userspace/init userspace/hello userspace/echo_server \
 	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
+	    userspace/test_creds userspace/test_aslr \
 	    $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
@@ -241,6 +242,12 @@ userspace/test_ptrace: userspace/test_ptrace.c
 userspace/test_unix: userspace/test_unix.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
+userspace/test_creds: userspace/test_creds.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
+userspace/test_aslr: userspace/test_aslr.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -258,7 +265,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
