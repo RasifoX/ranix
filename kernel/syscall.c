@@ -1230,8 +1230,15 @@ void syscall_handle(arch_context_t *ctx)
 		} else if (flags & CLONE_VM) {
 			/* Thread: share address space */
 			uint64_t newsp  = (uint64_t)arg1;
-			uint32_t *ctid  = (flags & CLONE_CTID) ? (uint32_t*)arg3 : NULL;
+			/* Linux ABI: x86_64 clone(flags,newsp,ptid,ctid,tls)
+			 *            aarch64 clone(flags,newsp,ptid,tls,ctid) */
+#if defined(__aarch64__)
+			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg3 : 0;
+			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg4 : NULL;
+#else
+			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg3 : NULL;
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg4 : 0;
+#endif
 			ret = (long)proc_clone_thread(newsp, tls, ctid);
 		} else {
 			ret = sys_fork();
