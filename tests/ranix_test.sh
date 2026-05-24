@@ -295,6 +295,26 @@ check "sort-order"        "1
 2
 3" "$(printf '3\n1\n2\n' | sort -n)"
 
+# ── 41. credentials (uid/gid/resuid/caps/getrandom) ──────────
+check "uid-is-root"    "0"  "$(id -u)"
+check "gid-is-root"    "0"  "$(id -g)"
+check "proc-uid-field" "0"  "$(awk '/^Uid:/{print $2}' /proc/self/status)"
+check "proc-euid-field" "0" "$(awk '/^Uid:/{print $3}' /proc/self/status)"
+check "proc-gid-field" "0"  "$(awk '/^Gid:/{print $2}' /proc/self/status)"
+check "proc-capprm-set" "1" "$(awk '/^CapPrm:/{print (length($2)>0)?1:0}' /proc/self/status)"
+check "proc-capeff-nonzero" "1" \
+    "$(awk '/^CapEff:/{print ($2 ~ /[1-9a-fA-F]/)?1:0}' /proc/self/status)"
+check "c-creds"        "OK"  "$(timeout 5 /bin/test_creds 2>/dev/null | tail -1)"
+
+# ── 42. ASLR — mmap base differs between processes ────────────
+_a1=$(/bin/test_aslr 2>/dev/null)
+_a2=$(/bin/test_aslr 2>/dev/null)
+check "aslr-mmap-differs" "1" "$([ \"$_a1\" != \"$_a2\" ] && echo 1 || echo 0)"
+
+# ── 43. /dev/shm symlink → /run/shm ──────────────────────────
+check "devshm-link"  "/run/shm"  "$(readlink /dev/shm)"
+check "devshm-write" "ok"        "$(echo ok > /run/shm/t && cat /run/shm/t && rm /run/shm/t)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
