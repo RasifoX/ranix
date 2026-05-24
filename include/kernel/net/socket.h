@@ -88,7 +88,8 @@ typedef struct socket {
 
     /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;
-    char           unix_path[108];  /* bound path, empty if not bound */
+    char           unix_path[108];  /* bound path; [0]=='\0' → abstract namespace */
+    int            unix_path_len;   /* 0 = not bound, >0 = length of unix_path */
 } socket_t;
 
 /* Per-process socket table — max 16 sockets per process for now */

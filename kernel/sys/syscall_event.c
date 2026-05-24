@@ -605,16 +605,126 @@ static long sys_inotify_rm_watch(int ifd, int wd)
     return -22;
 }
 
-/* ── signalfd (stub: returns fd that is never readable) ─── */
+/* ── signalfd ─────────────────────────────────────────────── */
 
-static long sys_signalfd4(int fd, const uint64_t *mask, size_t sigsetsize, int flags)
+typedef struct {
+    uint64_t   mask;    /* signals monitored */
+    int        flags;
+    process_t *owner;
+} signalfd_t;
+
+/* signalfd_siginfo: 128-byte struct passed to read() */
+typedef struct {
+    uint32_t ssi_signo;
+    int32_t  ssi_errno;
+    int32_t  ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t  ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t  ssi_status;
+    int32_t  ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t _pad2;
+    int32_t  ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t  _pad[28];
+} __attribute__((packed)) signalfd_siginfo_t;
+
+static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
-    (void)mask; (void)sigsetsize; (void)flags;
-    /* If fd == -1, create a new signalfd (stub, never delivers events).
-     * Many programs use signalfd only as a fallback; returning a valid fd
-     * that never becomes readable is enough to not crash them. */
-    if (fd != -1) return 0; /* modifying existing fd: no-op */
-    /* Reuse eventfd infrastructure with count=0, non-writable from outside */
-    return sys_eventfd2(0, flags & O_NONBLOCK);
+    if (len < sizeof(signalfd_siginfo_t)) return -22;
+    signalfd_t *sfd = (signalfd_t *)file->inode->priv;
+    process_t  *p   = sfd->owner;
+
+    while (1) {
+        uint64_t pending = p->sig_pending & sfd->mask;
+        if (pending) {
+            int sig = 1;
+            while (sig <= 64 && !((pending >> (sig-1)) & 1)) sig++;
+            p->sig_pending &= ~(1ULL << (sig-1));
+            signalfd_siginfo_t info;
+            __builtin_memset(&info, 0, sizeof(info));
+            info.ssi_signo = (uint32_t)sig;
+            info.ssi_pid   = (uint32_t)p->pid;
+            return copy_to_user(buf, &info, sizeof(info)) == 0
+                   ? (ssize_t)sizeof(info) : -14;
+        }
+        if (sfd->flags & O_NONBLOCK) return -11; /* EAGAIN */
+        if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
+        task_sleep();
+    }
+}
+
+static int signalfd_poll_vfs(vfs_file_t *file)
+{
+    signalfd_t *sfd = (signalfd_t *)file->inode->priv;
+    return (sfd->owner->sig_pending & sfd->mask) ? POLLIN : 0;
+}
+
+static int signalfd_close_vfs(vfs_file_t *file)
+{
+    signalfd_t  *sfd = (signalfd_t *)file->inode->priv;
+    vfs_inode_t *in  = file->inode;
+    kfree(sfd);
+    kfree(in);
+    kfree(file);
+    return 0;
+}
+
+static vfs_fops_t signalfd_fops = {
+    .read  = signalfd_read_vfs,
+    .poll  = signalfd_poll_vfs,
+    .close = signalfd_close_vfs,
+};
+
+static long sys_signalfd4(int fd, const uint64_t *umask, size_t sigsetsize, int flags)
+{
+    (void)sigsetsize;
+    uint64_t kmask = 0;
+    if (umask && copy_from_user(&kmask, umask, sizeof(kmask)) != 0) return -14;
+
+    process_t *p = task_current();
+
+    if (fd != -1) {
+        /* update mask on existing signalfd */
+        vfs_file_t *f = fd_get(p->fds, fd);
+        if (!f || !f->inode || f->inode->fops != &signalfd_fops) return -9;
+        ((signalfd_t *)f->inode->priv)->mask  = kmask;
+        ((signalfd_t *)f->inode->priv)->flags = flags;
+        return 0;
+    }
+
+    signalfd_t *sfd = kmalloc(sizeof(*sfd));
+    if (!sfd) return -12;
+    sfd->mask  = kmask;
+    sfd->flags = flags;
+    sfd->owner = p;
+
+    vfs_inode_t *in = kmalloc(sizeof(*in));
+    if (!in) { kfree(sfd); return -12; }
+    __builtin_memset(in, 0, sizeof(*in));
+    in->fops     = &signalfd_fops;
+    in->priv     = sfd;
+    in->refcount = 1;
+
+    vfs_file_t *f = kmalloc(sizeof(*f));
+    if (!f) { kfree(sfd); kfree(in); return -12; }
+    __builtin_memset(f, 0, sizeof(*f));
+    f->inode    = in;
+    f->refcount = 1;
+    if (flags & O_NONBLOCK) f->flags = O_NONBLOCK;
+
+    int newfd = fd_alloc(p->fds, f);
+    if (newfd < 0) { kfree(f); kfree(sfd); kfree(in); return -12; }
+    return newfd;
 }
 

@@ -8,7 +8,7 @@ static int sock_close_vfs(vfs_file_t *file)
     vfs_inode_t *in = file->inode;
 
     if (s->domain == AF_UNIX) {
-        if (s->unix_path[0]) unix_reg_remove(s);
+        if (s->unix_path_len > 0) unix_reg_remove(s);
         socket_t *peer = s->unix_peer;
         s->unix_peer = NULL;
         if (peer && peer->unix_peer == s) {
@@ -157,17 +157,23 @@ static int sock_to_fd(socket_t *s)
 }
 
 /* ── AF_UNIX path registry ───────────────────────────────── */
+/*
+ * Handles both filesystem paths (sun_path[0] != '\0') and abstract
+ * namespace sockets (sun_path[0] == '\0', name in sun_path[1..len-1]).
+ * pathlen is the number of bytes in path[] that identify the socket.
+ */
 
 #define UNIX_REG_MAX 64
-static struct { char path[108]; socket_t *sock; } unix_reg[UNIX_REG_MAX];
+static struct { char path[108]; int pathlen; socket_t *sock; } unix_reg[UNIX_REG_MAX];
 static spinlock_t unix_reg_lock = SPINLOCK_INIT;
 
-static socket_t *unix_reg_find(const char *path)
+static socket_t *unix_reg_find(const char *path, int pathlen)
 {
     uint64_t f = spin_lock_irq(&unix_reg_lock);
     socket_t *found = NULL;
     for (int i = 0; i < UNIX_REG_MAX; i++) {
-        if (unix_reg[i].sock && strcmp(unix_reg[i].path, path) == 0) {
+        if (unix_reg[i].sock && unix_reg[i].pathlen == pathlen &&
+            memcmp(unix_reg[i].path, path, (size_t)pathlen) == 0) {
             found = unix_reg[i].sock;
             break;
         }
@@ -176,7 +182,7 @@ static socket_t *unix_reg_find(const char *path)
     return found;
 }
 
-static int unix_reg_add(const char *path, socket_t *s)
+static int unix_reg_add(const char *path, int pathlen, socket_t *s)
 {
     uint64_t f = spin_lock_irq(&unix_reg_lock);
     int slot = -1;
@@ -184,9 +190,9 @@ static int unix_reg_add(const char *path, socket_t *s)
         if (!unix_reg[i].sock) { slot = i; break; }
     }
     if (slot >= 0) {
-        strncpy(unix_reg[slot].path, path, 107);
-        unix_reg[slot].path[107] = '\0';
-        unix_reg[slot].sock = s;
+        memcpy(unix_reg[slot].path, path, (size_t)pathlen);
+        unix_reg[slot].pathlen = pathlen;
+        unix_reg[slot].sock    = s;
     }
     spin_unlock_irq(&unix_reg_lock, f);
     return slot >= 0 ? 0 : -28; /* ENOSPC */
@@ -196,7 +202,11 @@ static void unix_reg_remove(socket_t *s)
 {
     uint64_t f = spin_lock_irq(&unix_reg_lock);
     for (int i = 0; i < UNIX_REG_MAX; i++) {
-        if (unix_reg[i].sock == s) { unix_reg[i].sock = NULL; unix_reg[i].path[0] = '\0'; break; }
+        if (unix_reg[i].sock == s) {
+            unix_reg[i].sock    = NULL;
+            unix_reg[i].pathlen = 0;
+            break;
+        }
     }
     spin_unlock_irq(&unix_reg_lock, f);
 }
@@ -225,12 +235,23 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
 
     if (family == AF_UNIX) {
         sockaddr_un_t su;
-        if (copy_from_user(&su, uaddr, sizeof(su)) != 0) return -14;
-        su.sun_path[107] = '\0';
-        if (unix_reg_find(su.sun_path)) return -98; /* EADDRINUSE */
-        strncpy(s->unix_path, su.sun_path, 107);
-        s->unix_path[107] = '\0';
-        return unix_reg_add(s->unix_path, s);
+        uint32_t copylen = addrlen < sizeof(su) ? addrlen : sizeof(su);
+        if (copy_from_user(&su, uaddr, copylen) != 0) return -14;
+        int pathlen;
+        if (su.sun_path[0] == '\0') {
+            /* abstract namespace: name is sun_path[0..addrlen-3], includes \0 */
+            pathlen = (int)addrlen - 2;
+            if (pathlen <= 0 || pathlen > 107) return -22;
+        } else {
+            /* filesystem path: use strlen+1 (null terminator included) */
+            int slen = 0;
+            while (slen < 107 && su.sun_path[slen]) slen++;
+            pathlen = slen + 1;
+        }
+        if (unix_reg_find(su.sun_path, pathlen)) return -98; /* EADDRINUSE */
+        memcpy(s->unix_path, su.sun_path, (size_t)pathlen);
+        s->unix_path_len = pathlen;
+        return unix_reg_add(s->unix_path, pathlen, s);
     }
 
     sockaddr_in_t sa;
@@ -252,9 +273,18 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
 
     if (family == AF_UNIX) {
         sockaddr_un_t su;
-        if (copy_from_user(&su, uaddr, sizeof(su)) != 0) return -14;
-        su.sun_path[107] = '\0';
-        socket_t *ls = unix_reg_find(su.sun_path);
+        uint32_t copylen = addrlen < sizeof(su) ? addrlen : sizeof(su);
+        if (copy_from_user(&su, uaddr, copylen) != 0) return -14;
+        int pathlen;
+        if (su.sun_path[0] == '\0') {
+            pathlen = (int)addrlen - 2;
+            if (pathlen <= 0 || pathlen > 107) return -22;
+        } else {
+            int slen = 0;
+            while (slen < 107 && su.sun_path[slen]) slen++;
+            pathlen = slen + 1;
+        }
+        socket_t *ls = unix_reg_find(su.sun_path, pathlen);
         if (!ls) return -111; /* ECONNREFUSED */
         if (ls->tcp_state != TCP_LISTEN) return -111;
 
