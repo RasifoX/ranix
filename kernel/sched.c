@@ -306,6 +306,12 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->gid  = current->gid;
 	p->egid = current->egid;
 	p->sgid = current->egid;
+	/* init (PID 1) runs as root with full capabilities */
+	if (p->euid == 0) {
+		p->cap_permitted   = ~0ULL;
+		p->cap_effective   = ~0ULL;
+		p->cap_inheritable = ~0ULL;
+	}
 
 	int nlen = 0;
 	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
@@ -430,6 +436,9 @@ pid_t proc_fork(void)
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->ngroups = parent->ngroups;
 	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
+	child->cap_permitted   = parent->cap_permitted;
+	child->cap_effective   = parent->cap_effective;
+	child->cap_inheritable = parent->cap_inheritable;
 	child->brk       = parent->brk;
 	child->mmap_next = parent->mmap_next;
 	child->reaped    = 0;
@@ -520,6 +529,9 @@ pid_t proc_vfork(void)
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->ngroups = parent->ngroups;
 	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
+	child->cap_permitted   = parent->cap_permitted;
+	child->cap_effective   = parent->cap_effective;
+	child->cap_inheritable = parent->cap_inheritable;
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
@@ -598,6 +610,9 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
 	child->ngroups = parent->ngroups;
 	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
+	child->cap_permitted   = parent->cap_permitted;
+	child->cap_effective   = parent->cap_effective;
+	child->cap_inheritable = parent->cap_inheritable;
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = -1;
