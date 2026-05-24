@@ -773,6 +773,17 @@ void task_wake(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+void task_wake_no_resched(process_t *p)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (p && p->state == PROC_SLEEPING) {
+		p->state = PROC_READY;
+		p->sleeping_on_queue = 0;
+		runqueue_add(p);
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void task_signal(process_t *p, int sig)
 {
 	if (!p || sig <= 0 || sig > NSIG) return;

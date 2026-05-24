@@ -105,7 +105,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		int woken = 0;
 		for (int i = 0; i < FUTEX_SLOTS && woken < (int)val; i++) {
 			if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
-				task_wake(futex_table[i].waiter);
+				task_wake_no_resched(futex_table[i].waiter);
 				futex_table[i].waiter = NULL;
 				futex_table[i].uaddr  = NULL;
 				woken++;
