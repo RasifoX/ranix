@@ -38,6 +38,7 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 
 #define FUTEX_WAIT         0
 #define FUTEX_WAKE         1
+#define FUTEX_WAKE_OP      5
 #define FUTEX_REQUEUE      3
 #define FUTEX_PRIVATE_FLAG 128
 
@@ -50,7 +51,6 @@ static spinlock_t futex_lock = SPINLOCK_INIT;
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
-	(void)uaddr2; (void)val3;
 	int cmd = op & ~FUTEX_PRIVATE_FLAG;
 
 	if (cmd == FUTEX_WAIT) {
@@ -109,6 +109,62 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				futex_table[i].waiter = NULL;
 				futex_table[i].uaddr  = NULL;
 				woken++;
+			}
+		}
+		spin_unlock_irq(&futex_lock, f);
+		return woken;
+	}
+
+	if (cmd == FUTEX_WAKE_OP) {
+		if (!uaddr2) return -22;
+		/* val3 encoding: op[31:28] cmp[27:24] oparg[23:12] cmparg[11:0] */
+		uint32_t op3     = (val3 >> 28) & 0xf;
+		uint32_t cmp3    = (val3 >> 24) & 0xf;
+		uint32_t oparg   = (val3 >> 12) & 0xfff;
+		uint32_t cmparg  = val3 & 0xfff;
+		if (op3 & 8) { oparg = 1u << oparg; op3 &= ~8u; } /* FUTEX_OP_ARG_SHIFT */
+		uint32_t oldval = 0;
+		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -14;
+		uint32_t newval = oldval;
+		switch (op3) {
+		case 0: newval  = oparg; break;           /* SET */
+		case 1: newval += oparg; break;           /* ADD */
+		case 2: newval |= oparg; break;           /* OR  */
+		case 3: newval &= ~oparg; break;          /* ANDN */
+		case 4: newval ^= oparg; break;           /* XOR */
+		}
+		if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -14;
+		/* wake val waiters on uaddr */
+		uint64_t f = spin_lock_irq(&futex_lock);
+		int woken = 0;
+		for (int i = 0; i < FUTEX_SLOTS && woken < (int)val; i++) {
+			if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
+				task_wake_no_resched(futex_table[i].waiter);
+				futex_table[i].waiter = NULL;
+				futex_table[i].uaddr  = NULL;
+				woken++;
+			}
+		}
+		/* wake val2 waiters on uaddr2 if cmp holds */
+		int do_wake2 = 0;
+		switch (cmp3) {
+		case 0: do_wake2 = (oldval == cmparg); break;
+		case 1: do_wake2 = (oldval != cmparg); break;
+		case 2: do_wake2 = ((int32_t)oldval <  (int32_t)cmparg); break;
+		case 3: do_wake2 = ((int32_t)oldval <= (int32_t)cmparg); break;
+		case 4: do_wake2 = ((int32_t)oldval >  (int32_t)cmparg); break;
+		case 5: do_wake2 = ((int32_t)oldval >= (int32_t)cmparg); break;
+		}
+		if (do_wake2) {
+			/* val2 is passed as the timeout pointer cast to uintptr_t */
+			int val2 = (int)(uintptr_t)timeout;
+			for (int i = 0; i < FUTEX_SLOTS && woken < (int)val + val2; i++) {
+				if (futex_table[i].uaddr == uaddr2 && futex_table[i].waiter) {
+					task_wake_no_resched(futex_table[i].waiter);
+					futex_table[i].waiter = NULL;
+					futex_table[i].uaddr  = NULL;
+					woken++;
+				}
 			}
 		}
 		spin_unlock_irq(&futex_lock, f);

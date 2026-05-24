@@ -202,6 +202,7 @@ typedef struct {
 	int        fds[EPOLL_MAX_WATCH];
 	uint32_t   ev[EPOLL_MAX_WATCH];
 	uint64_t   data[EPOLL_MAX_WATCH];
+	uint32_t   last_ready[EPOLL_MAX_WATCH]; /* for EPOLLET edge tracking */
 } epoll_t;
 
 static int epoll_close(vfs_file_t *file)
@@ -268,9 +269,10 @@ static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 		}
 		for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
 			if (ep->fds[i] < 0) {
-				ep->fds[i]  = fd;
-				ep->ev[i]   = ev.events;
-				ep->data[i] = ev.data;
+				ep->fds[i]        = fd;
+				ep->ev[i]         = ev.events;
+				ep->data[i]       = ev.data;
+				ep->last_ready[i] = 0;
 				spin_unlock_irq(&ep->lock, f);
 				return 0;
 			}
@@ -282,10 +284,12 @@ static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 	for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
 		if (ep->fds[i] != fd) continue;
 		if (op == EPOLL_CTL_DEL) {
-			ep->fds[i] = -1;
+			ep->fds[i]        = -1;
+			ep->last_ready[i] = 0;
 		} else if (op == EPOLL_CTL_MOD) {
-			ep->ev[i]   = ev.events;
-			ep->data[i] = ev.data;
+			ep->ev[i]         = ev.events;
+			ep->data[i]       = ev.data;
+			ep->last_ready[i] = 0; /* re-arm clears edge state */
 		}
 		spin_unlock_irq(&ep->lock, f);
 		return 0;
@@ -316,15 +320,29 @@ static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevent
 		ready = 0;
 		uint64_t f = spin_lock_irq(&ep->lock);
 		for (int i = 0; i < EPOLL_MAX_WATCH && ready < maxevents; i++) {
-			if (ep->fds[i] < 0) continue;
+			if (ep->fds[i] < 0 || ep->ev[i] == 0) continue;
 			int bits = fd_poll_bits(ep->fds[i]);
-			int r = 0;
+			uint32_t r = 0;
 			if ((ep->ev[i] & EPOLLIN)  && (bits & POLLIN))  r |= EPOLLIN;
 			if ((ep->ev[i] & EPOLLOUT) && (bits & POLLOUT)) r |= EPOLLOUT;
-			if (r) {
-				kev[ready].events = (uint32_t)r;
+
+			int report;
+			if (ep->ev[i] & EPOLLET) {
+				/* edge-trigger: only report newly ready bits */
+				report = (r & ~ep->last_ready[i]) != 0;
+				ep->last_ready[i] = r;
+			} else {
+				/* level-trigger: report whenever ready */
+				report = (r != 0);
+				ep->last_ready[i] = 0;
+			}
+
+			if (report) {
+				kev[ready].events = r;
 				kev[ready].data   = ep->data[i];
 				ready++;
+				if (ep->ev[i] & EPOLLONESHOT)
+					ep->ev[i] = 0; /* disarm until re-armed with MOD */
 			}
 		}
 		spin_unlock_irq(&ep->lock, f);
