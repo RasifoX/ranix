@@ -1192,7 +1192,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETEGID:     ret = sys_getegid(); break;
 	case SYS_ARCH_GETTID:      ret = sys_gettid(); break;
 	case SYS_ARCH_GETGROUPS:   ret = sys_getgroups((int)arg0, (uint64_t*)arg1); break;
-	case SYS_ARCH_SETGROUPS:   ret = 0; break;
+	case SYS_ARCH_SETGROUPS:   ret = sys_setgroups((int)arg0, (const gid_t*)arg1); break;
 	case SYS_ARCH_GETRLIMIT:   ret = sys_getrlimit((int)arg0, (void*)arg1); break;
 	case SYS_ARCH_SETRLIMIT:   ret = sys_setrlimit((int)arg0, (const void*)arg1); break;
 	case SYS_ARCH_SETUID:      ret = sys_setuid((uid_t)arg0); break;
