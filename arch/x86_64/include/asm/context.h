@@ -242,4 +242,19 @@ typedef struct {
 
 #define SYS_ARCH_PTRACE          101
 
+/* SysV IPC */
+#define SYS_ARCH_SHMGET           29
+#define SYS_ARCH_SHMCTL           31
+#define SYS_ARCH_SHMAT            30
+#define SYS_ARCH_SHMDT            67
+#define SYS_ARCH_SEMGET           64
+#define SYS_ARCH_SEMCTL           66
+#define SYS_ARCH_SEMOP            65
+/* POSIX IPC */
+#define SYS_ARCH_MQ_OPEN         240
+#define SYS_ARCH_MQ_UNLINK       241
+#define SYS_ARCH_MQ_TIMEDSEND    242
+#define SYS_ARCH_MQ_TIMEDRECEIVE 243
+#define SYS_ARCH_MQ_GETSETATTR   245
+
 #endif
