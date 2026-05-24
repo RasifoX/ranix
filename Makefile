@@ -115,6 +115,7 @@ SRCS_KERNEL = \
     kernel/mm/vm.c \
     kernel/mm/pmm.c \
     kernel/mm/heap.c \
+    kernel/mm/vmalloc.c \
     kernel/lib/string.c \
     kernel/tty/tty_core.c \
     drivers/video/fbdev.c \
