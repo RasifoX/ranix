@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/config.h>
+#include <kernel/cmdline.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
@@ -13,6 +14,7 @@ vfs_inotify_fn_t vfs_inotify_hook = NULL;
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static int dentry_count = 0;
+static int dentry_max_val = DENTRY_MAX;
 
 static void vfs_inode_free(vfs_inode_t *in)
 {
@@ -161,7 +163,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				return NULL;
 			}
 			/* Cache only if parent is real (in dentry tree) and caching is allowed */
-			if (!parent_was_volatile && !dir_inode->no_cache && dentry_count < DENTRY_MAX) {
+			if (!parent_was_volatile && !dir_inode->no_cache && dentry_count < dentry_max_val) {
 				/* Re-check: another task may have added this dentry while unlocked */
 				child = d->child;
 				while (child) {
@@ -891,6 +893,15 @@ extern void ext2_register(void);
 
 void vfs_init(void)
 {
+	{
+		char buf[16];
+		if (cmdline_get("vfs_dentry_max", buf, sizeof(buf))) {
+			int v = 0;
+			for (const char *s = buf; *s >= '0' && *s <= '9'; s++)
+				v = v * 10 + (*s - '0');
+			if (v > 0) dentry_max_val = v;
+		}
+	}
 	ramfs_register();
 	procfs_register();
 	devfs_register();

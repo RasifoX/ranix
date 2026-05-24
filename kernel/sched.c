@@ -1,6 +1,7 @@
 #include <kernel/proc.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>
+#include <kernel/cmdline.h>
 #include <kernel/tick.h>
 #include <kernel/elf.h>
 #include <kernel/kprintf.h>
@@ -66,6 +67,7 @@ static uint8_t *kstack_alloc(void)
 }
 
 static spinlock_t sched_lock = SPINLOCK_INIT;
+static int sched_quantum_val = SCHED_QUANTUM;
 
 static tick_fn_t *tick_cbs;
 static int        tick_cb_cnt = 0;
@@ -138,7 +140,7 @@ void sched_init(void)
 	p->entry = idle_loop;
 	p->next  = p;
 	p->kstack = idle_kstack;
-	p->ticks_remaining = SCHED_QUANTUM;
+	p->ticks_remaining = sched_quantum_val;
 	memcpy(p->name, "idle", 5);
 
 	uint8_t *sp_top = idle_kstack + KSTACK_SIZE;
@@ -157,6 +159,16 @@ void sched_init(void)
 	proctab_grow();
 	proctab[0] = p;
 	proc_cnt   = 1;
+
+	{
+		char buf[16];
+		if (cmdline_get("sched_quantum", buf, sizeof(buf))) {
+			int v = 0;
+			for (const char *s = buf; *s >= '0' && *s <= '9'; s++)
+				v = v * 10 + (*s - '0');
+			if (v > 0) sched_quantum_val = v;
+		}
+	}
 
 	tick_register(sched_tick);
 
@@ -221,7 +233,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->uid   = current ? current->uid : 0;
 	p->gid   = current ? current->gid : 0;
 	p->entry = fn;
-	p->ticks_remaining = SCHED_QUANTUM;
+	p->ticks_remaining = sched_quantum_val;
 
 	int nlen = 0;
 	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
@@ -440,7 +452,7 @@ pid_t proc_fork(void)
 		child->ctx = cctx;
 	}
 	child->tls_base        = parent->tls_base;
-	child->ticks_remaining = SCHED_QUANTUM;
+	child->ticks_remaining = sched_quantum_val;
 
 	{
 		uint64_t f = spin_lock_irq(&sched_lock);
@@ -608,7 +620,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	}
 
 	child->ctx             = cctx;
-	child->ticks_remaining = SCHED_QUANTUM;
+	child->ticks_remaining = sched_quantum_val;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int pid = alloc_pid();
@@ -671,7 +683,7 @@ void schedule(void)
 	}
 	next->state = PROC_RUNNING;
 	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
-	int q = SCHED_QUANTUM - (next->nice * SCHED_QUANTUM) / 40;
+	int q = sched_quantum_val - (next->nice * sched_quantum_val) / 40;
 	if (q < 1) q = 1;
 	next->ticks_remaining = q;
 
