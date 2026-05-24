@@ -103,7 +103,7 @@ typedef struct {
 #define SYS_ARCH_GETEGID       177
 #define SYS_ARCH_SYSINFO       179
 #define SYS_ARCH_CLONE         220
-#define SYS_ARCH_VFORK         190
+#define SYS_ARCH_VFORK          58
 #define SYS_ARCH_EXECVE        221
 #define SYS_ARCH_BRK           214
 #define SYS_ARCH_MUNMAP        215
@@ -209,5 +209,20 @@ typedef struct {
 #define SYS_ARCH_REMOVEXATTR      14
 
 #define SYS_ARCH_PTRACE          117
+
+/* SysV IPC */
+#define SYS_ARCH_SHMGET          194
+#define SYS_ARCH_SHMCTL          195
+#define SYS_ARCH_SHMAT           196
+#define SYS_ARCH_SHMDT           197
+#define SYS_ARCH_SEMGET          190
+#define SYS_ARCH_SEMCTL          191
+#define SYS_ARCH_SEMOP           193
+/* POSIX IPC */
+#define SYS_ARCH_MQ_OPEN         180
+#define SYS_ARCH_MQ_UNLINK       181
+#define SYS_ARCH_MQ_TIMEDSEND    182
+#define SYS_ARCH_MQ_TIMEDRECEIVE 183
+#define SYS_ARCH_MQ_GETSETATTR   185
 
 #endif
