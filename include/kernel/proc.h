@@ -120,6 +120,7 @@ void       schedule(void);
 void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);
+void       task_wake_no_resched(process_t *p);
 void       task_signal(process_t *p, int sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
 void       signal_dispatch(arch_context_t *tf);
