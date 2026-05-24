@@ -87,6 +87,11 @@ typedef struct process {
 	gid_t           groups[32]; /* supplementary groups */
 	int             ngroups;
 	int             dumpable;  /* 0=not dumpable, 1=dumpable (default) */
+
+	/* POSIX capabilities (lower 40 bits, caps 0-39) */
+	uint64_t        cap_permitted;
+	uint64_t        cap_effective;
+	uint64_t        cap_inheritable;
 	int             exit_code;
 	int             killed_by_sig; /* non-zero if exited due to signal */
 

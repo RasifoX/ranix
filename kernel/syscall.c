@@ -1,4 +1,5 @@
 #include <kernel/syscall.h>
+#include <kernel/capabilities.h>
 #include <kernel/proc.h>
 #include <kernel/elf.h>
 #include <kernel/vfs.h>
@@ -569,6 +570,19 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* apply credentials: suid/sgid set to new euid/egid after exec */
 	p->euid = new_euid; p->suid = new_euid;
 	p->egid = new_egid; p->sgid = new_egid;
+
+	/* capability transition on exec (no file caps):
+	 * P'(permitted)   = P(inheritable)
+	 * P'(effective)   = P'(permitted)   (if new euid == 0, keep all)
+	 * P'(inheritable) = P(inheritable)  (unchanged)
+	 * Root gets full caps, others keep only inherited subset */
+	if (new_euid == 0) {
+		p->cap_permitted   = CAP_FULL;
+		p->cap_effective   = CAP_FULL;
+	} else {
+		p->cap_permitted   = p->cap_inheritable;
+		p->cap_effective   = p->cap_inheritable;
+	}
 
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);

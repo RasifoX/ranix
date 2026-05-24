@@ -1,5 +1,6 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
+#include <kernel/capabilities.h>
 #include <kernel/cmdline.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
@@ -48,6 +49,13 @@ static void pb_u64kib(pb_t *b, uint64_t bytes)
 {
 	pb_u64(b, bytes / 1024);
 	pb_str(b, " kB\n");
+}
+
+static void pb_hex16(pb_t *b, uint64_t v)
+{
+	static const char hx[] = "0123456789abcdef";
+	for (int i = 15; i >= 0; i--)
+		pb_char(b, hx[(v >> (i * 4)) & 0xf]);
 }
 
 /* ── fill callbacks ──────────────────────────────────────────── */
@@ -170,10 +178,27 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_str(&b, "Tgid:\t"); pb_u64(&b, p->pid); pb_char(&b, '\n');
 	pb_str(&b, "Pid:\t");  pb_u64(&b, p->pid); pb_char(&b, '\n');
 	pb_str(&b, "PPid:\t"); pb_u64(&b, p->ppid); pb_char(&b, '\n');
-	pb_str(&b, "Uid:\t0\t0\t0\t0\n");
-	pb_str(&b, "Gid:\t0\t0\t0\t0\n");
+	pb_str(&b, "Uid:\t");
+	pb_u64(&b, p->uid);  pb_char(&b, '\t');
+	pb_u64(&b, p->euid); pb_char(&b, '\t');
+	pb_u64(&b, p->suid); pb_char(&b, '\t');
+	pb_u64(&b, p->euid); pb_char(&b, '\n'); /* fsuid = euid */
+	pb_str(&b, "Gid:\t");
+	pb_u64(&b, p->gid);  pb_char(&b, '\t');
+	pb_u64(&b, p->egid); pb_char(&b, '\t');
+	pb_u64(&b, p->sgid); pb_char(&b, '\t');
+	pb_u64(&b, p->egid); pb_char(&b, '\n'); /* fsgid = egid */
+	pb_str(&b, "Groups:\t");
+	for (int _i = 0; _i < p->ngroups; _i++) {
+		if (_i) pb_char(&b, ' ');
+		pb_u64(&b, p->groups[_i]);
+	}
+	pb_char(&b, '\n');
 	pb_str(&b, "VmRSS:\t"); pb_u64(&b, 64); pb_str(&b, " kB\n");
 	pb_str(&b, "Threads:\t1\n");
+	pb_str(&b, "CapInh:\t"); pb_hex16(&b, p->cap_inheritable); pb_char(&b, '\n');
+	pb_str(&b, "CapPrm:\t"); pb_hex16(&b, p->cap_permitted);   pb_char(&b, '\n');
+	pb_str(&b, "CapEff:\t"); pb_hex16(&b, p->cap_effective);   pb_char(&b, '\n');
 	return (int)(sz - b.rem);
 }
 
