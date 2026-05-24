@@ -138,7 +138,7 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static
+.PHONY: all clean qemu image initramfs bash-static test
 
 all: initramfs $(TARGET)
 
@@ -301,3 +301,24 @@ qemu-disk: iso disk-image
 image: all
 	llvm-objcopy -O binary $(TARGET) kernel8.img
 	@echo "[OK] kernel8.img hazır"
+
+TEST_LOG = $(BUILD_DIR)/serial-test.log
+
+ifeq ($(ARCH),x86_64)
+test: iso
+	@rm -f $(TEST_LOG)
+	timeout 120 $(QEMU_CMD) -m 512M -display none \
+	    -serial file:$(TEST_LOG) -cdrom ranix.iso || true
+else
+test: initramfs $(TARGET)
+	@rm -f $(TEST_LOG)
+	timeout 120 $(QEMU_CMD) -m 512M -display none \
+	    -serial file:$(TEST_LOG) \
+	    -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio || true
+endif
+	@echo "--- test output ---"
+	@grep -E "^(PASS|FAIL):" $(TEST_LOG) || true
+	@echo "-------------------"
+	@grep "Results:" $(TEST_LOG) || echo "Results: (not found)"
+	@grep -q "ALL_PASS" $(TEST_LOG) && echo "[OK] All tests passed" || \
+	    { echo "[FAIL] Some tests failed"; exit 1; }
