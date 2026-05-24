@@ -1,3 +1,5 @@
+#include <kernel/capabilities.h>
+
 /* ── statfs ──────────────────────────────────────────────── */
 
 typedef struct {
@@ -43,20 +45,58 @@ static long sys_fstatfs(int fd, kernel_statfs_t *buf)
 
 static long sys_capget(void *hdrp, void *datap)
 {
-	if (!hdrp) return -14;
-	/* write back version = 0x20080522, pid = 0 */
-	uint32_t hdr[2] = { 0x20080522, 0 };
-	if (access_ok(hdrp, 8)) copy_to_user(hdrp, hdr, 8);
-	if (datap && access_ok(datap, 24)) {
-		/* two sets (effective, permitted, inheritable) x2 (32-bit halves) */
-		uint32_t data[6] = { 0xffffffff, 0xffffffff, 0xffffffff,
-		                     0xffffffff, 0xffffffff, 0xffffffff };
-		copy_to_user(datap, data, 24);
-	}
+	if (!hdrp || !access_ok(hdrp, 8)) return -14;
+
+	uint32_t version;
+	if (copy_from_user(&version, hdrp, 4)) return -14;
+	/* always report v3 back */
+	version = _LINUX_CAPABILITY_VERSION_3;
+	if (copy_to_user(hdrp, &version, 4)) return -14;
+
+	if (!datap) return 0;
+	if (!access_ok(datap, 24)) return -14;
+
+	process_t *p = task_current();
+	/* v3 layout: two cap_user_data structs (caps 0-31, caps 32-63) */
+	uint32_t data[6] = {
+		(uint32_t)(p->cap_effective  & 0xffffffff),
+		(uint32_t)(p->cap_permitted  & 0xffffffff),
+		(uint32_t)(p->cap_inheritable & 0xffffffff),
+		(uint32_t)(p->cap_effective  >> 32),
+		(uint32_t)(p->cap_permitted  >> 32),
+		(uint32_t)(p->cap_inheritable >> 32),
+	};
+	return copy_to_user(datap, data, 24) == 0 ? 0 : -14;
+}
+
+static long sys_capset(void *hdrp, const void *datap)
+{
+	if (!hdrp || !access_ok(hdrp, 8)) return -14;
+	process_t *p = task_current();
+	/* only permitted to drop or set within permitted set; root can do anything */
+	if (!datap) return -14;
+	if (!access_ok(datap, 24)) return -14;
+
+	uint32_t data[6];
+	if (copy_from_user(data, datap, 24)) return -14;
+
+	uint64_t new_eff  = (uint64_t)data[0] | ((uint64_t)data[3] << 32);
+	uint64_t new_perm = (uint64_t)data[1] | ((uint64_t)data[4] << 32);
+	uint64_t new_inh  = (uint64_t)data[2] | ((uint64_t)data[5] << 32);
+
+	/* new_permitted must be subset of current permitted */
+	if ((new_perm & ~p->cap_permitted) != 0) return -1; /* EPERM */
+	/* new_effective must be subset of new permitted */
+	if ((new_eff & ~new_perm) != 0) return -1;
+	/* inheritable: unprivileged can only inherit from current inheritable ∪ permitted */
+	if (p->euid != 0 && (new_inh & ~(p->cap_inheritable | p->cap_permitted)) != 0)
+		return -1;
+
+	p->cap_permitted   = new_perm;
+	p->cap_effective   = new_eff;
+	p->cap_inheritable = new_inh;
 	return 0;
 }
-static long sys_capset(void *hdrp, const void *datap)
-{ (void)hdrp; (void)datap; return 0; }
 
 /* ── xattr (stubs: ENODATA) ──────────────────────────────── */
 static long sys_getxattr(const char *p, const char *n, void *v, size_t s)
