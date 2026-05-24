@@ -10,7 +10,7 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.6 tamamlandı — pthreads + inotify + ptrace + 172-test suite)
+## Neredeyiz (v0.6.5 tamamlandı — güvenlik + çok kullanıcı + 187-test suite)
 
 **Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi (statx/copy_file_range/memfd/inotify/epoll/futex/clone var), ama mimari olarak Linux 1.x (single-core, statik binary, ext2, dinamik linker yok).
 
@@ -27,7 +27,8 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 - Syscall: eventfd2, timerfd, memfd_create, signalfd4 (stub), epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; inotify gerçek (IN_CREATE/DELETE/MOVED_FROM/TO); getrandom; statx, copy_file_range, splice, pread64/pwrite64; auxv: AT_RANDOM/AT_EXECFN/AT_HWCAP/AT_PHDR/AT_ENTRY/AT_PAGESZ
 - Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); /proc/cmdline; init= ; quiet/debug
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
-- Test: **172/172 ALL_PASS** her iki arch'ta
+- Security: ruid/euid/suid, capabilities v3 ABI, ASLR (splitmix64), su + /etc/shadow, CPIO uid/gid/mode initrd fix
+- Test: **187/187 ALL_PASS** her iki arch'ta
 
 ---
 
@@ -138,7 +139,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 - [x] setuid / setgid / setreuid / setregid / setresuid / setresgid — Linux semantiği
 - [x] getgroups / setgroups — groups[32] + ngroups, VFS group match güncellendi
 - [x] setuid-bit ELF exec — S_ISUID/S_ISGID: euid/egid = file owner/group
-- [ ] su çalışması (passwd hash doğrulama)
+- [x] su çalışması — busybox su + /etc/shadow SHA-512; root→test user uid/gid drop; shadow-no-read (640)
 
 **Yetenekler (Capabilities)**
 - [x] CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN — capabilities.h'de tanımlı
@@ -153,11 +154,11 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 - [x] prctl(PR_SET_DUMPABLE) — implement edildi
 
 ### Test hedefleri
-- [ ] `su` ile kullanıcı değiştiriliyor; yanlış şifre reddediliyor
+- [x] `su` ile kullanıcı değiştiriliyor — su-switches-uid/gid, shadow-no-read geçiyor
+- [x] signalfd + epoll birlikte çalışıyor — c-signalfd testi geçiyor
 - [ ] normal kullanıcı /dev/sda'yı açamıyor (EACCES)
 - [ ] dbus abstract socket üzerinden haberleşiyor
 - [ ] `python3 -c "import multiprocessing"` crash etmiyor (SysV IPC)
-- [ ] signalfd + epoll birlikte çalışıyor (test_inotify benzeri test)
 
 ---
 
