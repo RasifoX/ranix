@@ -315,6 +315,17 @@ check "aslr-mmap-differs" "1" "$([ \"$_a1\" != \"$_a2\" ] && echo 1 || echo 0)"
 check "devshm-link"  "/run/shm"  "$(readlink /dev/shm)"
 check "devshm-write" "ok"        "$(echo ok > /run/shm/t && cat /run/shm/t && rm /run/shm/t)"
 
+# ── 44. signalfd + epoll ──────────────────────────────────────
+check "c-signalfd"   "OK"  "$(timeout 5 /bin/test_signalfd 2>/dev/null | tail -1)"
+
+# ── 45. su — kullanıcı değiştirme ────────────────────────────
+check "su-switches-uid"  "1000" \
+    "$(timeout 5 su test -c 'id -u' 2>/dev/null)"
+check "su-switches-gid"  "1000" \
+    "$(timeout 5 su test -c 'id -g' 2>/dev/null)"
+check "shadow-no-read" "1" \
+    "$(timeout 5 su test -c 'cat /etc/shadow 2>/dev/null' 2>/dev/null | wc -c | awk '{print ($1==0)?1:0}')"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
