@@ -327,6 +327,8 @@ static long sys_brk(uint64_t addr)
 	return (long)new_brk;
 }
 
+static uint64_t rng_next(void); /* defined below, used in sys_execve and sys_mmap */
+
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
 	if (len == 0) return -22;
@@ -573,7 +575,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
 	p->brk       = ei.load_end;
-	p->mmap_next = USER_MMAP_BASE_;
+	/* ASLR: randomize mmap base within a 1 GB window (page-aligned) */
+	p->mmap_next = USER_MMAP_BASE_ + ((rng_next() & 0xffffULL) << 12);
+	p->dumpable  = 1;
 	arch_vm_switch((uint64_t)new_vm->root);
 	if (old_vm) vm_destroy(old_vm);
 
@@ -588,7 +592,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	memset(uargv, 0, sizeof(uargv));
 	memset(uenvp, 0, sizeof(uenvp));
 
-	uint64_t sp = USER_STACK_TOP_;
+	/* ASLR: randomize stack top within last stack page (up to 4080 bytes) */
+	uint64_t sp = USER_STACK_TOP_ - ((rng_next() & 0xffULL) << 4);
 	if (kstrs) {
 		for (int j = envc - 1; j >= 0; j--) {
 			int n = 0; while (kenvp[j][n]) n++;
@@ -606,16 +611,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	sp &= ~15ULL;
 
-	/* 16 pseudo-random bytes for AT_RANDOM */
+	/* 16 random bytes for AT_RANDOM (used by libc for stack canary, etc.) */
 	sp -= 16;
 	{
-		extern volatile uint64_t kernel_ticks;
-		uint64_t rs = (uint64_t)(uintptr_t)p ^ kernel_ticks ^ ei.entry;
 		uint64_t *rp = (uint64_t *)sp;
-		rs = rs * 6364136223846793005ULL + 1442695040888963407ULL;
-		rp[0] = rs;
-		rs = rs * 6364136223846793005ULL + 1442695040888963407ULL;
-		rp[1] = rs;
+		rp[0] = rng_next();
+		rp[1] = rng_next();
 	}
 	uint64_t at_random_addr = sp;
 
@@ -1022,23 +1023,38 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		copy_to_user((void *)(uintptr_t)arg2, name, 16);
 		return 0;
 	}
-	case PR_GET_DUMPABLE: return 0;
+	case PR_SET_DUMPABLE:
+		p->dumpable = (arg2 == 1) ? 1 : 0;
+		return 0;
+	case PR_GET_DUMPABLE:
+		return p->dumpable;
 	default: return 0;
 	}
 }
 
-static uint64_t getrandom_state = 0xdeadbeefcafebabe;
+/* splitmix64 — fast, high-quality 64-bit PRNG (Sebastiano Vigna) */
+static uint64_t rng_state = 0xdeadbeefcafebabe;
+
+static uint64_t rng_next(void)
+{
+	extern volatile uint64_t kernel_ticks;
+	rng_state += 0x9e3779b97f4a7c15ULL ^ kernel_ticks;
+	uint64_t z = rng_state;
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return z ^ (z >> 31);
+}
 
 static long sys_getrandom(void *buf, size_t len, unsigned int flags)
 {
 	(void)flags;
 	if (!access_ok(buf, len)) return -14;
-	extern volatile uint64_t kernel_ticks;
-	getrandom_state ^= kernel_ticks;
 	uint8_t *dst = buf;
-	for (size_t i = 0; i < len; i++) {
-		getrandom_state = getrandom_state * 6364136223846793005ULL + 1442695040888963407ULL;
-		dst[i] = (uint8_t)(getrandom_state >> 33);
+	for (size_t i = 0; i < len; ) {
+		uint64_t r = rng_next();
+		size_t chunk = len - i < 8 ? len - i : 8;
+		for (size_t j = 0; j < chunk; j++, i++)
+			dst[i] = (uint8_t)(r >> (j * 8));
 	}
 	return (long)len;
 }
