@@ -204,6 +204,9 @@ void kernel_main(void)
 	vfs_mkdir("/mnt",  0755);
 	vfs_mount("/proc", "proc",  NULL);
 	vfs_mount("/dev",  "devfs", NULL);
+	vfs_mkdir("/run",  0755);
+	vfs_mkdir("/run/shm", 0777);
+	vfs_mount("/run/shm", "ramfs", NULL);
 	initrd_init();
 
 	sched_init();

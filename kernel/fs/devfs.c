@@ -146,9 +146,10 @@ typedef struct {
 } devfs_symlink_t;
 
 static devfs_symlink_t devfs_symlinks[] = {
-	{ "fd", "/proc/self/fd" },
+	{ "fd",  "/proc/self/fd" },
+	{ "shm", "/run/shm"      },
 };
-#define DEVFS_NSYMLINKS 1
+#define DEVFS_NSYMLINKS 2
 
 static devfs_entry_t devfs_builtins[] = {
 	{ "null",    S_IFCHR | 0666, &null_fops,    0x0101, &devfs_builtins[1] },
