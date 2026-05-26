@@ -18,6 +18,11 @@ SECTIONS
         *(.text.boot)
     }
 
+    /* AP trampoline — kept in low physical memory so APs can jump to it */
+    .trampoline : {
+        KEEP(*(.trampoline))
+    }
+
     .data.boot : {
         . = ALIGN(8);
         *(.data.boot)

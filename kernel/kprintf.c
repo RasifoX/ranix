@@ -5,6 +5,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/tty/fb_tty.h>
 #include <kernel/lib/string.h>
+#include <kernel/sync.h>
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
@@ -13,6 +14,7 @@ typedef __builtin_va_list va_list;
 
 static int fb_ready        = 0;
 static int at_line_start   = 1;
+static spinlock_t kprintf_lock = SPINLOCK_INIT;
 
 void kprintf_set_fb(void) { fb_ready = 1; }
 
@@ -110,7 +112,7 @@ static void fmt_uint(uint64_t n, int base, int width, char pad, int upper)
 
 void kprintf(const char *fmt, ...)
 {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&kprintf_lock);
     va_list args;
     va_start(args, fmt);
 
@@ -174,7 +176,7 @@ void kprintf(const char *fmt, ...)
     }
 
     va_end(args);
-    irq_restore(flags);
+    spin_unlock_irq(&kprintf_lock, flags);
 }
 
 void kprintf_flush(void)
@@ -185,6 +187,7 @@ void kprintf_flush(void)
 
 void kpanic(const char *msg)
 {
+    spin_lock(&kprintf_lock);
     irq_disable();
     _puts("\n[PANIC] ");
     _puts(msg);

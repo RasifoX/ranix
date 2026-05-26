@@ -67,3 +67,11 @@ void irq_dispatch(uint32_t hint) {
     if (src & (1 << 3))
         irq_handle(27);
 }
+
+void irqchip_secondary_init(uint64_t cpu_base) {
+    volatile uint32_t *cc = (volatile uint32_t *)cpu_base;
+    cc[0x004 / 4] = 0xF0;  /* GICC_PMR */
+    cc[0x000 / 4] = 1;      /* GICC_CTRL: enable */
+    /* Enable PPI 27 (virtual timer) and SGI 0 — banked per-CPU in ISENABLER0 */
+    GICD(0x100) |= (1u << 27) | (1u << 0);
+}

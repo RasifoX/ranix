@@ -94,6 +94,70 @@ _start_code:
 	ldr  x0, =kernel_main
 	br   x0
 
+/*
+ * Secondary CPU trampoline — runs at physical address with MMU off.
+ * x0 = cpu_id (passed as PSCI context_id)
+ */
+.section ".text.boot", "ax"
+.global secondary_trampoline
+secondary_trampoline:
+	/* Drop EL2 → EL1 if needed (same as primary) */
+	mrs x1, CurrentEL
+	lsr x1, x1, #2
+	cmp x1, #2
+	b.ne .Lsec_el1
+
+	mov x1, #(1 << 31)
+	msr hcr_el2, x1
+	mov x1, #0x3c5
+	msr spsr_el2, x1
+	adr x1, .Lsec_el1
+	msr elr_el2, x1
+	mov x1, #3
+	msr cnthctl_el2, x1
+	msr cntvoff_el2, xzr
+	eret
+
+.Lsec_el1:
+	mov x9, #1
+	msr spsel, x9
+	isb
+
+	/* cpu_id is in x0 — save it */
+	mov x20, x0
+
+	/* Read boot params from ap_boot_sync[cpu_id]:
+	 * struct ap_boot_sync layout (40 bytes per entry):
+	 *   offset 0:  ttbr0_phys (u64)
+	 *   offset 8:  ttbr1_phys (u64)
+	 *   offset 16: sp_phys    (u64)
+	 *   offset 24: cpu_id     (i32)
+	 *   offset 28: ready      (i32)
+	 *   offset 32: go         (i32)
+	 *   offset 36: _pad       (i32)
+	 */
+	adr  x10, ap_boot_sync
+	mov  x11, #40
+	mul  x11, x20, x11
+	add  x10, x10, x11   /* x10 = &ap_boot_sync[cpu_id] */
+
+	ldr  x0, [x10, #0]   /* ttbr0_phys */
+	ldr  x1, [x10, #8]   /* ttbr1_phys */
+
+	/* Set up physical boot stack before enabling MMU */
+	ldr  x2, [x10, #16]  /* sp_phys */
+	mov  sp, x2
+
+	bl   enable_mmu
+
+	/* MMU on — convert physical SP to virtual */
+	ldr  x1, =0xFFFFFF8000000000
+	add  sp, sp, x1
+
+	mov  x0, x20         /* cpu_id */
+	ldr  x9, =secondary_cpu_main
+	br   x9
+
 .section ".data.boot", "aw"
 .balign 8
 .global _dtb_ptr

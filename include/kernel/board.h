@@ -31,6 +31,9 @@ int board_fb_alloc(fb_info_t *out);
 /* Phase 3 — Set up irqchip and timer; runs after heap_init(). */
 void board_irq_init(void);
 
+/* Per-CPU IRQ/timer init called by each secondary CPU after arch_secondary_init(). */
+void board_secondary_irq_init(void);
+
 /* Phase 4 — Register platform drivers in driver framework. */
 void board_drivers_register(void);
 

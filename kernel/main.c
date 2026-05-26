@@ -219,6 +219,8 @@ void kernel_main(void)
 	net_init();
 
 	irq_enable();
+	extern void smp_init(void);
+	smp_init();
 	board_drivers_register();
 	extern void fbdev_init(void);
 	fbdev_init();

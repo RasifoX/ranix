@@ -89,11 +89,11 @@ common_irq:
 	movq 632(%rsp), %rdi
 	call irq_dispatch
 
-	/* Check for reschedule */
-	movl need_resched(%rip), %eax
+	/* Check for reschedule (per-CPU need_resched at %gs:80) */
+	movl %gs:80, %eax
 	testl %eax, %eax
 	jz .irq_ret
-	movl $0, need_resched(%rip)
+	movl $0, %gs:80
 
 	movq %rsp, %r15
 	call task_current
@@ -191,11 +191,11 @@ syscall_entry:
 	movq %rsp, %rdi
 	call signal_dispatch
 
-	/* reschedule check */
-	movl need_resched(%rip), %eax
+	/* reschedule check (per-CPU at %gs:80) */
+	movl %gs:80, %eax
 	testl %eax, %eax
 	jz .syscall_ret
-	movl $0, need_resched(%rip)
+	movl $0, %gs:80
 
 	movq %rsp, %r15
 	call task_current
@@ -232,6 +232,35 @@ irq_stub_yield:
 	movq %rsp, %rdi
 	call signal_dispatch
 
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	restore_context
+	addq $16, %rsp
+	testq $3, 8(%rsp)
+	jz 2f
+	swapgs
+2:	iretq
+
+/* IPI reschedule handler — vector 0xF0 */
+.global irq_stub_ipi
+irq_stub_ipi:
+	testq $3, 8(%rsp)
+	jz 1f
+	swapgs
+1:	pushq $0
+	pushq $0xF0
+	save_context
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+	call arch_smp_ipi_ack
+	movl $0, %gs:80
+	call schedule
+	call vm_activate
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	movq %rsp, %rdi
+	call signal_dispatch
 	call sched_get_current_ctx
 	movq %rax, %rsp
 	restore_context
