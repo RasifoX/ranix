@@ -327,5 +327,14 @@ check "shadow-no-read" "1" \
     "$(timeout 5 su test -c 'cat /etc/shadow 2>/dev/null' 2>/dev/null | wc -c | awk '{print ($1==0)?1:0}')"
 
 echo "---"
+
+# ── 46. SMP — nproc ve affinity ───────────────────────────────
+check "smp-nproc"     "4"  "$(nproc)"
+check "smp-affinity-nproc" "4" \
+    "$(timeout 5 /bin/test_affinity 2>/dev/null | grep '^nproc=' | sed 's/nproc=//')"
+check "smp-threads-ok" "OK" \
+    "$(timeout 5 /bin/test_affinity 2>/dev/null | tail -1)"
+
+echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
