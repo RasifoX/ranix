@@ -112,6 +112,7 @@ typedef struct process {
 
 	/* ── wait queue tracking ──────────────────── */
 	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
+	int             on_cpu;            /* 1 when currently executing on a CPU, protects against wake-up race condition */
 
 	/* ── signal alternate stack ───────────────── */
 	stack_t         altstack;
@@ -129,6 +130,8 @@ typedef struct process {
 void       sched_init(void);
 void       sched_tick(void);
 void       schedule(void);
+void       sched_free_dying_kstack(void);
+void       sched_requeue_prev(void);
 void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);

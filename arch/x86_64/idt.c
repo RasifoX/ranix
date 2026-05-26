@@ -51,6 +51,7 @@ extern void irq_stub_2c(void); extern void irq_stub_2d(void);
 extern void irq_stub_2e(void); extern void irq_stub_2f(void);
 extern void irq_stub_yield(void);
 extern void irq_stub_syscall(void);
+extern void irq_stub_ipi(void);
 
 void idt_init(void)
 {
@@ -78,7 +79,17 @@ void idt_init(void)
 
 	idt_set_gate(VEC_YIELD,   irq_stub_yield,   0xEE);
 	idt_set_gate(VEC_SYSCALL, irq_stub_syscall, 0xEE);
+	idt_set_gate(0xF0,        irq_stub_ipi,     0x8E);  /* SMP reschedule IPI */
 
+	struct idtr idtr = {
+		.limit = sizeof(idt) - 1,
+		.base  = (uint64_t)idt,
+	};
+	__asm__ volatile("lidt %0" :: "m"(idtr));
+}
+
+void idt_load(void)
+{
 	struct idtr idtr = {
 		.limit = sizeof(idt) - 1,
 		.base  = (uint64_t)idt,

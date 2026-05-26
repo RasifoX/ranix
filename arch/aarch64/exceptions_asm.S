@@ -192,20 +192,23 @@ irq_handler:
 	mov  w0, #0
 	bl   irq_dispatch
 
-	/* Check for reschedule */
-	adrp x19, need_resched
-	ldr  w20, [x19, :lo12:need_resched]
+	/* Check per-CPU need_resched (cpu_context_t offset 80) */
+	mrs  x19, tpidr_el1
+	ldr  w20, [x19, #80]
 	cbz  w20, .irq_ret
-	str  wzr, [x19, :lo12:need_resched]
+	str  wzr, [x19, #80]
 
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
 
+	msr  daifset, #2
 	bl   schedule
 	bl   vm_activate
 	bl   sched_get_current_ctx
 	mov  sp, x0
+	bl   sched_requeue_prev
+	bl   sched_free_dying_kstack
 
 .irq_ret:
 	mov  x0, sp
@@ -233,20 +236,23 @@ sync_handler:
 	mov  x0, sp
 	bl   syscall_handle
 
-	/* Check for reschedule */
-	adrp x19, need_resched
-	ldr  w20, [x19, :lo12:need_resched]
+	/* Check per-CPU need_resched */
+	mrs  x19, tpidr_el1
+	ldr  w20, [x19, #80]
 	cbz  w20, .syscall_ret
-	str  wzr, [x19, :lo12:need_resched]
+	str  wzr, [x19, #80]
 
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
 
+	msr  daifset, #2
 	bl   schedule
 	bl   vm_activate
 	bl   sched_get_current_ctx
 	mov  sp, x0
+	bl   sched_requeue_prev
+	bl   sched_free_dying_kstack
 
 .syscall_ret:
 	mov  x0, sp
@@ -260,10 +266,13 @@ sync_handler:
 	bl   task_current
 	mov  x1, sp
 	str  x1, [x0, #16]
+	msr  daifset, #2
 	bl   schedule
 	bl   vm_activate
 	bl   sched_get_current_ctx
 	mov  sp, x0
+	bl   sched_requeue_prev
+	bl   sched_free_dying_kstack
 	mov  x0, sp
 	bl   signal_dispatch
 	bl   sched_get_current_ctx

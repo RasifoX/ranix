@@ -71,26 +71,29 @@ static int fill_version(char *buf, size_t sz)
 static int fill_cpuinfo(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
+	extern int smp_ncpus;
+	for (int i = 0; i < smp_ncpus; i++) {
 #if defined(__aarch64__)
-	pb_str(&b, "processor\t: 0\n");
-	pb_str(&b, "BogoMIPS\t: 100.00\n");
-	pb_str(&b, "Features\t: fp asimd\n");
-	pb_str(&b, "CPU implementer\t: 0x41\n");
-	pb_str(&b, "CPU architecture: 8\n");
-	pb_str(&b, "CPU variant\t: 0x0\n");
-	pb_str(&b, "CPU part\t: 0xd08\n");
-	pb_str(&b, "CPU revision\t: 3\n\n");
+		pb_str(&b, "processor\t: "); pb_u64(&b, i); pb_char(&b, '\n');
+		pb_str(&b, "BogoMIPS\t: 100.00\n");
+		pb_str(&b, "Features\t: fp asimd\n");
+		pb_str(&b, "CPU implementer\t: 0x41\n");
+		pb_str(&b, "CPU architecture: 8\n");
+		pb_str(&b, "CPU variant\t: 0x0\n");
+		pb_str(&b, "CPU part\t: 0xd08\n");
+		pb_str(&b, "CPU revision\t: 3\n\n");
 #else
-	pb_str(&b, "processor\t: 0\n");
-	pb_str(&b, "vendor_id\t: GenuineRanix\n");
-	pb_str(&b, "cpu family\t: 6\n");
-	pb_str(&b, "model\t\t: 0\n");
-	pb_str(&b, "model name\t: Ranix Virtual CPU\n");
-	pb_str(&b, "stepping\t: 0\n");
-	pb_str(&b, "cpu MHz\t\t: 1000.000\n");
-	pb_str(&b, "cache size\t: 4096 KB\n");
-	pb_str(&b, "bogomips\t: 2000.00\n\n");
+		pb_str(&b, "processor\t: "); pb_u64(&b, i); pb_char(&b, '\n');
+		pb_str(&b, "vendor_id\t: GenuineRanix\n");
+		pb_str(&b, "cpu family\t: 6\n");
+		pb_str(&b, "model\t\t: 0\n");
+		pb_str(&b, "model name\t: Ranix Virtual CPU\n");
+		pb_str(&b, "stepping\t: 0\n");
+		pb_str(&b, "cpu MHz\t\t: 1000.000\n");
+		pb_str(&b, "cache size\t: 4096 KB\n");
+		pb_str(&b, "bogomips\t: 2000.00\n\n");
 #endif
+	}
 	return (int)(sz - b.rem);
 }
 
@@ -139,11 +142,14 @@ static int fill_uptime(char *buf, size_t sz)
 static int fill_stat(char *buf, size_t sz)
 {
 	extern volatile uint64_t kernel_ticks;
+	extern int smp_ncpus;
 	pb_t b = {buf, sz};
 	pb_str(&b, "cpu  ");
 	pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
-	pb_str(&b, "cpu0 ");
-	pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
+	for (int i = 0; i < smp_ncpus; i++) {
+		pb_str(&b, "cpu"); pb_u64(&b, i); pb_str(&b, " ");
+		pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
+	}
 	pb_str(&b, "processes "); pb_u64(&b, (uint64_t)task_count()); pb_char(&b, '\n');
 	pb_str(&b, "procs_running 1\n");
 	pb_str(&b, "procs_blocked 0\n");

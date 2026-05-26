@@ -42,6 +42,8 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 #define FUTEX_REQUEUE      3
 #define FUTEX_PRIVATE_FLAG 128
 
+extern spinlock_t sched_lock;
+
 static struct {
 	uint32_t  *uaddr;
 	process_t *waiter;
@@ -80,14 +82,32 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				uint64_t end = kernel_ticks +
 				    (uint64_t)kts.tv_sec * TIMER_HZ +
 				    (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
-				while (futex_table[slot].waiter && kernel_ticks < end) {
-					task_sleep();
+				while (kernel_ticks < end) {
+					uint64_t fq = spin_lock_irq(&futex_lock);
+					if (!futex_table[slot].waiter) {
+						spin_unlock_irq(&futex_lock, fq);
+						break;
+					}
+					uint64_t fs = spin_lock_irq(&sched_lock);
+					self->state = PROC_SLEEPING;
+					spin_unlock_irq(&sched_lock, fs);
+					spin_unlock_irq(&futex_lock, fq);
+					arch_yield();
 					if (self->sig_pending & ~self->sig_mask) break;
 				}
 			}
 		} else {
-			while (futex_table[slot].waiter) {
-				task_sleep();
+			while (1) {
+				uint64_t fq = spin_lock_irq(&futex_lock);
+				if (!futex_table[slot].waiter) {
+					spin_unlock_irq(&futex_lock, fq);
+					break;
+				}
+				uint64_t fs = spin_lock_irq(&sched_lock);
+				self->state = PROC_SLEEPING;
+				spin_unlock_irq(&sched_lock, fs);
+				spin_unlock_irq(&futex_lock, fq);
+				arch_yield();
 				if (self->sig_pending & ~self->sig_mask) break;
 			}
 		}
@@ -223,14 +243,32 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
 				uint64_t end = kernel_ticks + (uint64_t)kts.tv_sec * TIMER_HZ +
 				               (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
-				while (futex_table[slot].waiter && kernel_ticks < end) {
-					task_sleep();
+				while (kernel_ticks < end) {
+					uint64_t fq = spin_lock_irq(&futex_lock);
+					if (!futex_table[slot].waiter) {
+						spin_unlock_irq(&futex_lock, fq);
+						break;
+					}
+					uint64_t fs = spin_lock_irq(&sched_lock);
+					self2->state = PROC_SLEEPING;
+					spin_unlock_irq(&sched_lock, fs);
+					spin_unlock_irq(&futex_lock, fq);
+					arch_yield();
 					if (self2->sig_pending & ~self2->sig_mask) break;
 				}
 			}
 		} else {
-			while (futex_table[slot].waiter) {
-				task_sleep();
+			while (1) {
+				uint64_t fq = spin_lock_irq(&futex_lock);
+				if (!futex_table[slot].waiter) {
+					spin_unlock_irq(&futex_lock, fq);
+					break;
+				}
+				uint64_t fs = spin_lock_irq(&sched_lock);
+				self2->state = PROC_SLEEPING;
+				spin_unlock_irq(&sched_lock, fs);
+				spin_unlock_irq(&futex_lock, fq);
+				arch_yield();
 				if (self2->sig_pending & ~self2->sig_mask) break;
 			}
 		}

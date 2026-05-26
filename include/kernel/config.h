@@ -5,7 +5,7 @@
 #define SCHED_QUANTUM   10      /* timer ticks per process timeslice */
 
 /* Memory */
-#define KSTACK_SIZE     8192    /* kernel stack per process (bytes) */
+#define KSTACK_SIZE     16384   /* kernel stack per process (bytes) */
 #define DENTRY_MAX      4096    /* max cached dentries */
 
 /* VFS */

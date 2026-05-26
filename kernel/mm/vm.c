@@ -108,6 +108,10 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 void vm_activate(void)
 {
 	task_t *t = task_current();
+	if ((uint64_t)t < 0xFFFF000000000000ULL) {
+		kprintf("[DBG] vm_activate: current=%p\n", t);
+		kpanic("vm_activate: invalid cpu->current");
+	}
 	if (t->vm) {
 		arch_set_user_kstack((uint64_t)t->kstack + KSTACK_SIZE);
 		arch_vm_switch((uint64_t)t->vm->root);

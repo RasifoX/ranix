@@ -38,6 +38,15 @@ void timer_init(uint32_t hz) {
 
 uint64_t timer_ticks(void) { return ticks; }
 
+void timer_secondary_init(void) {
+    uint64_t freq, count;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(count));
+    count += freq / timer_hz;
+    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(count));
+    __asm__ volatile("msr cntv_ctl_el0,  %0" :: "r"((uint64_t)1));
+}
+
 static driver_t timer_driver = {
     .name = "arm-timer",
     .type = DRIVER_TYPE_TIMER,

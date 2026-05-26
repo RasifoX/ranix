@@ -97,6 +97,8 @@ void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
 #define PM_WDOG     (*(volatile uint32_t *)(PM_BASE + 0x24))
 #define PM_PASSWORD 0x5A000000U
 
+void board_secondary_irq_init(void) { /* BCM2711: SMP not used */ }
+
 void board_reset(void)
 {
 	PM_WDOG = PM_PASSWORD | 1U;
