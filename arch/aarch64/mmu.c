@@ -4,7 +4,7 @@
 
 /* physical — VMA=LMA (in .bss.boot, before high-half section) */
 __attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l1[512];
-__attribute__((section(".bss.boot"), aligned(4096))) static uint64_t kernel_l1_high[512];
+__attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l1_high[512];
 __attribute__((section(".bss.boot"), aligned(4096))) static uint64_t l2[512];
 
 extern void enable_mmu(uint64_t ttbr0_phys, uint64_t ttbr1_phys);

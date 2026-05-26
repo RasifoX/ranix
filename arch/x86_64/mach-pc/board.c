@@ -45,6 +45,12 @@ void board_irq_init(void)
 	ps2_kbd_init();
 }
 
+void board_secondary_irq_init(void)
+{
+	/* x86_64: PIT IRQ0 is broadcast via PIC to all CPUs.
+	 * Secondary CPUs only need to load GDT/IDT (done in arch_secondary_init). */
+}
+
 extern void virtio_net_pci_init(void);
 
 #include <drivers/block/sdcard.h>

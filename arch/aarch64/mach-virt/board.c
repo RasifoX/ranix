@@ -48,6 +48,18 @@ void board_irq_init(void)
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 	timer_init(TIMER_HZ);
+	extern void smp_ipi_handler(void);
+	irq_register(0, smp_ipi_handler);  /* SGI #0 = reschedule IPI */
+}
+
+void board_secondary_irq_init(void)
+{
+	/* Initialize GIC CPU interface on secondary CPU */
+	extern void irqchip_secondary_init(uint64_t cpu_base);
+	irqchip_secondary_init(config.gic_cpu_base);
+	/* Initialize per-CPU timer */
+	extern void timer_secondary_init(void);
+	timer_secondary_init();
 }
 
 #include <drivers/block/sdcard.h>

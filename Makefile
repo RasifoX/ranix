@@ -39,6 +39,7 @@ ifeq ($(ARCH),aarch64)
         arch/aarch64/cpu.c \
         arch/aarch64/mmu.c \
         arch/aarch64/vm.c \
+        arch/aarch64/smp.c \
         $(MACH_DIR)/board.c
     SRCS_ARCH_ASM = \
         arch/aarch64/boot.S \
@@ -65,11 +66,13 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/mmu.c \
         arch/x86_64/vm.c \
         arch/x86_64/exceptions.c \
+        arch/x86_64/smp.c \
         arch/x86_64/mach-pc/board.c \
         arch/x86_64/multiboot2.c
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
-        arch/x86_64/exceptions_asm.S
+        arch/x86_64/exceptions_asm.S \
+        arch/x86_64/trampoline.S
     SRCS_DRIVERS = \
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \
@@ -91,6 +94,7 @@ SRCS_NET = \
 
 SRCS_KERNEL = \
     kernel/main.c \
+    kernel/smp.c \
     kernel/initrd.c \
     kernel/cmdline.c \
     kernel/driver.c \
@@ -176,12 +180,12 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp userspace/init userspace/hello userspace/echo_server \
 	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
-	    userspace/test_creds userspace/test_aslr userspace/test_signalfd \
+	    userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
 	    $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
@@ -261,6 +265,9 @@ userspace/test_aslr: userspace/test_aslr.c
 userspace/test_signalfd: userspace/test_signalfd.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
+userspace/test_affinity: userspace/test_affinity.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -278,7 +285,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
@@ -327,12 +334,12 @@ TEST_LOG = $(BUILD_DIR)/serial-test.log
 ifeq ($(ARCH),x86_64)
 test: iso
 	@rm -f $(TEST_LOG)
-	timeout 120 $(QEMU_CMD) -m 512M -display none \
+	timeout 120 $(QEMU_CMD) -smp 4 -m 512M -display none \
 	    -serial file:$(TEST_LOG) -cdrom ranix.iso || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)
-	timeout 120 $(QEMU_CMD) -m 512M -display none \
+	timeout 120 $(QEMU_CMD) -smp 4 -m 512M -display none \
 	    -serial file:$(TEST_LOG) \
 	    -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio || true
 endif

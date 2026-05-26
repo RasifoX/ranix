@@ -13,6 +13,7 @@
 #include <kernel/vfs.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/smp.h>
 #include <asm/mmu.h>
 
 static process_t **proctab;
@@ -58,7 +59,7 @@ static int alloc_pid(void)
 #define KSTACK_CANARY 0xDEADBEEFCAFEBABEULL
 
 static int kstack_size_val  = KSTACK_SIZE;
-static int kstack_order_val = 1; /* buddy order; 1 = 2 pages = 8192 bytes */
+static int kstack_order_val = 2; /* buddy order; 2 = 4 pages = 16384 bytes */
 
 static uint8_t *kstack_alloc(void)
 {
@@ -69,7 +70,7 @@ static uint8_t *kstack_alloc(void)
 	return ks;
 }
 
-static spinlock_t sched_lock = SPINLOCK_INIT;
+spinlock_t sched_lock = SPINLOCK_INIT;
 static int sched_quantum_val = SCHED_QUANTUM;
 
 static tick_fn_t *tick_cbs;
@@ -90,39 +91,120 @@ void tick_register(tick_fn_t fn)
 
 void tick_notify(void)
 {
-	for (int i = 0; i < tick_cb_cnt; i++)
-		tick_cbs[i]();
+	/* sched_tick always runs on every CPU */
+	sched_tick();
+	/* Global callbacks (tcp_tick, timerfd_tick) run on CPU0 only */
+	if (arch_get_cpu_ctx()->cpu_id == 0) {
+		for (int i = 1; i < tick_cb_cnt; i++)
+			tick_cbs[i]();
+	}
 }
 
-/* O(1) Runqueue: simple head/tail linked list */
-static process_t *rq_head = NULL;
-static process_t *rq_tail = NULL;
+void tick_notify_local(void)
+{
+	sched_tick();
+}
 
-volatile int      need_resched  = 0;
 volatile uint64_t kernel_ticks  = 0;
+
+/* Per-CPU runqueue helpers — caller must hold sched_lock */
+
+static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
+{
+	if ((uint64_t)p < 0xFFFF000000000000ULL) {
+		kprintf("[DBG] cpu_rq_add: bad p=%p cpu%d\n", p, (int)cpu->cpu_id);
+		kpanic("cpu_rq_add: invalid process ptr");
+	}
+	p->sched_next = NULL;
+	if (!cpu->rq_tail) {
+		cpu->rq_head = cpu->rq_tail = p;
+	} else {
+		cpu->rq_tail->sched_next = p;
+		cpu->rq_tail = p;
+	}
+}
+
+static process_t *cpu_rq_pop(cpu_context_t *cpu)
+{
+	if (!cpu->rq_head) return NULL;
+	process_t *p = cpu->rq_head;
+	if ((uint64_t)p < 0xFFFF000000000000ULL) {
+		kprintf("[DBG] cpu_rq_pop: bad head %p on cpu%d rq_tail=%p\n",
+		        p, (int)cpu->cpu_id, cpu->rq_tail);
+		cpu->rq_head = cpu->rq_tail = NULL;
+		kpanic("cpu_rq_pop: corrupt rq_head");
+	}
+	process_t *nxt = p->sched_next;
+	if (nxt && (uint64_t)nxt < 0xFFFF000000000000ULL) {
+		kprintf("[DBG] cpu_rq_pop: bad sched_next %p in proc pid=%lld cpu%d\n",
+		        nxt, (long long)p->pid, (int)cpu->cpu_id);
+		kpanic("cpu_rq_pop: corrupt sched_next");
+	}
+	cpu->rq_head = nxt;
+	if (!cpu->rq_head) cpu->rq_tail = NULL;
+	p->sched_next = NULL;
+	return p;
+}
+
+/* Count processes in a CPU's runqueue */
+static int cpu_rq_len(cpu_context_t *cpu)
+{
+	int n = 0;
+	for (process_t *p = cpu->rq_head; p; p = p->sched_next) n++;
+	return n;
+}
+
+/* Pick the least-loaded online CPU */
+static cpu_context_t *pick_cpu(void)
+{
+	extern int smp_ncpus;
+	extern cpu_context_t *all_cpus[];
+	cpu_context_t *best = arch_get_cpu_ctx();
+	int best_len = cpu_rq_len(best);
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c || !c->online) continue;
+		int l = cpu_rq_len(c);
+		if (l < best_len) { best = c; best_len = l; }
+	}
+	return best;
+}
 
 /* Internal: must hold sched_lock */
 static void runqueue_add(process_t *p)
 {
 	if (p->pid == 0) return;
-	p->sched_next = NULL;
-	if (!rq_tail) {
-		rq_head = rq_tail = p;
-	} else {
-		rq_tail->sched_next = p;
-		rq_tail = p;
+	cpu_context_t *cpu = pick_cpu();
+	cpu_rq_add(cpu, p);
+	cpu->need_resched = 1;
+	if (cpu != arch_get_cpu_ctx()) {
+		extern void smp_ipi_resched(int);
+		int cid = (int)cpu->cpu_id;
+		smp_ipi_resched(cid);
+		__asm__ volatile("" ::: "memory");
 	}
 }
 
-/* Internal: must hold sched_lock */
+/* Pop from current CPU; if empty, try work-stealing */
 static process_t *runqueue_pop(void)
 {
-	if (!rq_head) return NULL;
-	process_t *p = rq_head;
-	rq_head = p->sched_next;
-	if (!rq_head) rq_tail = NULL;
-	p->sched_next = NULL;
-	return p;
+	cpu_context_t *cpu = arch_get_cpu_ctx();
+	process_t *p = cpu_rq_pop(cpu);
+	if (p) return p;
+
+	/* work stealing: find busiest CPU */
+	extern int smp_ncpus;
+	extern cpu_context_t *all_cpus[];
+	cpu_context_t *victim = NULL;
+	int max_len = 1;  /* only steal if > 1 task */
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c || !c->online || c == cpu) continue;
+		int l = cpu_rq_len(c);
+		if (l > max_len) { victim = c; max_len = l; }
+	}
+	if (!victim) return NULL;
+	return cpu_rq_pop(victim);
 }
 
 
@@ -140,6 +222,7 @@ void sched_init(void)
 	memset(p, 0, sizeof(*p));
 	p->pid   = 0;
 	p->state = PROC_RUNNING;
+	p->on_cpu = 1;
 	p->entry = idle_loop;
 	p->next  = p;
 	p->kstack = idle_kstack;
@@ -152,12 +235,18 @@ void sched_init(void)
 	p->ctx = ctx;
 
 	cpu_context_t *cpu = arch_get_cpu_ctx();
-	cpu->self       = cpu;
-	cpu->current    = p;
-	cpu->kstack_top = sp_top;
-	cpu->irq_stack  = irq_stack + KSTACK_SIZE;
-	cpu->cpu_id     = 0;
-	cpu->magic      = 0xCAFEBABE;
+	cpu->self         = cpu;
+	cpu->current      = p;
+	cpu->kstack_top   = sp_top;
+	cpu->irq_stack    = irq_stack + KSTACK_SIZE;
+	cpu->cpu_id       = 0;
+	cpu->magic        = 0xCAFEBABE;
+	cpu->rq_head      = NULL;
+	cpu->rq_tail      = NULL;
+	cpu->online       = 1;
+	cpu->need_resched = 0;
+	cpu->idle         = p;
+	all_cpus[0]       = cpu;
 
 	proctab_grow();
 	proctab[0] = p;
@@ -204,37 +293,37 @@ void sched_tick(void)
 	current->ticks++;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
-	if (current->pid != 0) {
-		if (--current->ticks_remaining <= 0) {
-			need_resched = 1;
-		}
-	} else if (rq_head) {
-		need_resched = 1;
-	}
-	spin_unlock_irq(&sched_lock, f);
 
-	/* Walk circular linked list (sentinel = proctab[0]) under one lock */
-	{
-		uint64_t lf = spin_lock_irq(&sched_lock);
-		process_t *sentinel = proctab[0];
-		for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-			if (t->itimer_value > 0) {
-				t->itimer_value--;
-				if (t->itimer_value == 0) {
-					t->itimer_value = t->itimer_interval;
-					t->sig_pending |= (1ULL << (14 - 1));
-					if (t->state == PROC_SLEEPING) { t->state = PROC_READY; runqueue_add(t); need_resched = 1; }
+	if (current->pid != 0) {
+		if (--current->ticks_remaining <= 0)
+			arch_get_cpu_ctx()->need_resched = 1;
+	} else if (arch_get_cpu_ctx()->rq_head) {
+		arch_get_cpu_ctx()->need_resched = 1;
+	}
+
+	/* Walk process list: fire interval timers and wake nanosleeping tasks */
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->itimer_value > 0) {
+			t->itimer_value--;
+			if (t->itimer_value == 0) {
+				t->itimer_value = t->itimer_interval;
+				t->sig_pending |= (1ULL << (14 - 1));
+				if (t->state == PROC_SLEEPING) {
+					t->state = PROC_READY;
+					if (!t->on_cpu) runqueue_add(t);
+					arch_get_cpu_ctx()->need_resched = 1;
 				}
 			}
-			if (t->state == PROC_SLEEPING && !t->sleeping_on_queue) {
-				t->state = PROC_READY;
-				runqueue_add(t);
-				need_resched = 1;
-			}
 		}
-		spin_unlock_irq(&sched_lock, lf);
+		if (t->state == PROC_SLEEPING && !t->sleeping_on_queue) {
+			t->state = PROC_READY;
+			if (!t->on_cpu) runqueue_add(t);
+			arch_get_cpu_ctx()->need_resched = 1;
+		}
 	}
 
+	spin_unlock_irq(&sched_lock, f);
 }
 
 pid_t proc_create(const char *name, void (*fn)(void))
@@ -574,7 +663,7 @@ pid_t proc_vfork(void)
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
 
 	parent->state = PROC_SLEEPING;
-	need_resched  = 1;
+	arch_get_cpu_ctx()->need_resched = 1;
 
 	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
@@ -589,8 +678,8 @@ void proc_vfork_exec_notify(void)
 	process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
 	if (pp && pp->state == PROC_SLEEPING) {
 		pp->state = PROC_READY;
-		runqueue_add(pp);
-		need_resched = 1;
+		if (!pp->on_cpu) runqueue_add(pp);
+		arch_get_cpu_ctx()->need_resched = 1;
 	}
 	p->vfork_parent = -1;
 	spin_unlock_irq(&sched_lock, f);
@@ -700,7 +789,7 @@ void proc_wait(pid_t pid)
 	while (1) {
 		uint64_t f = spin_lock_irq(&sched_lock);
 		process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
-		if (!p || p->state == PROC_DEAD) {
+		if (!p || p->state == PROC_DEAD || p->state == PROC_ZOMBIE) {
 			spin_unlock_irq(&sched_lock, f);
 			break;
 		}
@@ -709,21 +798,67 @@ void proc_wait(pid_t pid)
 	}
 }
 
+/*
+ * Called from assembly after the stack switch (mov sp, x0) in irq_handler and
+ * .yield.  At that point we are on the NEW process's kstack, so it is safe to
+ * release resources belonging to the process we just switched away from.
+ */
+void sched_free_dying_kstack(void)
+{
+	cpu_context_t *cpu = arch_get_cpu_ctx();
+
+	if (cpu->dying_kstack) {
+		buddy_free(VIRT_TO_PHYS(cpu->dying_kstack), cpu->dying_kstack_order);
+		cpu->dying_kstack = NULL;
+	}
+}
+
+/*
+ * Called from assembly AFTER the stack switch (mov sp, x0).  At that point
+ * the previous process's kstack is no longer in use by this CPU, so it is
+ * safe to make prev visible to other CPUs via the runqueue.
+ */
+void sched_requeue_prev(void)
+{
+	cpu_context_t *cpu = arch_get_cpu_ctx();
+	process_t *p = cpu->pending_requeue;
+	if (!p) return;
+	cpu->pending_requeue = NULL;
+
+	uint64_t f = spin_lock_irq(&sched_lock);
+	p->on_cpu = 0;
+	if (p->state == PROC_READY)
+		runqueue_add(p);
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void schedule(void)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *prev = task_current();
 
+	cpu_context_t *cpu = arch_get_cpu_ctx();
+	
+	/* Always pass prev to sched_requeue_prev to clear on_cpu */
+	cpu->pending_requeue = prev;
+
 	if (prev->state == PROC_RUNNING) {
 		prev->state = PROC_READY;
-		runqueue_add(prev);
 	}
 
 	process_t *next = runqueue_pop();
 	if (!next) {
-		next = &idle_proc;
+		cpu_context_t *_cpu = arch_get_cpu_ctx();
+		next = _cpu->idle ? _cpu->idle : &idle_proc;
+	}
+	if ((uint64_t)next < 0xFFFF000000000000ULL) {
+		kprintf("[DBG] schedule: bad next=%p prev=%p cpu%d rq_head=%p rq_tail=%p\n",
+		        next, prev, (int)arch_get_cpu_ctx()->cpu_id,
+		        arch_get_cpu_ctx()->rq_head, arch_get_cpu_ctx()->rq_tail);
+		kpanic("schedule: invalid next process");
 	}
 	next->state = PROC_RUNNING;
+	next->on_cpu = 1;
 	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
 	int q = sched_quantum_val - (next->nice * sched_quantum_val) / 40;
 	if (q < 1) q = 1;
@@ -735,10 +870,30 @@ void schedule(void)
 	    *(uint64_t *)next->kstack != KSTACK_CANARY)
 		kpanic("kstack overflow detected");
 
-	cpu_context_t *cpu = arch_get_cpu_ctx();
+	/*
+	 * When switching away from a dead process: defer kstack freeing until
+	 * after the stack switch (mov sp,x0), then mark it PROC_ZOMBIE so
+	 * proc_reap knows schedule() has completed and process_t is safe to free.
+	 * Wake the parent again — it may have found PROC_DEAD too early.
+	 */
+	if (prev->state == PROC_DEAD && prev->pid != 0 && prev->kstack) {
+		cpu->dying_kstack       = prev->kstack;
+		cpu->dying_kstack_order = kstack_order_val;
+		prev->kstack = NULL;
+		prev->state  = PROC_ZOMBIE;
+		if (prev->ppid > 0 && (int)prev->ppid < proc_cnt) {
+			process_t *pp = proctab[prev->ppid];
+			if (pp && pp->state == PROC_SLEEPING) {
+				pp->state = PROC_READY;
+				if (!pp->on_cpu) runqueue_add(pp);
+			}
+		}
+	}
+
 	cpu->current = next;
 	/* IMPORTANT: update the syscall kstack pointer */
 	cpu->kstack_top = next->kstack + kstack_size_val;
+	smp_mb();
 
 	arch_restore_tls(next);
 
@@ -783,8 +938,8 @@ void task_exit(void)
 		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
 		if (pp && pp->state == PROC_SLEEPING) {
 			pp->state = PROC_READY;
-			runqueue_add(pp);
-			need_resched = 1;
+			if (!pp->on_cpu) runqueue_add(pp);
+			arch_get_cpu_ctx()->need_resched = 1;
 		}
 		p->vfork_parent = -1;
 	}
@@ -795,7 +950,7 @@ void task_exit(void)
 	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next) {
 		if (c->ppid == (pid_t)p->pid && c != p) {
 			c->ppid = init_proc ? (pid_t)init_proc->pid : 0;
-			if (c->state == PROC_DEAD && init_proc)
+			if ((c->state == PROC_DEAD || c->state == PROC_ZOMBIE) && init_proc)
 				init_proc->sig_pending |= (1UL << (SIGCHLD - 1));
 		}
 	}
@@ -804,8 +959,8 @@ void task_exit(void)
 	if (parent) {
 		if (parent->state == PROC_SLEEPING) {
 			parent->state = PROC_READY;
-			runqueue_add(parent);
-			need_resched = 1;
+			if (!parent->on_cpu) runqueue_add(parent);
+			arch_get_cpu_ctx()->need_resched = 1;
 		}
 		parent->sig_pending |= (1UL << (SIGCHLD - 1));
 	}
@@ -821,8 +976,8 @@ void task_wake(process_t *p)
 	if (p && p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
 		p->sleeping_on_queue = 0;
-		runqueue_add(p);
-		need_resched = 1;
+		if (!p->on_cpu) runqueue_add(p);
+		arch_get_cpu_ctx()->need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -833,7 +988,7 @@ void task_wake_no_resched(process_t *p)
 	if (p && p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
 		p->sleeping_on_queue = 0;
-		runqueue_add(p);
+		if (!p->on_cpu) runqueue_add(p);
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -845,8 +1000,8 @@ void task_signal(process_t *p, int sig)
 	p->sig_pending |= (1UL << (sig - 1));
 	if (p->state == PROC_SLEEPING) {
 		p->state = PROC_READY;
-		runqueue_add(p);
-		need_resched = 1;
+		if (!p->on_cpu) runqueue_add(p);
+		arch_get_cpu_ctx()->need_resched = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -856,7 +1011,7 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-		if (t->pgrp == pgrp && t->state != PROC_DEAD)
+		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE)
 			t->sig_pending |= (1UL << (sig - 1));
 	}
 	spin_unlock_irq(&sched_lock, f);
@@ -1031,12 +1186,12 @@ void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
 	process_t *sentinel = proctab[0];
 	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
 		if (c->ppid == ppid) {
-			if (c->state == PROC_DEAD && !c->reaped) {
+			if (c->state == PROC_ZOMBIE && !c->reaped) {
 				c->reaped = 1;
 				*out_child = c;
 				break;
 			}
-			if (c->state != PROC_DEAD)
+			if (c->state != PROC_ZOMBIE)
 				*out_any_alive = 1;
 		}
 	}
@@ -1046,23 +1201,25 @@ void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
 void proc_reap(process_t *child)
 {
 	pid_t cpid = child->pid;
-	uint8_t *kstack = child->kstack;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (cpid >= 0 && cpid < proc_cnt)
 		proctab[cpid] = NULL;
-		
-	/* remove from the global process linked list to prevent Use-After-Free */
+
 	process_t **p = &proctab[0]->next;
-	while (*p && *p != child) {
+	while (*p && *p != child)
 		p = &(*p)->next;
-	}
-	if (*p == child) {
+	if (*p == child)
 		*p = child->next;
-	}
 	spin_unlock_irq(&sched_lock, f);
 
-	if (kstack)
-		buddy_free(VIRT_TO_PHYS(kstack), kstack_order_val);
+	/*
+	 * kstack was already freed by sched_free_dying_kstack() (called from
+	 * assembly after the stack switch), and schedule() cleared child->kstack.
+	 * proc_find_zombie only returns PROC_ZOMBIE processes, meaning schedule()
+	 * has completed — no CPU has child as cpu->current anymore.
+	 */
+	if (child->kstack)
+		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(child), 0);
 }

@@ -2,6 +2,7 @@
 #include <kernel/irq.h>
 #include <kernel/sched.h>
 #include <kernel/hal.h>
+#include <kernel/kprintf.h>
 
 /* arch_spin_trylock: attempt to atomically set locked 0→1.
  * Returns 1 on success, 0 if already locked. */
@@ -48,8 +49,12 @@ void spin_lock(spinlock_t *l)
 
 void spin_unlock(spinlock_t *l)
 {
+#if defined(__aarch64__)
+	__asm__ volatile("stlr wzr, [%0]" :: "r"(&l->locked) : "memory");
+#else
 	__asm__ volatile("" ::: "memory");
 	l->locked = 0;
+#endif
 }
 
 uint64_t spin_lock_irq(spinlock_t *l)
