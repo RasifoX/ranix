@@ -870,7 +870,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	process_t *child = proc_find(pid);
 	if (!child || child->ppid != p->pid) return -10;
 
-	while (child->state != PROC_DEAD) {
+	while (child->state != PROC_ZOMBIE) {
 		if (child->ptrace_stop && !child->ptrace_stop_reported) {
 			child->ptrace_stop_reported = 1;
 			if (status && (uint64_t)status > 0x1000)
@@ -1000,10 +1000,12 @@ static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 {
 	(void)pid;
 	if (len >= 8 && access_ok(mask, len)) {
-		uint64_t m = 1;
+		extern int smp_ncpus;
+		uint64_t m = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
 		copy_to_user(mask, &m, 8);
+		return 8;
 	}
-	return 0;
+	return -22; /* EINVAL */
 }
 
 #define PR_SET_NAME    15
