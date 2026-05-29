@@ -48,13 +48,21 @@ static int proctab_ensure(void)
 	return proctab_grow();
 }
 
-/* Scan for recycled NULL slot; extend proc_cnt only when table is full */
+/* Rotating pid allocation (Linux-style last_pid): search forward from the
+ * last allocated slot so a freed pid/tid is not reused immediately. Quick
+ * reuse can collide with stale userspace state keyed on tid (e.g. musl's
+ * __thread_list_lock holds the owner's tid). */
+static int last_pid = 0;
 static int alloc_pid(void)
 {
-	for (int i = 1; i < proc_cnt; i++) {
-		if (!proctab[i]) return i;
+	for (int n = 1; n < proc_cnt; n++) {
+		int i = last_pid + n;
+		if (i >= proc_cnt) i -= (proc_cnt - 1);   /* wrap, skipping slot 0 */
+		if (i == 0) i = 1;
+		if (!proctab[i]) { last_pid = i; return i; }
 	}
 	if (proctab_ensure() != 0) return -1;
+	last_pid = proc_cnt;
 	return proc_cnt++;
 }
 
