@@ -329,17 +329,18 @@ image: all
 	llvm-objcopy -O binary $(TARGET) kernel8.img
 	@echo "[OK] kernel8.img hazır"
 
+TEST_TIMEOUT ?= 120
 TEST_LOG = $(BUILD_DIR)/serial-test.log
 
 ifeq ($(ARCH),x86_64)
 test: iso
 	@rm -f $(TEST_LOG)
-	timeout 120 $(QEMU_CMD) -smp 4 -m 512M -display none \
+	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 512M -display none \
 	    -serial file:$(TEST_LOG) -cdrom ranix.iso || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)
-	timeout 120 $(QEMU_CMD) -smp 4 -m 512M -display none \
+	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 512M -display none \
 	    -serial file:$(TEST_LOG) \
 	    -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio || true
 endif

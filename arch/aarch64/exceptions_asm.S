@@ -281,15 +281,25 @@ sync_handler:
 	eret
 
 .sync_fault:
+	/* A fault can happen while the syscall/IRQ return path is mid-flight
+	 * (e.g. signal_dispatch writing the signal frame triggers a user-stack
+	 * grow). That outer path relies on task->ctx pointing at ITS trapframe.
+	 * Save the current task->ctx, publish the fault frame only for the
+	 * duration of sync_dispatch (so a fatal fault's reschedule sees it),
+	 * then restore it and eret back to our own fault frame. Clobbering
+	 * task->ctx here would make the outer path restore a stale frame and
+	 * eret into a corrupted state — wedging the CPU. */
 	bl   task_current
+	ldr  x19, [x0, #16]      /* x19 = caller's saved ctx (callee-saved) */
 	mov  x1, sp
-	str  x1, [x0, #16]
+	str  x1, [x0, #16]       /* task->ctx = fault frame */
 	mov  x0, sp
 	bl   sync_dispatch
+	bl   task_current
+	str  x19, [x0, #16]      /* restore caller's ctx */
 	mov  x0, sp
 	bl   signal_dispatch
-	bl   sched_get_current_ctx
-	mov  sp, x0
+	mov  x0, sp              /* return to our own fault frame */
 	restore_trapframe
 	eret
 

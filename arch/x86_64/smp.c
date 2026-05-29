@@ -110,10 +110,9 @@ void arch_secondary_init(int cpu_id)
 		:: "r"(gs_base) : "rax", "ecx", "rdx"
 	);
 
-	/* Load shared GDT and IDT */
-	extern void gdt_init(void);
+	/* Load per-CPU GDT and shared IDT */
 	extern void idt_load(void);
-	gdt_init();
+	gdt_init(cpu_id);
 	idt_load();
 
 	/* Enable SSE */
@@ -125,6 +124,14 @@ void arch_secondary_init(int cpu_id)
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
 	cr4_val |= (3ULL << 9);
 	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
+
+	/* Enable AP LAPIC so it can receive IPIs */
+	if (lapic)
+		lapic_write(LAPIC_SPIV, lapic_read(LAPIC_SPIV) | 0x100 | 0xFF);
+
+	/* Enable syscall instruction on this AP (EFER.SCE + LSTAR/STAR/SFMASK) */
+	extern void arch_syscall_init(void);
+	arch_syscall_init();
 }
 
 void arch_smp_ipi_send(int cpu_id)
