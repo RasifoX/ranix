@@ -162,7 +162,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 
 ---
 
-## v0.7 — SMP
+## v0.7 — SMP  🔶 BÜYÜK ÖLÇÜDE TAMAMLANDI (aarch64'te kararlılık sertleştirmesi sürüyor)
 
 **Neden burada?**
 Artık doğru locking primitive'lerimiz var.
@@ -170,22 +170,75 @@ Thread'ler zaten var, onları farklı CPU'larda çalıştırmak doğal adım.
 SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 
 ### CPU başlatma
-- [ ] aarch64: MPIDR CPU topolojisi okuma, PSCI CPU_ON ile secondary boot
-- [ ] x86_64: ACPI MADT'tan CPU listesi, INIT+SIPI sequence
-- [ ] per-CPU boot stack + trampoline kodu
-- [ ] per-CPU idle task
-- [ ] smp_processor_id() — hangi CPU'dayım
+- [x] aarch64: secondary boot (trampoline + per-CPU ctx), 4/4 CPU online
+- [x] x86_64: secondary boot, 4/4 CPU online
+- [x] per-CPU boot stack + trampoline
+- [x] per-CPU idle task (ap_idle_procs)
+- [x] smp_processor_id() (arch_get_cpu_ctx()->cpu_id)
 
 ### Scheduler
-- [ ] per-CPU runqueue (şu an global tek kuyruk)
-- [ ] IPI: sched_ipi → remote CPU'yu uyandır (need_resched)
-- [ ] load balancing: basit — en boş CPU'ya push
-- [ ] sched_setaffinity / sched_getaffinity gerçek implementasyon
+- [x] per-CPU runqueue (rq_head/rq_tail) + work-stealing
+- [x] IPI: smp_ipi_resched → remote CPU uyandırma (GICv2 SGI / x86 IPI)
+- [x] load balancing: pick_cpu — en boş CPU'ya push
+- [x] sched_setaffinity / sched_getaffinity (byte-count fix)
 - [ ] SCHED_FIFO / SCHED_RR — real-time scheduling class
+
+### SMP kararlılık düzeltmeleri (bu oturum — 2026-05-29)
+- [x] **CLONE_PARENT_SETTID**: clone artık ptid (arg2) yazıyor. Eksikken worker
+      thread tid=0 kalıyordu → musl `__tl_lock` (`if(val==tid)return`) no-op →
+      SMP'de thread listesi bozuluyor → `pthread_exit`'te self->prev=NULL crash.
+- [x] **vfork → fork**: vfork parent'ın stack'ini paylaşıyordu; SMP'de parent
+      ve child eşzamanlı koşup ortak user stack'teki dönüş adreslerini bozuyordu
+      → busybox `timeout` `ret` ile .bss'e atlıyor → EC=0x0 (undefined). Artık
+      vfork tam fork (ayrı adres uzayı). Tüm timeout/busybox segfault'ları gitti.
+- [x] **schedule() ölü-process guard**: dönüş yolunda READY olarak requeue edilen
+      bir process ölümcül sinyal alıp task_exit çağırırsa, runqueue'da PROC_DEAD
+      kalabiliyordu; schedule onu çalıştırınca task_exit "geri dönüyor" ve sinyal
+      sonsuz yeniden tetikleniyordu (SIGCHLD storm → CPU IRQ-masked kilitleniyor).
+      schedule artık PROC_DEAD/ZOMBIE process'i asla çalıştırmıyor; task_exit
+      re-entry guard'lı.
+- [x] **.sync_fault task->ctx koruması (EN BÜYÜK FIX)**: aarch64 `.sync_fault`
+      (exceptions_asm.S) bir fault'ta `task->ctx`'i fault-frame'e yazıp geri
+      koymuyordu. signal_dispatch (syscall-return yolunda) sinyal frame'ini user
+      stack'e yazarken stack-grow fault'u tetikleyince, iç içe fault `task->ctx`'i
+      bozuyordu; dıştaki dönüş yolu `sched_get_current_ctx` ile bayat frame'i
+      restore edip bozuk state'e eret ediyor → CPU IRQ-masked kilitleniyordu.
+      `.sync_fault` artık task->ctx'i kaydedip geri koyuyor, kendi frame'ine eret
+      ediyor. **Hang'ler ~%17 → ~%2-5'e düştü** (asıl freeze nedeni buydu).
+- [x] **smp_mb() proc_clone_thread'de** (runqueue_add öncesi): tid'in child
+      runnable olmadan önce globalde görünmesini garanti. (tid'in doğru yazıldığı
+      segfault dump'ında `tid@tp-0xa8=pid` ile DOĞRULANDI — tid=0 değil.)
+- [x] **TLB lazy-switch**: arch_vm_switch (her iki arch) aynı adres uzayına
+      geçişte TTBR0/CR3 reload + flush'u atlıyor (thread switch / aynı task).
+      Gerçek donanımda kazanç; pthread crash'in nedeni DEĞİL (test edildi).
+- [x] x86_64: **190/190 ALL_PASS, kaya gibi** (8/8, KVM hızlandırmalı).
+- aarch64 clean: ~35/40 (%87). Hang'ler büyük ölçüde gitti.
+
+### Bilinen kalan sorun (aarch64-ONLY — derin SMP yarışı, ana kalan hata)
+- [ ] **pthread thread-list race**: test_threads/test_affinity ~%5-7 koşuda
+      `pthread_exit`'te crash. Tetiklediği yan etkiler: suite hang (crashed
+      thread-test pipe'ı tıkıyor) + smp-affinity boş çıktı. Yani kalan
+      başarısızlıkların ÇOĞU bu. **Kesin teşhis (bu oturum):**
+      * crash anında self->next=0 VE self->prev=0 → thread HİÇ linklenmemiş.
+      * tid DOĞRU set (tid@tp-0xa8=pid, dump'ta doğrulandı) → tl_lock no-op DEĞİL.
+      * musl link kodu (pthread_create 0x...fb4) her zaman çalışıyor; 4 worker'ın
+        tid'leri farklı (collision yok); TLB-skip nedeni değil (kapatınca da var).
+      * Yani: tid set + tl_lock çalışır + link kodu koşar + paylaşımlı bellek,
+        AMA worker kendi struct'ını linksiz (sıfır) görüyor. Kalan şüphe:
+        clone başlangıç handshake'i (__wake/__wait futex) veya weak-ordering'de
+        worker'ın struct'ı görme sırası; ya da struct/TP kimlik yarışı.
+      * Sonraki adım: clone __wake/__wait futex handshake'ini SMP'de incele;
+        veya proc_clone_thread'de child'ın ilk EL0 girişinden önce tam bariyer.
+- [ ] nadir (~%2.5) ayrı hang (su testleri sonrası, segfault yok) — muhtemelen
+      futex/ptrace yolu; .sync_fault fix'inden sonra kalan tek bağımsız hang.
+- Teşhis yöntemi (tekrar kullan): TEST_TIMEOUT=30 ile hızlı döngü; tek-atış
+      frozen-CPU watchdog (sched_tick'te cpu0'dan local_ticks donmuş CPU tespiti)
+      + segfault dump'ında tls/tid okuma. Aynı yöntem iki arch'ta da.
 
 ### Locking
 - [ ] ticket spinlock → daha fair
-- [ ] TLB shootdown IPI (fork/mmap sonrası remote flush)
+- [ ] TLB shootdown IPI (fork/mmap sonrası remote flush) — şu an her vm_switch'te
+      tam `tlbi vmalle1is` (ağır ama doğru)
 - [ ] per-CPU variables (this_cpu_read/write)
 - [ ] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR)
 
@@ -194,9 +247,10 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [ ] PHYS_TO_VIRT sınırını kaldır — 64-bit PML4 tam kullanımı
 
 ### Test hedefleri
-- [ ] nproc → 4 (QEMU -smp 4)
-- [ ] 4 pthread farklı CPU'larda çalışıyor (affinity test)
-- [ ] stress -c 4 — sistem kilitlenmiyor
+- [x] nproc → 4 (QEMU -smp 4)
+- [x] 4 pthread farklı CPU'larda çalışıyor (affinity test) — x86_64 kararlı,
+      aarch64 çoğunlukla geçiyor (yukarıdaki race hariç)
+- [ ] stress -c 4 — sistem kilitlenmiyor (aarch64 hang race kapanınca)
 
 ---
 

@@ -3,7 +3,7 @@
 
 #include <uapi/types.h>
 
-void gdt_init(void);
+void gdt_init(int cpu_id);
 
 /* segment selectors */
 #define GDT_NULL    0x00

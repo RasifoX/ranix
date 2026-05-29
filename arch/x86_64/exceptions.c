@@ -7,7 +7,7 @@
 
 void exceptions_init(void)
 {
-	gdt_init();
+	gdt_init(0);
 	idt_init();
 }
 

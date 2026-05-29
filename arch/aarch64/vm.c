@@ -202,6 +202,16 @@ uint64_t arch_vm_get_paddr(uint64_t *l1_phys, uint64_t vaddr)
 
 void arch_vm_switch(uint64_t root_phys)
 {
+	/* Skip the reload + full TLB flush when the address space is unchanged
+	 * (thread switches, re-running the same task, busy yields). Without
+	 * ASIDs the flush is mandatory on a real AS change, but identical here.
+	 * Safe against root reuse: task_exit switches to the kernel PT before
+	 * vm_destroy frees a root, and shared VMs are refcounted, so TTBR0 never
+	 * holds a freed-and-reused root. Big win under TCG emulation. */
+	uint64_t cur;
+	__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(cur));
+	if (cur == root_phys)
+		return;
 	__asm__ volatile(
 		"msr ttbr0_el1, %0\n"
 		"isb\n"
