@@ -44,7 +44,7 @@ cpu_context_t *arch_get_cpu_ctx(void)
 	return ctx;
 }
 
-static void arch_syscall_init(void)
+void arch_syscall_init(void)
 {
 	/* Also enable SMAP/SMEP in CR4 if we want hardware guards */
 	uint64_t cr4;

@@ -101,6 +101,10 @@ common_irq:
 
 	call schedule
 	call vm_activate
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	call sched_requeue_prev
+	call sched_free_dying_kstack
 
 .irq_ret:
 	/* Switch to current/new task's saved context before signal delivery */
@@ -205,6 +209,8 @@ syscall_entry:
 	call vm_activate
 	call sched_get_current_ctx
 	movq %rax, %rsp
+	call sched_requeue_prev
+	call sched_free_dying_kstack
 
 .syscall_ret:
 	restore_context
@@ -225,6 +231,10 @@ irq_stub_yield:
 	movq %r15, 16(%rax)
 	call schedule
 	call vm_activate
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	call sched_requeue_prev
+	call sched_free_dying_kstack
 
 	/* Switch to new task's saved context before signal delivery */
 	call sched_get_current_ctx
@@ -257,6 +267,10 @@ irq_stub_ipi:
 	movl $0, %gs:80
 	call schedule
 	call vm_activate
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	call sched_requeue_prev
+	call sched_free_dying_kstack
 	call sched_get_current_ctx
 	movq %rax, %rsp
 	movq %rsp, %rdi

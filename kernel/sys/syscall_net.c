@@ -91,7 +91,7 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
         spin_unlock_irq(&s->recv_lock, f);
         task_sleep();
         process_t *p = task_current();
-        if (p->sig_pending & ~p->sig_mask) { s->recv_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
     }
 }
 
@@ -111,7 +111,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
                 s->connect_waiter = task_current();
                 task_sleep();
                 process_t *p = task_current();
-                if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
+                if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
             }
         }
         kfree(kbuf);
@@ -324,7 +324,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
         s->connect_waiter = task_current();
         task_sleep();
         process_t *p = task_current();
-        if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { s->connect_waiter = NULL; return -4; }
     }
     return (s->tcp_state == TCP_ESTABLISHED) ? 0 : -111; /* ECONNREFUSED */
 }
@@ -359,7 +359,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             s->connect_waiter = task_current();
             task_sleep();
             process_t *p = task_current();
-            if (p->sig_pending & ~p->sig_mask) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
+            if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
         }
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_DGRAM) {
@@ -428,7 +428,7 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
         spin_unlock_irq(&s->recv_lock, f);
         task_sleep();
         process_t *p = task_current();
-        if (p->sig_pending & ~p->sig_mask) { s->recv_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
     }
 }
 
@@ -489,7 +489,7 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
         ls->accept_waiter = task_current();
         task_sleep();
         process_t *p = task_current();
-        if (p->sig_pending & ~p->sig_mask) { ls->accept_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { ls->accept_waiter = NULL; return -4; }
     }
 
     /* dequeue from accept list (accept_head chained via accept_head field of child) */

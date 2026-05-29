@@ -43,6 +43,7 @@ int main(void)
     }
 
     printf("nproc=%d\n", nproc);
+    fflush(stdout);
 
     /* Launch nproc threads and verify they all run */
     int n = nproc < 4 ? nproc : 4;

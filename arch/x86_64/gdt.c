@@ -1,4 +1,5 @@
 #include <asm/gdt.h>
+#include <kernel/smp.h>
 #include <uapi/types.h>
 
 struct gdt_entry {
@@ -42,52 +43,47 @@ struct tss64 {
 static struct {
 	struct gdt_entry entries[5];
 	struct tss_desc  tssd;
-} __attribute__((packed)) gdt;
+} __attribute__((packed)) cpu_gdt[MAX_CPUS];
 
-static struct tss64 tss;
-static struct gdtr  gdtr;
-
-uint64_t current_kstack_top = 0;
+static struct tss64 cpu_tss[MAX_CPUS];
+static struct gdtr  cpu_gdtr[MAX_CPUS];
 
 void tss_set_rsp0(uint64_t rsp0)
 {
-	tss.rsp0 = rsp0;
-	current_kstack_top = rsp0;
+	uint64_t gs_base;
+	__asm__ volatile("movq %%gs:0, %0" : "=r"(gs_base));
+	/* gs:0 is cpu_context_t->self; cpu_id is at offset 32 */
+	uint64_t cpu_id;
+	__asm__ volatile("movq %%gs:32, %0" : "=r"(cpu_id));
+	if (cpu_id < MAX_CPUS)
+		cpu_tss[cpu_id].rsp0 = rsp0;
 }
 
-void gdt_init(void)
+void gdt_init(int cpu_id)
 {
-	/* null */
-	gdt.entries[0] = (struct gdt_entry){ 0 };
+	if ((unsigned)cpu_id >= MAX_CPUS) cpu_id = 0;
 
-	/* kernel code: present, ring0, code exec/read, L=1 */
-	gdt.entries[1] = (struct gdt_entry){ .access = 0x9A, .gran = 0x20 };
+	cpu_gdt[cpu_id].entries[0] = (struct gdt_entry){ 0 };
+	cpu_gdt[cpu_id].entries[1] = (struct gdt_entry){ .access = 0x9A, .gran = 0x20 };
+	cpu_gdt[cpu_id].entries[2] = (struct gdt_entry){ .access = 0x92 };
+	cpu_gdt[cpu_id].entries[3] = (struct gdt_entry){ .access = 0xFA, .gran = 0x20 };
+	cpu_gdt[cpu_id].entries[4] = (struct gdt_entry){ .access = 0xF2 };
 
-	/* kernel data: present, ring0, data read/write */
-	gdt.entries[2] = (struct gdt_entry){ .access = 0x92 };
+	uint64_t base = (uint64_t)&cpu_tss[cpu_id];
+	uint32_t lim  = sizeof(struct tss64) - 1;
+	cpu_gdt[cpu_id].tssd.limit_lo   = lim & 0xFFFF;
+	cpu_gdt[cpu_id].tssd.base_lo    = base & 0xFFFF;
+	cpu_gdt[cpu_id].tssd.base_mid   = (base >> 16) & 0xFF;
+	cpu_gdt[cpu_id].tssd.flags1     = 0x89;
+	cpu_gdt[cpu_id].tssd.flags2     = (uint8_t)((lim >> 16) & 0x0F);
+	cpu_gdt[cpu_id].tssd.base_hi    = (base >> 24) & 0xFF;
+	cpu_gdt[cpu_id].tssd.base_upper = (base >> 32) & 0xFFFFFFFF;
+	cpu_gdt[cpu_id].tssd.reserved   = 0;
 
-	/* user code: present, ring3, code exec/read, L=1 */
-	gdt.entries[3] = (struct gdt_entry){ .access = 0xFA, .gran = 0x20 };
+	cpu_tss[cpu_id].iopb = sizeof(struct tss64);
 
-	/* user data: present, ring3, data read/write */
-	gdt.entries[4] = (struct gdt_entry){ .access = 0xF2 };
-
-	/* 64-bit TSS descriptor */
-	uint64_t base = (uint64_t)&tss;
-	uint32_t lim  = sizeof(tss) - 1;
-	gdt.tssd.limit_lo   = lim & 0xFFFF;
-	gdt.tssd.base_lo    = base & 0xFFFF;
-	gdt.tssd.base_mid   = (base >> 16) & 0xFF;
-	gdt.tssd.flags1     = 0x89;   /* P=1, DPL=0, type=9 (TSS available) */
-	gdt.tssd.flags2     = (uint8_t)((lim >> 16) & 0x0F);
-	gdt.tssd.base_hi    = (base >> 24) & 0xFF;
-	gdt.tssd.base_upper = (base >> 32) & 0xFFFFFFFF;
-	gdt.tssd.reserved   = 0;
-
-	tss.iopb = sizeof(tss);
-
-	gdtr.limit = sizeof(gdt) - 1;
-	gdtr.base  = (uint64_t)&gdt;
+	cpu_gdtr[cpu_id].limit = sizeof(cpu_gdt[0]) - 1;
+	cpu_gdtr[cpu_id].base  = (uint64_t)&cpu_gdt[cpu_id];
 
 	__asm__ volatile(
 		"lgdt %0\n"
@@ -102,6 +98,6 @@ void gdt_init(void)
 		"1:\n"
 		"mov $0x28, %%ax\n"
 		"ltr %%ax\n"
-		:: "m"(gdtr) : "rax", "memory"
+		:: "m"(cpu_gdtr[cpu_id]) : "rax", "memory"
 	);
 }

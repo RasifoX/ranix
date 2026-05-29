@@ -201,6 +201,13 @@ uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 
 void arch_vm_switch(uint64_t root_phys)
 {
+	/* Skip the CR3 reload (which flushes the non-global TLB) when the
+	 * address space is unchanged — avoids needless flushes on thread
+	 * switches and same-task re-runs. */
+	uint64_t cur;
+	__asm__ volatile("mov %%cr3, %0" : "=r"(cur));
+	if ((cur & ~0xFFFUL) == (root_phys & ~0xFFFUL))
+		return;
 	__asm__ volatile("mov %0, %%cr3" :: "r"(root_phys) : "memory");
 }
 

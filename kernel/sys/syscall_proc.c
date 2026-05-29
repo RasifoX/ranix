@@ -90,8 +90,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 					}
 					uint64_t fs = spin_lock_irq(&sched_lock);
 					self->state = PROC_SLEEPING;
+					int sig = (self->sig_pending & ~self->sig_mask) != 0;
+					if (sig) self->state = PROC_RUNNING;
 					spin_unlock_irq(&sched_lock, fs);
 					spin_unlock_irq(&futex_lock, fq);
+					if (sig) break;
 					arch_yield();
 					if (self->sig_pending & ~self->sig_mask) break;
 				}
@@ -105,8 +108,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				}
 				uint64_t fs = spin_lock_irq(&sched_lock);
 				self->state = PROC_SLEEPING;
+				int sig = (self->sig_pending & ~self->sig_mask) != 0;
+				if (sig) self->state = PROC_RUNNING;
 				spin_unlock_irq(&sched_lock, fs);
 				spin_unlock_irq(&futex_lock, fq);
+				if (sig) break;
 				arch_yield();
 				if (self->sig_pending & ~self->sig_mask) break;
 			}
@@ -251,8 +257,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 					}
 					uint64_t fs = spin_lock_irq(&sched_lock);
 					self2->state = PROC_SLEEPING;
+					int sig = (self2->sig_pending & ~self2->sig_mask) != 0;
+					if (sig) self2->state = PROC_RUNNING;
 					spin_unlock_irq(&sched_lock, fs);
 					spin_unlock_irq(&futex_lock, fq);
+					if (sig) break;
 					arch_yield();
 					if (self2->sig_pending & ~self2->sig_mask) break;
 				}
@@ -266,8 +275,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				}
 				uint64_t fs = spin_lock_irq(&sched_lock);
 				self2->state = PROC_SLEEPING;
+				int sig = (self2->sig_pending & ~self2->sig_mask) != 0;
+				if (sig) self2->state = PROC_RUNNING;
 				spin_unlock_irq(&sched_lock, fs);
 				spin_unlock_irq(&futex_lock, fq);
+				if (sig) break;
 				arch_yield();
 				if (self2->sig_pending & ~self2->sig_mask) break;
 			}

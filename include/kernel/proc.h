@@ -123,6 +123,7 @@ typedef struct process {
 	int             ptrace_stop;          /* 0=running, 1=entry stop, 2=exit stop */
 	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
 	int             ptrace_in_syscall;    /* currently sleeping in ptrace_do_stop */
+	uint32_t       *clear_child_tid;
 } process_t;
 
 /* scheduler */
@@ -136,6 +137,7 @@ void       yield(void);
 void       task_sleep(void);
 void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);
+int        task_has_actionable_signal(void);
 void       task_signal(process_t *p, int sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
 void       signal_dispatch(arch_context_t *tf);
@@ -152,7 +154,7 @@ pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
 pid_t      proc_fork(void);
 pid_t      proc_vfork(void);
 void       proc_vfork_exec_notify(void);
-pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid);
+pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid);
 process_t *proc_find(pid_t pid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);

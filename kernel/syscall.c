@@ -836,10 +836,18 @@ static long sys_fork(void)
 
 static long sys_vfork(void)
 {
-	return (long)proc_vfork();
+	/* vfork-as-fork: give the child its own address space instead of
+	 * sharing the parent's stack. Sharing is unsafe under SMP — the
+	 * parent and child can run concurrently and corrupt the shared
+	 * user stack. fork semantics are always a valid vfork. */
+	return (long)proc_fork();
 }
 
 #define WNOHANG 1
+
+extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
+                                      process_t **out_child, int *out_any_alive);
+extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep);
 
 static long sys_waitpid(pid_t pid, int *status, int flags)
 {
@@ -850,7 +858,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0;
-			proc_find_zombie(p->pid, &child, &any_alive);
+			proc_find_zombie_or_sleep(p->pid, p, !wnohang, &child, &any_alive);
 			if (child) {
 				int st = child->killed_by_sig
 				       ? (child->exit_code & 0x7F)
@@ -863,22 +871,23 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 			}
 			if (!any_alive) return -10; /* ECHILD */
 			if (wnohang)    return 0;
-			task_sleep();
+			arch_yield();
 		}
 	}
 
 	process_t *child = proc_find(pid);
 	if (!child || child->ppid != p->pid) return -10;
 
-	while (child->state != PROC_ZOMBIE) {
-		if (child->ptrace_stop && !child->ptrace_stop_reported) {
-			child->ptrace_stop_reported = 1;
+	while (1) {
+		int r = proc_check_or_sleep(child, p, !wnohang);
+		if (r == 1) break;  /* zombie */
+		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
 			if (status && (uint64_t)status > 0x1000)
 				*status = (5 << 8) | 0x7f; /* WIFSTOPPED | SIGTRAP */
 			return (long)pid;
 		}
 		if (wnohang) return 0;
-		task_sleep();
+		arch_yield();
 	}
 
 	child->reaped = 1;
@@ -1266,6 +1275,7 @@ void syscall_handle(arch_context_t *ctx)
 #define CLONE_VM       0x00000100
 #define CLONE_THREAD   0x00010000
 #define CLONE_SETTLS   0x00080000
+#define CLONE_PTID     0x00100000 /* CLONE_PARENT_SETTID */
 #define CLONE_CTID     0x00200000 /* CLONE_CHILD_CLEARTID */
 #define CLONE_VFORK    0x00004000
 		if (flags & CLONE_VFORK) {
@@ -1275,6 +1285,7 @@ void syscall_handle(arch_context_t *ctx)
 			uint64_t newsp  = (uint64_t)arg1;
 			/* Linux ABI: x86_64 clone(flags,newsp,ptid,ctid,tls)
 			 *            aarch64 clone(flags,newsp,ptid,tls,ctid) */
+			uint32_t *ptid  = (flags & CLONE_PTID)   ? (uint32_t*)arg2 : NULL;
 #if defined(__aarch64__)
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg3 : 0;
 			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg4 : NULL;
@@ -1282,7 +1293,7 @@ void syscall_handle(arch_context_t *ctx)
 			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg3 : NULL;
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg4 : 0;
 #endif
-			ret = (long)proc_clone_thread(newsp, tls, ctid);
+			ret = (long)proc_clone_thread(newsp, tls, ctid, ptid);
 		} else {
 			ret = sys_fork();
 		}

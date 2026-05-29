@@ -16,6 +16,8 @@
 #include <kernel/smp.h>
 #include <asm/mmu.h>
 
+extern void futex_wake_addr(uint32_t *uaddr);
+
 static process_t **proctab;
 static int         proc_cap = 0;
 static process_t   idle_proc;
@@ -157,6 +159,7 @@ static int cpu_rq_len(cpu_context_t *cpu)
 /* Pick the least-loaded online CPU */
 static cpu_context_t *pick_cpu(void)
 {
+#ifdef __aarch64__
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
 	cpu_context_t *best = arch_get_cpu_ctx();
@@ -168,6 +171,9 @@ static cpu_context_t *pick_cpu(void)
 		if (l < best_len) { best = c; best_len = l; }
 	}
 	return best;
+#else
+	return arch_get_cpu_ctx();
+#endif
 }
 
 /* Internal: must hold sched_lock */
@@ -685,7 +691,7 @@ void proc_vfork_exec_notify(void)
 	spin_unlock_irq(&sched_lock, f);
 }
 
-pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
+pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid)
 {
 	process_t *parent = task_current();
 	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
@@ -742,13 +748,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 
 	child->tls_base = tls ? tls : parent->tls_base;
 
-	/* Write child TID to ctid if requested */
-	if (ctid) {
-		uint32_t tid = (uint32_t)child->pid;
-		/* we can't use copy_to_user here (no current context switch yet),
-		 * but ctid is in the shared VM so direct write works */
-		*ctid = tid;
-	}
+	child->clear_child_tid = ctid;
 
 	child->ctx             = cctx;
 	child->ticks_remaining = sched_quantum_val;
@@ -763,8 +763,18 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid)
 	child->tgid = parent->tgid;
 	child->next      = proctab[0]->next;
 	proctab[0]->next = child;
-	runqueue_add(child);
 	proctab[pid] = child;
+	/* Write real child TID to ctid/ptid before child is runnable.
+	 * ptid (CLONE_PARENT_SETTID) is required: musl's __tl_lock keys on
+	 * pthread_self()->tid, so a 0 tid silently disables thread-list
+	 * locking and corrupts the list under SMP. */
+	if (ctid) *ctid = (uint32_t)pid;
+	if (ptid) *ptid = (uint32_t)pid;
+	/* Publish the tid (and all child setup) to memory before the child can
+	 * be observed runnable on another CPU. On weakly-ordered aarch64 a stale
+	 * tid=0 read makes musl's __tl_lock a no-op and corrupts the thread list. */
+	smp_mb();
+	runqueue_add(child);
 
 	spin_unlock_irq(&sched_lock, f);
 	return child->pid;
@@ -827,6 +837,9 @@ void sched_requeue_prev(void)
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	p->on_cpu = 0;
+	/* Only requeue a genuinely runnable process. A process that exited
+	 * after being marked for requeue (PROC_DEAD/ZOMBIE) must not go back
+	 * into the runqueue, or schedule() could resume its task_exit. */
 	if (p->state == PROC_READY)
 		runqueue_add(p);
 	spin_unlock_irq(&sched_lock, f);
@@ -847,6 +860,15 @@ void schedule(void)
 	}
 
 	process_t *next = runqueue_pop();
+	/* Never run a process that has already exited. A dying process can be
+	 * left in a runqueue (e.g. requeued READY in the return path, then it
+	 * takes a fatal signal and calls task_exit before being descheduled).
+	 * Running it would resume task_exit's arch_yield, making task_exit
+	 * "return" and the fatal signal re-fire — an unkillable livelock. */
+	while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
+		next->on_cpu = 0;
+		next = runqueue_pop();
+	}
 	if (!next) {
 		cpu_context_t *_cpu = arch_get_cpu_ctx();
 		next = _cpu->idle ? _cpu->idle : &idle_proc;
@@ -910,15 +932,33 @@ void task_sleep(void) {
 
 void task_exit(void)
 {
-	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *p = task_current();
+	/* Re-entry guard: if this process is already exiting (e.g. a second
+	 * fatal signal, or it was resumed from a runqueue while dying), do not
+	 * run the teardown again — just leave the CPU and never return. */
+	if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) {
+		for (;;) {
+			uint64_t gf = spin_lock_irq(&sched_lock);
+			p->state = PROC_DEAD;
+			spin_unlock_irq(&sched_lock, gf);
+			arch_yield();
+		}
+	}
+	uint32_t *cctid = p->clear_child_tid;
 
-	/* Steal vm/fds pointers under lock so we own them for teardown.
-	 * Keep state PROC_RUNNING so the scheduler can still preempt and
-	 * reschedule us during cleanup — prevents use-after-free of kstack. */
+	/* Write tid=0 and wake futex waiter while p->vm is still set.
+	 * Must happen before stealing p->vm: a preemption between p->vm=NULL
+	 * and this write would cause vm_activate to load the kernel PT, making
+	 * the user-address write fault at EL1. futex_wake_addr must also be
+	 * called outside sched_lock to preserve lock order (futex→sched). */
+	if (cctid) {
+		*cctid = 0;
+		futex_wake_addr(cctid);
+	}
+
+	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
 	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
-
 	spin_unlock_irq(&sched_lock, f);
 
 	/* Free resources — process is still schedulable during this. */
@@ -1035,6 +1075,21 @@ static int sig_default_kill(int sig)
 	default:
 		return 0;
 	}
+}
+
+int task_has_actionable_signal(void)
+{
+	process_t *p = task_current();
+	uint64_t mask = p->sig_pending & ~p->sig_mask;
+	while (mask) {
+		int sig = __builtin_ctzll(mask) + 1;
+		mask &= mask - 1;
+		void (*handler)(int) = p->sig_actions[sig - 1].sa_handler;
+		if ((uintptr_t)handler == 1) continue;   /* SIG_IGN */
+		if (!handler && !sig_default_kill(sig)) continue; /* SIG_DFL non-fatal */
+		return 1;
+	}
+	return 0;
 }
 
 void signal_dispatch(arch_context_t *tf)
@@ -1196,6 +1251,48 @@ void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
 		}
 	}
 	spin_unlock_irq(&sched_lock, f);
+}
+
+/* Like proc_find_zombie but, if no zombie is found and will_sleep is set,
+ * atomically marks parent PROC_SLEEPING under sched_lock so that a
+ * concurrent task_exit cannot sneak its wakeup between our check and sleep. */
+void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
+                               process_t **out_child, int *out_any_alive)
+{
+	*out_child = NULL;
+	*out_any_alive = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
+		if (c->ppid == ppid) {
+			if (c->state == PROC_ZOMBIE && !c->reaped) {
+				c->reaped = 1;
+				*out_child = c;
+				break;
+			}
+			if (c->state != PROC_ZOMBIE)
+				*out_any_alive = 1;
+		}
+	}
+	if (!*out_child && *out_any_alive && will_sleep)
+		parent->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, f);
+}
+
+/* Atomically check child state: zombie=1, ptrace_stop=2, else sleep (0).
+ * If sleeping and will_sleep is set, marks parent PROC_SLEEPING under the
+ * same lock hold that checked the child — no wakeup can slip through. */
+int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int zombie = (child->state == PROC_ZOMBIE);
+	int ptrace = !zombie && child->ptrace_stop && !child->ptrace_stop_reported;
+	if (ptrace)
+		child->ptrace_stop_reported = 1;
+	if (!zombie && !ptrace && will_sleep)
+		parent->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, f);
+	return zombie ? 1 : (ptrace ? 2 : 0);
 }
 
 void proc_reap(process_t *child)

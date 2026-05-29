@@ -37,7 +37,7 @@ int board_fb_alloc(fb_info_t *out)
 
 void board_irq_init(void)
 {
-	gdt_init();
+	gdt_init(0);
 	idt_init();
 	pic8259_init();
 	irq_register(0x20, pit_handler);

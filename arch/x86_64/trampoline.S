@@ -77,7 +77,7 @@ trampoline_start:
 	or   $0x80000001, %eax
 	mov  %eax, %cr0
 
-	ljmp $0x08, $(TRAMP_PHYS + .Llm64 - trampoline_start)
+	ljmp $0x18, $(TRAMP_PHYS + .Llm64 - trampoline_start)
 
 .code64
 .Llm64:
