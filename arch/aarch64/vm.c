@@ -1,4 +1,5 @@
 #include <kernel/mm/vm.h>
+#include <kernel/sync.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
@@ -37,15 +38,16 @@ vm_space_t *vm_create(void)
 
 vm_space_t *vm_get(vm_space_t *vs)
 {
-	if (vs) vs->refcount++;
+	/* Atomic: threads share a vm; concurrent create/exit on different CPUs
+	 * would otherwise race this refcount and free the page tables early. */
+	if (vs) atomic_fetch_add32(&vs->refcount, 1);
 	return vs;
 }
 
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
-	if (vs->refcount > 1) { vs->refcount--; return; }
-	vs->refcount = 0;
+	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
 
 	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 

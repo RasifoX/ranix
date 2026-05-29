@@ -41,6 +41,50 @@ static int arch_spin_trylock(volatile uint32_t *p)
 #endif
 }
 
+/* v8.0-safe atomic RMW (cortex-a72 has no LSE, so we cannot let the compiler
+ * emit ldadd/etc via __atomic — it would be an undefined instruction). x86
+ * uses LOCK xadd. Used for shared refcounts (vm/fd_table) under SMP. */
+uint32_t atomic_fetch_add32(volatile uint32_t *p, uint32_t v)
+{
+#if defined(__aarch64__)
+	uint32_t old, nw, res;
+	__asm__ volatile(
+		"1: ldaxr %w0, [%3]\n"
+		"   add   %w1, %w0, %w4\n"
+		"   stlxr %w2, %w1, [%3]\n"
+		"   cbnz  %w2, 1b\n"
+		: "=&r"(old), "=&r"(nw), "=&r"(res)
+		: "r"(p), "r"(v) : "memory");
+	return old;
+#elif defined(__x86_64__)
+	__asm__ volatile("lock xaddl %0, %1" : "+r"(v), "+m"(*p) :: "memory");
+	return v;
+#else
+	uint32_t old = *p; *p = old + v; return old;
+#endif
+}
+
+uint32_t atomic_sub_fetch32(volatile uint32_t *p, uint32_t v)
+{
+#if defined(__aarch64__)
+	uint32_t nw, res;
+	__asm__ volatile(
+		"1: ldaxr %w0, [%2]\n"
+		"   sub   %w0, %w0, %w3\n"
+		"   stlxr %w1, %w0, [%2]\n"
+		"   cbnz  %w1, 1b\n"
+		: "=&r"(nw), "=&r"(res)
+		: "r"(p), "r"(v) : "memory");
+	return nw;
+#elif defined(__x86_64__)
+	uint32_t neg = (uint32_t)(-(int32_t)v);
+	__asm__ volatile("lock xaddl %0, %1" : "+r"(neg), "+m"(*p) :: "memory");
+	return neg - v;
+#else
+	*p -= v; return *p;
+#endif
+}
+
 void spin_lock(spinlock_t *l)
 {
 	while (!arch_spin_trylock(&l->locked))
