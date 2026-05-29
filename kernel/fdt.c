@@ -165,6 +165,7 @@ static void parse_info(void)
         uint32_t entry_size = (addr_cells + size_cells) * 4;
         int first = 1;
 
+        _info.mem_total = 0;
         while (len >= entry_size) {
             uint64_t base = (addr_cells == 2) ? be64(p) : be32(p);
             p += addr_cells * 4;
@@ -175,19 +176,24 @@ static void parse_info(void)
                 _info.mem_size = size;
                 first = 0;
             }
+            if (size > 0) _info.mem_total += size;
             len -= entry_size;
         }
     }
 
-    /* count cpus by walking struct block for /cpus/cpu@N nodes */
+    /* Walk /cpus/cpu@N: count CPUs and read each one's spin-table
+     * cpu-release-addr straight from the DTB (no hardcoded addresses). */
     _info.num_cpus = 0;
+    for (int i = 0; i < 8; i++) _info.cpu_release[i] = 0;
     {
         fdt_header_t *hdr = (fdt_header_t *)_dtb;
         uint8_t *structs = (uint8_t *)_dtb + be32(&hdr->off_dt_struct);
+        char *strings    = (char *)_dtb + be32(&hdr->off_dt_strings);
         uint32_t ssize = be32(&hdr->size_dt_struct);
         uint32_t off = 0;
         int depth = 0;
         int in_cpus = 0;
+        int cur_cpu = -1;   /* index of the cpu@N node we are currently inside */
 
         while (off < ssize) {
             uint32_t token = be32(structs + off);
@@ -198,15 +204,25 @@ static void parse_info(void)
                 off += (nlen + 3) & ~3u;
                 if (depth == 1 && node_name_match(name, "cpus"))
                     in_cpus = 1;
-                if (in_cpus && depth == 2 && node_name_match(name, "cpu"))
+                if (in_cpus && depth == 2 && node_name_match(name, "cpu")) {
+                    cur_cpu = (int)_info.num_cpus;
                     _info.num_cpus++;
+                }
                 depth++;
             } else if (token == FDT_END_NODE) {
                 depth--;
-                if (in_cpus && depth <= 1)
-                    in_cpus = 0;
+                if (in_cpus && depth == 2) cur_cpu = -1;
+                if (in_cpus && depth <= 1)  in_cpus = 0;
             } else if (token == FDT_PROP) {
-                uint32_t plen = be32(structs + off); off += 8;
+                uint32_t plen  = be32(structs + off);
+                uint32_t noff  = be32(structs + off + 4);
+                const void *pval = structs + off + 8;
+                off += 8;
+                if (cur_cpu >= 0 && cur_cpu < 8 &&
+                    strcmp(strings + noff, "cpu-release-addr") == 0) {
+                    if (plen == 8)      _info.cpu_release[cur_cpu] = be64(pval);
+                    else if (plen == 4) _info.cpu_release[cur_cpu] = be32(pval);
+                }
                 off += (plen + 3) & ~3u;
             } else if (token == FDT_NOP) {
                 continue;
@@ -217,6 +233,20 @@ static void parse_info(void)
     }
     if (_info.num_cpus == 0)
         _info.num_cpus = 1;
+
+    /* PSCI conduit: /psci { method = "hvc" | "smc" }. On real Pi4 the
+     * firmware provides PSCI at EL3 via SMC; QEMU virt uses HVC. */
+    _info.psci_present = 0;
+    _info.psci_use_smc = 0;
+    {
+        uint32_t plen;
+        const void *m = fdt_get_prop("psci", "method", &plen);
+        if (m) {
+            _info.psci_present = 1;
+            if (plen >= 3 && ((const char *)m)[0] == 's')
+                _info.psci_use_smc = 1;   /* "smc" */
+        }
+    }
 }
 
 /* ── public API ──────────────────────────────────────────── */
@@ -240,7 +270,7 @@ int fdt_init(void *dtb_addr)
     parse_info();
 
     kprintf("fdt: %s  RAM %d MB  CPUs %d\n",
-            _info.model, (int)(_info.mem_size >> 20), (int)_info.num_cpus);
+            _info.model, (int)(_info.mem_total >> 20), (int)_info.num_cpus);
 
     return 0;
 }

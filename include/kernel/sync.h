@@ -16,6 +16,10 @@ typedef struct {
 
 void spin_lock(spinlock_t *l);
 void spin_unlock(spinlock_t *l);
+
+/* v8.0-safe atomic RMW for shared refcounts (no LSE dependency). */
+uint32_t atomic_fetch_add32(volatile uint32_t *p, uint32_t v);
+uint32_t atomic_sub_fetch32(volatile uint32_t *p, uint32_t v);
 /* IRQ-safe variants — use these from interrupt context */
 uint64_t spin_lock_irq(spinlock_t *l);
 void     spin_unlock_irq(spinlock_t *l, uint64_t flags);

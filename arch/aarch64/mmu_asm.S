@@ -27,3 +27,26 @@ enable_mmu:
 	isb
 
 	ret
+
+/*
+ * inval_dcache_region(x9 = start, x10 = size) — invalidate by VA to PoC.
+ * Clobbers x9-x13. Used by secondaries to drop stale clean lines for the
+ * page tables (primary wrote them caches-off, so no coherency snoop reached
+ * this core) before turning the MMU on with cacheable table walks.
+ */
+.global inval_dcache_region
+inval_dcache_region:
+	add  x10, x9, x10
+	mrs  x11, ctr_el0
+	ubfx x11, x11, #16, #4   /* DminLine: log2(words per line) */
+	mov  x12, #4
+	lsl  x12, x12, x11       /* line size in bytes */
+	sub  x13, x12, #1
+	bic  x9, x9, x13         /* align start down to a line */
+1:	dc   ivac, x9
+	add  x9, x9, x12
+	cmp  x9, x10
+	b.lo 1b
+	dsb  sy
+	isb
+	ret
