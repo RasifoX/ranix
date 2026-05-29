@@ -19,6 +19,9 @@ typedef struct {
 	uint64_t    mem_size;
 	uint32_t    fb_width;
 	uint32_t    fb_height;
+	/* Secondary-CPU release: per-CPU spin-table release address (physical).
+	 * 0 = use PSCI (hvc). Real Pi4 uses spin-table; QEMU virt uses PSCI. */
+	uint64_t    smp_release_addr[8];
 } board_config_t;
 
 /* Phase 1 — UART only, safe to call before MMU or heap */

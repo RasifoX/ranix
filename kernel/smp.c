@@ -52,6 +52,8 @@ void smp_init(void)
 	all_cpus[0]->online = 1;
 
 #ifdef __aarch64__
+	extern void mmu_clean_tables_poc(void);
+	mmu_clean_tables_poc();
 	fdt_info_t *fi = fdt_get_info();
 	int ncpus = (int)fi->num_cpus;
 #else
@@ -77,6 +79,19 @@ void smp_init(void)
 #endif
 
 		__asm__ volatile("" ::: "memory");
+
+#ifdef __aarch64__
+		/* The AP reads this entry with caches off (pre-MMU); our writes
+		 * above are still in this CPU's cache. Clean to PoC or the AP gets
+		 * stale zeros for ttbr0/ttbr1/sp. */
+		{
+			uint64_t s = (uint64_t)&ap_boot_sync[i] & ~63UL;
+			uint64_t e = (uint64_t)&ap_boot_sync[i] + sizeof(ap_boot_sync[i]);
+			for (uint64_t a = s; a < e; a += 64)
+				__asm__ volatile("dc cvac, %0" :: "r"(a) : "memory");
+			__asm__ volatile("dsb sy" ::: "memory");
+		}
+#endif
 
 		arch_smp_boot_cpu(i);
 

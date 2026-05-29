@@ -413,14 +413,16 @@ fd_table_t *fd_table_create(void)
 
 fd_table_t *fd_table_get(fd_table_t *t)
 {
-	if (t) t->refcount++;
+	/* Atomic: threads share one fd table; concurrent thread create/exit on
+	 * different CPUs must not race this refcount. */
+	if (t) atomic_fetch_add32((volatile uint32_t*)&t->refcount, 1);
 	return t;
 }
 
 void fd_table_put(fd_table_t *t)
 {
 	if (!t) return;
-	if (--t->refcount <= 0) fd_table_destroy(t);
+	if ((int32_t)atomic_sub_fetch32((volatile uint32_t*)&t->refcount, 1) <= 0) fd_table_destroy(t);
 }
 
 void fd_table_destroy(fd_table_t *t)

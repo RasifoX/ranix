@@ -20,6 +20,11 @@ static board_config_t config = {
 	.mem_size      = 0x3C000000UL,
 	.fb_width      = 800,
 	.fb_height     = 480,
+	/* BCM2711 armstub parks secondaries in a spin-table, each polling its
+	 * release address in low memory (cpu0=0xd8, cpu1=0xe0, cpu2=0xe8,
+	 * cpu3=0xf0). Write the entry point there + SEV to start them — the
+	 * kernel has taken over EL2, so PSCI-over-hvc is unavailable here. */
+	.smp_release_addr = { 0xd8, 0xe0, 0xe8, 0xf0, 0, 0, 0, 0 },
 };
 
 void board_early_init(void)
@@ -65,6 +70,9 @@ void board_irq_init(void)
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 
+	extern void smp_ipi_handler(void);
+	irq_register(0, smp_ipi_handler);  /* SGI #0 = reschedule IPI */
+
 	timer_init(TIMER_HZ);
 }
 
@@ -97,7 +105,21 @@ void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
 #define PM_WDOG     (*(volatile uint32_t *)(PM_BASE + 0x24))
 #define PM_PASSWORD 0x5A000000U
 
-void board_secondary_irq_init(void) { /* BCM2711: SMP not used */ }
+void board_secondary_irq_init(void)
+{
+	extern void irqchip_secondary_init(uint64_t cpu_base);
+	irqchip_secondary_init(config.gic_cpu_base);
+
+	extern void timer_secondary_init(void);
+	timer_secondary_init();
+
+	/* Route this core's virtual-timer IRQ to itself via the BCM2711 local
+	 * controller (per-core register: local_base + 0x40 + 4*core). */
+	uint64_t mpidr;
+	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+	uint32_t cpu = (uint32_t)(mpidr & 0xff);
+	*(volatile uint32_t *)(config.local_base + 0x40 + 4 * cpu) = (1 << 3);
+}
 
 void board_reset(void)
 {

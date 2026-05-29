@@ -27,8 +27,14 @@ typedef struct {
 /* parsed system info from DTB */
 typedef struct {
     uint64_t mem_base;
-    uint64_t mem_size;
+    uint64_t mem_size;       /* first region only (legacy fallback) */
+    uint64_t mem_total;      /* sum of all /memory regions */
     uint32_t num_cpus;
+    /* Per-CPU secondary-boot info read straight from the DTB (no hardcoding):
+     * cpu_release[i] = spin-table release address (0 if cpu uses PSCI). */
+    uint64_t cpu_release[8];
+    uint32_t psci_present;   /* 1 if a /psci node exists */
+    uint32_t psci_use_smc;   /* 1 if /psci method = "smc", 0 = "hvc" */
     char     model[64];
     char     compatible[64];
 } fdt_info_t;

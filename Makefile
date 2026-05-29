@@ -26,6 +26,7 @@ ifeq ($(ARCH),aarch64)
         LINKER      = arch/aarch64/linker_raspi4.ld
         QEMU_CMD    = qemu-system-aarch64 -M raspi4b -cpu cortex-a72
         QEMU_KERNEL = $(TARGET)
+        ARCH_CFLAGS += -DBOARD_RASPI4=1
     else
         MACH_DIR    = arch/aarch64/mach-virt
         LINKER      = arch/aarch64/linker.ld

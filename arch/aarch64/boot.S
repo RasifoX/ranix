@@ -109,6 +109,8 @@ secondary_trampoline:
 
 	mov x1, #(1 << 31)
 	msr hcr_el2, x1
+	mov x1, #0
+	msr sctlr_el1, x1       /* known-clean EL1 state (EE=0 etc.), like primary */
 	mov x1, #0x3c5
 	msr spsr_el2, x1
 	adr x1, .Lsec_el1
@@ -116,6 +118,18 @@ secondary_trampoline:
 	mov x1, #3
 	msr cnthctl_el2, x1
 	msr cntvoff_el2, xzr
+
+#ifdef BOARD_RASPI4
+	/* Cortex-A72: join the SMP coherency domain (CPUECTLR_EL1.SMPEN, bit 6)
+	 * while still at EL2 — EL1 access to this impl-def register traps into
+	 * our empty EL2 vector. Must run before enable_mmu so the cacheable
+	 * page-table walk sees the primary's tables. Real-hardware only. */
+	mrs x1, S3_1_C15_C2_1
+	orr x1, x1, #(1 << 6)
+	msr S3_1_C15_C2_1, x1
+	isb
+#endif
+
 	eret
 
 .Lsec_el1:
@@ -123,8 +137,23 @@ secondary_trampoline:
 	msr spsel, x9
 	isb
 
-	/* cpu_id is in x0 — save it */
-	mov x20, x0
+	/* Derive cpu_id from MPIDR Aff0 (core number). Works for both PSCI
+	 * (QEMU virt) and spin-table (real Pi4) entry — spin-table does not
+	 * pass a context_id in x0, so MPIDR is the reliable source. Aff0 is
+	 * 0..3 on both BCM2711 (single cluster) and QEMU virt. */
+	mrs x20, mpidr_el1
+	and x20, x20, #0xff
+
+	/* Disable MMU + caches to a known state before (re)configuring them.
+	 * The firmware armstub may hand the secondary over with the MMU and/or
+	 * caches enabled; reprogramming TTBR/TCR with translation live faults.
+	 * The primary does the same in .Lel1_entry. */
+	mrs x3, sctlr_el1
+	bic x3, x3, #(1 << 0)    /* M  — MMU */
+	bic x3, x3, #(1 << 2)    /* C  — data cache */
+	bic x3, x3, #(1 << 12)   /* I  — instruction cache */
+	msr sctlr_el1, x3
+	isb
 
 	/* Read boot params from ap_boot_sync[cpu_id]:
 	 * struct ap_boot_sync layout (40 bytes per entry):
@@ -147,6 +176,21 @@ secondary_trampoline:
 	/* Set up physical boot stack before enabling MMU */
 	ldr  x2, [x10, #16]  /* sp_phys */
 	mov  sp, x2
+
+	/* Drop stale clean cache lines for the page tables this core never
+	 * wrote: kernel_l1 (x0), kernel_l1_high (x1), and the shared L2 it
+	 * points at. Without this the cacheable table walk reads stale lines
+	 * and faults the instant the MMU comes on. */
+	mov  x9, x0
+	mov  x10, #0x1000
+	bl   inval_dcache_region
+	mov  x9, x1
+	mov  x10, #0x1000
+	bl   inval_dcache_region
+	ldr  x9, [x0]                       /* kernel_l1[0] → L2 descriptor */
+	and  x9, x9, #0x0000fffffffff000    /* mask to L2 physical base */
+	mov  x10, #0x1000
+	bl   inval_dcache_region
 
 	bl   enable_mmu
 

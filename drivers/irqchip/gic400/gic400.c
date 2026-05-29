@@ -62,8 +62,12 @@ void irq_dispatch(uint32_t hint) {
         return;
     }
 
-    /* BCM2711: per-core timer IRQs come via local controller, not GIC */
-    uint32_t src = *(volatile uint32_t *)local_irq_src0_addr;
+    /* BCM2711: per-core timer IRQs come via local controller, not GIC.
+     * Each core has its own IRQ-source register (local_base + 0x60 + 4*core). */
+    uint64_t mpidr;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    uint32_t cpu = (uint32_t)(mpidr & 0xff);
+    uint32_t src = *(volatile uint32_t *)(local_irq_src0_addr + 4 * cpu);
     if (src & (1 << 3))
         irq_handle(27);
 }

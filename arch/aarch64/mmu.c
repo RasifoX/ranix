@@ -55,6 +55,23 @@ void mmu_init(void)
 	vm_set_kernel_pt((uint64_t)kernel_l1);
 }
 
+/* Clean the boot page tables to the point of coherency so a secondary CPU,
+ * walking them with caches+MMU about to come on, sees the latest entries
+ * even if we touched them cacheably after early boot. */
+static void clean_page(uint64_t *page)
+{
+	for (uint64_t a = (uint64_t)page; a < (uint64_t)page + 4096; a += 64)
+		__asm__ volatile("dc cvac, %0" :: "r"(a) : "memory");
+}
+
+void mmu_clean_tables_poc(void)
+{
+	clean_page(kernel_l1);
+	clean_page(kernel_l1_high);
+	clean_page(l2);
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
 void arch_map_high_memory(uint64_t max_phys)
 {
 	(void)max_phys;
