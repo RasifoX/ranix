@@ -181,13 +181,13 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/bench userspace/test_clock $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp userspace/init userspace/hello userspace/echo_server \
 	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
 	    userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
-	    userspace/test_cowrace userspace/bench userspace/test_clock \
+	    userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock \
 	    $(BUILD_DIR)/initramfs/bin/
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
@@ -270,6 +270,9 @@ userspace/test_signalfd: userspace/test_signalfd.c
 userspace/test_affinity: userspace/test_affinity.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
 
+userspace/test_fpsig: userspace/test_fpsig.c
+	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
+
 userspace/test_cowrace: userspace/test_cowrace.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
 
@@ -296,7 +299,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/bench userspace/test_clock userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
