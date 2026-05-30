@@ -1157,7 +1157,7 @@ void signal_dispatch(arch_context_t *tf)
 	p->sig_mask |= sa->sa_mask;
 
 #if defined(__aarch64__)
-	/* Frame layout — 256 bytes, 16-byte aligned:
+	/* Frame layout — 736 bytes, 16-byte aligned:
 	 *   [sp+  0]  orig_elr  (PC to resume)
 	 *   [sp+  8]  orig_x30  (LR)
 	 *   [sp+ 16]  old_mask
@@ -1165,9 +1165,15 @@ void signal_dispatch(arch_context_t *tf)
 	 *   [sp+ 32]  orig_x0 .. orig_x18  (19 caller-saved + indirect-result regs)
 	 *   [sp+184]  orig_x29 (frame pointer)
 	 *   [sp+192]  orig_spsr
-	 *   [sp+200]  padding × 7  (→ total 256)
+	 *   [sp+200]  orig_fpsr (4) + orig_fpcr (4)
+	 *   [sp+208]  orig_q0 .. q31  (512 bytes)
+	 *   [sp+720]  padding × 2  (→ total 736)
+	 *
+	 * The FP/SIMD state MUST round-trip: musl's memcpy/strlen are vectorised,
+	 * so a signal landing mid-copy whose handler clobbers q-regs would resume
+	 * the interrupted op with garbage SIMD state and corrupt memory silently.
 	 */
-	uint64_t usp = (tf->sp - 256) & ~15UL;
+	uint64_t usp = (tf->sp - 736) & ~15UL;
 	*(uint64_t *)(usp +   0) = tf->elr;
 	*(uint64_t *)(usp +   8) = tf->regs[30];
 	*(uint64_t *)(usp +  16) = old_mask;
@@ -1176,6 +1182,10 @@ void signal_dispatch(arch_context_t *tf)
 		*(uint64_t *)(usp + 32 + (uint64_t)_i * 8) = tf->regs[_i];
 	*(uint64_t *)(usp + 184) = tf->regs[29];
 	*(uint64_t *)(usp + 192) = tf->spsr;
+	*(uint32_t *)(usp + 200) = tf->fpsr;
+	*(uint32_t *)(usp + 204) = tf->fpcr;
+	for (int _i = 0; _i < 64; _i++)
+		*(uint64_t *)(usp + 208 + (uint64_t)_i * 8) = tf->qregs[_i];
 	tf->sp                   = usp;
 	tf->regs[30]             = sa->sa_restorer ? (uint64_t)sa->sa_restorer
 	                                            : tf->elr;

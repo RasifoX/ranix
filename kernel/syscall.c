@@ -783,7 +783,11 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 		ctx->regs[_i] = *(uint64_t *)(usp + 32 + (uint64_t)_i * 8);
 	ctx->regs[29] = *(uint64_t *)(usp + 184);
 	ctx->spsr     = *(uint64_t *)(usp + 192);
-	ctx->sp       = usp + 256;
+	ctx->fpsr     = *(uint32_t *)(usp + 200);
+	ctx->fpcr     = *(uint32_t *)(usp + 204);
+	for (int _i = 0; _i < 64; _i++)
+		ctx->qregs[_i] = *(uint64_t *)(usp + 208 + (uint64_t)_i * 8);
+	ctx->sp       = usp + 736;
 #elif defined(__x86_64__)
 	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
 	 * Frame layout matches signal_dispatch: offsets from frame_base+8. */
