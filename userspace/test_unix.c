@@ -15,6 +15,14 @@ int main(void)
     int srv = socket(AF_UNIX, SOCK_STREAM, 0);
     if (srv < 0) { puts("FAIL: server-socket"); return 1; }
 
+    /* getsockopt(SO_TYPE) must report the socket type */
+    {
+        int sotype = -1; socklen_t ol = sizeof(sotype);
+        if (getsockopt(srv, SOL_SOCKET, SO_TYPE, &sotype, &ol) != 0 || sotype != SOCK_STREAM) {
+            puts("FAIL: getsockopt-so-type"); return 1;
+        }
+    }
+
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
