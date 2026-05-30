@@ -159,27 +159,36 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
 	uint64_t l2i = (vaddr >> 21) & 0x1FF;
 	uint64_t l3i = (vaddr >> 12) & 0x1FF;
 
-	if (!(l1[l1i] & PTE_VALID)) return;
-	uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[l1i] & ~0xFFFUL);
+	/* Serialize against concurrent faults in a shared address space (threads),
+	 * so a sibling COW and this unmap cannot race the same leaf PTE. */
+	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
+	uint64_t pte = 0;
 
-	if (!(l2[l2i] & PTE_VALID)) return;
-	uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	if (l1[l1i] & PTE_VALID) {
+		uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[l1i] & ~0xFFFUL);
+		if (l2[l2i] & PTE_VALID) {
+			uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
+			pte = l3[l3i];
+			l3[l3i] = 0;
+			__asm__ volatile(
+				"dsb ishst\n"
+				"tlbi vaae1is, %0\n"
+				"dsb ish\n"
+				"isb\n"
+				:: "r"(vaddr >> 12)
+			);
+		}
+	}
 
-	uint64_t pte = l3[l3i];
-	l3[l3i] = 0;
-	__asm__ volatile(
-		"dsb ishst\n"
-		"tlbi vaae1is, %0\n"
-		"dsb ish\n"
-		"isb\n"
-		:: "r"(vaddr >> 12)
-	);
-	/* Free the physical page if it was a user allocation */
+	spin_unlock_irq(&vs->fault_lock, lf);
+
+	/* Free the physical page if it was a user allocation (outside the lock;
+	 * pmm has its own). */
 	if ((pte & PTE_VALID) && (pte & PTE_USER))
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
@@ -234,6 +243,11 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	if (!root_phys) goto oom;
 	new_vs->root = (uint64_t *)root_phys;
 
+	/* Lock the parent across the walk: sibling threads sharing this space may
+	 * be faulting concurrently, and vm_copy both reads and write-protects the
+	 * parent's leaf PTEs (for COW) while bumping page refcounts. */
+	uint64_t lf = spin_lock_irq(&vs->fault_lock);
+
 	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
@@ -249,7 +263,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 		uint64_t *l2_old = (uint64_t *)PHYS_TO_VIRT(l1_old[i] & ~0xFFFUL);
 		uint64_t l2_new_phys = alloc_table();
-		if (!l2_new_phys) goto oom;
+		if (!l2_new_phys) { spin_unlock_irq(&vs->fault_lock, lf); goto oom; }
 		uint64_t *l2_new = (uint64_t *)PHYS_TO_VIRT(l2_new_phys);
 		l1_new[i] = l2_new_phys | L12_TABLE;
 
@@ -270,7 +284,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 			uint64_t *l3_old = (uint64_t *)PHYS_TO_VIRT(l2_old[j] & ~0xFFFUL);
 			uint64_t l3_new_phys = alloc_table();
-			if (!l3_new_phys) goto oom;
+			if (!l3_new_phys) { spin_unlock_irq(&vs->fault_lock, lf); goto oom; }
 			uint64_t *l3_new = (uint64_t *)PHYS_TO_VIRT(l3_new_phys);
 			l2_new[j] = l3_new_phys | L12_TABLE;
 
@@ -286,6 +300,8 @@ vm_space_t *vm_copy(vm_space_t *vs)
 			}
 		}
 	}
+
+	spin_unlock_irq(&vs->fault_lock, lf);
 
 	__asm__ volatile("dsb ishst; tlbi vmalle1is; dsb ish; isb" ::: "memory");
 
