@@ -61,28 +61,39 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	if (!p || !p->vm) { kprintf("fault: no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
 
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+
+	/* Threads share one address space, so two CPUs can fault the same PTE
+	 * at once. Without serialization both would run the COW copy-and-free
+	 * and drop the shared page's refcount twice for one logical reference,
+	 * freeing it while a forked sibling still maps it. Resolve under the
+	 * per-space lock and re-read the PTE so a second arrival sees the
+	 * already-private page and only re-maps it. */
+	uint64_t lf = spin_lock_irq(&p->vm->fault_lock);
 	uint64_t paddr = arch_vm_get_paddr(p->vm->root, vaddr);
+	int ret = -1;
 
 	/* No mapping — check if this is a stack expansion */
 	if (!paddr) {
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
 			void *pg = buddy_alloc(0);
-			if (!pg) return -1;
-			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-			vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
-			return 0;
+			if (pg) {
+				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+				vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
+				ret = 0;
+			}
 		}
-		return -1;
+		goto out;
 	}
 
-	if (!is_write) return -1;
+	if (!is_write) goto out;
 
 	/* Check if this page belongs to a VMA_SHARED region — shared, not COW */
 	for (vma_t *v = p->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_SHARED) {
 				vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
-				return 0;
+				ret = 0;
+				goto out;
 			}
 			break;
 		}
@@ -90,19 +101,22 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 
 	/* Permission fault on a mapped page — COW */
 	page_t *pg = paddr_to_page(paddr);
-	if (!pg) return -1;
+	if (!pg) goto out;
 
 	if (pg->refcount > 1) {
 		void *new_p = pmm_alloc();
-		if (!new_p) return -1;
+		if (!new_p) goto out;
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
 		vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE);
 		pmm_free((void *)paddr);
 	} else {
 		vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 	}
+	ret = 0;
 
-	return 0;
+out:
+	spin_unlock_irq(&p->vm->fault_lock, lf);
+	return ret;
 }
 
 void vm_activate(void)
