@@ -161,20 +161,26 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
+	/* Serialize against concurrent faults in a shared address space. */
+	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
+	uint64_t pte = 0;
+
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(vs->root);
-	if (!(l4[(vaddr >> 39) & 0x1FF] & PTE_P)) return;
+	if (l4[(vaddr >> 39) & 0x1FF] & PTE_P) {
+		uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
+		if (pdp[(vaddr >> 30) & 0x1FF] & PTE_P) {
+			uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL);
+			if (pd[(vaddr >> 21) & 0x1FF] & PTE_P) {
+				uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL);
+				pte = pt[(vaddr >> 12) & 0x1FF];
+				pt[(vaddr >> 12) & 0x1FF] = 0;
+				__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+			}
+		}
+	}
 
-	uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
-	if (!(pdp[(vaddr >> 30) & 0x1FF] & PTE_P)) return;
+	spin_unlock_irq(&vs->fault_lock, lf);
 
-	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL);
-	if (!(pd[(vaddr >> 21) & 0x1FF] & PTE_P)) return;
-
-	uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL);
-
-	uint64_t pte = pt[(vaddr >> 12) & 0x1FF];
-	pt[(vaddr >> 12) & 0x1FF] = 0;
-	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 	if ((pte & PTE_P) && (pte & PTE_U))
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
@@ -227,6 +233,10 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	if (!root_phys) goto oom;
 	new_vs->root = (uint64_t *)root_phys;
 
+	/* Lock the parent across the walk: sibling threads may fault concurrently,
+	 * and vm_copy both reads and write-protects the parent's leaf PTEs. */
+	uint64_t lf = spin_lock_irq(&vs->fault_lock);
+
 	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
@@ -241,7 +251,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 		uint64_t *l3_old = (uint64_t *)PHYS_TO_VIRT(l4_old[i] & ~0xFFFUL);
 		uint64_t l3_new_phys = alloc_table();
-		if (!l3_new_phys) goto oom;
+		if (!l3_new_phys) { spin_unlock_irq(&vs->fault_lock, lf); goto oom; }
 		uint64_t *l3_new = (uint64_t *)PHYS_TO_VIRT(l3_new_phys);
 		l4_new[i] = l3_new_phys | eflags;
 
@@ -254,7 +264,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 			uint64_t *l2_old = (uint64_t *)PHYS_TO_VIRT(l3_old[j] & ~0xFFFUL);
 			uint64_t l2_new_phys = alloc_table();
-			if (!l2_new_phys) goto oom;
+			if (!l2_new_phys) { spin_unlock_irq(&vs->fault_lock, lf); goto oom; }
 			uint64_t *l2_new = (uint64_t *)PHYS_TO_VIRT(l2_new_phys);
 			l3_new[j] = l2_new_phys | eflags;
 
@@ -275,7 +285,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 				uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(l2_old[k] & ~0xFFFUL);
 				uint64_t l1_new_phys = alloc_table();
-				if (!l1_new_phys) goto oom;
+				if (!l1_new_phys) { spin_unlock_irq(&vs->fault_lock, lf); goto oom; }
 				uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(l1_new_phys);
 				l2_new[k] = l1_new_phys | eflags;
 
@@ -292,6 +302,8 @@ vm_space_t *vm_copy(vm_space_t *vs)
 			}
 		}
 	}
+
+	spin_unlock_irq(&vs->fault_lock, lf);
 
 	uint64_t cr3;
 	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
