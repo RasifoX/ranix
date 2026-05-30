@@ -310,13 +310,31 @@ void futex_wake_addr(uint32_t *uaddr)
 	spin_unlock_irq(&futex_lock, f);
 }
 
+/* Monotonic wall time. On aarch64 read the generic counter for ~ns
+ * resolution (the 100Hz tick clock is only 10ms); EL1 may always read
+ * cntvct_el0. Split-divide to avoid 64-bit overflow on cnt*1e9. */
+static void mono_time(int64_t *sec, int64_t *nsec)
+{
+#if defined(__aarch64__)
+	uint64_t cnt, frq;
+	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt));
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+	if (frq) {
+		*sec  = (int64_t)(cnt / frq);
+		*nsec = (int64_t)(((cnt % frq) * 1000000000ULL) / frq);
+		return;
+	}
+#endif
+	*sec  = (int64_t)(kernel_ticks / TIMER_HZ);
+	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
+}
+
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
 	(void)clkid;
 	if (!tp) return -14;
 	linux_timespec_t k;
-	k.tv_sec  = (int64_t)(kernel_ticks / TIMER_HZ);
-	k.tv_nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
+	mono_time(&k.tv_sec, &k.tv_nsec);
 	return copy_to_user(tp, &k, sizeof(k));
 }
 
@@ -325,8 +343,10 @@ static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 	(void)tz;
 	if (!tv) return 0;
 	linux_timeval_t k;
-	k.tv_sec  = (int64_t)(kernel_ticks / TIMER_HZ);
-	k.tv_usec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000 / TIMER_HZ));
+	int64_t s, ns;
+	mono_time(&s, &ns);
+	k.tv_sec  = s;
+	k.tv_usec = ns / 1000;
 	return copy_to_user(tv, &k, sizeof(k));
 }
 

@@ -20,8 +20,19 @@ void timer_handler(void) {
     tick_notify();
 }
 
+/* Allow EL0 to read the virtual + physical counters (CNTKCTL_EL1.EL0VCTEN|
+ * EL0PCTEN). Per-CPU register — set on every core. Enables fast userspace
+ * timing (vDSO-style clock_gettime) without a syscall trap. */
+static void timer_enable_el0_counter(void) {
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntkctl_el1" : "=r"(v));
+    v |= (1u << 0) | (1u << 1);
+    __asm__ volatile("msr cntkctl_el1, %0; isb" :: "r"(v));
+}
+
 void timer_init(uint32_t hz) {
     timer_hz = hz;
+    timer_enable_el0_counter();
 
     uint64_t freq, count;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
@@ -39,6 +50,7 @@ void timer_init(uint32_t hz) {
 uint64_t timer_ticks(void) { return ticks; }
 
 void timer_secondary_init(void) {
+    timer_enable_el0_counter();
     uint64_t freq, count;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(count));
