@@ -335,6 +335,8 @@ check "smp-affinity-nproc" "4" \
     "$(timeout 5 /bin/test_affinity 2>/dev/null | grep '^nproc=' | sed 's/nproc=//')"
 check "smp-threads-ok" "OK" \
     "$(timeout 5 /bin/test_affinity 2>/dev/null | tail -1)"
+check "smp-cow-race" "OK" \
+    "$(timeout 90 /bin/test_cowrace 2>/dev/null | tail -1)"
 
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
