@@ -287,6 +287,7 @@ check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
 # ── 40. misc ─────────────────────────────────────────────────
 check "uname-has-output"  "1"    "$(uname -r | wc -c | awk '{print ($1>0)?1:0}')"
 check "date-epoch"        "1"    "$(date +%s | awk '{print ($1>0)?1:0}')"
+check "clock-monotonic"   "OK"   "$(timeout 8 /bin/test_clock 2>/dev/null)"
 check "env-has-path"      "1"    "$(env | grep -c '^PATH=')"
 check "which-bash"        "1"    "$(which bash | grep -c bash)"
 check "seq-count"         "5"    "$(seq 1 5 | wc -l | tr -d ' ')"
