@@ -415,10 +415,10 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 #if defined(__aarch64__)
 		if (prot & PROT_EXEC) {
-			uintptr_t pp = (uintptr_t)pg;
+			uintptr_t pp = (uintptr_t)pg_virt;
 			for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
-				__asm__ volatile("dc civac, %0" :: "r"(l) : "memory");
-			__asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory");
+				__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
+			__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
 		}
 #endif
 	}
