@@ -99,6 +99,43 @@ void tick_register(tick_fn_t fn)
 	tick_cbs[tick_cb_cnt++] = fn;
 }
 
+/* Runs on CPU0 only. A CPU whose wd_ticks froze since the last sweep took no
+ * timer interrupt for ~2.5s — wedged with IRQs masked (spinlock deadlock or a
+ * stuck IRQ-off section). Report which CPU, where, and on what. */
+static void sched_watchdog(void)
+{
+	extern int smp_ncpus;
+	extern cpu_context_t *all_cpus[];
+	static uint64_t last_seen[MAX_CPUS];
+	static unsigned n;
+	static int warm;
+
+	if ((++n & 0xFF) != 0) return;   /* ~every 256 ticks (2.56s @100Hz) */
+
+	if (warm < 2) {
+		warm++;
+		for (int i = 0; i < smp_ncpus; i++)
+			if (all_cpus[i]) last_seen[i] = all_cpus[i]->wd_ticks;
+		return;
+	}
+
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c || !c->online) continue;
+		process_t *cur = c->current;
+		/* An idle CPU halted in WFI/HLT legitimately takes no tick until an IPI
+		 * wakes it (x86 secondaries lack a per-CPU timer) — only a CPU running
+		 * real work with frozen ticks is wedged. */
+		if (cur && cur->pid != 0 && c->wd_ticks == last_seen[i]) {
+			kprintf("WATCHDOG: cpu%d wedged, where=%s pid=%d (%s)\n",
+			        i, c->wd_where ? c->wd_where : "?",
+			        (int)cur->pid, cur->name);
+			kpanic("cpu wedged (watchdog)");
+		}
+		last_seen[i] = c->wd_ticks;
+	}
+}
+
 void tick_notify(void)
 {
 	/* sched_tick always runs on every CPU */
@@ -107,6 +144,7 @@ void tick_notify(void)
 	if (arch_get_cpu_ctx()->cpu_id == 0) {
 		for (int i = 1; i < tick_cb_cnt; i++)
 			tick_cbs[i]();
+		sched_watchdog();
 	}
 }
 
@@ -313,6 +351,7 @@ void sched_init(void)
 void sched_tick(void)
 {
 	kernel_ticks++;
+	arch_get_cpu_ctx()->wd_ticks++;   /* watchdog heartbeat (timer-IRQ driven) */
 	process_t *current = task_current();
 	if (!current) return;
 
@@ -867,6 +906,7 @@ void sched_requeue_prev(void)
 
 void schedule(void)
 {
+	arch_get_cpu_ctx()->wd_where = "schedule";
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *prev = task_current();
 
@@ -1114,6 +1154,7 @@ int task_has_actionable_signal(void)
 
 void signal_dispatch(arch_context_t *tf)
 {
+	arch_get_cpu_ctx()->wd_where = "signal_dispatch";
 	/* Only deliver signals when returning to user space */
 #if defined(__x86_64__)
 	if ((tf->cs & 3) != 3) return;
