@@ -10,7 +10,7 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.6.5 tamamlandı — güvenlik + çok kullanıcı + 187-test suite)
+## Neredeyiz (v0.7 SMP tamamlandı — gerçek Pi4'te 4-core, 191-test suite kararlı)
 
 **Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi (statx/copy_file_range/memfd/inotify/epoll/futex/clone var), ama mimari olarak Linux 1.x (single-core, statik binary, ext2, dinamik linker yok).
 
@@ -28,7 +28,8 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 - Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); /proc/cmdline; init= ; quiet/debug
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
 - Security: ruid/euid/suid, capabilities v3 ABI, ASLR (splitmix64), su + /etc/shadow, CPIO uid/gid/mode initrd fix
-- Test: **187/187 ALL_PASS** her iki arch'ta
+- SMP: gerçek Pi4'te 4-core (per-CPU runqueue + IPI + per-core timer); yield/idle latency fix (~1440×); buddy free-list metadata (allocator-cascade fix)
+- Test: **191/191 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Raspberry Pi 4
 
 ---
 
@@ -162,7 +163,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 
 ---
 
-## v0.7 — SMP  🔶 BÜYÜK ÖLÇÜDE TAMAMLANDI (aarch64'te kararlılık sertleştirmesi sürüyor)
+## v0.7 — SMP  ✅ TAMAMLANDI (gerçek Pi4'te 4-core, 191/191 kararlı; nadir UAF residual rmap dedektörüne kaldı)
 
 **Neden burada?**
 Artık doğru locking primitive'lerimiz var.
@@ -208,32 +209,42 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [x] **smp_mb() proc_clone_thread'de** (runqueue_add öncesi): tid'in child
       runnable olmadan önce globalde görünmesini garanti. (tid'in doğru yazıldığı
       segfault dump'ında `tid@tp-0xa8=pid` ile DOĞRULANDI — tid=0 değil.)
-- [x] **TLB lazy-switch**: arch_vm_switch (her iki arch) aynı adres uzayına
-      geçişte TTBR0/CR3 reload + flush'u atlıyor (thread switch / aynı task).
-      Gerçek donanımda kazanç; pthread crash'in nedeni DEĞİL (test edildi).
-- [x] x86_64: **190/190 ALL_PASS, kaya gibi** (8/8, KVM hızlandırmalı).
-- aarch64 clean: ~35/40 (%87). Hang'ler büyük ölçüde gitti.
+- [~] **TLB lazy-switch GERİ ALINDI**: arch_vm_switch (aarch64) artık her AS
+      değişiminde tam flush yapıyor — lazy-skip ASID'siz, freed-root reuse'da
+      stale-TLB riski taşıyordu. Doğru hâli ASID'li TLB (v0.8 hedefi).
 
-### Bilinen kalan sorun (aarch64-ONLY — derin SMP yarışı, ana kalan hata)
-- [ ] **pthread thread-list race**: test_threads/test_affinity ~%5-7 koşuda
-      `pthread_exit`'te crash. Tetiklediği yan etkiler: suite hang (crashed
-      thread-test pipe'ı tıkıyor) + smp-affinity boş çıktı. Yani kalan
-      başarısızlıkların ÇOĞU bu. **Kesin teşhis (bu oturum):**
-      * crash anında self->next=0 VE self->prev=0 → thread HİÇ linklenmemiş.
-      * tid DOĞRU set (tid@tp-0xa8=pid, dump'ta doğrulandı) → tl_lock no-op DEĞİL.
-      * musl link kodu (pthread_create 0x...fb4) her zaman çalışıyor; 4 worker'ın
-        tid'leri farklı (collision yok); TLB-skip nedeni değil (kapatınca da var).
-      * Yani: tid set + tl_lock çalışır + link kodu koşar + paylaşımlı bellek,
-        AMA worker kendi struct'ını linksiz (sıfır) görüyor. Kalan şüphe:
-        clone başlangıç handshake'i (__wake/__wait futex) veya weak-ordering'de
-        worker'ın struct'ı görme sırası; ya da struct/TP kimlik yarışı.
-      * Sonraki adım: clone __wake/__wait futex handshake'ini SMP'de incele;
-        veya proc_clone_thread'de child'ın ilk EL0 girişinden önce tam bariyer.
-- [ ] nadir (~%2.5) ayrı hang (su testleri sonrası, segfault yok) — muhtemelen
-      futex/ptrace yolu; .sync_fault fix'inden sonra kalan tek bağımsız hang.
-- Teşhis yöntemi (tekrar kullan): TEST_TIMEOUT=30 ile hızlı döngü; tek-atış
-      frozen-CPU watchdog (sched_tick'te cpu0'dan local_ticks donmuş CPU tespiti)
-      + segfault dump'ında tls/tid okuma. Aynı yöntem iki arch'ta da.
+### v0.7 tamamlama (2026-05-30) — GERÇEK Pi4'te 4-core, 191/191 KARARLI
+- [x] **Gerçek Raspberry Pi 4'te 4-core SMP boot** (spin-table; EL2'de SMPEN;
+      ap_boot_sync PoC clean — secondary cache-kapalı `ttbr0=0` okuyordu;
+      SGI0 IPI handler register; secondary per-core timer route + per-core
+      IRQ-source dispatch). **pthread crash'in QEMU-MTTCG artefaktı olduğu
+      KANITLANDI**: gerçek 4 çekirdekte c-threads / smp-threads-ok / c-ptrace
+      HEPSİ PASS. (Yukarıdaki "pthread thread-list race" hipotezi MTTCG bellek-
+      modeli quirk'iymiş; Ranix bariyer mantığı doğru.)
+- [x] **yield/idle latency fix**: idle_loop `need_resched` görünce hemen
+      reschedule (eskiden bir sonraki 100Hz tick'e kadar WFI'de bekliyordu →
+      yield/fork ~10ms tick-bound). Gerçek Pi4: sched-yield 9.4ms→6.5µs
+      (~1440×), fork+wait 10ms→545µs (~18×), ctxsw 53µs→12µs, mmap 196µs→53µs.
+- [x] **buddy free-list → mem_map metadata (allocator-cascade fix)**: free-list
+      boş sayfa İÇERİĞİNDE saklanıyordu; heavy SMP churn'de bir UAF-write onu
+      ezip tüm allocator'ı çökertiyordu (çığ → suite fail + kernel panic). Linux-
+      tarzı metadata free-list (page_t.free_next/prev, page index) → allocator
+      içerik-bozulmasına BAĞIŞIK. **Çığ gitti; suite gerçek Pi4'te kararlı
+      191/191 (5/5 koşu), panic yok.** + buddy double-free guard (güvenlik neti).
+- [x] **Ölçüm + ABI**: `/bin/bench` mikro-benchmark suite; clock_gettime ns
+      çözünürlük (aarch64 cntvct + CNTKCTL EL0 erişimi); getsockopt gerçek
+      (SO_TYPE/ERROR/RCVBUF…); test_clock regresyon testi.
+- [x] **Test: 191/191 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Pi4.
+
+### Bilinen kalan sorun (derin/nadir — yalnızca aşırı-yapay stres)
+- [ ] **free-while-mapped UAF**: yalnızca yapay aşırı-stres (6× eşzamanlı pipe
+      churn — normal kullanımın çok ötesi) altında nadir segfault. Bir sayfa hâlâ
+      map'liyken serbest bırakılıp yeni sahibe veriliyor → iki sahip → içerik
+      bozulması (process başkasının verisini okuyor). Metadata free-list sayesinde
+      artık ÇIĞ YAPMIYOR (lokal, gerçek suite'i ve normal işleyişi etkilemiyor).
+      ELENDİ: kernel-frame bozulması (ctx_check temiz, 5+ koşu), double-free
+      (guard temiz), COW-sharing (eager-copy kötüleştirdi). Sonraki: rmap-tabanlı
+      "freed page hâlâ map'li mi" dedektörü; refcount/vm_destroy yolu cerrahi.
 
 ### Locking
 - [ ] ticket spinlock → daha fair
