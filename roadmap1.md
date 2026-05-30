@@ -163,7 +163,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 
 ---
 
-## v0.7 — SMP  ✅ TAMAMLANDI (gerçek Pi4'te 4-core, 191/191 kararlı; nadir UAF residual rmap dedektörüne kaldı)
+## v0.7 — SMP  ✅ TAMAMLANDI (gerçek Pi4'te 4-core, 192/192 kararlı; free-while-mapped UAF çözüldü)
 
 **Neden burada?**
 Artık doğru locking primitive'lerimiz var.
@@ -236,15 +236,24 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
       (SO_TYPE/ERROR/RCVBUF…); test_clock regresyon testi.
 - [x] **Test: 191/191 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Pi4.
 
-### Bilinen kalan sorun (derin/nadir — yalnızca aşırı-yapay stres)
-- [ ] **free-while-mapped UAF**: yalnızca yapay aşırı-stres (6× eşzamanlı pipe
-      churn — normal kullanımın çok ötesi) altında nadir segfault. Bir sayfa hâlâ
-      map'liyken serbest bırakılıp yeni sahibe veriliyor → iki sahip → içerik
-      bozulması (process başkasının verisini okuyor). Metadata free-list sayesinde
-      artık ÇIĞ YAPMIYOR (lokal, gerçek suite'i ve normal işleyişi etkilemiyor).
-      ELENDİ: kernel-frame bozulması (ctx_check temiz, 5+ koşu), double-free
-      (guard temiz), COW-sharing (eager-copy kötüleştirdi). Sonraki: rmap-tabanlı
-      "freed page hâlâ map'li mi" dedektörü; refcount/vm_destroy yolu cerrahi.
+### free-while-mapped UAF ✅ ÇÖZÜLDÜ (2026-05-30)
+- [x] **Kök neden**: thread'ler tek adres uzayını paylaşıyor; iki CPU aynı
+      PTE'de aynı anda fault atınca COW yolu (refcount oku → kopyala → eşle →
+      orijinali serbest bırak) serileştirilmemişti. İkisi de copy-and-free
+      yapıyor, paylaşılan sayfanın refcount'unu tek mantıksal referans için
+      İKİ KEZ düşürüyordu → sıfıra inip allocator'a dönüyor, oysa fork'lanmış
+      kardeş hâlâ map'liyor. Tek-thread fork her zaman güvenliydi (her process
+      kendi PTE'sini bir kez serbest bırakır); yalnızca paylaşılan PTE'de
+      eşzamanlı fault çiftliyordu. Gerçek Pi4'te register/pointer bozulması,
+      QEMU MTTCG'de pthread "artifact"ı sandığımız şey buydu.
+- [x] **Çözüm**: fault çözümü adres-uzayı başına kilit (`vm_space.fault_lock`)
+      altında; kilit içinde PTE yeniden okunuyor → ikinci gelen zaten-private
+      sayfayı görüp sadece yeniden eşliyor. Paylaşımlı kod (`vm_handle_fault`),
+      iki mimari de kazanıyor.
+- [x] **Kanıt**: `test_cowrace` — guardian COW-snapshot'ı RO tutar, 4 thread
+      aynı sayfaları aynı anda yazar. Fix YOKKEN aarch64'te ilk iterasyonda her
+      koşuda CORRUPT + kernel double-free guard ateşliyor; fix VARKEN 5+ koşu
+      tertemiz. Suite'e bağlandı (smp-cow-race, 192/192).
 
 ### Locking
 - [ ] ticket spinlock → daha fair
