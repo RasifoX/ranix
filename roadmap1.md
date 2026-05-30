@@ -10,11 +10,16 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.7 SMP tamamlandı — gerçek Pi4'te 4-core, 191-test suite kararlı)
+## Neredeyiz (v0.7 SMP tamamlandı — gerçek Pi4'te 4-core, 192-test suite kararlı, 5/5 SIFIR çökme)
 
 **Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi (statx/copy_file_range/memfd/inotify/epoll/futex/clone var), ama mimari olarak Linux 1.x (single-core, statik binary, ext2, dinamik linker yok).
 
-**v1.0 hedefi**: glibc çalışan, dpkg kurulabilen, Claude CLI çalıştırabilen bir sistem.
+**2026-05-30 — kronik bellek bozulması çözüldü** (3 temel bug: COW double-free, FP/SIMD signal'da korunmuyordu, exec I-cache CPU-lokal). + fork/unmap kilit tamamlandı, x86 FP paritesi. Gerçek Pi4'te 5/5 koşu 192/192. Detay: v0.7 bölümü.
+
+**v1.0 hedefi (NETLEŞTİ 2026-05-30)**: üstüne gerçek dağıtım kurulabilen TAM SÜRÜM —
+"Ranix Debian" (glibc/dinamik) veya "Ranix Arch" mümkün; üstüne masaüstü giydirilebilir
+(KDE / XFCE / Hyprland), Wine çalışır. Yani sadece headless değil, masaüstü-yetenekli.
+Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü+dağıtım = v1.0.
 
 - Boot: x86_64 + aarch64 (Raspi4, QEMU virt)
 - Memory: buddy + COW fork + mmap + brk + mprotect (on-demand page alloc); alloc_table OOM → ENOMEM; heap slab
@@ -29,7 +34,7 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
 - Security: ruid/euid/suid, capabilities v3 ABI, ASLR (splitmix64), su + /etc/shadow, CPIO uid/gid/mode initrd fix
 - SMP: gerçek Pi4'te 4-core (per-CPU runqueue + IPI + per-core timer); yield/idle latency fix (~1440×); buddy free-list metadata (allocator-cascade fix)
-- Test: **191/191 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Raspberry Pi 4
+- Test: **192/192 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Raspberry Pi 4 (5/5 koşu)
 
 ---
 
@@ -242,7 +247,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [x] **Ölçüm + ABI**: `/bin/bench` mikro-benchmark suite; clock_gettime ns
       çözünürlük (aarch64 cntvct + CNTKCTL EL0 erişimi); getsockopt gerçek
       (SO_TYPE/ERROR/RCVBUF…); test_clock regresyon testi.
-- [x] **Test: 191/191 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Pi4.
+- [x] **Test: 192/192 ALL_PASS** — virt (aarch64) + x86_64 + GERÇEK Pi4 (cow-race dahil).
 
 ### free-while-mapped UAF ✅ ÇÖZÜLDÜ (2026-05-30)
 - [x] **Kök neden**: thread'ler tek adres uzayını paylaşıyor; iki CPU aynı
@@ -279,6 +284,42 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [x] 4 pthread farklı CPU'larda çalışıyor (affinity test) — x86_64 kararlı,
       aarch64 çoğunlukla geçiyor (yukarıdaki race hariç)
 - [ ] stress -c 4 — sistem kilitlenmiyor (aarch64 hang race kapanınca)
+
+---
+
+## v0.7.x — Taban Sağlamlaştırma  ⏳ SIRADAKİ (foundation-first, "bina gibi")
+
+**Neden burada?** Üstüne kat çıkmadan önce temel taş gibi olmalı. Çatlak taban,
+yukarıda çözülmesi imkânsız hayalet bug'lara dönüşür. Kronik bozulmayı çözdük ama
+sıfır-flake değiliz ve gelecekteki temel bug'ları (boot.S dahil) anında yakalayan
+bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne oturmalı.
+
+### Sıfır-flake (önce bunu)
+- [ ] cow-race 1/10 flake (Pi'de got='' sessiz ölüm) — kökü bulunmalı, sebep gizli
+- [ ] signal-storm wedge — child sürekli `kill` → full-suite'te sistem kilitleniyor
+      (gerçek signal/IPI scheduler soundness bug'ı; 1/10 flake'le aynı kök olabilir)
+- [ ] "10'da 1 = sorun var, çözülür" — non-determinizm sıfırlanmadan üste inşa yok
+
+### Sessiz bozulmayı gürültülü yap (invariant katmanı)
+- [ ] poison-on-free: serbest sayfaya pattern bas, alloc'ta kontrol (UAF-read yakala)
+- [ ] process_t / vm_space_t / kstack magic alanları — bozulma anında lokalize panic
+- [ ] kstack canary trap-giriş/çıkışta da kontrol (şu an sadece schedule'da)
+- [ ] ucuz invariant'lar KALICI (gerekçeyi belgeler; AI slop değil) — pahalılar CONFIG_DEBUG
+
+### Robustness modeli (Linux'u takip et)
+- [ ] kernel-invariant ihlali → gürültülü panic (BUG()); bozulmuş halde limp etme
+- [ ] DIŞ hata (userspace çöp pointer, driver probe fail, I/O hata, OOM) → contain et,
+      o process/driver'ı öldür, kernel ASLA düşmesin. "Ranix taş gibi" = bu.
+
+### Dinamik runtime-growable ölçeklenme (compile-time config YASAK)
+- [ ] MAX_CPUS sabiti kalk → CPU sayısına göre dinamik (per-CPU veri alanları)
+- [ ] proctab/runqueue/scheduler tam dinamik (1 ↔ 128 çekirdek, aynı binary)
+- [ ] bellek yapıları RAM miktarına uyarlanır (128MB ↔ 512GB, mem_map/buddy dinamik)
+- [ ] per-CPU değişkenler + RCU-benzeri primitif (Linux'tan miras, üstüne iyileştir;
+      dinamik AMA kilitsiz hot-path — global kmalloc'a bağlama, "akmalı")
+- [ ] devtmpfs + ttyN dinamik (sabit sayı yok)
+- [ ] global sched_lock → per-CPU rq-lock (ölçeklenme engeli)
+- [ ] ASID'li TLB (aarch64) — her vm_switch'te tam flush yerine; lazy-switch güvenli olur
 
 ---
 
@@ -483,10 +524,10 @@ Claude CLI için TLS şart.
 
 ---
 
-## v1.0 — "Çalışan Sistem" (Claude CLI dahil)
+## v0.9.5 — "Headless Tam Sürüm" (Claude CLI dahil)
 
 **Tanım**: glibc çalışıyor, dpkg var, TLS var, SSH var.
-Terminalde `claude` komutu çalışıyor.
+Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden son headless taş.
 
 ### Zorunlular
 - [ ] glibc 2.38 dinamik linked programlar çalışıyor ✓ (v0.8.5'ten)
@@ -522,6 +563,57 @@ Terminalde `claude` komutu çalışıyor.
 
 ---
 
+## v1.0 — TAM SÜRÜM: Masaüstü & Dağıtım
+
+**Tanım (kullanıcı, 2026-05-30)**: üstüne gerçek dağıtım kurulabilir ve masaüstü
+giydirilebilir. "Ranix Debian" / "Ranix Arch" yapılabilir; KDE / XFCE / Hyprland
+sorunsuz açılır; Wine çalışır. İki libc yolu da desteklenir: glibc/dinamik (Debian-tarzı)
+ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki GUI; taban aynı.
+
+### Masaüstü sütunu (YENİ — eskiden "Uzun Vade"deydi, v1.0'a taşındı)
+**Ekran / GPU**
+- [ ] DRM/KMS subsystem: `/dev/dri/card0` + `/dev/dri/renderD128`, mode setting, dumb buffer
+- [ ] GBM (Generic Buffer Management) — Wayland compositor buffer ayırma
+- [ ] Mesa + **llvmpipe** (yazılım GL/GLES tabanı) — gerçek GPU olmadan Hyprland/KDE çalışsın
+- [ ] virtio-gpu (QEMU) + Pi4 VC4/V3D — donanım hızlandırma (yazılım taban sonrası)
+- [ ] EGL/GLES kütüphane yolu (userspace, Mesa) — compositor'lar GL'e dayanıyor
+
+**Girdi**
+- [ ] evdev: `/dev/input/eventN` Linux ABI (ioctl + read) — libinput buradan okur
+- [ ] klavye / fare / touch; PS/2 + USB HID
+- [ ] /dev/input/mice uyumluluk
+
+**Cihaz modeli (userspace beklentisi)**
+- [ ] devtmpfs — dinamik /dev (udev'in temeli) [bkz v0.7.x dinamik]
+- [ ] sysfs tam (/sys/class, /sys/devices) — udev + libinput device enumeration
+- [ ] udev (veya eudev) çalışıyor — hotplug + device node
+
+**Pencere sistemi (userspace, kernel'e bağımlılıkları test et)**
+- [ ] Wayland: Unix socket + **SCM_RIGHTS fd-passing** (ZORUNLU) + memfd/shm + epoll
+- [ ] Weston (referans compositor) açılıyor → sonra wlroots/Hyprland
+- [ ] X11 (Xorg veya Xwayland) — KDE/XFCE X11 yolu + eski uygulamalar
+- [ ] Ses: ALSA `/dev/snd` (en azından stub + bir HDA/virtio-snd sürücü)
+
+### Wine
+- [ ] Wine'ın talep ettiği syscall/mmap semantiği (MAP_FIXED, geniş VA, robust futex,
+      ptrace, arch_prctl, sinyal davranışı) — Wine en zorlu userspace hedefi
+- [ ] `wine notepad` → pencere açılıyor (Wayland/X üstünde)
+
+### Dağıtım yapılabilirliği
+- [ ] ext4 (ext2 değil) + GPT bölümleme — modern dağıtım root FS
+- [ ] init kararı: "Ranix Debian" systemd ister (cgroups v2 + namespaces, v0.7.5) VEYA
+      systemd'siz varyant (Devuan/Artix tarzı: OpenRC/runit) — KARAR netleşmeli
+- [ ] apt + dpkg (glibc) / pacman benzeri (statik) — paket deposu
+- [ ] Ranix ISO + installer (GRUB/U-Boot) [bkz Uzun Vade]
+
+### Test hedefleri
+- [ ] Weston QEMU virtio-gpu'da açılıyor; sonra Hyprland (llvmpipe)
+- [ ] KDE Plasma veya XFCE oturumu açılıyor
+- [ ] `wine notepad` çalışıyor
+- [ ] Üçüncü taraf biri "Ranix Debian" kurup masaüstü açabiliyor (gerçek fark görülür)
+
+---
+
 ## Uzun Vade (v1.x — v2.0)
 
 ### Ranix Dağıtımı (v1.5 hedefi)
@@ -553,7 +645,7 @@ Terminalde `claude` komutu çalışıyor.
 
 ### Sanallaştırma & Donanım
 - [ ] KVM host: /dev/kvm — Ranix üstünde VM çalıştırma
-- [ ] virtio-gpu + DRM/KMS — GPU accelerated framebuffer
+- [ ] GPU hızlandırma ileri: Vulkan, virgl/venus, gerçek 3D (v1.0 yazılım-GL tabanından sonra)
 - [ ] Bluetooth HCI over USB
 
 ### Güvenlik (ileri)
@@ -577,3 +669,16 @@ Terminalde `claude` komutu çalışıyor.
 - glibc için IFUNC (R_*_IRELATIVE) dinamik linker'da desteklenmeli — musl kullanmaz, glibc her string fonksiyonunda kullanır.
 - Node.js v20 glibc 2.17+ gerektiriyor (x86_64), glibc 2.17 aarch64 için 2.31+. glibc 2.38 yeterli.
 - clone3 + rseq + pidfd_* glibc fallback'i var, geçici stub yeterli.
+
+### Kararlar (2026-05-30)
+- **Robustness:** kernel-invariant ihlali → BUG()/panic (gürültülü, limp etme); DIŞ hata
+  (userspace/driver/IO/OOM) → contain, kernel asla düşmez. Linux modeli.
+- **Dinamik = runtime-growable:** compile-time config YASAK; per-CPU + RCU (Linux'tan
+  miras, üstüne iyileştir); dinamik AMA kilitsiz hot-path (global kmalloc'a bağlama).
+- **Driver:** native-first temiz/stable API gerçek; ileride (post-1.0) AÇIK Linux driver'ları
+  için kaynak-seviyesi şim (LinuxKPI/BSD tarzı). Binary/kapalı ABI taklidi REDDEDİLDİ
+  (ReactOS tuzağı). Kapalı driver (nvidia) hiçbir non-Linux kernelde çözülmez; nouveau hedef.
+- **Instrumentation = gerekçe:** ucuz invariant/poison/magic kalıcı olabilir; "okunacak şey"
+  budur, AI slop değil. Pahalı kontroller CONFIG_DEBUG.
+- **v1.0 = masaüstü+dağıtım** (KDE/Hyprland/Wine, Ranix Debian/Arch); Claude-CLI/headless = v0.9.5.
+- **GUI tabanı yazılım-GL (llvmpipe + DRM dumb buffer)** — gerçek GPU hızlandırma post-v1.
