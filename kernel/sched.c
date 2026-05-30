@@ -227,7 +227,19 @@ static process_t *runqueue_pop(void)
 
 static void idle_loop(void)
 {
-	while (1) arch_halt();
+	/* Reschedule the instant a task becomes runnable instead of sleeping in
+	 * WFI/HLT until the next timer tick — yield/wake latency 10ms→µs. No lost
+	 * wakeups: need_resched on an idle CPU is set by an interrupt (wakes WFI)
+	 * or the requeue just before idling (caught on the first iteration). */
+	while (1) {
+		cpu_context_t *c = arch_get_cpu_ctx();
+		if (c->need_resched) {
+			c->need_resched = 0;   /* consume the hint; runqueue is the truth */
+			arch_yield();
+		} else {
+			arch_halt();
+		}
+	}
 }
 
 void sched_init(void)
