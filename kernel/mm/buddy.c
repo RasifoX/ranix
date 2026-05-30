@@ -6,11 +6,13 @@
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
 
-/* Doubly-linked free list — O(1) insertion and removal.
- * next/prev store physical addresses (0 = NULL). */
-struct node { uint64_t next; uint64_t prev; };
+/* Free list is a doubly-linked list of page INDICES, with the next/prev links
+ * stored in mem_map[] metadata — NOT in the free pages' own content. This makes
+ * the allocator immune to a use-after-free *write* corrupting the free list
+ * (which would otherwise hand the same page to two owners and cascade). */
+#define BUDDY_NIL (~0ULL)
 
-static uint64_t    free_list[BUDDY_MAX_ORDER]; /* physical addr of head, 0 = empty */
+static uint64_t    free_list[BUDDY_MAX_ORDER]; /* page index of head, BUDDY_NIL = empty */
 static uint8_t     *blk_order;
 static uint8_t     *free_bm;
 static uint64_t    _base;
@@ -28,11 +30,6 @@ static int  bm_get(uint64_t p) { return  free_bm[p >> 3] &  (1 << (p & 7)); }
 static uint64_t pidx(uint64_t addr) { return (addr - _base) >> PAGE_SHIFT; }
 static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
-static inline struct node *node_at(uint64_t phys)
-{
-	return (struct node *)PHYS_TO_VIRT(phys);
-}
-
 page_t *paddr_to_page(uint64_t p)
 {
 	uint64_t idx = p >> PAGE_SHIFT;
@@ -45,41 +42,45 @@ uint64_t page_to_paddr(page_t *page)
 	return (uint64_t)(page - mem_map) << PAGE_SHIFT;
 }
 
-static void push(int ord, uint64_t addr)
+/* free-list ops — operate on page indices, links live in mem_map[] */
+static void push(int ord, uint64_t p)
 {
-	struct node *n = node_at(addr);
-	n->prev = 0;
-	n->next = free_list[ord];
-	if (free_list[ord])
-		node_at(free_list[ord])->prev = addr;
-	free_list[ord] = addr;
+	mem_map[p].free_prev = BUDDY_NIL;
+	mem_map[p].free_next = free_list[ord];
+	if (free_list[ord] != BUDDY_NIL)
+		mem_map[free_list[ord]].free_prev = p;
+	free_list[ord] = p;
 }
 
 static uint64_t pop(int ord)
 {
-	uint64_t addr = free_list[ord];
-	struct node *n = node_at(addr);
-	free_list[ord] = n->next;
-	if (n->next)
-		node_at(n->next)->prev = 0;
-	return addr;
+	uint64_t p = free_list[ord];
+	free_list[ord] = mem_map[p].free_next;
+	if (free_list[ord] != BUDDY_NIL)
+		mem_map[free_list[ord]].free_prev = BUDDY_NIL;
+	return p;
 }
 
-static void list_remove(int ord, uint64_t addr)
+static void list_remove(int ord, uint64_t p)
 {
-	struct node *n = node_at(addr);
-	if (n->prev)
-		node_at(n->prev)->next = n->next;
-	else
-		free_list[ord] = n->next;
-	if (n->next)
-		node_at(n->next)->prev = n->prev;
+	uint64_t nx = mem_map[p].free_next, pv = mem_map[p].free_prev;
+	if (pv != BUDDY_NIL) mem_map[pv].free_next = nx;
+	else                 free_list[ord] = nx;
+	if (nx != BUDDY_NIL) mem_map[nx].free_prev = pv;
 }
 
 void buddy_free(uint64_t addr, int ord)
 {
 	uint64_t f = spin_lock_irq(&buddy_lock);
 	uint64_t p = pidx(addr);
+
+	/* Double-free guard: a block already on the free list at this order would
+	 * be pushed twice → the same page handed to two allocators. Catch + refuse. */
+	if (p < _npages && bm_get(p) && blk_order[p] == (uint8_t)ord) {
+		spin_unlock_irq(&buddy_lock, f);
+		kprintf("buddy: DOUBLE-FREE addr=%lx ord=%d (already free)\n", addr, ord);
+		return;
+	}
 
 	uint64_t npg = 1ul << ord;
 	_free_pages += npg;
@@ -93,14 +94,14 @@ void buddy_free(uint64_t addr, int ord)
 		if (buddy >= _npages || !bm_get(buddy) || blk_order[buddy] != (uint8_t)ord)
 			break;
 		bm_clr(buddy);
-		list_remove(ord, paddr(buddy));
+		list_remove(ord, buddy);
 		p = (p < buddy) ? p : buddy;
 		ord++;
 	}
 
 	bm_set(p);
 	blk_order[p] = (uint8_t)ord;
-	push(ord, paddr(p));
+	push(ord, p);
 	spin_unlock_irq(&buddy_lock, f);
 }
 
@@ -108,7 +109,7 @@ void *buddy_alloc(int ord)
 {
 	uint64_t f = spin_lock_irq(&buddy_lock);
 	int o = ord;
-	while (o < BUDDY_MAX_ORDER && !free_list[o])
+	while (o < BUDDY_MAX_ORDER && free_list[o] == BUDDY_NIL)
 		o++;
 	if (o >= BUDDY_MAX_ORDER) {
 		spin_unlock_irq(&buddy_lock, f);
@@ -116,8 +117,8 @@ void *buddy_alloc(int ord)
 		return NULL;
 	}
 
-	uint64_t addr = pop(o);
-	uint64_t p    = pidx(addr);
+	uint64_t p = pop(o);
+	uint64_t addr = paddr(p);
 	bm_clr(p);
 
 	while (o-- > ord) {
@@ -125,7 +126,7 @@ void *buddy_alloc(int ord)
 		uint64_t half_p = pidx(half);
 		bm_set(half_p);
 		blk_order[half_p] = (uint8_t)o;
-		push(o, half);
+		push(o, half_p);
 	}
 
 	blk_order[p] = (uint8_t)ord;
@@ -188,7 +189,7 @@ uint64_t buddy_init(uint64_t base, uint64_t limit)
 	_npages     = total_pages;
 	_free_pages = 0;
 
-	memset(free_list, 0, sizeof(free_list));
+	for (int i = 0; i < BUDDY_MAX_ORDER; i++) free_list[i] = BUDDY_NIL;
 	memset(blk_order, 0, blk_order_sz);
 	memset(free_bm,   0, free_bm_sz);
 	memset(mem_map,   0, mem_map_sz);
