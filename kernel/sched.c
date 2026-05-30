@@ -248,7 +248,8 @@ static process_t *runqueue_pop(void)
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
 	cpu_context_t *victim = NULL;
-	int max_len = 1;  /* only steal if > 1 task */
+	int max_len = 0;  /* steal any queued task — a lone runnable task on a busy
+	                     CPU must not starve while this CPU is idle */
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
 		if (!c || !c->online || c == cpu) continue;
@@ -983,11 +984,13 @@ void schedule(void)
 }
 
 void yield(void)      { arch_yield(); }
-void task_sleep(void) { 
+void task_sleep(void) {
 	uint64_t f = spin_lock_irq(&sched_lock);
-	task_current()->state = PROC_SLEEPING; 
+	process_t *c = task_current();
+	c->sleeping_on_queue = 0;   /* a bare sleep relies on the per-tick poll */
+	c->state = PROC_SLEEPING;
 	spin_unlock_irq(&sched_lock, f);
-	arch_yield(); 
+	arch_yield();
 }
 
 void task_exit(void)
@@ -1349,8 +1352,10 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
 				*out_any_alive = 1;
 		}
 	}
-	if (!*out_child && *out_any_alive && will_sleep)
+	if (!*out_child && *out_any_alive && will_sleep) {
 		parent->state = PROC_SLEEPING;
+		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
+	}
 	spin_unlock_irq(&sched_lock, f);
 }
 
@@ -1364,8 +1369,10 @@ int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep)
 	int ptrace = !zombie && child->ptrace_stop && !child->ptrace_stop_reported;
 	if (ptrace)
 		child->ptrace_stop_reported = 1;
-	if (!zombie && !ptrace && will_sleep)
+	if (!zombie && !ptrace && will_sleep) {
 		parent->state = PROC_SLEEPING;
+		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
+	}
 	spin_unlock_irq(&sched_lock, f);
 	return zombie ? 1 : (ptrace ? 2 : 0);
 }
