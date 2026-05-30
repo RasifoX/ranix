@@ -27,6 +27,7 @@ vm_space_t *vm_create(void)
 	if (!vs_phys) return NULL;
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
 	vs->root = NULL;
+	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t root_phys = alloc_table();
 	if (!root_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
@@ -227,6 +228,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
 	new_vs->root = NULL;
 	new_vs->refcount = 1;
+	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t root_phys = alloc_table();
 	if (!root_phys) goto oom;
