@@ -1153,6 +1153,7 @@ static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask,
 
 void syscall_handle(arch_context_t *ctx)
 {
+	arch_get_cpu_ctx()->wd_where = "syscall";
 	long n    = (long)CTX_SYSCALL_N(ctx);
 	long arg0 = (long)CTX_SYSCALL_ARG0(ctx);
 	long arg1 = (long)CTX_SYSCALL_ARG1(ctx);

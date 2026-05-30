@@ -52,6 +52,9 @@ typedef struct cpu_context {
 	int                 dying_kstack_order; /* offset 104 */
 	int                 _pad2;          /* offset 108 */
 	struct process     *pending_requeue; /* offset 112 — prev to add to runqueue after stack switch */
+	/* watchdog (C-only) — wd_ticks frozen ⇒ this CPU is wedged with IRQs off */
+	volatile uint64_t   wd_ticks;       /* bumped every local timer tick */
+	volatile const char *wd_where;      /* breadcrumb: last kernel region entered */
 } cpu_context_t;
 
 /* Get the current CPU's context structure. Implemented in arch/ */
