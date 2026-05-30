@@ -75,8 +75,46 @@ int main(void)
 				break;
 			}
 	}
+#elif defined(__x86_64__)
+	for (int round = 0; round < 80 && !bad; round++) {
+		unsigned long t0 = ticks;
+		unsigned long tmp;
+		__asm__ volatile(
+			"movsd  0(%[in]), %%xmm0\n"
+			"movsd  8(%[in]), %%xmm1\n"
+			"movsd 16(%[in]), %%xmm2\n"
+			"movsd 24(%[in]), %%xmm3\n"
+			"movsd 32(%[in]), %%xmm4\n"
+			"movsd 40(%[in]), %%xmm5\n"
+			"movsd 48(%[in]), %%xmm6\n"
+			"movsd 56(%[in]), %%xmm7\n"
+			"1:\n"
+			"movq (%[tick]), %[tmp]\n"
+			"subq %[t0], %[tmp]\n"
+			"cmpq $40, %[tmp]\n"
+			"jb 1b\n"
+			"movsd %%xmm0,  0(%[out])\n"
+			"movsd %%xmm1,  8(%[out])\n"
+			"movsd %%xmm2, 16(%[out])\n"
+			"movsd %%xmm3, 24(%[out])\n"
+			"movsd %%xmm4, 32(%[out])\n"
+			"movsd %%xmm5, 40(%[out])\n"
+			"movsd %%xmm6, 48(%[out])\n"
+			"movsd %%xmm7, 56(%[out])\n"
+			: [tmp] "=&r"(tmp)
+			: [in] "r"(in), [out] "r"(out), [tick] "r"(&ticks), [t0] "r"(t0)
+			: "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7","memory");
+
+		for (int i = 0; i < 8; i++)
+			if (out[i] != in[i]) {
+				printf("FP-CORRUPT round=%d xmm%d got=%f want=%f ticks=%lu\n",
+				       round, i, out[i], in[i], ticks);
+				bad = 1;
+				break;
+			}
+	}
 #else
-	(void)in; (void)out;   /* x86 xmm variant pending the x86 FP-signal fix */
+	(void)in; (void)out;
 #endif
 
 	kill(child, SIGKILL);
