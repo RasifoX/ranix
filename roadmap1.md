@@ -163,7 +163,15 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 
 ---
 
-## v0.7 — SMP  ✅ TAMAMLANDI (gerçek Pi4'te 4-core, 192/192 kararlı; free-while-mapped UAF çözüldü)
+## v0.7 — SMP  ✅ TAMAMLANDI (gerçek Pi4'te 4-core, 5/5 koşu 192/192 SIFIR çökme; kronik bellek bozulması çözüldü)
+
+> 🏆 **Kronik bellek bozulması çözüldü (2026-05-30).** "Hep vardı, hiç çözülemedi"
+> denen temel bozulma üç kök nedenin birleşimiymiş, üçü de çözüldü ve gerçek Pi4'te
+> 5/5 koşu tertemiz doğrulandı:
+> 1. **COW double-free** — paylaşımlı PTE'de eşzamanlı COW, refcount çift düşüyor → free-while-mapped.
+> 2. **FP/SIMD signal'da korunmuyordu** — musl'un vektörel strlen/strchr'si signal ortasında bozuluyordu.
+> 3. **exec I-cache CPU-lokal** — `ic iallu` yerine `ic ialluis`; başka çekirdekte bayat kod → çöp PC.
+
 
 **Neden burada?**
 Artık doğru locking primitive'lerimiz var.
