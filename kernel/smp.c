@@ -128,7 +128,16 @@ void smp_ipi_handler(void)
 	arch_smp_ipi_ack();
 }
 
-static void ap_idle_loop(void) { for (;;) arch_halt(); }
+static void ap_idle_loop(void)
+{
+	/* See idle_loop() in sched.c: reschedule on need_resched instead of
+	 * sleeping until the next tick. */
+	for (;;) {
+		cpu_context_t *c = arch_get_cpu_ctx();
+		if (c->need_resched) { c->need_resched = 0; arch_yield(); }
+		else arch_halt();
+	}
+}
 
 void secondary_cpu_main(int cpu_id)
 {
@@ -175,6 +184,10 @@ void secondary_cpu_main(int cpu_id)
 
 	irq_enable();
 
-	/* idle loop — scheduler will preempt us on timer interrupt */
-	while (1) arch_halt();
+	/* idle loop — reschedule on need_resched, else sleep until an interrupt */
+	while (1) {
+		cpu_context_t *c = arch_get_cpu_ctx();
+		if (c->need_resched) { c->need_resched = 0; arch_yield(); }
+		else arch_halt();
+	}
 }
