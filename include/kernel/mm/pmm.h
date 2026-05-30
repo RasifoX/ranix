@@ -11,6 +11,8 @@
 typedef struct page {
 	uint32_t refcount;
 	uint32_t flags;
+	uint64_t free_next;   /* buddy free-list link (page index; valid only while free) */
+	uint64_t free_prev;
 } page_t;
 
 #define PG_MANAGED  (1 << 0)
