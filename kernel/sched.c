@@ -202,10 +202,10 @@ static int cpu_rq_len(cpu_context_t *cpu)
 	return n;
 }
 
-/* Pick the least-loaded online CPU */
+/* Pick the least-loaded online CPU (both arches — without this, x86 piled
+ * every task onto the CPU that forked it while the others sat idle). */
 static cpu_context_t *pick_cpu(void)
 {
-#ifdef __aarch64__
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
 	cpu_context_t *best = arch_get_cpu_ctx();
@@ -217,9 +217,6 @@ static cpu_context_t *pick_cpu(void)
 		if (l < best_len) { best = c; best_len = l; }
 	}
 	return best;
-#else
-	return arch_get_cpu_ctx();
-#endif
 }
 
 /* Internal: must hold sched_lock */
