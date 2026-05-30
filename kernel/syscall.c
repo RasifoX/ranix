@@ -811,6 +811,7 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	ctx->r13      = *(uint64_t *)(base + 128);
 	ctx->r14      = *(uint64_t *)(base + 136);
 	ctx->r15      = *(uint64_t *)(base + 144);
+	memcpy(ctx->fxsave, (void *)(base + 160), sizeof(ctx->fxsave));
 #endif
 }
 

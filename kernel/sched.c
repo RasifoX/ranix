@@ -1213,9 +1213,12 @@ void signal_dispatch(arch_context_t *tf)
 	 *   [rsp+136]  orig_r13
 	 *   [rsp+144]  orig_r14
 	 *   [rsp+152]  orig_r15
-	 *   [rsp+160]  padding × 1  (→ total 168, rsp % 16 == 8)
-	 * rt_sigreturn reads base = ctx->rsp (= frame_base+8 after handler ret). */
-	uint64_t usp = (tf->rsp & ~15UL) - 168; /* frame below RSP, 8-mod-16 for handler entry */
+	 *   [rsp+160]  padding × 1
+	 *   [rsp+168]  fxsave area (512 bytes, 16-byte aligned)  (→ total 680)
+	 * rt_sigreturn reads base = ctx->rsp (= frame_base+8 after handler ret).
+	 * The FP/SSE state must round-trip or a handler's xmm use corrupts the
+	 * interrupted code's vector registers (same class as the aarch64 bug). */
+	uint64_t usp = (tf->rsp & ~15UL) - 680; /* 8-mod-16 entry; usp+168 is 16-aligned */
 	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
 	*(uint64_t *)(usp +   8) = old_mask;
 	*(uint64_t *)(usp +  16) = tf->rip;
@@ -1237,6 +1240,7 @@ void signal_dispatch(arch_context_t *tf)
 	*(uint64_t *)(usp + 144) = tf->r14;
 	*(uint64_t *)(usp + 152) = tf->r15;
 	*(uint64_t *)(usp + 160) = 0;
+	memcpy((void *)(usp + 168), tf->fxsave, sizeof(tf->fxsave));  /* 16-aligned */
 	tf->rsp                  = usp;
 	tf->rdi                  = (uint64_t)sig;
 	tf->rip                  = (uint64_t)handler;
