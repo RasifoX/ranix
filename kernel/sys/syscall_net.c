@@ -458,11 +458,60 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
     return 0;
 }
 
+#define SO_SOL_SOCKET   1
+#define SO_REUSEADDR    2
+#define SO_TYPE         3
+#define SO_ERROR        4
+#define SO_SNDBUF       7
+#define SO_RCVBUF       8
+#define SO_KEEPALIVE    9
+#define SO_ACCEPTCONN  30
+#define SO_IPPROTO_TCP  6
+#define SO_TCP_NODELAY  1
+
 static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t len)
-{ (void)fd; (void)lv; (void)opt; (void)val; (void)len; return 0; }
+{
+	(void)lv; (void)opt; (void)val; (void)len;
+	/* Accept and ignore: no tunable per-socket buffers/flags yet, but success
+	 * is what well-behaved programs expect. Reject only a bad fd. */
+	if (!fd_to_sock(fd)) return -9; /* EBADF */
+	return 0;
+}
 
 static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
-{ (void)fd; (void)lv; (void)opt; (void)val; (void)len; return -38; }
+{
+	socket_t *s = fd_to_sock(fd);
+	if (!s) return -9;            /* EBADF */
+	if (!val || !len) return -14; /* EFAULT */
+
+	uint32_t ulen;
+	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -14;
+
+	int out;
+	if (lv == SO_SOL_SOCKET) {
+		switch (opt) {
+		case SO_TYPE:       out = s->type; break;
+		case SO_ERROR:      out = 0; break;                     /* no pending error */
+		case SO_ACCEPTCONN: out = (s->tcp_state == TCP_LISTEN); break;
+		case SO_RCVBUF:     out = 65536; break;
+		case SO_SNDBUF:     out = 65536; break;
+		case SO_REUSEADDR:
+		case SO_KEEPALIVE:  out = 0; break;
+		default:            return -92;  /* ENOPROTOOPT */
+		}
+	} else if (lv == SO_IPPROTO_TCP) {
+		if (opt == SO_TCP_NODELAY) out = 0;
+		else return -92;
+	} else {
+		return -92;
+	}
+
+	uint32_t cp = ulen < sizeof(int) ? ulen : sizeof(int);
+	if (cp && copy_to_user(val, &out, cp) != 0) return -14;
+	uint32_t rl = sizeof(int);
+	if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -14;
+	return 0;
+}
 
 static long sys_listen(int fd, int bl)
 {
