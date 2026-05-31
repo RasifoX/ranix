@@ -1029,7 +1029,16 @@ void task_exit(void)
 	 * the user-address write fault at EL1. futex_wake_addr must also be
 	 * called outside sched_lock to preserve lock order (futex→sched). */
 	if (cctid) {
+		/* CLONE_CHILD_CLEARTID / set_tid_address: write 0 to the address and
+		 * futex-wake it on exit. A threading library may use this address as a
+		 * lock it holds across SYS_exit (released by this write); the thread's
+		 * prior user writes must be globally visible before the release, and
+		 * the 0 before the wake — release ordering the bare store lacks. */
+		arch_get_cpu_ctx()->wd_where = "exit:ctid";
+		smp_mb();
 		*cctid = 0;
+		smp_mb();
+		arch_get_cpu_ctx()->wd_where = "exit:futex";
 		futex_wake_addr(cctid);
 	}
 
