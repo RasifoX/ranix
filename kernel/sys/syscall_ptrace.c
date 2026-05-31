@@ -29,7 +29,7 @@ static void ptrace_do_stop(process_t *p)
 	p->ptrace_in_syscall = 1;
 	if (tracer)
 		task_wake(tracer);
-	task_sleep();
+	task_sleep_interruptible();   /* resumed by the tracer's task_wake (PTRACE_CONT) or a signal */
 	p->ptrace_in_syscall = 0;
 }
 
