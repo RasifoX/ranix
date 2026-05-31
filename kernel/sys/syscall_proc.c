@@ -275,8 +275,8 @@ static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
 	process_t *cp = task_current();
 	while (kernel_ticks < end) {
-		task_sleep();
 		if (cp->sig_pending & ~cp->sig_mask) return -4; /* EINTR */
+		task_sleep_until(end);
 	}
 	return 0;
 }
