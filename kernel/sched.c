@@ -84,8 +84,11 @@ static uint8_t *kstack_alloc(void)
 	return ks;
 }
 
+
+
 spinlock_t sched_lock = SPINLOCK_INIT;
 static int sched_quantum_val = SCHED_QUANTUM;
+
 
 static tick_fn_t *tick_cbs;
 static int        tick_cb_cnt = 0;
@@ -184,6 +187,8 @@ static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
 		kprintf("[DBG] cpu_rq_add: bad p=%p cpu%d\n", p, (int)cpu->cpu_id);
 		kpanic("cpu_rq_add: invalid process ptr");
 	}
+	if (p->in_rq) return;   /* already queued — guard against double-enqueue corruption */
+	p->in_rq = 1;
 	p->sched_next = NULL;
 	if (!cpu->rq_tail) {
 		cpu->rq_head = cpu->rq_tail = p;
@@ -212,6 +217,7 @@ static process_t *cpu_rq_pop(cpu_context_t *cpu)
 	cpu->rq_head = nxt;
 	if (!cpu->rq_head) cpu->rq_tail = NULL;
 	p->sched_next = NULL;
+	p->in_rq = 0;
 	return p;
 }
 

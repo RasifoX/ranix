@@ -113,6 +113,7 @@ typedef struct process {
 	/* ── wait queue tracking ──────────────────── */
 	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
 	int             on_cpu;            /* 1 when currently executing on a CPU, protects against wake-up race condition */
+	int             in_rq;             /* 1 when queued in a CPU runqueue (guards double-enqueue) */
 
 	/* ── signal alternate stack ───────────────── */
 	stack_t         altstack;
