@@ -51,6 +51,8 @@ void exc_dispatch(arch_context_t *ctx)
 		        (int)p->pid, p->name, ctx->rip, (int)ctx->vector, ctx->error_code);
 		if (ctx->vector == 14)
 			kprintf("  CR2=0x%lx\n", read_cr2());
+		kprintf("  rax=0x%lx rbx=0x%lx rbp=0x%lx rsp=0x%lx\n",
+		        ctx->rax, ctx->rbx, ctx->rbp, ctx->rsp);
 		task_exit();
 		__builtin_unreachable();
 	}
