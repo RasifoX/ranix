@@ -78,8 +78,10 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 			void *pg = buddy_alloc(0);
 			if (pg) {
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-				vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
-				ret = 0;
+				if (vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE) == 0)
+					ret = 0;
+				else
+					buddy_free((uint64_t)pg, 0);
 			}
 		}
 		goto out;
@@ -91,8 +93,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	for (vma_t *v = p->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_SHARED) {
-				vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
-				ret = 0;
+				ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 				goto out;
 			}
 			break;
@@ -107,12 +108,15 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		void *new_p = pmm_alloc();
 		if (!new_p) goto out;
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
-		vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE);
-		pmm_free((void *)paddr);
+		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE) == 0) {
+			pmm_free((void *)paddr);
+			ret = 0;
+		} else {
+			pmm_free(new_p);
+		}
 	} else {
-		vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
+		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 	}
-	ret = 0;
 
 out:
 	spin_unlock_irq(&p->vm->fault_lock, lf);
