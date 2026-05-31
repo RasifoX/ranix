@@ -8,12 +8,25 @@
 #include <asm/gdt.h>
 #include <asm/idt.h>
 #include <asm/mmu.h>
+#include <asm/io.h>
+#include <kernel/tick.h>
+#include <kernel/board.h>
+#include <kernel/sync.h>
+#include <kernel/irq.h>
 
 /* LAPIC register offsets */
 #define LAPIC_EOI        0x0B0
 #define LAPIC_SPIV       0x0F0
+#define LAPIC_LVT_TIMER  0x320
+#define LAPIC_TIMER_INIT 0x380
+#define LAPIC_TIMER_CUR  0x390
+#define LAPIC_TIMER_DIV  0x3E0
 #define LAPIC_ICR_LO     0x300
 #define LAPIC_ICR_HI     0x310
+
+#define LVT_TIMER_PERIODIC 0x20000
+#define LVT_MASKED         0x10000
+#define VEC_LAPIC_TIMER    0xF1
 
 /* ICR delivery mode bits */
 #define ICR_INIT         0x00004500
@@ -48,6 +61,55 @@ static void io_delay(void)
 		__asm__ volatile("nop");
 }
 
+/* Periodic LAPIC-timer init count for one TIMER_HZ tick, measured against the
+ * PIT once on the BSP. Each CPU has its own local timer but they run at the
+ * same frequency, so one calibration serves all. */
+static uint32_t lapic_timer_initcnt;
+
+static void lapic_timer_calibrate(void)
+{
+	if (!lapic || lapic_timer_initcnt) return;
+
+	uint64_t flags = irq_save();
+	lapic_write(LAPIC_TIMER_DIV, 0x3);                 /* divide by 16 */
+
+	/* PIT channel 2, mode 0 (one-shot), count = 1/TIMER_HZ second. */
+	uint16_t pit_cnt = (uint16_t)(1193182UL / TIMER_HZ);
+	outb(0x61, (inb(0x61) & 0xFC) | 0x01);             /* gate on, speaker off */
+	outb(0x43, 0xB0);                                  /* ch2, lo/hi, mode 0 */
+	outb(0x42, pit_cnt & 0xFF);
+	outb(0x42, pit_cnt >> 8);
+
+	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
+	uint64_t guard = 0;
+	while (!(inb(0x61) & 0x20))                         /* wait PIT ch2 OUT high */
+		if (++guard > 100000000UL) break;
+	uint32_t remaining = lapic_read(LAPIC_TIMER_CUR);
+	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+
+	lapic_timer_initcnt = 0xFFFFFFFF - remaining;
+	irq_restore(flags);
+	kprintf("LAPIC timer: %u ticks per %d Hz\n", lapic_timer_initcnt, TIMER_HZ);
+}
+
+/* Start this CPU's periodic local timer. Calibrates lazily on first use. */
+void lapic_timer_start(void)
+{
+	if (!lapic) return;
+	if (!lapic_timer_initcnt) lapic_timer_calibrate();
+	if (!lapic_timer_initcnt) return;
+	lapic_write(LAPIC_TIMER_DIV, 0x3);
+	lapic_write(LAPIC_LVT_TIMER, VEC_LAPIC_TIMER | LVT_TIMER_PERIODIC);
+	lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt);
+}
+
+/* Vector 0xF1 handler — per-CPU scheduler tick. */
+void lapic_timer_irq(void)
+{
+	tick_notify_local();
+	lapic_write(LAPIC_EOI, 0);
+}
+
 extern char trampoline_start[];
 extern char trampoline_end[];
 
@@ -75,6 +137,7 @@ static void setup_trampoline(int cpu_id)
 void arch_smp_boot_cpu(int cpu_id)
 {
 	if (!lapic) lapic_init_bsp();
+	lapic_timer_calibrate();   /* once, on the BSP, before any AP starts */
 
 	setup_trampoline(cpu_id);
 
@@ -132,6 +195,11 @@ void arch_secondary_init(int cpu_id)
 	/* Enable syscall instruction on this AP (EFER.SCE + LSTAR/STAR/SFMASK) */
 	extern void arch_syscall_init(void);
 	arch_syscall_init();
+
+	/* Per-CPU periodic timer — the PIT only reaches the BSP, so without this a
+	 * task on a secondary is never preempted and never returns to the kernel to
+	 * take a pending signal. */
+	lapic_timer_start();
 }
 
 void arch_smp_ipi_send(int cpu_id)

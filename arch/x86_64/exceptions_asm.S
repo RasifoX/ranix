@@ -251,6 +251,45 @@ irq_stub_yield:
 	swapgs
 2:	iretq
 
+/* Per-CPU LAPIC timer — vector 0xF1 */
+.global irq_stub_lapic
+irq_stub_lapic:
+	testq $3, 8(%rsp)
+	jz 1f
+	swapgs
+1:	pushq $0
+	pushq $0xF1
+	save_context
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+	call lapic_timer_irq
+	movl %gs:80, %eax
+	testl %eax, %eax
+	jz 3f
+	movl $0, %gs:80
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
+	call schedule
+	call vm_activate
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	call sched_requeue_prev
+	call sched_free_dying_kstack
+3:	call sched_get_current_ctx
+	movq %rax, %rsp
+	movq %rsp, %rdi
+	call signal_dispatch
+	call sched_get_current_ctx
+	movq %rax, %rsp
+	restore_context
+	addq $16, %rsp
+	testq $3, 8(%rsp)
+	jz 2f
+	swapgs
+2:	iretq
+
 /* IPI reschedule handler — vector 0xF0 */
 .global irq_stub_ipi
 irq_stub_ipi:
