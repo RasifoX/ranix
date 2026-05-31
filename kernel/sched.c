@@ -406,6 +406,14 @@ void sched_tick(void)
 				}
 			}
 		}
+		if (t->wake_deadline && kernel_ticks >= t->wake_deadline) {
+			t->wake_deadline = 0;
+			if (t->state == PROC_SLEEPING) {
+				t->state = PROC_READY;
+				if (!t->on_cpu) runqueue_add(t);
+				arch_get_cpu_ctx()->need_resched = 1;
+			}
+		}
 		if (t->state == PROC_SLEEPING && !t->sleeping_on_queue) {
 			t->state = PROC_READY;
 			if (!t->on_cpu) runqueue_add(t);
@@ -1021,6 +1029,19 @@ void task_sleep(void) {
 	c->state = PROC_SLEEPING;
 	spin_unlock_irq(&sched_lock, f);
 	arch_yield();
+}
+
+/* Sleep until tick `deadline` (or a signal). Woken by the deadline sweep in
+ * sched_tick, not the per-tick blanket wake — no churn while sleeping. */
+void task_sleep_until(uint64_t deadline) {
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *c = task_current();
+	c->wake_deadline      = deadline;
+	c->sleeping_on_queue  = 1;   /* deadline sweep / signal wakes us */
+	c->state              = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, f);
+	arch_yield();
+	c->wake_deadline = 0;
 }
 
 void task_exit(void)
