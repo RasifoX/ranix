@@ -765,7 +765,7 @@ void proc_vfork_exec_notify(void)
 	spin_unlock_irq(&sched_lock, f);
 }
 
-pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid)
+pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid)
 {
 	process_t *parent = task_current();
 	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
@@ -838,12 +838,18 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->next      = proctab[0]->next;
 	proctab[0]->next = child;
 	proctab[pid] = child;
-	/* Write real child TID to ctid/ptid before child is runnable.
-	 * ptid (CLONE_PARENT_SETTID) is required: musl's __tl_lock keys on
-	 * pthread_self()->tid, so a 0 tid silently disables thread-list
-	 * locking and corrupts the list under SMP. */
-	if (ctid) *ctid = (uint32_t)pid;
-	if (ptid) *ptid = (uint32_t)pid;
+	/* Write the real child TID before the child is runnable, for the flags
+	 * that demand it at creation: CLONE_PARENT_SETTID (*ptid) and
+	 * CLONE_CHILD_SETTID (*set_tid). musl keys __tl_lock on
+	 * pthread_self()->tid (via PARENT_SETTID), so a 0 tid would silently
+	 * disable thread-list locking under SMP.
+	 * The CLONE_CHILD_CLEARTID address (ctid) is NOT written here — it is
+	 * cleared to 0 (and futex-woken) only on exit. musl points it at the
+	 * global __thread_list_lock; writing the tid into it at creation would
+	 * set the lock to the new thread's own tid, making that thread's
+	 * __tl_lock take the recursive (no-op) path and corrupt the list. */
+	if (ptid)    *ptid    = (uint32_t)pid;
+	if (set_tid) *set_tid = (uint32_t)pid;
 	/* Publish the tid (and all child setup) to memory before the child can
 	 * be observed runnable on another CPU. On weakly-ordered aarch64 a stale
 	 * tid=0 read makes musl's __tl_lock a no-op and corrupts the thread list. */
