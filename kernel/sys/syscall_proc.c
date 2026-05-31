@@ -134,7 +134,10 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		q.next = futex_bucket[h]; futex_bucket[h] = &q;
 		uint64_t fs = spin_lock_irq(&sched_lock);
 		self->state = PROC_SLEEPING;
-		self->sleeping_on_queue = 0;
+		/* event-driven: woken by futex_do_wake or task_signal, so the per-tick
+		 * blanket wake can skip us. timed waits stay on the poll for their
+		 * deadline (no per-waiter timer yet). */
+		self->sleeping_on_queue = timed ? 0 : 1;
 		spin_unlock_irq(&sched_lock, fs);
 		spin_unlock_irq(&futex_lock, f);
 
