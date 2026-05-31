@@ -84,7 +84,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				    (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
 				while (kernel_ticks < end) {
 					uint64_t fq = spin_lock_irq(&futex_lock);
-					if (!futex_table[slot].waiter) {
+					if (futex_table[slot].waiter != task_current()) {
 						spin_unlock_irq(&futex_lock, fq);
 						break;
 					}
@@ -119,9 +119,14 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		}
 
 		f = spin_lock_irq(&futex_lock);
-		int was_woken = (futex_table[slot].waiter == NULL);
-		futex_table[slot].waiter = NULL;
-		futex_table[slot].uaddr  = NULL;
+		/* Woken iff our entry was removed (by a WAKE). If the slot was reused by
+		 * a new waiter it is no longer ours, so we were still woken — and must
+		 * NOT clear it, or we would drop that waiter's registration. */
+		int was_woken = (futex_table[slot].waiter != task_current());
+		if (!was_woken) {
+			futex_table[slot].waiter = NULL;
+			futex_table[slot].uaddr  = NULL;
+		}
 		spin_unlock_irq(&futex_lock, f);
 		return was_woken ? 0 : -4; /* EINTR if not woken by WAKE */
 	}
@@ -251,7 +256,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				               (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
 				while (kernel_ticks < end) {
 					uint64_t fq = spin_lock_irq(&futex_lock);
-					if (!futex_table[slot].waiter) {
+					if (futex_table[slot].waiter != task_current()) {
 						spin_unlock_irq(&futex_lock, fq);
 						break;
 					}
@@ -285,9 +290,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 			}
 		}
 		f = spin_lock_irq(&futex_lock);
-		int woken2 = (futex_table[slot].waiter == NULL);
-		futex_table[slot].waiter = NULL;
-		futex_table[slot].uaddr  = NULL;
+		int woken2 = (futex_table[slot].waiter != task_current());
+		if (!woken2) {
+			futex_table[slot].waiter = NULL;
+			futex_table[slot].uaddr  = NULL;
+		}
 		spin_unlock_irq(&futex_lock, f);
 		return woken2 ? 0 : -4;
 	}
