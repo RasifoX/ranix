@@ -85,14 +85,35 @@ uint32_t atomic_sub_fetch32(volatile uint32_t *p, uint32_t v)
 #endif
 }
 
+/* Owner tracking is unsafe until the per-CPU context pointer (tpidr_el1 / gs
+ * base) is established in arch_cpu_init; enabled from main right after. */
+volatile int spin_diag_on = 0;
+
 void spin_lock(spinlock_t *l)
 {
-	while (!arch_spin_trylock(&l->locked))
-		;
+	if (!spin_diag_on) {
+		while (!arch_spin_trylock(&l->locked))
+			;
+		return;
+	}
+	int self = arch_get_cpu_ctx()->cpu_id;
+	uint64_t spins = 0;
+	while (!arch_spin_trylock(&l->locked)) {
+		if (l->owner == self)
+			kpanic("recursive spinlock (self-deadlock)");
+		if (++spins == 0x3000000) {
+			kprintf("spin_lock: cpu%d stuck on lock %p held by cpu%d (where=%s)\n",
+			        self, (void *)l, l->owner,
+			        arch_get_cpu_ctx()->wd_where ? (const char *)arch_get_cpu_ctx()->wd_where : "?");
+			kpanic("spinlock deadlock");
+		}
+	}
+	l->owner = self;
 }
 
 void spin_unlock(spinlock_t *l)
 {
+	l->owner = -1;
 #if defined(__aarch64__)
 	__asm__ volatile("stlr wzr, [%0]" :: "r"(&l->locked) : "memory");
 #else

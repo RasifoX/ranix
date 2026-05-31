@@ -1039,15 +1039,19 @@ void task_exit(void)
 	spin_unlock_irq(&sched_lock, f);
 
 	/* Free resources — process is still schedulable during this. */
+	arch_get_cpu_ctx()->wd_where = "exit:fdput";
 	if (dying_fds) fd_table_put(dying_fds);
 	if (dying_vm) {
+		arch_get_cpu_ctx()->wd_where = "exit:vmdestroy";
 		vm_activate();
 		vm_destroy(dying_vm);
 	}
+	arch_get_cpu_ctx()->wd_where = "exit:vmas";
 	vma_t *v = p->vmas; p->vmas = NULL;
 	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
 
 	/* Cleanup done — now mark dead and wake parent. */
+	arch_get_cpu_ctx()->wd_where = "exit:reparent";
 	f = spin_lock_irq(&sched_lock);
 	p->state = PROC_DEAD;
 
@@ -1064,7 +1068,10 @@ void task_exit(void)
 	/* Reparent orphaned children to init (pid 1) */
 	process_t *init_proc = (proc_cnt > 1 && proctab[1]) ? proctab[1] : NULL;
 	process_t *sentinel2 = proctab[0];
+	int walk = 0, walk_max = proc_cnt + 8;
 	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next) {
+		if (++walk > walk_max)
+			kpanic("task_exit: process list cycle (corrupt ->next)");
 		if (c->ppid == (pid_t)p->pid && c != p) {
 			c->ppid = init_proc ? (pid_t)init_proc->pid : 0;
 			if ((c->state == PROC_DEAD || c->state == PROC_ZOMBIE) && init_proc)
@@ -1203,10 +1210,12 @@ void signal_dispatch(arch_context_t *tf)
 		if (sig_default_kill(sig)) {
 			p->exit_code      = sig;
 			p->killed_by_sig  = 1;
+			arch_get_cpu_ctx()->wd_where = "sig:kill";
 			task_exit();
 		}
 		return;
 	}
+	arch_get_cpu_ctx()->wd_where = "sig:frame";
 
 	/* Deliver to user handler: redirect the trap frame */
 	/* Block this signal during handler execution; save old mask for restore */
