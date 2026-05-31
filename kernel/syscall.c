@@ -1252,7 +1252,12 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SETPRIORITY: ret = sys_setpriority((int)arg0, (int)arg1, (int)arg2); break;
 	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1); break;
 	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
-	case SYS_ARCH_SET_TID_ADDR: ret = (long)task_current()->pid; break;
+	case SYS_ARCH_SET_TID_ADDR:
+		/* Linux ABI: record the clear-on-exit address and return the tid. On
+		 * thread exit the kernel writes 0 there and futex-wakes it. */
+		task_current()->clear_child_tid = (uint32_t *)arg0;
+		ret = (long)task_current()->pid;
+		break;
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
 	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
