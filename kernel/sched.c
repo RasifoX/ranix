@@ -148,9 +148,26 @@ void tick_notify(void)
 	}
 }
 
+/* Per-CPU tick: scheduler accounting only, no global bookkeeping. Runs on
+ * every CPU from its own local timer; the global walk (kernel_ticks, sleeper
+ * wakeups, itimers, watchdog) stays on the BSP's tick_notify. */
+void sched_tick_local(void)
+{
+	arch_get_cpu_ctx()->wd_ticks++;
+	process_t *current = task_current();
+	if (!current) return;
+	current->ticks++;
+	if (current->pid != 0) {
+		if (--current->ticks_remaining <= 0)
+			arch_get_cpu_ctx()->need_resched = 1;
+	} else if (arch_get_cpu_ctx()->rq_head) {
+		arch_get_cpu_ctx()->need_resched = 1;
+	}
+}
+
 void tick_notify_local(void)
 {
-	sched_tick();
+	sched_tick_local();
 }
 
 volatile uint64_t kernel_ticks  = 0;
