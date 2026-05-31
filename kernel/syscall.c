@@ -1288,6 +1288,7 @@ void syscall_handle(arch_context_t *ctx)
 #define CLONE_SETTLS   0x00080000
 #define CLONE_PTID     0x00100000 /* CLONE_PARENT_SETTID */
 #define CLONE_CTID     0x00200000 /* CLONE_CHILD_CLEARTID */
+#define CLONE_CSETTID  0x01000000 /* CLONE_CHILD_SETTID */
 #define CLONE_VFORK    0x00004000
 		if (flags & CLONE_VFORK) {
 			ret = sys_vfork();
@@ -1299,12 +1300,17 @@ void syscall_handle(arch_context_t *ctx)
 			uint32_t *ptid  = (flags & CLONE_PTID)   ? (uint32_t*)arg2 : NULL;
 #if defined(__aarch64__)
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg3 : 0;
-			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg4 : NULL;
+			uint32_t *ctid_arg = (uint32_t*)arg4;
 #else
-			uint32_t *ctid  = (flags & CLONE_CTID)   ? (uint32_t*)arg3 : NULL;
+			uint32_t *ctid_arg = (uint32_t*)arg3;
 			uint64_t tls    = (flags & CLONE_SETTLS) ? (uint64_t)arg4 : 0;
 #endif
-			ret = (long)proc_clone_thread(newsp, tls, ctid, ptid);
+			/* CLEARTID: clear+wake on exit (don't touch at creation).
+			 * SETTID: write the tid into *ctid at creation. These are
+			 * distinct flags sharing the one ctid argument. */
+			uint32_t *clear_tid = (flags & CLONE_CTID)    ? ctid_arg : NULL;
+			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? ctid_arg : NULL;
+			ret = (long)proc_clone_thread(newsp, tls, clear_tid, ptid, set_tid);
 		} else {
 			ret = sys_fork();
 		}
