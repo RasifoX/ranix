@@ -1,5 +1,6 @@
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
+#include <kernel/hal.h>
 
 #define MAX_IRQS 128
 
@@ -16,8 +17,9 @@ void irq_register(uint32_t irq, irq_handler_t handler) {
 }
 
 void irq_handle(uint32_t irq) {
-    if (irq < MAX_IRQS && handlers[irq])
+    if (irq < MAX_IRQS && handlers[irq]) {
+        arch_get_cpu_ctx()->wd_where = "irq_handle";
         handlers[irq]();
-    else
+    } else
         kprintf("irq: unhandled #%d\n", irq);
 }

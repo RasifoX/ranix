@@ -172,6 +172,8 @@ void kernel_main(void)
 	mmu_init();
 	fdt_remap();
 	arch_cpu_init();
+	extern volatile int spin_diag_on;
+	spin_diag_on = 1;
 
 	if (fdt_ok == 0) {
 		uint32_t cl_len;

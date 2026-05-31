@@ -10,9 +10,10 @@
  */
 typedef struct {
 	volatile uint32_t locked;
+	volatile int      owner;   /* cpu_id of holder while locked; -1 when free */
 } spinlock_t;
 
-#define SPINLOCK_INIT  { 0 }
+#define SPINLOCK_INIT  { 0, -1 }
 
 void spin_lock(spinlock_t *l);
 void spin_unlock(spinlock_t *l);
