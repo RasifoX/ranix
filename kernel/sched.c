@@ -1383,6 +1383,7 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
 	*out_any_alive = 0;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
+	int dead_pending = 0;
 	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
 		if (c->ppid == ppid) {
 			if (c->state == PROC_ZOMBIE && !c->reaped) {
@@ -1390,11 +1391,16 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
 				*out_child = c;
 				break;
 			}
+			if (c->state == PROC_DEAD)
+				dead_pending = 1;   /* exiting; becomes ZOMBIE shortly */
 			if (c->state != PROC_ZOMBIE)
 				*out_any_alive = 1;
 		}
 	}
-	if (!*out_child && *out_any_alive && will_sleep) {
+	/* Don't sleep while a child is mid-exit (PROC_DEAD): its task_exit wakeup
+	 * has already fired, and it only turns ZOMBIE later in schedule(). Yield
+	 * and retry instead, or the wakeup is lost forever. */
+	if (!*out_child && *out_any_alive && will_sleep && !dead_pending) {
 		parent->state = PROC_SLEEPING;
 		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
 	}
@@ -1411,7 +1417,10 @@ int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep)
 	int ptrace = !zombie && child->ptrace_stop && !child->ptrace_stop_reported;
 	if (ptrace)
 		child->ptrace_stop_reported = 1;
-	if (!zombie && !ptrace && will_sleep) {
+	/* A child in PROC_DEAD has exited and already passed its wakeup in
+	 * task_exit; it only becomes PROC_ZOMBIE later in schedule(). Sleeping now
+	 * would miss that wakeup forever — yield and retry until it is ZOMBIE. */
+	if (!zombie && !ptrace && will_sleep && child->state != PROC_DEAD) {
 		parent->state = PROC_SLEEPING;
 		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
 	}
