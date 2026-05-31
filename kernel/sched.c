@@ -48,22 +48,26 @@ static int proctab_ensure(void)
 	return proctab_grow();
 }
 
-/* Rotating pid allocation (Linux-style last_pid): search forward from the
- * last allocated slot so a freed pid/tid is not reused immediately. Quick
- * reuse can collide with stale userspace state keyed on tid (e.g. musl's
- * __thread_list_lock holds the owner's tid). */
+/* Linux-style pid allocation: hand out fresh, monotonically climbing pids up
+ * to PID_MAX before ever reusing a freed one. Quick reuse is unsafe — a stale
+ * reference to a dead pid (a `timeout` parent's liveness probe / kill, musl's
+ * __thread_list_lock keyed on a tid) would then land on an unrelated process
+ * that reused the number. Only after the space fills do we wrap and reuse. */
+#define PID_MAX 32768
 static int last_pid = 0;
 static int alloc_pid(void)
 {
+	if (proc_cnt < PID_MAX && proctab_ensure() == 0) {
+		last_pid = proc_cnt;
+		return proc_cnt++;
+	}
 	for (int n = 1; n < proc_cnt; n++) {
 		int i = last_pid + n;
 		if (i >= proc_cnt) i -= (proc_cnt - 1);   /* wrap, skipping slot 0 */
 		if (i == 0) i = 1;
 		if (!proctab[i]) { last_pid = i; return i; }
 	}
-	if (proctab_ensure() != 0) return -1;
-	last_pid = proc_cnt;
-	return proc_cnt++;
+	return -1;
 }
 
 #define KSTACK_CANARY 0xDEADBEEFCAFEBABEULL
