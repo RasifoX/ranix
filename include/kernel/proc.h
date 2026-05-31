@@ -138,6 +138,7 @@ void       sched_requeue_prev(void);
 void       yield(void);
 void       task_sleep(void);
 void       task_sleep_until(uint64_t deadline);
+void       task_sleep_interruptible(void);
 void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);
 int        task_has_actionable_signal(void);
