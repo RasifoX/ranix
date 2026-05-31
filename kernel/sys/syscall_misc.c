@@ -156,7 +156,9 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 
 static long sys_pause(void)
 {
-	task_sleep();
+	process_t *p = task_current();
+	while (!(p->sig_pending & ~p->sig_mask))
+		task_sleep_interruptible();
 	return -4; /* EINTR */
 }
 
@@ -335,7 +337,8 @@ static long sys_rt_sigsuspend(const uint64_t *unewmask, size_t sigsetsize)
 	process_t *p = task_current();
 	uint64_t oldmask = p->sig_mask;
 	p->sig_mask = newmask;
-	task_sleep();
+	while (!(p->sig_pending & ~p->sig_mask))
+		task_sleep_interruptible();
 	p->sig_mask = oldmask;
 	return -4; /* EINTR */
 }

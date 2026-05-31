@@ -1031,6 +1031,18 @@ void task_sleep(void) {
 	arch_yield();
 }
 
+/* Sleep until explicitly woken (task_wake) or a signal arrives (task_signal
+ * wakes a sleeping target). sleeping_on_queue=1 → the per-tick blanket wake
+ * leaves it alone; the caller must loop on its own condition. */
+void task_sleep_interruptible(void) {
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *c = task_current();
+	c->sleeping_on_queue = 1;
+	c->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, f);
+	arch_yield();
+}
+
 /* Sleep until tick `deadline` (or a signal). Woken by the deadline sweep in
  * sched_tick, not the per-tick blanket wake — no churn while sleeping. */
 void task_sleep_until(uint64_t deadline) {
