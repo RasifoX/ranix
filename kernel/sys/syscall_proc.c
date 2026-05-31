@@ -44,287 +44,180 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 
 extern spinlock_t sched_lock;
 
-static struct {
-	uint32_t  *uaddr;
-	process_t *waiter;
-} futex_table[FUTEX_SLOTS];
-static spinlock_t futex_lock = SPINLOCK_INIT;
+/* ── futex: event-driven, per-address hash buckets (Linux futex_q model) ──────
+ * Waiters are stack-allocated nodes linked into a bucket keyed by
+ * (address space, uaddr). FUTEX_WAIT does an atomic value-check + enqueue under
+ * futex_lock, then sleeps; FUTEX_WAKE dequeues and wakes — no fixed slot table,
+ * no slot-reuse races. The wait loop re-reads the user word each iteration, so a
+ * release whose wake was never delivered is still noticed. (A non-timed waiter
+ * could set sleeping_on_queue=1 to drop the per-tick poll entirely — phase 2,
+ * with the blocking-I/O wait-queue rework; kept 0 here for signal/timeout
+ * responsiveness via the existing tick walk.) */
+typedef struct futex_q {
+	struct process *task;
+	uint32_t       *uaddr;
+	void           *mm;
+	int             woken;
+	struct futex_q *next;
+} futex_q_t;
 
+#define FUTEX_BUCKETS 64
+static futex_q_t  *futex_bucket[FUTEX_BUCKETS];
+static spinlock_t  futex_lock = SPINLOCK_INIT;
+
+static unsigned futex_hash(void *mm, uint32_t *uaddr)
+{
+	uintptr_t a = (uintptr_t)uaddr >> 2, m = (uintptr_t)mm >> 6;
+	return (unsigned)((a ^ m) & (FUTEX_BUCKETS - 1));
+}
+
+/* caller holds futex_lock; unlink q if still queued, return 1 if found */
+static int futex_unlink(futex_q_t *q)
+{
+	for (futex_q_t **pp = &futex_bucket[futex_hash(q->mm, q->uaddr)]; *pp; pp = &(*pp)->next)
+		if (*pp == q) { *pp = q->next; q->next = NULL; return 1; }
+	return 0;
+}
+
+/* caller holds futex_lock; wake up to max waiters on (mm,uaddr), requeue up to
+ * max_req of the remainder onto uaddr2. returns number woken. */
+static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
+                         uint32_t *uaddr2, int max_req)
+{
+	int woken = 0, requeued = 0;
+	futex_q_t **pp = &futex_bucket[futex_hash(mm, uaddr)];
+	while (*pp) {
+		futex_q_t *q = *pp;
+		if (q->mm != mm || q->uaddr != uaddr) { pp = &q->next; continue; }
+		if (woken < max) {
+			*pp = q->next; q->next = NULL;
+			q->woken = 1;
+			task_wake(q->task);
+			woken++;
+		} else if (uaddr2 && requeued < max_req) {
+			*pp = q->next;
+			q->uaddr = uaddr2;
+			unsigned h2 = futex_hash(mm, uaddr2);
+			q->next = futex_bucket[h2]; futex_bucket[h2] = q;
+			requeued++;
+		} else {
+			pp = &q->next;
+		}
+	}
+	return woken;
+}
 
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
 	int cmd = op & ~FUTEX_PRIVATE_FLAG;
+	process_t *self = task_current();
+	void *mm = self->vm;
 
-	if (cmd == FUTEX_WAIT) {
-		uint64_t f = spin_lock_irq(&futex_lock);
-		uint32_t cur;
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) {
-			spin_unlock_irq(&futex_lock, f);
-			return -14;
-		}
-		if (cur != val) {
-			spin_unlock_irq(&futex_lock, f);
-			return -11; /* EAGAIN */
-		}
-		int slot = -1;
-		for (int i = 0; i < FUTEX_SLOTS; i++) {
-			if (!futex_table[i].waiter) { slot = i; break; }
-		}
-		if (slot < 0) { spin_unlock_irq(&futex_lock, f); return -11; }
-		futex_table[slot].uaddr  = uaddr;
-		futex_table[slot].waiter = task_current();
-		spin_unlock_irq(&futex_lock, f);
-
-		process_t *self = task_current();
+	if (cmd == FUTEX_WAIT || cmd == 9 /* FUTEX_WAIT_BITSET */) {
+		int timed = 0;
+		uint64_t end = 0;
 		if (timeout) {
 			linux_timespec_t kts;
 			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
-				uint64_t end = kernel_ticks +
-				    (uint64_t)kts.tv_sec * TIMER_HZ +
-				    (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
-				while (kernel_ticks < end) {
-					uint64_t fq = spin_lock_irq(&futex_lock);
-					uint32_t cur2;
-					if (futex_table[slot].waiter != task_current() ||
-					    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
-						spin_unlock_irq(&futex_lock, fq);
-						break;
-					}
-					uint64_t fs = spin_lock_irq(&sched_lock);
-					self->state = PROC_SLEEPING;
-					int sig = (self->sig_pending & ~self->sig_mask) != 0;
-					if (sig) self->state = PROC_RUNNING;
-					spin_unlock_irq(&sched_lock, fs);
-					spin_unlock_irq(&futex_lock, fq);
-					if (sig) break;
-					arch_yield();
-					if (self->sig_pending & ~self->sig_mask) break;
-				}
-			}
-		} else {
-			while (1) {
-				uint64_t fq = spin_lock_irq(&futex_lock);
-				uint32_t cur2;
-				if (futex_table[slot].waiter != task_current() ||
-				    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
-					spin_unlock_irq(&futex_lock, fq);
-					break;
-				}
-				uint64_t fs = spin_lock_irq(&sched_lock);
-				self->state = PROC_SLEEPING;
-				int sig = (self->sig_pending & ~self->sig_mask) != 0;
-				if (sig) self->state = PROC_RUNNING;
-				spin_unlock_irq(&sched_lock, fs);
-				spin_unlock_irq(&futex_lock, fq);
-				if (sig) break;
-				arch_yield();
-				if (self->sig_pending & ~self->sig_mask) break;
+				end = kernel_ticks + (uint64_t)kts.tv_sec * TIMER_HZ +
+				      (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
+				timed = 1;
 			}
 		}
-
-		f = spin_lock_irq(&futex_lock);
-		/* Woken iff our entry was removed (by a WAKE). If the slot was reused by
-		 * a new waiter it is no longer ours, so we were still woken — and must
-		 * NOT clear it, or we would drop that waiter's registration. */
-		int was_woken = (futex_table[slot].waiter != task_current());
-		if (!was_woken) {
-			futex_table[slot].waiter = NULL;
-			futex_table[slot].uaddr  = NULL;
-		}
+		futex_q_t q = { self, uaddr, mm, 0, NULL };
+		uint64_t f = spin_lock_irq(&futex_lock);
+		uint32_t cur;
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -14; }
+		if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -11; }
+		unsigned h = futex_hash(mm, uaddr);
+		q.next = futex_bucket[h]; futex_bucket[h] = &q;
+		uint64_t fs = spin_lock_irq(&sched_lock);
+		self->state = PROC_SLEEPING;
+		self->sleeping_on_queue = 0;
+		spin_unlock_irq(&sched_lock, fs);
 		spin_unlock_irq(&futex_lock, f);
-		return was_woken ? 0 : -4; /* EINTR if not woken by WAKE */
+
+		for (;;) {
+			arch_yield();
+			f = spin_lock_irq(&futex_lock);
+			if (q.woken) { spin_unlock_irq(&futex_lock, f); return 0; }
+			int sig = (self->sig_pending & ~self->sig_mask) != 0;
+			uint32_t c2;
+			int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
+			int tmo  = timed && kernel_ticks >= end;
+			if (sig || vchg || tmo) {
+				futex_unlink(&q);
+				spin_unlock_irq(&futex_lock, f);
+				return sig ? -4 : (tmo ? -110 : -11);
+			}
+			fs = spin_lock_irq(&sched_lock);
+			self->state = PROC_SLEEPING;
+			spin_unlock_irq(&sched_lock, fs);
+			spin_unlock_irq(&futex_lock, f);
+		}
 	}
 
 	if (cmd == FUTEX_WAKE) {
 		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = 0;
-		for (int i = 0; i < FUTEX_SLOTS && woken < (int)val; i++) {
-			if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
-				task_wake_no_resched(futex_table[i].waiter);
-				futex_table[i].waiter = NULL;
-				futex_table[i].uaddr  = NULL;
-				woken++;
-			}
-		}
+		int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
 	}
 
 	if (cmd == FUTEX_WAKE_OP) {
 		if (!uaddr2) return -22;
-		/* val3 encoding: op[31:28] cmp[27:24] oparg[23:12] cmparg[11:0] */
-		uint32_t op3     = (val3 >> 28) & 0xf;
-		uint32_t cmp3    = (val3 >> 24) & 0xf;
-		uint32_t oparg   = (val3 >> 12) & 0xfff;
-		uint32_t cmparg  = val3 & 0xfff;
-		if (op3 & 8) { oparg = 1u << oparg; op3 &= ~8u; } /* FUTEX_OP_ARG_SHIFT */
+		uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
+		uint32_t oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
+		if (op3 & 8) { oparg = 1u << oparg; op3 &= ~8u; }
 		uint32_t oldval = 0;
 		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -14;
 		uint32_t newval = oldval;
 		switch (op3) {
-		case 0: newval  = oparg; break;           /* SET */
-		case 1: newval += oparg; break;           /* ADD */
-		case 2: newval |= oparg; break;           /* OR  */
-		case 3: newval &= ~oparg; break;          /* ANDN */
-		case 4: newval ^= oparg; break;           /* XOR */
+		case 0: newval  = oparg; break; case 1: newval += oparg; break;
+		case 2: newval |= oparg; break; case 3: newval &= ~oparg; break;
+		case 4: newval ^= oparg; break;
 		}
 		if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -14;
-		/* wake val waiters on uaddr */
 		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = 0;
-		for (int i = 0; i < FUTEX_SLOTS && woken < (int)val; i++) {
-			if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
-				task_wake_no_resched(futex_table[i].waiter);
-				futex_table[i].waiter = NULL;
-				futex_table[i].uaddr  = NULL;
-				woken++;
-			}
-		}
-		/* wake val2 waiters on uaddr2 if cmp holds */
-		int do_wake2 = 0;
+		int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
+		int do2 = 0;
 		switch (cmp3) {
-		case 0: do_wake2 = (oldval == cmparg); break;
-		case 1: do_wake2 = (oldval != cmparg); break;
-		case 2: do_wake2 = ((int32_t)oldval <  (int32_t)cmparg); break;
-		case 3: do_wake2 = ((int32_t)oldval <= (int32_t)cmparg); break;
-		case 4: do_wake2 = ((int32_t)oldval >  (int32_t)cmparg); break;
-		case 5: do_wake2 = ((int32_t)oldval >= (int32_t)cmparg); break;
+		case 0: do2 = (oldval == cmparg); break; case 1: do2 = (oldval != cmparg); break;
+		case 2: do2 = ((int32_t)oldval <  (int32_t)cmparg); break;
+		case 3: do2 = ((int32_t)oldval <= (int32_t)cmparg); break;
+		case 4: do2 = ((int32_t)oldval >  (int32_t)cmparg); break;
+		case 5: do2 = ((int32_t)oldval >= (int32_t)cmparg); break;
 		}
-		if (do_wake2) {
-			/* val2 is passed as the timeout pointer cast to uintptr_t */
-			int val2 = (int)(uintptr_t)timeout;
-			for (int i = 0; i < FUTEX_SLOTS && woken < (int)val + val2; i++) {
-				if (futex_table[i].uaddr == uaddr2 && futex_table[i].waiter) {
-					task_wake_no_resched(futex_table[i].waiter);
-					futex_table[i].waiter = NULL;
-					futex_table[i].uaddr  = NULL;
-					woken++;
-				}
-			}
-		}
+		if (do2) woken += futex_do_wake(mm, uaddr2, (int)(uintptr_t)timeout, NULL, 0);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
 	}
 
-	if (cmd == FUTEX_REQUEUE || cmd == (FUTEX_REQUEUE|FUTEX_PRIVATE_FLAG) ||
-	    cmd == 4 /* FUTEX_CMP_REQUEUE */ || cmd == (4|FUTEX_PRIVATE_FLAG)) {
-		/* REQUEUE: wake up to val waiters on uaddr, requeue rest to uaddr2 */
-		if (cmd == 4 || cmd == (4|FUTEX_PRIVATE_FLAG)) {
-			uint32_t cur;
+	if (cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */) {
+		if (cmd == 4) {
 			uint64_t fq = spin_lock_irq(&futex_lock);
-			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) {
-				spin_unlock_irq(&futex_lock, fq);
-				return -14;
-			}
-			if (cur != val3) { spin_unlock_irq(&futex_lock, fq); return -11; }
+			uint32_t cur;
+			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, fq); return -14; }
+			if (cur != val3)                                   { spin_unlock_irq(&futex_lock, fq); return -11; }
 			spin_unlock_irq(&futex_lock, fq);
 		}
 		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = 0;
-		int requeued = 0;
-		int max_wake = (int)val;
-		int max_req  = (int)(uintptr_t)timeout; /* val2 passed as timeout ptr */
-		for (int i = 0; i < FUTEX_SLOTS; i++) {
-			if (futex_table[i].uaddr != uaddr || !futex_table[i].waiter) continue;
-			if (woken < max_wake) {
-				task_wake(futex_table[i].waiter);
-				futex_table[i].waiter = NULL;
-				futex_table[i].uaddr  = NULL;
-				woken++;
-			} else if (requeued < max_req && uaddr2) {
-				futex_table[i].uaddr = uaddr2;
-				requeued++;
-			}
-		}
+		int woken = futex_do_wake(mm, uaddr, (int)val, uaddr2, (int)(uintptr_t)timeout);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
-	}
-
-	/* FUTEX_WAIT_BITSET (9) — treat like WAIT, ignore bitset */
-	if ((cmd & ~FUTEX_PRIVATE_FLAG) == 9) {
-		uint64_t f = spin_lock_irq(&futex_lock);
-		uint32_t cur;
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -14; }
-		if (cur != val) { spin_unlock_irq(&futex_lock, f); return -11; }
-		int slot = -1;
-		for (int i = 0; i < FUTEX_SLOTS; i++) { if (!futex_table[i].waiter) { slot = i; break; } }
-		if (slot < 0) { spin_unlock_irq(&futex_lock, f); return -11; }
-		futex_table[slot].uaddr  = uaddr;
-		futex_table[slot].waiter = task_current();
-		spin_unlock_irq(&futex_lock, f);
-		process_t *self2 = task_current();
-		if (timeout) {
-			linux_timespec_t kts;
-			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
-				uint64_t end = kernel_ticks + (uint64_t)kts.tv_sec * TIMER_HZ +
-				               (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
-				while (kernel_ticks < end) {
-					uint64_t fq = spin_lock_irq(&futex_lock);
-					uint32_t cur2;
-					if (futex_table[slot].waiter != task_current() ||
-					    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
-						spin_unlock_irq(&futex_lock, fq);
-						break;
-					}
-					uint64_t fs = spin_lock_irq(&sched_lock);
-					self2->state = PROC_SLEEPING;
-					int sig = (self2->sig_pending & ~self2->sig_mask) != 0;
-					if (sig) self2->state = PROC_RUNNING;
-					spin_unlock_irq(&sched_lock, fs);
-					spin_unlock_irq(&futex_lock, fq);
-					if (sig) break;
-					arch_yield();
-					if (self2->sig_pending & ~self2->sig_mask) break;
-				}
-			}
-		} else {
-			while (1) {
-				uint64_t fq = spin_lock_irq(&futex_lock);
-				uint32_t cur2;
-				if (futex_table[slot].waiter != task_current() ||
-				    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
-					spin_unlock_irq(&futex_lock, fq);
-					break;
-				}
-				uint64_t fs = spin_lock_irq(&sched_lock);
-				self2->state = PROC_SLEEPING;
-				int sig = (self2->sig_pending & ~self2->sig_mask) != 0;
-				if (sig) self2->state = PROC_RUNNING;
-				spin_unlock_irq(&sched_lock, fs);
-				spin_unlock_irq(&futex_lock, fq);
-				if (sig) break;
-				arch_yield();
-				if (self2->sig_pending & ~self2->sig_mask) break;
-			}
-		}
-		f = spin_lock_irq(&futex_lock);
-		int woken2 = (futex_table[slot].waiter != task_current());
-		if (!woken2) {
-			futex_table[slot].waiter = NULL;
-			futex_table[slot].uaddr  = NULL;
-		}
-		spin_unlock_irq(&futex_lock, f);
-		return woken2 ? 0 : -4;
 	}
 
 	return -38;
 }
 
-/* Called from sched.c task_exit to wake futex waiters on clear_child_tid */
+/* Called from sched.c task_exit to wake futex waiters on clear_child_tid. */
 void futex_wake_addr(uint32_t *uaddr)
 {
 	if (!uaddr) return;
+	process_t *self = task_current();
 	uint64_t f = spin_lock_irq(&futex_lock);
-	int n = 0;
-	for (int i = 0; i < FUTEX_SLOTS; i++) {
-		if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
-			task_wake(futex_table[i].waiter);
-			futex_table[i].waiter = NULL;
-			futex_table[i].uaddr  = NULL;
-			n++;
-		}
-	}
+	futex_do_wake(self ? self->vm : NULL, uaddr, 0x7fffffff, NULL, 0);
 	spin_unlock_irq(&futex_lock, f);
 }
 
