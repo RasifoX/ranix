@@ -50,6 +50,7 @@ static struct {
 } futex_table[FUTEX_SLOTS];
 static spinlock_t futex_lock = SPINLOCK_INIT;
 
+
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
@@ -84,7 +85,9 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				    (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
 				while (kernel_ticks < end) {
 					uint64_t fq = spin_lock_irq(&futex_lock);
-					if (futex_table[slot].waiter != task_current()) {
+					uint32_t cur2;
+					if (futex_table[slot].waiter != task_current() ||
+					    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
 						spin_unlock_irq(&futex_lock, fq);
 						break;
 					}
@@ -102,7 +105,9 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		} else {
 			while (1) {
 				uint64_t fq = spin_lock_irq(&futex_lock);
-				if (!futex_table[slot].waiter) {
+				uint32_t cur2;
+				if (futex_table[slot].waiter != task_current() ||
+				    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
 					spin_unlock_irq(&futex_lock, fq);
 					break;
 				}
@@ -256,7 +261,9 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				               (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
 				while (kernel_ticks < end) {
 					uint64_t fq = spin_lock_irq(&futex_lock);
-					if (futex_table[slot].waiter != task_current()) {
+					uint32_t cur2;
+					if (futex_table[slot].waiter != task_current() ||
+					    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
 						spin_unlock_irq(&futex_lock, fq);
 						break;
 					}
@@ -274,7 +281,9 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		} else {
 			while (1) {
 				uint64_t fq = spin_lock_irq(&futex_lock);
-				if (!futex_table[slot].waiter) {
+				uint32_t cur2;
+				if (futex_table[slot].waiter != task_current() ||
+				    (copy_from_user(&cur2, uaddr, sizeof(cur2)) == 0 && cur2 != val)) {
 					spin_unlock_irq(&futex_lock, fq);
 					break;
 				}
@@ -307,11 +316,13 @@ void futex_wake_addr(uint32_t *uaddr)
 {
 	if (!uaddr) return;
 	uint64_t f = spin_lock_irq(&futex_lock);
+	int n = 0;
 	for (int i = 0; i < FUTEX_SLOTS; i++) {
 		if (futex_table[i].uaddr == uaddr && futex_table[i].waiter) {
 			task_wake(futex_table[i].waiter);
 			futex_table[i].waiter = NULL;
 			futex_table[i].uaddr  = NULL;
+			n++;
 		}
 	}
 	spin_unlock_irq(&futex_lock, f);
