@@ -30,6 +30,28 @@ static int  bm_get(uint64_t p) { return  free_bm[p >> 3] &  (1 << (p & 7)); }
 static uint64_t pidx(uint64_t addr) { return (addr - _base) >> PAGE_SHIFT; }
 static uint64_t paddr(uint64_t p)   { return _base + (p << PAGE_SHIFT); }
 
+/* Poison-on-free: stamp the first word of every freed page and verify it on the
+ * next allocation. A free page has no legitimate writer, so a changed word means
+ * a use-after-free *write* hit it while it sat on the free list. Per-page (not
+ * per-block) so it survives buddy split/merge. Cheap: one word touched per page. */
+#define BUDDY_POISON 0x6b6b6b6b6b6b6b6bULL
+
+static void buddy_poison(uint64_t addr, int ord)
+{
+	uint64_t npg = 1ul << ord;
+	for (uint64_t i = 0; i < npg; i++)
+		*(volatile uint64_t *)PHYS_TO_VIRT(addr + (i << PAGE_SHIFT)) = BUDDY_POISON;
+}
+
+static int buddy_poison_ok(uint64_t addr, int ord)
+{
+	uint64_t npg = 1ul << ord;
+	for (uint64_t i = 0; i < npg; i++)
+		if (*(volatile uint64_t *)PHYS_TO_VIRT(addr + (i << PAGE_SHIFT)) != BUDDY_POISON)
+			return 0;
+	return 1;
+}
+
 page_t *paddr_to_page(uint64_t p)
 {
 	uint64_t idx = p >> PAGE_SHIFT;
@@ -82,6 +104,8 @@ void buddy_free(uint64_t addr, int ord)
 		return;
 	}
 
+	buddy_poison(addr, ord);   /* stamp before it joins the free list */
+
 	uint64_t npg = 1ul << ord;
 	_free_pages += npg;
 	for (uint64_t i = 0; i < npg; i++) {
@@ -130,6 +154,9 @@ void *buddy_alloc(int ord)
 	}
 
 	blk_order[p] = (uint8_t)ord;
+
+	if (!buddy_poison_ok(addr, ord))
+		kprintf("buddy: USE-AFTER-FREE write detected on addr=%lx ord=%d (poison clobbered)\n", addr, ord);
 
 	uint64_t npg = 1ul << ord;
 	_free_pages -= npg;
