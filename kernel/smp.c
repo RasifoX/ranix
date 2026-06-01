@@ -116,10 +116,10 @@ void smp_init(void)
 		ap_boot_sync[i].sp_phys   = VIRT_TO_PHYS((uint64_t)(ap_kstacks[i] + KSTACK_SIZE));
 
 #ifdef __aarch64__
-		extern uint64_t kernel_l1[];
-		extern uint64_t kernel_l1_high[];
-		ap_boot_sync[i].ttbr0_phys = (uint64_t)kernel_l1;
-		ap_boot_sync[i].ttbr1_phys = (uint64_t)kernel_l1_high;
+		extern uint64_t kernel_l0[];
+		extern uint64_t kernel_l0_high[];
+		ap_boot_sync[i].ttbr0_phys = (uint64_t)kernel_l0;   /* 4-level: L0 roots */
+		ap_boot_sync[i].ttbr1_phys = (uint64_t)kernel_l0_high;
 #endif
 
 		__asm__ volatile("" ::: "memory");
