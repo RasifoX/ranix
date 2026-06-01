@@ -12,7 +12,7 @@
 static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldact, size_t sigsetsize)
 {
 	if (sig <= 0 || sig > NSIG || sigsetsize < 8) return -22;
-	if (sig == SIGKILL) return -22;
+	if (sig == SIGKILL || sig == SIGSTOP) return -22;   /* uncatchable */
 
 	/* struct sigaction (kernel ABI): handler, flags, restorer, mask[N]
 	 * Our sigaction_t mirrors this layout. User struct may have larger
@@ -52,7 +52,7 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 		else if (how == 2) p->sig_mask = new_set;    /* SIG_SETMASK */
 		else return -22;
 
-		p->sig_mask &= ~(1UL << (SIGKILL - 1));
+		p->sig_mask &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));  /* unblockable */
 	}
 	return 0;
 }
