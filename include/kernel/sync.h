@@ -57,4 +57,9 @@ void sleep_on(wait_queue_t *q);
 void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags);
 void wake_up(wait_queue_t *q);
 
+/* poll/select/epoll: poll_block() sleeps until poll_notify() or the deadline;
+ * producers call poll_notify() when an fd's readiness changes. */
+void poll_notify(void);
+void poll_block(uint64_t deadline);
+
 #endif
