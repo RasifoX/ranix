@@ -1,5 +1,6 @@
 #include <kernel/proc.h>
 #include <kernel/nsproxy.h>
+#include <kernel/pid_namespace.h>
 #include <kernel/cgroup.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>

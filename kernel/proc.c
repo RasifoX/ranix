@@ -58,6 +58,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	proctab[0]->next = p;
 	runqueue_add(p);
 	proctab[pid] = p;
+	pidns_attach(p, &init_pid_ns, pid);
 	spin_unlock_irq(&sched_lock, f);
 	return p->pid;
 }
@@ -179,6 +180,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		proctab[0]->next = p;
 		runqueue_add(p);
 		proctab[pid] = p;
+		pidns_attach(p, &init_pid_ns, pid);
 		spin_unlock_irq(&sched_lock, f);
 	}
 	return p->pid;
@@ -205,6 +207,19 @@ pid_t proc_fork(uint64_t clone_flags)
 	 * cgroup_exit when the child eventually exits. */
 	if (cgroup_can_fork(parent) != 0) { buddy_free(VIRT_TO_PHYS(child), 0); return -11; }
 	cgroup_fork_attach(child, parent);
+
+	/* pick the child's pid namespace: a fresh one for clone(CLONE_NEWPID), the
+	 * parent's pending ns (unshare CLONE_NEWPID), else the parent's own. */
+	pid_namespace_t *target_pidns;
+	int owns_pidns = 0;
+	if (clone_flags & CLONE_NEWPID) {
+		target_pidns = pid_ns_create_child(parent->pid_ns ? parent->pid_ns : &init_pid_ns);
+		if (!target_pidns) { cgroup_cancel_fork(parent); buddy_free(VIRT_TO_PHYS(child), 0); return -12; }
+		owns_pidns = 1;
+	} else {
+		target_pidns = parent->pid_ns_new ? parent->pid_ns_new
+		             : (parent->pid_ns ? parent->pid_ns : &init_pid_ns);
+	}
 
 	child->ppid      = parent->pid;
 	child->pgrp      = parent->pgrp;
@@ -295,8 +310,10 @@ pid_t proc_fork(uint64_t clone_flags)
 		proctab[0]->next = child;
 		runqueue_add(child);
 		proctab[pid] = child;
+		pidns_attach(child, target_pidns, pid);
 		spin_unlock_irq(&sched_lock, f);
 	}
+	if (owns_pidns) pid_ns_put(target_pidns);   /* child holds its own ref now */
 	return child->pid;
 
 fail_early:
@@ -307,6 +324,7 @@ fail_early:
 	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
 	if (child->time_ns) time_ns_put(child->time_ns);
 	if (child->mnt_ns) mnt_ns_put(child->mnt_ns);
+	if (owns_pidns) pid_ns_put(target_pidns);
 	cgroup_cancel_fork(parent);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
@@ -373,6 +391,7 @@ pid_t proc_vfork(void)
 	proctab[0]->next = child;
 	runqueue_add(child);
 	proctab[pid] = child;
+	pidns_attach(child, parent->pid_ns ? parent->pid_ns : &init_pid_ns, pid);
 
 	if (parent->ctx)
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
@@ -478,6 +497,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->next      = proctab[0]->next;
 	proctab[0]->next = child;
 	proctab[pid] = child;
+	pidns_attach(child, parent->pid_ns ? parent->pid_ns : &init_pid_ns, pid);
 	/* Write the real child TID before the child is runnable, for the flags
 	 * that demand it at creation: CLONE_PARENT_SETTID (*ptid) and
 	 * CLONE_CHILD_SETTID (*set_tid). musl keys __tl_lock on
@@ -578,6 +598,16 @@ void task_exit(void)
 	if (p->time_ns_new) { time_ns_put(p->time_ns_new); p->time_ns_new = NULL; }
 	mnt_ns_put(p->mnt_ns);
 	p->mnt_ns = NULL;
+	/* If this is a pid namespace's init (nr 1), capture that before detaching
+	 * so the reparent section can tear the namespace down; hold an extra ref so
+	 * it survives the put below. */
+	pid_namespace_t *exit_pidns = p->pid_ns;
+	int exit_is_reaper = exit_pidns && exit_pidns != &init_pid_ns && task_vpid(p) == 1;
+	if (exit_is_reaper) pid_ns_get(exit_pidns);
+	pidns_detach(p);
+	if (p->pid_ns_new) { pid_ns_put(p->pid_ns_new); p->pid_ns_new = NULL; }
+	pid_ns_put(p->pid_ns);
+	p->pid_ns = NULL;
 	cgroup_exit(p);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -620,10 +650,29 @@ void task_exit(void)
 		if (++walk > walk_max)
 			kpanic("task_exit: process list cycle (corrupt ->next)");
 		if (c->ppid == (pid_t)p->pid && c != p) {
-			c->ppid = init_proc ? (pid_t)init_proc->pid : 0;
-			if ((c->state == PROC_DEAD || c->state == PROC_ZOMBIE) && init_proc)
-				init_proc->sig_pending |= (1UL << (SIGCHLD - 1));
+			/* orphans reparent to the reaper (nr 1) of their own pid ns */
+			pid_namespace_t *cns = c->pid_ns;
+			process_t *reaper = (cns && cns != &init_pid_ns && cns->reaper && cns->reaper != c)
+			                  ? cns->reaper : init_proc;
+			c->ppid = reaper ? (pid_t)reaper->pid : 0;
+			if ((c->state == PROC_DEAD || c->state == PROC_ZOMBIE) && reaper)
+				reaper->sig_pending |= (1UL << (SIGCHLD - 1));
 		}
+	}
+
+	/* A pid namespace's init dying takes the whole namespace down: SIGKILL
+	 * every remaining member (standard CLONE_NEWPID semantics). */
+	if (exit_is_reaper) {
+		exit_pidns->dead = 1;
+		for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next)
+			if (c != p && c->pid_ns == exit_pidns) {
+				c->sig_pending |= (1UL << (SIGKILL - 1));
+				if (c->state == PROC_SLEEPING) {
+					c->state = PROC_READY;
+					if (!c->on_cpu) runqueue_add(c);
+					arch_get_cpu_ctx()->need_resched = 1;
+				}
+			}
 	}
 
 	process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
@@ -637,6 +686,8 @@ void task_exit(void)
 	}
 
 	spin_unlock_irq(&sched_lock, f);
+
+	if (exit_is_reaper) pid_ns_put(exit_pidns);   /* drop the teardown ref */
 
 	arch_yield();
 }

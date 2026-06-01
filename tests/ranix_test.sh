@@ -222,6 +222,7 @@ check "proc-self-ns-uts"  "uts" "$(readlink /proc/self/ns/uts | cut -d: -f1)"
 check "proc-self-ns-ipc"  "ipc" "$(readlink /proc/self/ns/ipc | cut -d: -f1)"
 check "proc-self-ns-time" "time" "$(readlink /proc/self/ns/time | cut -d: -f1)"
 check "proc-self-ns-mnt"  "mnt" "$(readlink /proc/self/ns/mnt | cut -d: -f1)"
+check "proc-self-ns-pid"  "pid" "$(readlink /proc/self/ns/pid | cut -d: -f1)"
 check "proc-filesystems"  "1"  "$(grep -c ext2 /proc/filesystems)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
@@ -314,6 +315,7 @@ check "shared-lib"   "sharedlib-ok" "$(timeout 10 /bin/test_sharedlib 2>/dev/nul
 check "dlopen"       "dlopen-ok" "$(timeout 10 /bin/test_dlopen 2>/dev/null)"
 check "cgroup-pids"  "cgroup-ok" "$(timeout 15 /bin/test_cgroup 2>/dev/null)"
 check "mount-ns"     "mountns-ok" "$(timeout 10 /bin/test_mountns 2>/dev/null)"
+check "pid-ns"       "pidns-ok" "$(timeout 10 /bin/test_pidns 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"

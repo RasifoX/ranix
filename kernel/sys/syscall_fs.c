@@ -357,7 +357,12 @@ static long sys_getuid(void)  { return (long)task_current()->uid; }
 static long sys_geteuid(void) { return (long)task_current()->euid; }
 static long sys_getgid(void)  { return (long)task_current()->gid; }
 static long sys_getegid(void) { return (long)task_current()->egid; }
-static long sys_getppid(void) { return (long)task_current()->ppid; }
+static long sys_getppid(void)
+{
+	process_t *p = task_current();
+	process_t *parent = proc_find(p->ppid);
+	return parent ? (long)task_pid_nr_ns(parent, current_pid_ns()) : 0;
+}
 static long sys_gettid(void)  { return (long)task_current()->pid; }
 static long sys_getgroups(int size, uint64_t *list) {
 	process_t *p = task_current();
