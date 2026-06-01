@@ -13,4 +13,17 @@ void cgroup_exit(struct process *p);
 void cgroup_register(void);
 int  cgroup_mount(struct vfs_mount *mnt, void *data);
 
+/* cgroup namespace */
+struct cgroup_namespace;
+extern struct cgroup_namespace init_cgroup_ns;
+struct cgroup_namespace *current_cgroup_ns(void);
+struct cgroup_namespace *cgroup_ns_get(struct cgroup_namespace *ns);
+void                     cgroup_ns_put(struct cgroup_namespace *ns);
+struct cgroup_namespace *cgroup_ns_create(void);
+unsigned long            cgroup_ns_inum(struct cgroup_namespace *ns);
+int  cgroup_proc_path(struct process *p, char *buf, int sz);
+
+struct vfs_file;
+struct cgroup_namespace *nsfile_to_cgroup(struct vfs_file *f);
+
 #endif

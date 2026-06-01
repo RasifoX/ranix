@@ -18,6 +18,8 @@
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 
+extern unsigned long ns_inum_alloc(void);
+
 typedef struct cgroup {
 	char            name[64];
 	struct cgroup  *parent;
@@ -29,6 +31,78 @@ typedef struct cgroup {
 
 static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0 };
 static spinlock_t cg_lock = SPINLOCK_INIT;
+
+/* ── cgroup namespace ──────────────────────────────────────── */
+
+struct cgroup_namespace {
+	int           refcount;
+	unsigned long inum;
+	cgroup_t     *root;     /* the cgroup that appears as "/" in this ns */
+};
+
+struct cgroup_namespace init_cgroup_ns = { .refcount = 1, .inum = 0xF0000008UL, .root = &cgroup_root };
+static spinlock_t cgns_lock = SPINLOCK_INIT;
+
+struct cgroup_namespace *current_cgroup_ns(void)
+{
+	process_t *p = task_current();
+	return (p && p->cgroup_ns) ? p->cgroup_ns : &init_cgroup_ns;
+}
+
+struct cgroup_namespace *cgroup_ns_get(struct cgroup_namespace *ns)
+{
+	if (!ns) ns = &init_cgroup_ns;
+	if (ns != &init_cgroup_ns) {
+		uint64_t f = spin_lock_irq(&cgns_lock);
+		ns->refcount++;
+		spin_unlock_irq(&cgns_lock, f);
+	}
+	return ns;
+}
+
+void cgroup_ns_put(struct cgroup_namespace *ns)
+{
+	if (!ns || ns == &init_cgroup_ns) return;
+	uint64_t f = spin_lock_irq(&cgns_lock);
+	int last = (--ns->refcount == 0);
+	spin_unlock_irq(&cgns_lock, f);
+	if (last) kfree(ns);
+}
+
+struct cgroup_namespace *cgroup_ns_create(void)
+{
+	process_t *p = task_current();
+	struct cgroup_namespace *ns = kmalloc(sizeof(*ns));
+	if (!ns) return NULL;
+	ns->refcount = 1;
+	ns->inum     = ns_inum_alloc();
+	ns->root     = p && p->cgroup ? (cgroup_t *)p->cgroup : &cgroup_root;
+	return ns;
+}
+
+unsigned long cgroup_ns_inum(struct cgroup_namespace *ns)
+{
+	return (ns ? ns : &init_cgroup_ns)->inum;
+}
+
+/* /proc/<pid>/cgroup path of p's cgroup, relative to the caller's cgroup ns
+ * root. Format component is just the path; caller adds the "0::" prefix. */
+int cgroup_proc_path(process_t *p, char *buf, int sz)
+{
+	cgroup_t *cg     = p && p->cgroup ? (cgroup_t *)p->cgroup : &cgroup_root;
+	cgroup_t *nsroot = current_cgroup_ns()->root;
+	/* collect names from cg up to (not including) nsroot */
+	cgroup_t *chain[16]; int n = 0;
+	for (cgroup_t *c = cg; c && c != nsroot && n < 16; c = c->parent) chain[n++] = c;
+	int pos = 0;
+	if (n == 0) { if (pos < sz - 1) buf[pos++] = '/'; }  /* at the ns root */
+	for (int i = n - 1; i >= 0; i--) {
+		if (pos < sz - 1) buf[pos++] = '/';
+		for (int k = 0; chain[i]->name[k] && pos < sz - 1; k++) buf[pos++] = chain[i]->name[k];
+	}
+	buf[pos] = '\0';
+	return pos;
+}
 
 /* ── charge / uncharge (subtree counts, limit check) ─────────── */
 
