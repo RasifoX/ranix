@@ -13,6 +13,10 @@ void cgroup_exit(struct process *p);
 void cgroup_register(void);
 int  cgroup_mount(struct vfs_mount *mnt, void *data);
 
+/* memory controller (cg = a process's ->cgroup, void to keep cgroup_t opaque) */
+int  cgroup_charge_mem(void *cg, long n);   /* 0 ok, -1 over memory.max */
+void cgroup_uncharge_mem(void *cg, long n);
+
 /* cgroup namespace */
 struct cgroup_namespace;
 extern struct cgroup_namespace init_cgroup_ns;

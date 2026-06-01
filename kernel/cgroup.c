@@ -27,10 +27,38 @@ typedef struct cgroup {
 	struct cgroup  *sibling;    /* next sibling */
 	long            pids_max;   /* -1 = unlimited */
 	long            nr_procs;   /* processes in this subtree */
+	long            mem_max;    /* memory.max bytes, -1 = unlimited */
+	long            mem_cur;    /* memory.current bytes in this subtree */
 } cgroup_t;
 
-static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0 };
+static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0, .mem_max = -1 };
 static spinlock_t cg_lock = SPINLOCK_INIT;
+
+/* memory controller: charge n bytes to cg's subtree; fail if over memory.max */
+int cgroup_charge_mem(void *cgp, long n)
+{
+	cgroup_t *cg = cgp ? (cgroup_t *)cgp : &cgroup_root;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	for (cgroup_t *c = cg; c; c = c->parent)
+		if (c->mem_max >= 0 && c->mem_cur + n > c->mem_max) {
+			spin_unlock_irq(&cg_lock, f);
+			return -1;
+		}
+	for (cgroup_t *c = cg; c; c = c->parent) c->mem_cur += n;
+	spin_unlock_irq(&cg_lock, f);
+	return 0;
+}
+
+void cgroup_uncharge_mem(void *cgp, long n)
+{
+	cgroup_t *cg = cgp ? (cgroup_t *)cgp : &cgroup_root;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	for (cgroup_t *c = cg; c; c = c->parent) {
+		c->mem_cur -= n;
+		if (c->mem_cur < 0) c->mem_cur = 0;
+	}
+	spin_unlock_irq(&cg_lock, f);
+}
 
 /* ── cgroup namespace ──────────────────────────────────────── */
 
@@ -157,8 +185,9 @@ void cgroup_exit(struct process *p)
 
 /* ── cgroupfs ────────────────────────────────────────────────── */
 
-enum { CG_PROCS = 0, CG_PIDS_MAX, CG_PIDS_CURRENT, CG_CONTROLLERS, CG_NFILES };
-static const char *cg_files[] = { "cgroup.procs", "pids.max", "pids.current", "cgroup.controllers" };
+enum { CG_PROCS = 0, CG_PIDS_MAX, CG_PIDS_CURRENT, CG_CONTROLLERS, CG_MEM_MAX, CG_MEM_CUR, CG_NFILES };
+static const char *cg_files[] = { "cgroup.procs", "pids.max", "pids.current", "cgroup.controllers",
+                                  "memory.max", "memory.current" };
 
 typedef struct { cgroup_t *cg; int file; } cg_priv_t;   /* file=-1 → directory */
 
@@ -189,8 +218,16 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 	case CG_PIDS_CURRENT:
 		n = cg_putlong(tmp, pr->cg->nr_procs); tmp[n++] = '\n';
 		break;
+	case CG_MEM_MAX:
+		if (pr->cg->mem_max < 0) { tmp[n++]='m';tmp[n++]='a';tmp[n++]='x'; }
+		else n += cg_putlong(tmp, pr->cg->mem_max);
+		tmp[n++] = '\n';
+		break;
+	case CG_MEM_CUR:
+		n = cg_putlong(tmp, pr->cg->mem_cur); tmp[n++] = '\n';
+		break;
 	case CG_CONTROLLERS:
-		tmp[n++]='p';tmp[n++]='i';tmp[n++]='d';tmp[n++]='s';tmp[n++]='\n';
+		for (const char *s = "pids memory\n"; *s; s++) tmp[n++] = *s;
 		break;
 	default: /* cgroup.procs: pids whose cgroup is exactly this one */
 		for (int i = 0; i < task_count(); i++) {
@@ -219,6 +256,11 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	if (pr->file == CG_PIDS_MAX) {
 		if (kb[0] == 'm') { pr->cg->pids_max = -1; }           /* "max" */
 		else { long v = 0; for (int i = 0; kb[i] >= '0' && kb[i] <= '9'; i++) v = v*10 + (kb[i]-'0'); pr->cg->pids_max = v; }
+		return (ssize_t)len;
+	}
+	if (pr->file == CG_MEM_MAX) {
+		if (kb[0] == 'm') { pr->cg->mem_max = -1; }             /* "max" */
+		else { long v = 0; for (int i = 0; kb[i] >= '0' && kb[i] <= '9'; i++) v = v*10 + (kb[i]-'0'); pr->cg->mem_max = v; }
 		return (ssize_t)len;
 	}
 	if (pr->file == CG_PROCS) {
@@ -301,6 +343,7 @@ static int cg_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	int l = 0; while (name[l] && l < 63) { cg->name[l] = name[l]; l++; }
 	cg->name[l] = '\0';
 	cg->pids_max = -1;
+	cg->mem_max  = -1;
 	cg->parent = dp->cg;
 	uint64_t f = spin_lock_irq(&cg_lock);
 	cg->sibling = dp->cg->children;

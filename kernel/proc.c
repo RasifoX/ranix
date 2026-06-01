@@ -629,6 +629,7 @@ void task_exit(void)
 	p->net_ns = NULL;
 	cgroup_ns_put(p->cgroup_ns);
 	p->cgroup_ns = NULL;
+	if (p->mem_charged) { cgroup_uncharge_mem(p->cgroup, p->mem_charged); p->mem_charged = 0; }
 	/* If this is a pid namespace's init (nr 1), capture that before detaching
 	 * so the reparent section can tear the namespace down; hold an extra ref so
 	 * it survives the put below. */
