@@ -361,10 +361,11 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - Container için mount+pid şart; kalanlar somut ihtiyaç çıkınca
 
 ### cgroups v2
-- [ ] cgroupfs mount (/sys/fs/cgroup)
-- [ ] memory controller: memory.max, memory.current
+- [x] **cgroupfs (cgroup2)** — hierarchy, mkdir subgroups, cgroup.procs; kernel/cgroup.c (512d53a)
+- [x] **PID controller: pids.max / pids.current** — subtree sayımı + fork'ta EAGAIN (fork-bomb koruması) ✅
+- [ ] /sys/fs/cgroup kanonik path (şu an /cgroup; sysfs'in fs/cgroup mountpoint sunması gerek)
+- [ ] memory controller: memory.max, memory.current (bellek accounting hook'u gerek)
 - [ ] CPU controller: cpu.weight, cpu.max
-- [ ] PID controller: pids.max — fork bomb koruması
 - [ ] freezer: cgroup.freeze
 
 ### sysfs (/sys) — temel iskelet ✅ (2026-06-01)
