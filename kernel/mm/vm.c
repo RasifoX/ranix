@@ -8,6 +8,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/sched.h>
 #include <kernel/vfs.h>
+#include <kernel/cgroup.h>
 #include <asm/mmu.h>
 
 static uint64_t kernel_pt_phys;
@@ -75,13 +76,19 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	/* No mapping — check if this is a stack expansion */
 	if (!paddr) {
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
+			if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
 			void *pg = buddy_alloc(0);
 			if (pg) {
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-				if (vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE) == 0)
+				if (vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE) == 0) {
+					p->mem_charged += PAGE_SIZE;
 					ret = 0;
-				else
+				} else {
 					buddy_free((uint64_t)pg, 0);
+					cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
+				}
+			} else {
+				cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
 			}
 		}
 		goto out;
@@ -110,14 +117,17 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	if (!pg) goto out;
 
 	if (pg->refcount > 1) {
+		if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
 		void *new_p = pmm_alloc();
-		if (!new_p) goto out;
+		if (!new_p) { cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); goto out; }
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
 		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE) == 0) {
 			pmm_free((void *)paddr);
+			p->mem_charged += PAGE_SIZE;
 			ret = 0;
 		} else {
 			pmm_free(new_p);
+			cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
 		}
 	} else {
 		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);

@@ -59,12 +59,14 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE)
 				vm_unmap(p->vm, v);
 		} else {
+			if (cgroup_charge_mem(p->cgroup, (long)len) != 0) return -12; /* over memory.max */
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 				void *pg = buddy_alloc(0);
-				if (!pg) { kprintf("mmap: ENOMEM pid=%u va=%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
+				if (!pg) { cgroup_uncharge_mem(p->cgroup, (long)len); kprintf("mmap: ENOMEM pid=%u va=%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 				vm_map(p->vm, v, (uint64_t)pg, vmflags);
 			}
+			p->mem_charged += (long)len;
 		}
 		{
 			uint32_t vf = VMA_USER | VMA_ANON;
