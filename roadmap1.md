@@ -551,7 +551,7 @@ Claude CLI için TLS şart.
 
 ### Depolama
 - [ ] NVMe (PCIe SSD) — MSI-X gerektirir
-- [ ] AHCI (SATA) — eski PC
+- [x] AHCI (SATA) ✅ (drivers/block/ahci.c — polling, IDENTIFY+RW DMA EXT, block_device sata0; ext4 r/w test'li) — eski PC
 - [ ] bcmgenet RPi4 ethernet
 
 ### Test hedefleri
