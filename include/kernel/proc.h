@@ -163,7 +163,7 @@ process_t *task_get(int index);
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
-pid_t      proc_fork(void);
+pid_t      proc_fork(int new_uts_ns);
 pid_t      proc_vfork(void);
 void       proc_vfork_exec_notify(void);
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);

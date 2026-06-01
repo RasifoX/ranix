@@ -191,7 +191,7 @@ fail:
 	return -1;
 }
 
-pid_t proc_fork(void)
+pid_t proc_fork(int new_uts_ns)
 {
 	process_t *parent = task_current();
 	arch_save_tls(parent);
@@ -256,7 +256,12 @@ pid_t proc_fork(void)
 		child->ctx = cctx;
 	}
 	child->tls_base        = parent->tls_base;
-	child->uts_ns          = uts_ns_get(parent->uts_ns);
+	if (new_uts_ns) {
+		child->uts_ns = uts_ns_clone(parent->uts_ns);
+		if (!child->uts_ns) goto fail_early;
+	} else {
+		child->uts_ns = uts_ns_get(parent->uts_ns);
+	}
 	child->ticks_remaining = sched_quantum_val;
 
 	{
@@ -281,6 +286,7 @@ fail_early:
 	if (child->vm)     vm_destroy(child->vm);
 	if (child->fds)    fd_table_destroy(child->fds);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
+	if (child->uts_ns) uts_ns_put(child->uts_ns);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
