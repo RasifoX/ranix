@@ -302,6 +302,7 @@ check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
 check "c-uts-ns"     "uts-ok" "$(timeout 10 /bin/test_uts 2>/dev/null)"
 check "c-setns"      "setns-ok" "$(timeout 10 /bin/test_setns 2>/dev/null)"
+check "c-clone-ns"   "clonens-ok" "$(timeout 10 /bin/test_clonens 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
