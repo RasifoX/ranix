@@ -528,6 +528,8 @@ void schedule(void)
 	next->on_cpu = 1;
 	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
 	int q = sched_quantum_val - (next->nice * sched_quantum_val) / 40;
+	/* cgroup cpu.weight scales the slice (100 = baseline) */
+	q = (int)((long)q * cgroup_cpu_weight(next->cgroup) / 100);
 	if (q < 1) q = 1;
 	next->ticks_remaining = q;
 
