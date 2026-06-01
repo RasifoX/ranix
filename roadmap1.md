@@ -333,8 +333,8 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 
 ### Kapasite hedefleri — Linux'a EŞİT veya FAZLA (compile-time sabit YOK, hepsi runtime)
 > Kural: Ranix donanımın verdiğini sonuna kadar kullanmalı; "yapılıyorsa daha fazlası".
-- [ ] **Çekirdek:** şu an MAX_CPUS=4 → dinamik, ≥8192 (Linux CONFIG_MAXSMP seviyesi)
-- [ ] **RAM:** x86_64 şu an 4 GB (direct map 4×1GB) → ≥128 TB (4-level), 5-level paging ile PB sınıfı; aarch64 zaten 512 GB → 52-bit VA ile artır
+- [~] **Çekirdek:** MAX_CPUS 4→**64** ✅ (aarch64 8/8 boot doğrulandı, FDT auto-detect; x86 MADT bekliyor). Tam dinamik ≥8192 = follow-up.
+- [~] **RAM:** x86_64 4GB → **512 GB** ✅ (direct-map PDPT 512 entry; -m 6G doğrulandı). aarch64 zaten 512 GB. ≥128TB/5-level = follow-up.
 - [ ] **Disk:** 64-bit LBA, ≥16 TB tek disk; ext4 (≤1 EB FS / ≤16 TB dosya) [v1.0]
 - [ ] **Sayfa boyutu:** 4K + 2M + 1G hugepage (THP dahil) — şu an yalnız 4K
 - [ ] **Açık dosya / process / PID:** dinamik tablo, RAM'le ölçeklenen üst sınır (statik cap yok)
