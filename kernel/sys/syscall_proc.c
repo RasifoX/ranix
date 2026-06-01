@@ -134,28 +134,32 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		q.next = futex_bucket[h]; futex_bucket[h] = &q;
 		uint64_t fs = spin_lock_irq(&sched_lock);
 		self->state = PROC_SLEEPING;
-		/* event-driven: woken by futex_do_wake or task_signal, so the per-tick
-		 * blanket wake can skip us. timed waits stay on the poll for their
-		 * deadline (no per-waiter timer yet). */
-		self->sleeping_on_queue = timed ? 0 : 1;
+		/* event-driven: woken by futex_do_wake or task_signal. timed waits also
+		 * arm wake_deadline so the sched_tick deadline sweep fires the timeout —
+		 * no per-tick blanket poll either way. */
+		self->sleeping_on_queue = 1;
+		if (timed) self->wake_deadline = end;
 		spin_unlock_irq(&sched_lock, fs);
 		spin_unlock_irq(&futex_lock, f);
 
 		for (;;) {
 			arch_yield();
 			f = spin_lock_irq(&futex_lock);
-			if (q.woken) { spin_unlock_irq(&futex_lock, f); return 0; }
+			if (q.woken) { self->wake_deadline = 0; spin_unlock_irq(&futex_lock, f); return 0; }
 			int sig = (self->sig_pending & ~self->sig_mask) != 0;
 			uint32_t c2;
 			int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
 			int tmo  = timed && kernel_ticks >= end;
 			if (sig || vchg || tmo) {
+				self->wake_deadline = 0;
 				futex_unlink(&q);
 				spin_unlock_irq(&futex_lock, f);
 				return sig ? -4 : (tmo ? -110 : -11);
 			}
 			fs = spin_lock_irq(&sched_lock);
 			self->state = PROC_SLEEPING;
+			self->sleeping_on_queue = 1;
+			if (timed) self->wake_deadline = end;
 			spin_unlock_irq(&sched_lock, fs);
 			spin_unlock_irq(&futex_lock, f);
 		}
