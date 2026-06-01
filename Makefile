@@ -167,7 +167,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_pipestress \
                  userspace/test_uts userspace/test_setns userspace/test_clonens \
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
-                 userspace/test_dynamic
+                 userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -208,6 +208,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@if [ -z "$(DEMO)" ]; then cp $(USER_TEST_BINS) $(BUILD_DIR)/initramfs/bin/; fi
 	@mkdir -p $(BUILD_DIR)/initramfs/lib
 	@cp $(LDSO_SRC) $(BUILD_DIR)/initramfs/lib/$(LDSO_NAME)
+	@if [ -z "$(DEMO)" ]; then cp userspace/libfoo.so $(BUILD_DIR)/initramfs/lib/; fi
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -266,6 +267,14 @@ userspace/%: userspace/%.c
 userspace/test_dynamic: userspace/test_dynamic.c
 	$(MUSL_CC) -O2 -o $@ $<
 
+# extra shared library + a load-time and a runtime (dlopen) consumer
+userspace/libfoo.so: userspace/libfoo.c
+	$(MUSL_CC) -shared -fPIC -O2 -Wl,-soname,libfoo.so -o $@ $<
+userspace/test_sharedlib: userspace/test_sharedlib.c userspace/libfoo.so
+	$(MUSL_CC) -O2 -o $@ $< -Luserspace -lfoo
+userspace/test_dlopen: userspace/test_dlopen.c
+	$(MUSL_CC) -O2 -o $@ $<
+
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
@@ -283,7 +292,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img $(USER_CORE_BINS) $(USER_TEST_BINS) userspace/sh userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img $(USER_CORE_BINS) $(USER_TEST_BINS) userspace/sh userspace/*_elf.h userspace/libfoo.so
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
