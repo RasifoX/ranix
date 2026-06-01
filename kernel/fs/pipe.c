@@ -87,6 +87,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
 
         wake_up(&pipe->rd_wait);
         spin_unlock_irq(&pipe->lock, f);
+        poll_notify();
     }
 
     return (ssize_t)written;
@@ -102,6 +103,7 @@ static int pipe_close(vfs_file_t *file)
 
     wake_up(&pipe->rd_wait);
     wake_up(&pipe->wr_wait);
+    poll_notify();
 
     if (pipe->readers == 0 && pipe->writers == 0) {
         spin_unlock_irq(&pipe->lock, f);

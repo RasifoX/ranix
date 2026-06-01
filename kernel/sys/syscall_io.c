@@ -101,7 +101,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			if (kfds[i].revents) ready++;
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		task_sleep();
+		poll_block(deadline);
 	}
 
 	copy_to_user(fds, kfds, nfds * sizeof(linux_pollfd_t));
@@ -138,7 +138,7 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 			if ((wfds & (1ULL << i)) && fd_is_writable(i)) { wres |= (1ULL << i); ready++; }
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		task_sleep();
+		poll_block(deadline);
 	}
 
 	if (readfds)  copy_to_user(readfds,  &rres, 8);
@@ -347,7 +347,7 @@ static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevent
 		}
 		spin_unlock_irq(&ep->lock, f);
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		task_sleep();
+		poll_block(deadline);
 	}
 
 	copy_to_user(uevents, kev, (size_t)ready * sizeof(*kev));

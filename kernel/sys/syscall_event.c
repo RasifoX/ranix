@@ -53,6 +53,7 @@ static ssize_t eventfd_write_vfs(vfs_file_t *file, const void *buf, size_t len)
             efd->count += val;
             wake_up(&efd->rd_wait);
             spin_unlock_irq(&efd->lock, f);
+            poll_notify();
             return 8;
         }
         if (file->flags & O_NONBLOCK) {
