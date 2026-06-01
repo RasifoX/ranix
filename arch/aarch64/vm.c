@@ -214,17 +214,19 @@ uint64_t arch_vm_get_paddr(uint64_t *l1_phys, uint64_t vaddr)
 
 void arch_vm_switch(uint64_t root_phys)
 {
-	/* Always reload TTBR0 and flush. The lazy "skip when TTBR0 unchanged"
-	 * optimisation is unsafe without ASIDs once a freed root_phys can be
-	 * reused for a different address space while still cached in TTBR0 —
-	 * the stale TLB then translates one process's VAs to another's pages
-	 * (observed on real 4-core hardware as garbage user-register/pointer
-	 * corruption). Correctness over the TCG-only speedup. */
+	/* Always reload TTBR0 and flush, but flush only THIS CPU's TLB (vmalle1,
+	 * non-shareable) instead of broadcasting to every core (vmalle1is). Each CPU
+	 * already flushes its own TLB when it switches away from a space, so a
+	 * freed+reused root cannot leave stale translations on any core — the
+	 * per-switch broadcast was unnecessary cost. (VA invalidations in vm_unmap/
+	 * mprotect stay broadcast: a live thread on another core must see the unmap.)
+	 * Zero-flush ASIDs would need a rollover-safe allocator + non-global PTEs —
+	 * a later step. */
 	__asm__ volatile(
 		"msr ttbr0_el1, %0\n"
 		"isb\n"
-		"tlbi vmalle1is\n"
-		"dsb ish\n"
+		"tlbi vmalle1\n"
+		"dsb nsh\n"
 		"isb\n"
 		:: "r"(root_phys)
 	);
