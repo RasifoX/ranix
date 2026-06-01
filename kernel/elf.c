@@ -4,7 +4,8 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 
-int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
+int elf_load(vm_space_t *vm, const void *data, size_t len,
+             uint64_t load_bias_hint, elf_info_t *out)
 {
 	if (len < sizeof(elf64_hdr_t)) return -1;
 
@@ -25,12 +26,19 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
 
 	const uint8_t *bytes = data;
 
-	/* Reject dynamically linked binaries — no dynamic linker support */
+	/* Record the interpreter path (if any); the caller loads it separately
+	 * and the in-userspace dynamic linker handles relocation. */
+	out->interp[0] = '\0';
 	for (uint16_t i = 0; i < hdr->phnum; i++) {
 		if (hdr->phoff + (i + 1) * sizeof(elf64_phdr_t) > len) return -1;
 		const elf64_phdr_t *ph =
 			(const elf64_phdr_t *)(bytes + hdr->phoff + i * sizeof(elf64_phdr_t));
-		if (ph->type == PT_INTERP) return -1;
+		if (ph->type == PT_INTERP && ph->filesz > 0 && ph->offset + ph->filesz <= len) {
+			size_t n = ph->filesz;
+			if (n > sizeof(out->interp) - 1) n = sizeof(out->interp) - 1;
+			memcpy(out->interp, bytes + ph->offset, n);
+			out->interp[n] = '\0';
+		}
 	}
 
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
@@ -39,9 +47,9 @@ int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *out)
 	uint64_t load_start = ~0UL;
 	uint64_t load_bias  = 0;
 
-	/* ET_DYN: pick a load base so the binary doesn't land at 0 */
+	/* ET_DYN: place at the caller's hint, or a default so it doesn't land at 0 */
 	if (hdr->type == ET_DYN)
-		load_bias = 0x400000UL;
+		load_bias = load_bias_hint ? load_bias_hint : 0x400000UL;
 
 	/* Pass 1: validate, and map every page in the loadable span exactly once,
 	 * with the union of permissions of all segments that touch it. Adjacent
