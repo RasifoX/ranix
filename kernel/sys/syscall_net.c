@@ -88,8 +88,7 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             return 0;
         }
         s->recv_waiter = task_current();
-        spin_unlock_irq(&s->recv_lock, f);
-        task_sleep();
+        task_sleep_unlock(&s->recv_lock, f);
         process_t *p = task_current();
         if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
     }
@@ -425,8 +424,7 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
         }
         if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
         s->recv_waiter = task_current();
-        spin_unlock_irq(&s->recv_lock, f);
-        task_sleep();
+        task_sleep_unlock(&s->recv_lock, f);
         process_t *p = task_current();
         if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
     }
