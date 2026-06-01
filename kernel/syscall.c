@@ -12,6 +12,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
 #include <kernel/tty/fb_tty.h>
@@ -33,6 +34,8 @@
 #define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_HUGETLB   0x40000
+#define MAP_HUGE_SHIFT 26
+#define MAP_HUGE_1GB  (30 << MAP_HUGE_SHIFT)
 
 /* mmap prot */
 #define PROT_READ  0x1

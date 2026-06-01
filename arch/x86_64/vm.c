@@ -3,6 +3,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
@@ -74,7 +75,10 @@ void vm_destroy(vm_space_t *vs)
 		uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l3_phys);
 		for (int j = 0; j < 512; j++) {
 			if (!(l3[j] & PTE_P)) continue;
-			if (l3[j] & PTE_PS) continue;
+			if (l3[j] & PTE_PS) {
+				if (l3[j] & PTE_U) huge1g_put(l3[j] & ~0x3FFFFFFFUL);  /* 1GB block */
+				continue;
+			}
 
 			uint64_t l2_phys = l3[j] & ~0xFFFUL;
 			uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
@@ -180,18 +184,43 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	return 0;
 }
 
+/* Map a 1 GB block at the PDPT level. paddr must be 1 GB-aligned. */
+int vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+{
+	uint64_t eflags = PTE_P | PTE_W | PTE_U;
+
+	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	if (!pdp_phys) return -1;
+
+	uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(pdp_phys);
+	uint64_t entry = (paddr & ~0x3FFFFFFFUL) | PTE_P | PTE_PS;
+	if (flags & VM_WRITE)   entry |= PTE_W;
+	if (flags & VM_USER)    entry |= PTE_U;
+	if (flags & VM_NOCACHE) entry |= PTE_PWT | PTE_PCD;
+	pdp[(vaddr >> 30) & 0x1FF] = entry;
+
+	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+	return 0;
+}
+
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
 	/* Serialize against concurrent faults in a shared address space. */
 	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
 	uint64_t pte = 0;
 
-	uint64_t huge_base = 0;
+	uint64_t huge_base = 0, huge1g = 0;
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	if (l4[(vaddr >> 39) & 0x1FF] & PTE_P) {
 		uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
-		if (pdp[(vaddr >> 30) & 0x1FF] & PTE_P) {
-			uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL);
+		uint64_t pdpe = pdp[(vaddr >> 30) & 0x1FF];
+		if ((pdpe & PTE_P) && (pdpe & PTE_PS)) {
+			/* 1 GB block */
+			if (pdpe & PTE_U) huge1g = pdpe & ~0x3FFFFFFFUL;
+			pdp[(vaddr >> 30) & 0x1FF] = 0;
+			__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+		} else if (pdpe & PTE_P) {
+			uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpe & ~0xFFFUL);
 			uint64_t pde = pd[(vaddr >> 21) & 0x1FF];
 			if ((pde & PTE_P) && (pde & PTE_PS)) {
 				if (pde & PTE_U) huge_base = pde & ~0x1FFFFFUL;
@@ -208,7 +237,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 	spin_unlock_irq(&vs->fault_lock, lf);
 
-	if (huge_base) {
+	if (huge1g) {
+		huge1g_put(huge1g);
+	} else if (huge_base) {
 		for (int i = 0; i < 512; i++)
 			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 	} else if ((pte & PTE_P) && (pte & PTE_U))
@@ -289,7 +320,15 @@ vm_space_t *vm_copy(vm_space_t *vs)
 		for (int j = 0; j < 512; j++) {
 			if (!(l3_old[j] & PTE_P)) continue;
 			if (l3_old[j] & PTE_PS) {
-				l3_new[j] = l3_old[j];
+				/* 1 GB block: COW it — write-protect both, bump the pool
+				 * refcount, copy the entry. A write fault copies the 1 GB. */
+				uint64_t entry = l3_old[j];
+				if (entry & PTE_U) {
+					entry &= ~PTE_W;
+					l3_old[j] = entry;
+					huge1g_get(entry & ~0x3FFFFFFFUL);
+				}
+				l3_new[j] = entry;
 				continue;
 			}
 
