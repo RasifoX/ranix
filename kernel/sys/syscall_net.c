@@ -314,6 +314,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     s->remote_port = ntohs(sa.sin_port);
     if (s->type == SOCK_DGRAM) return 0;
     if (s->type != SOCK_STREAM) return -38;
+    if (!s->dev) return -101; /* ENETUNREACH — no network device to reach the peer */
 
     int rc = tcp_connect(s);
     if (rc < 0) return rc;
