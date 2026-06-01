@@ -82,6 +82,10 @@ void signal_dispatch(arch_context_t *tf)
 	process_t *p = task_current();
 	if (!p) return;
 
+	/* Catch a kernel-stack overflow in the same trap that caused it. */
+	extern void kstack_check(void);
+	kstack_check();
+
 	/* (Re)arm single-step TF on this user return, independent of signals. */
 	extern void ptrace_apply_singlestep(arch_context_t *);
 	ptrace_apply_singlestep(tf);

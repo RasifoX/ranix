@@ -91,6 +91,17 @@ static uint8_t *kstack_alloc(void)
 	return ks;
 }
 
+/* Canary at the base (lowest address) of the kernel stack — the last word before
+ * an overflow runs off the bottom. schedule() checks it per context switch; this
+ * lets the common user-return path catch a breach in the same trap that caused
+ * it. (idle/pid 0 uses a static stack without the canary — skip it.) */
+void kstack_check(void)
+{
+	process_t *p = task_current();
+	if (p && p->pid != 0 && p->kstack && *(uint64_t *)p->kstack != KSTACK_CANARY)
+		kpanic("kstack overflow detected");
+}
+
 
 
 spinlock_t sched_lock = SPINLOCK_INIT;
