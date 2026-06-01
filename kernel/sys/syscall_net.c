@@ -216,7 +216,7 @@ static long sys_socket(int domain, int type, int proto)
     if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
     socket_t *s = sock_alloc(domain, type, proto);
     if (!s) return -12;
-    s->dev = net_dev(0);
+    s->dev = net_default_dev();
     if (type == SOCK_RAW) sock_register(s);
     int fd = sock_to_fd(s);
     if (fd < 0) { sock_free(s); return fd; }

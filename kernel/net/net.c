@@ -119,6 +119,38 @@ uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len)
     return (uint16_t)~sum;
 }
 
+/* ── loopback device ─────────────────────────────────────── */
+
+/* The loopback netdev "lo" (127.0.0.1) is always present, with no hardware
+ * behind it: ip_tx already redirects frames addressed to 127/8 (or our own IP)
+ * back into the receive path, so lo's tx just enqueues. Having lo guarantees
+ * there is always at least one device — a socket never ends up with a NULL
+ * dev — and lets 127.0.0.1 work even with no NIC. */
+static netdev_t lo_dev;
+
+static int lo_tx(netdev_t *dev, skb_t *skb)
+{
+    netdev_rx_enqueue(dev, skb);
+    return 0;
+}
+
+/* Default device for a new socket: a real NIC if one exists, else loopback.
+ * (127/8 traffic loops back regardless of which device carries it — ip_tx.) */
+netdev_t *net_default_dev(void)
+{
+    for (int i = 0; i < ndevs; i++)
+        if ((devs[i]->ip >> 24) != 127) return devs[i];
+    return ndevs ? devs[0] : NULL;
+}
+
 /* ── init ────────────────────────────────────────────────── */
 
-void net_init(void) { }
+void net_init(void)
+{
+    memcpy(lo_dev.name, "lo", 3);
+    lo_dev.ip      = 0x7f000001;        /* 127.0.0.1 */
+    lo_dev.mask    = 0xff000000;        /* 127/8 */
+    lo_dev.tx      = lo_tx;
+    lo_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
+    net_register(&lo_dev);
+}
