@@ -129,7 +129,7 @@ static void setup_trampoline(int cpu_id)
 	uint64_t pml4_phys = VIRT_TO_PHYS((uint64_t)pml4);
 
 	/* Virtual stack top for C code (secondary_cpu_main uses virtual addresses) */
-	extern uint8_t (*ap_kstacks)[KSTACK_SIZE];
+	extern uint8_t **ap_kstacks;
 	uint64_t sp_virt = (uint64_t)(ap_kstacks[cpu_id] + KSTACK_SIZE);
 
 	*(uint64_t *)(data + TDATA_PML4)   = pml4_phys;
