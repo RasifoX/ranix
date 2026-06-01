@@ -318,6 +318,7 @@ check "shared-lib"   "sharedlib-ok" "$(timeout 10 /bin/test_sharedlib 2>/dev/nul
 check "dlopen"       "dlopen-ok" "$(timeout 10 /bin/test_dlopen 2>/dev/null)"
 check "cgroup-pids"  "cgroup-ok" "$(timeout 15 /bin/test_cgroup 2>/dev/null)"
 check "cgroup-mem"   "memcg-ok" "$(timeout 15 /bin/test_memcg 2>/dev/null)"
+check "cgroup-freeze" "freeze-ok" "$(timeout 15 /bin/test_freeze 2>/dev/null)"
 check "mount-ns"     "mountns-ok" "$(timeout 10 /bin/test_mountns 2>/dev/null)"
 check "pid-ns"       "pidns-ok" "$(timeout 10 /bin/test_pidns 2>/dev/null)"
 check "user-ns"      "userns-ok" "$(timeout 10 /bin/test_userns 2>/dev/null)"

@@ -495,6 +495,25 @@ void schedule(void)
 		next->on_cpu = 0;
 		next = runqueue_pop();
 	}
+	/* cgroup.freeze: requeue a frozen process and try the next, bounded by the
+	 * runqueue length so an all-frozen runqueue falls through to idle. */
+	if (next && next->pid != 0) {
+		int budget = cpu_rq_len(cpu) + 1;
+		while (next && next->pid != 0 && cgroup_frozen(next->cgroup) && budget-- > 0) {
+			next->on_cpu = 0;
+			cpu_rq_add(cpu, next);
+			next = runqueue_pop();
+			while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
+				next->on_cpu = 0;
+				next = runqueue_pop();
+			}
+		}
+		if (next && next->pid != 0 && cgroup_frozen(next->cgroup)) {
+			next->on_cpu = 0;
+			cpu_rq_add(cpu, next);
+			next = NULL;
+		}
+	}
 	if (!next) {
 		cpu_context_t *_cpu = arch_get_cpu_ctx();
 		next = _cpu->idle ? _cpu->idle : &idle_proc;
