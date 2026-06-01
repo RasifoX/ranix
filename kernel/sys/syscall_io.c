@@ -410,3 +410,137 @@ static long sys_fchown(int fd, uid_t u, gid_t g)         { (void)fd; (void)u; (v
 static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int f)
 { (void)d; (void)p; (void)u; (void)g; (void)f; return 0; }
 
+/* ── read / write / open / stat ──────────────────────────────────────────────
+ * Thin wrappers over the VFS: validate the user pointer, then call vfs_*.
+ * writev/readv loop over iovecs reusing the single-buffer paths; sendfile
+ * copies in-kernel between two fds. resolve_path (sys/syscall_fs.c) turns a
+ * dirfd + user path into a kernel path for the path-based opens.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static long sys_write(int fd, const void *buf, size_t len)
+{
+	if (!access_ok(buf, len)) return -14;
+	return vfs_write(fd, buf, len);
+}
+
+static long sys_read(int fd, void *buf, size_t len)
+{
+	if (!access_ok(buf, len)) return -14;
+	return vfs_read(fd, buf, len);
+}
+
+static long sys_writev(int fd, const iovec_t *iov, int cnt)
+{
+	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+
+	long total = 0;
+	for (int i = 0; i < cnt; i++) {
+		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
+		long r = sys_write(fd, iov[i].iov_base, iov[i].iov_len);
+		if (r < 0) return r;
+		total += r;
+	}
+	return total;
+}
+
+static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
+{
+	char buf[4096];
+	size_t sent = 0;
+	if (offset) {
+		long off;
+		if (copy_from_user(&off, offset, sizeof(off)) != 0) return -14;
+		vfs_seek(in_fd, off, 0);
+	}
+	while (sent < count) {
+		size_t n = count - sent;
+		if (n > sizeof(buf)) n = sizeof(buf);
+		long r = vfs_read(in_fd, buf, n);
+		if (r <= 0) break;
+		long w = vfs_write(out_fd, buf, (size_t)r);
+		if (w < 0) return w;
+		sent += (size_t)w;
+	}
+	if (offset) {
+		long off = (long)vfs_seek(in_fd, 0, 1);
+		copy_to_user(offset, &off, sizeof(off));
+	}
+	return (long)sent;
+}
+
+static long sys_readv(int fd, const iovec_t *iov, int cnt)
+{
+	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+
+	long total = 0;
+	for (int i = 0; i < cnt; i++) {
+		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
+		long r = sys_read(fd, iov[i].iov_base, iov[i].iov_len);
+		if (r < 0) return r;
+		if (r == 0) break;
+		total += r;
+	}
+	return total;
+}
+
+static long sys_open(const char *path, int flags, mode_t mode)
+{
+	char kpath[PROC_NAME_MAX];
+	int r = resolve_path(kpath, AT_FDCWD, path);
+	if (r) return r;
+	return vfs_open(kpath, flags, mode);
+}
+
+static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
+{
+	char kpath[PROC_NAME_MAX];
+	int r = resolve_path(kpath, dirfd, path);
+	if (r) return r;
+	long fd = vfs_open(kpath, flags, mode);
+	return fd < 0 ? -2 : fd;
+}
+
+static long sys_close(int fd)
+{
+	return vfs_close(fd) == 0 ? 0 : -9;
+}
+
+static long sys_lseek(int fd, off_t off, int whence)
+{
+	return (long)vfs_seek(fd, off, whence);
+}
+
+static long sys_fstat(int fd, linux_stat_t *st)
+{
+	if (!st) return -14;
+	memset(st, 0, sizeof(*st));
+
+	if (fd >= 0 && fd <= 2) {
+		st->st_mode     = 0x2190;
+		st->st_nlink    = 1;
+		st->st_rdev     = 0x0501;
+		st->st_blksize  = 1024;
+		return 0;
+	}
+
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f) return -9;
+
+	vfs_stat_t vs = {0};
+	if (f->inode->iops && f->inode->iops->stat)
+		f->inode->iops->stat(f->inode, &vs);
+
+	st->st_dev     = 1;  /* single root device */
+	st->st_rdev    = vs.rdev;
+	st->st_mode    = vs.mode;
+	st->st_ino     = vs.ino;
+	st->st_size    = (int64_t)vs.size;
+	st->st_nlink   = vs.nlink ? vs.nlink : 1;
+	st->st_uid     = vs.uid;
+	st->st_gid     = vs.gid;
+	st->st_blksize = 4096;
+	st->st_blocks  = (vs.size + 511) / 512;
+	return 0;
+}
+
