@@ -89,6 +89,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/irqchip/pit/pit.c \
         drivers/input/ps2/ps2.c \
         drivers/block/virtio_blk.c \
+        drivers/block/ahci.c \
         drivers/net/virtio_net.c
 endif
 
@@ -383,7 +384,8 @@ test: iso $(BUILD_DIR)/gpt-test.img
 	@rm -f $(TEST_LOG)
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
-	    -drive file=$(BUILD_DIR)/gpt-test.img,format=raw,if=virtio || true
+	    -drive id=d0,file=$(BUILD_DIR)/gpt-test.img,format=raw,if=none \
+	    -device ich9-ahci,id=ahci -device ide-hd,drive=d0,bus=ahci.0 || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)

@@ -60,6 +60,8 @@ void board_drivers_register(void)
 	uart16550_register();
 	pit_register();
 	virtio_blk_init();
+	extern void ahci_init(void);
+	ahci_init();
 	virtio_net_pci_init();
 }
 
