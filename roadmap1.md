@@ -401,7 +401,7 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [ ] R_*_IRELATIVE — IFUNC (musl kullanmaz; glibc gelince ld.so tarafında gerekli)
 - [ ] PT_GNU_RELRO mprotect(PROT_READ) — ld.so yapar; bizde mprotect var, doğrula
 - [x] **dinamik bash** — bash dinamik + shared libc, tüm 221-test suite'ini dinamik bash yürütüyor (init `/bin/bash /test.sh`). + mprotect VMA-split fix (RELRO write-strip bug'ı)
-- [ ] dlopen / dlsym / dlclose — runtime shared library (çoklu .so senaryosu) ⏳ SIRADAKİ
+- [x] **dlopen / dlsym / dlclose** + load-time multi-DSO — libfoo.so (test_sharedlib + test_dlopen), iki arch ✅
 
 ### mmap & memory tamamlama
 - [ ] MAP_FIXED güvenilir (şu an temel var)
@@ -438,7 +438,7 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 ### Test hedefleri
 - [x] musl dinamik linked "hello world" çalışıyor (test_dynamic, iki arch) ✅
 - [x] **dinamik bash çalışıyor** — tüm suite'i dinamik bash yürütüyor ✅
-- [ ] dlopen / çoklu shared .so senaryosu
+- [x] dlopen / çoklu shared .so senaryosu (libfoo.so) ✅
 - [ ] glibc 2.38 dinamik linked "hello world" (v0.8.5 — glibc portu)
 - [ ] dynamically linked pthread test geçiyor
 
