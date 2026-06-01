@@ -43,15 +43,54 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 {
 	if (len == 0) return -22;
 	process_t *p = task_current();
+
+	uint32_t vmflags = VM_USER;
+	if (prot & PROT_READ)  vmflags |= VM_READ;
+	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
+	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
+
+	/* MAP_HUGETLB: back the region with 2 MB blocks. Both length and address
+	 * round to the huge-page boundary; pages are populated eagerly so there is
+	 * no demand-fault path to teach about blocks. */
+	if ((flags & MAP_HUGETLB) && (flags & MAP_ANONYMOUS) && prot != 0) {
+		len = (len + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+		uint64_t va;
+		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
+		else {
+			p->mmap_next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+			va = p->mmap_next; p->mmap_next += len;
+		}
+		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) return -12;
+		uint64_t done = 0;
+		for (uint64_t v = va; v < va + len; v += HUGE_PAGE_SIZE) {
+			void *blk = buddy_alloc(9);   /* 2 MB = 512 pages */
+			if (!blk || vm_map_huge(p->vm, v, (uint64_t)blk, vmflags) != 0) {
+				if (blk) buddy_free((uint64_t)blk, 9);
+				for (uint64_t u = va; u < v; u += HUGE_PAGE_SIZE) vm_unmap(p->vm, u);
+				cgroup_uncharge_mem(p->cgroup, (long)len);
+				return -12;
+			}
+			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_PAGE_SIZE);
+			done += HUGE_PAGE_SIZE;
+		}
+		(void)done;
+		p->mem_charged += (long)len;
+		{
+			uint32_t vf = VMA_USER | VMA_ANON | VMA_HUGE;
+			if (prot & PROT_READ)  vf |= VMA_READ;
+			if (prot & PROT_WRITE) vf |= VMA_WRITE;
+			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+			if (flags & MAP_SHARED) vf |= VMA_SHARED;
+			vma_add(p, va, len, vf);
+		}
+		return (long)va;
+	}
+
 	len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
 	uint64_t va;
 	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	else { va = p->mmap_next; p->mmap_next += len; }
-	uint32_t vmflags = VM_USER;
-	if (prot & PROT_READ)  vmflags |= VM_READ;
-	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
-	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
 
 	if (flags & MAP_ANONYMOUS) {
 		if (prot == 0) {
