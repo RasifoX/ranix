@@ -4,12 +4,25 @@
 #include <asm/mmu.h>
 
 extern uint64_t pml4[];
+extern uint64_t pml5[];
 extern uint64_t pdpt_dm[];
+extern uint8_t  la57_enabled;
 
 void mmu_init(void)
 {
-	vm_init_kernel((uint64_t)pml4);
-	vm_set_kernel_pt((uint64_t)pml4);
+	/* Read the boot LA57 flag while the identity map is still live, and cache
+	 * it in the high half for the fault-path code (see arch_vm_set_la57). */
+	extern void arch_vm_set_la57(int v);
+	int la57 = la57_enabled;
+	arch_vm_set_la57(la57);
+
+	/* Kernel address space root the CPU loads into CR3: PML5 under 5-level. */
+	uint64_t root = la57 ? (uint64_t)pml5 : (uint64_t)pml4;
+	vm_init_kernel(root);
+	vm_set_kernel_pt(root);
+
+	extern void kprintf(const char *, ...);
+	kprintf("paging: %s\n", la57 ? "5-level (LA57, 128 PB VA)" : "4-level (256 TB VA)");
 }
 
 /* Direct map covers PML4[256] (boot pdpt_dm, first 512 GB). To map RAM past

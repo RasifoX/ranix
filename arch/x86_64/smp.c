@@ -124,9 +124,12 @@ static void setup_trampoline(int cpu_id)
 
 	uint8_t *data = (uint8_t *)(tramp_virt + DATA_OFF);
 
-	/* PML4 physical address */
-	extern uint64_t pml4[];
-	uint64_t pml4_phys = VIRT_TO_PHYS((uint64_t)pml4);
+	/* Top-level table the AP loads into CR3 — PML5 under 5-level, else PML4.
+	 * Same VIRT_TO_PHYS convention as the BSP path that already boots APs. */
+	extern uint64_t pml4[], pml5[];
+	extern uint8_t  la57_enabled;
+	uint64_t pml4_phys = la57_enabled ? VIRT_TO_PHYS((uint64_t)pml5)
+	                                   : VIRT_TO_PHYS((uint64_t)pml4);
 
 	/* Virtual stack top for C code (secondary_cpu_main uses virtual addresses) */
 	extern uint8_t **ap_kstacks;

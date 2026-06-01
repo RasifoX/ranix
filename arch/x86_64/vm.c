@@ -16,7 +16,18 @@
 #define PTE_PCD (1UL << 4)
 #define PTE_PS  (1UL << 7)
 
-extern uint64_t pml4[];
+extern uint64_t pml4[];      /* kernel (boot) PML4 — phys when cast to uint64_t */
+
+/* 5-level paging flag, cached in the high half. The raw boot symbol (la57)
+ * lives at a low VA reachable only through the identity map (pml4[0]), which user
+ * address spaces don't carry — reading it during a fault in user context would
+ * fault again. mmu_init() seeds this while the identity map is still live. */
+static int la57;
+void arch_vm_set_la57(int v) { la57 = v; }
+
+/* PML5 slots holding the kernel's 48-bit-canonical mappings under 5-level. */
+#define PML5_DMAP  504   /* direct map  (0xFFFF800000000000) */
+#define PML5_KTEXT 511   /* kernel text (0xFFFFFFFF80000000) */
 
 static uint64_t alloc_table(void)
 {
@@ -24,6 +35,17 @@ static uint64_t alloc_table(void)
 	if (!p) return 0;
 	memset((void *)PHYS_TO_VIRT(p), 0, PAGE_SIZE);
 	return (uint64_t)p;
+}
+
+/* The PML4 the CPU reaches for user VA. In 5-level it lives under pml5[0], so
+ * the rest of every walk (PML4→PDPT→PD→PT) is identical to 4-level. */
+static uint64_t user_pml4(vm_space_t *vs)
+{
+	if (la57) {
+		uint64_t *pml5 = (uint64_t *)PHYS_TO_VIRT((uint64_t)vs->root);
+		return pml5[0] & ~0xFFFUL;
+	}
+	return (uint64_t)vs->root;
 }
 
 vm_space_t *vm_create(void)
@@ -34,16 +56,26 @@ vm_space_t *vm_create(void)
 	vs->root = NULL;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
-	uint64_t root_phys = alloc_table();
-	if (!root_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
-	vs->root = (uint64_t *)root_phys;
+	uint64_t pml4_phys = alloc_table();
+	if (!pml4_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
 
-	uint64_t *root_virt = (uint64_t *)PHYS_TO_VIRT(root_phys);
-	uint64_t *kpml4_virt = (uint64_t *)PHYS_TO_VIRT(pml4);
-
-	memset(root_virt, 0, PAGE_SIZE);
-	for (int i = 1; i < PT_ENTRIES; i++)
-		root_virt[i] = kpml4_virt[i];
+	if (la57) {
+		/* User PML4 is purely user (empty); kernel mappings come from the
+		 * shared boot PML4 via pml5[504]/[511]. */
+		uint64_t pml5_phys = alloc_table();
+		if (!pml5_phys) { buddy_free(pml4_phys, 0); buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
+		uint64_t *pml5 = (uint64_t *)PHYS_TO_VIRT(pml5_phys);
+		pml5[0]          = pml4_phys      | PTE_P | PTE_W | PTE_U;
+		pml5[PML5_DMAP]  = (uint64_t)pml4 | PTE_P | PTE_W;
+		pml5[PML5_KTEXT] = (uint64_t)pml4 | PTE_P | PTE_W;
+		vs->root = (uint64_t *)pml5_phys;
+	} else {
+		uint64_t *root_virt  = (uint64_t *)PHYS_TO_VIRT(pml4_phys);
+		uint64_t *kpml4_virt = (uint64_t *)PHYS_TO_VIRT(pml4);
+		for (int i = 1; i < PT_ENTRIES; i++)
+			root_virt[i] = kpml4_virt[i];
+		vs->root = (uint64_t *)pml4_phys;
+	}
 
 	vs->refcount = 1;
 	return vs;
@@ -64,7 +96,7 @@ void vm_destroy(vm_space_t *vs)
 
 	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
-	uint64_t l4_phys = (uint64_t)vs->root;
+	uint64_t l4_phys = user_pml4(vs);   /* under pml5[0] in 5-level */
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(l4_phys);
 
 	/* We only walk index 0 (user space) */
@@ -109,7 +141,8 @@ void vm_destroy(vm_space_t *vs)
 		buddy_free(l3_phys, 0);
 	}
 
-	buddy_free(l4_phys, 0);
+	buddy_free(l4_phys, 0);                                  /* user PML4 */
+	if (la57) buddy_free((uint64_t)vs->root, 0);     /* PML5 */
 	buddy_free(VIRT_TO_PHYS(vs), 0);
 }
 
@@ -145,7 +178,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	uint64_t pdp_phys = get_or_alloc(user_pml4(vs), (vaddr >> 39) & 0x1FF, eflags);
 	if (!pdp_phys) return -1;
 	uint64_t pd_phys  = get_or_alloc(pdp_phys,           (vaddr >> 30) & 0x1FF, eflags);
 	if (!pd_phys)  return -1;
@@ -169,7 +202,7 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	uint64_t pdp_phys = get_or_alloc(user_pml4(vs), (vaddr >> 39) & 0x1FF, eflags);
 	if (!pdp_phys) return -1;
 	uint64_t pd_phys  = get_or_alloc(pdp_phys,           (vaddr >> 30) & 0x1FF, eflags);
 	if (!pd_phys)  return -1;
@@ -194,7 +227,7 @@ int vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flag
 {
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
-	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	uint64_t pdp_phys = get_or_alloc(user_pml4(vs), (vaddr >> 39) & 0x1FF, eflags);
 	if (!pdp_phys) return -1;
 
 	uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(pdp_phys);
@@ -215,7 +248,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	uint64_t pte = 0;
 
 	uint64_t huge_base = 0, huge1g = 0;
-	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(user_pml4(vs));
 	if (l4[(vaddr >> 39) & 0x1FF] & PTE_P) {
 		uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
 		uint64_t pdpe = pdp[(vaddr >> 30) & 0x1FF];
@@ -254,6 +287,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 {
+	/* Callers pass vs->root; under 5-level that's the PML5 — descend pml5[0]. */
+	if (la57)
+		pml4_phys = (uint64_t *)(((uint64_t *)PHYS_TO_VIRT((uint64_t)pml4_phys))[0] & ~0xFFFUL);
 	uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(pml4_phys);
 	uint64_t p4i = (vaddr >> 39) & 0x1FF;
 	uint64_t p3i = (vaddr >> 30) & 0x1FF;
@@ -297,20 +333,30 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->refcount = 1;
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
-	uint64_t root_phys = alloc_table();
+	uint64_t root_phys = alloc_table();   /* the new user PML4 */
 	if (!root_phys) goto oom;
-	new_vs->root = (uint64_t *)root_phys;
+	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
+
+	if (la57) {
+		uint64_t pml5_phys = alloc_table();
+		if (!pml5_phys) { buddy_free(root_phys, 0); goto oom; }
+		uint64_t *pml5 = (uint64_t *)PHYS_TO_VIRT(pml5_phys);
+		pml5[0]          = root_phys      | PTE_P | PTE_W | PTE_U;
+		pml5[PML5_DMAP]  = (uint64_t)pml4 | PTE_P | PTE_W;
+		pml5[PML5_KTEXT] = (uint64_t)pml4 | PTE_P | PTE_W;
+		new_vs->root = (uint64_t *)pml5_phys;   /* user PML4 stays kernel-free */
+	} else {
+		new_vs->root = (uint64_t *)root_phys;
+		uint64_t *kpml4 = (uint64_t *)PHYS_TO_VIRT(pml4);
+		for (int i = 1; i < 512; i++)
+			l4_new[i] = kpml4[i];
+	}
 
 	/* Lock the parent across the walk: sibling threads may fault concurrently,
 	 * and vm_copy both reads and write-protects the parent's leaf PTEs. */
 	uint64_t lf = spin_lock_irq(&vs->fault_lock);
 
-	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
-	uint64_t *l4_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
-
-	uint64_t *kpml4 = (uint64_t *)PHYS_TO_VIRT(pml4);
-	for (int i = 1; i < 512; i++)
-		l4_new[i] = kpml4[i];
+	uint64_t *l4_old = (uint64_t *)PHYS_TO_VIRT(user_pml4(vs));
 
 	uint64_t eflags = PTE_P | PTE_W | PTE_U;
 
