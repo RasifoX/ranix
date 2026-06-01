@@ -114,6 +114,7 @@ static void sched_watchdog(void)
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
 	static uint64_t last_seen[MAX_CPUS];
+	static unsigned frozen[MAX_CPUS];
 	static unsigned n;
 	static int warm;
 
@@ -133,7 +134,13 @@ static void sched_watchdog(void)
 		/* An idle CPU halted in WFI/HLT legitimately takes no tick until an IPI
 		 * wakes it (x86 secondaries lack a per-CPU timer) — only a CPU running
 		 * real work with frozen ticks is wedged. */
-		if (cur && cur->pid != 0 && c->wd_ticks == last_seen[i]) {
+		if (cur && cur->pid != 0 && c->wd_ticks == last_seen[i])
+			frozen[i]++;
+		else
+			frozen[i] = 0;
+		/* require sustained freeze across sweeps: a transient TCG host-starvation
+		 * stall resolves and resets; a real IRQ-off deadlock stays frozen. */
+		if (frozen[i] >= 3) {
 			kprintf("WATCHDOG: cpu%d wedged, where=%s pid=%d (%s)\n",
 			        i, c->wd_where ? c->wd_where : "?",
 			        (int)cur->pid, cur->name);
