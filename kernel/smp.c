@@ -16,20 +16,38 @@
 int smp_ncpus = 1;
 cpu_context_t *all_cpus[MAX_CPUS];
 
-/* Non-static so arch code can reference them */
-cpu_context_t  ap_cpu_ctxs  [MAX_CPUS];
-uint8_t        ap_kstacks   [MAX_CPUS][KSTACK_SIZE] __attribute__((aligned(16)));
-uint8_t        ap_irq_stacks[MAX_CPUS][KSTACK_SIZE] __attribute__((aligned(16)));
-process_t      ap_idle_procs[MAX_CPUS];
+/*
+ * Per-CPU bring-up state. Only all_cpus[] and ap_boot_sync[] stay statically
+ * sized by MAX_CPUS (a few KB each); the bulky per-CPU memory below is
+ * allocated in smp_init() sized to the detected CPU count, so raising MAX_CPUS
+ * costs almost nothing and a 4-core box doesn't carry 1024 cores' worth of
+ * kernel stacks. Non-static so arch code can reference them.
+ */
+cpu_context_t  *ap_cpu_ctxs;
+uint8_t       (*ap_kstacks)   [KSTACK_SIZE];
+uint8_t       (*ap_irq_stacks)[KSTACK_SIZE];
+process_t      *ap_idle_procs;
 
 /*
- * Separate initial trap-frames for secondary idle processes.
- * Placed here (not on the kstack) so arch_context_init() doesn't clobber
- * the live call-frames that secondary_cpu_main() uses on ap_kstacks.
- * After the first real interrupt fires, the irq_handler overwrites
- * idle->ctx with the actual kstack trapframe address.
+ * Separate initial trap-frames for secondary idle processes — kept off the
+ * kstack so arch_context_init() doesn't clobber the live call-frames that
+ * secondary_cpu_main() uses on ap_kstacks.
  */
-static arch_context_t ap_idle_init_ctxs[MAX_CPUS] __attribute__((aligned(16)));
+static arch_context_t *ap_idle_init_ctxs;
+
+/* Allocate `n` zeroed, page-rounded bytes from the buddy; returns a direct-map
+ * virtual pointer (VIRT_TO_PHYS works on it for the trampoline's sp_phys). */
+static void *percpu_alloc(uint64_t n)
+{
+	uint64_t pages = (n + PAGE_SIZE - 1) / PAGE_SIZE;
+	int order = 0;
+	while (((uint64_t)1 << order) < pages) order++;
+	void *p = buddy_alloc(order);
+	if (!p) return NULL;
+	void *v = (void *)PHYS_TO_VIRT((uint64_t)p);
+	memset(v, 0, pages * PAGE_SIZE);
+	return v;
+}
 
 /*
  * AP trampoline sync block — in .data.boot so VMA == physical address,
@@ -64,6 +82,21 @@ void smp_init(void)
 #endif
 	if (ncpus <= 0) ncpus = 1;
 	if (ncpus > MAX_CPUS) ncpus = MAX_CPUS;
+
+	/* Size the bulky per-CPU arrays to the detected count. If allocation fails
+	 * we fall back to uniprocessor rather than risk a half-built AP. */
+	if (ncpus > 1) {
+		ap_cpu_ctxs       = percpu_alloc((uint64_t)ncpus * sizeof(cpu_context_t));
+		ap_kstacks        = percpu_alloc((uint64_t)ncpus * KSTACK_SIZE);
+		ap_irq_stacks     = percpu_alloc((uint64_t)ncpus * KSTACK_SIZE);
+		ap_idle_procs     = percpu_alloc((uint64_t)ncpus * sizeof(process_t));
+		ap_idle_init_ctxs = percpu_alloc((uint64_t)ncpus * sizeof(arch_context_t));
+		if (!ap_cpu_ctxs || !ap_kstacks || !ap_irq_stacks ||
+		    !ap_idle_procs || !ap_idle_init_ctxs) {
+			kprintf("SMP: per-CPU alloc failed, staying uniprocessor\n");
+			ncpus = 1;
+		}
+	}
 
 	for (int i = 1; i < ncpus; i++) {
 		ap_boot_sync[i].cpu_id    = i;
