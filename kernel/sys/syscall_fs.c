@@ -353,10 +353,10 @@ static long sys_getcwd(char *buf, size_t size)
 
 /* ── process info ────────────────────────────────────────── */
 
-static long sys_getuid(void)  { return (long)task_current()->uid; }
-static long sys_geteuid(void) { return (long)task_current()->euid; }
-static long sys_getgid(void)  { return (long)task_current()->gid; }
-static long sys_getegid(void) { return (long)task_current()->egid; }
+static long sys_getuid(void)  { return (long)from_kuid(current_user_ns(), task_current()->uid); }
+static long sys_geteuid(void) { return (long)from_kuid(current_user_ns(), task_current()->euid); }
+static long sys_getgid(void)  { return (long)from_kgid(current_user_ns(), task_current()->gid); }
+static long sys_getegid(void) { return (long)from_kgid(current_user_ns(), task_current()->egid); }
 static long sys_getppid(void)
 {
 	process_t *p = task_current();

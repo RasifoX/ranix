@@ -7,6 +7,7 @@
 #include <kernel/vfs.h>
 #include <kernel/config.h>
 #include <kernel/pid_namespace.h>
+#include <kernel/user_namespace.h>
 
 #define PROC_NAME_MAX  256
 
@@ -145,6 +146,7 @@ typedef struct process {
 	struct pid_namespace *pid_ns_new;
 	struct { struct pid_namespace *ns; int nr; } pidnrs[PIDNS_MAX_LEVEL];
 	int                   pid_levels;
+	struct user_namespace *user_ns;
 
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;

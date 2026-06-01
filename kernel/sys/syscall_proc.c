@@ -63,6 +63,15 @@ static long sys_unshare(unsigned long flags)
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = ns;
 	}
+	if (flags & CLONE_NEWUSER) {
+		/* moves the caller into a new user namespace and makes it all-powerful
+		 * there (rootless-container basis); uid_map is written afterwards */
+		user_namespace_t *ns = user_ns_create_child(p->user_ns ? p->user_ns : &init_user_ns, p->euid);
+		if (!ns) return -12;
+		user_ns_put(p->user_ns);
+		p->user_ns = ns;
+		p->cap_effective = p->cap_permitted = CAP_FULL;
+	}
 	if (flags & CLONE_NEWPID) {
 		/* applies to future children, not the caller (the caller's pid does
 		 * not change); the first child becomes nr 1 of the new ns */
@@ -129,6 +138,15 @@ static long sys_setns(int fd, int nstype)
 		pid_ns_get(pns);
 		if (p->pid_ns_new) pid_ns_put(p->pid_ns_new);
 		p->pid_ns_new = pns;
+		return 0;
+	}
+
+	user_namespace_t *uns = nsfile_to_user(f);
+	if (uns) {
+		if (nstype != 0 && nstype != CLONE_NEWUSER) return -22;
+		user_ns_get(uns);
+		user_ns_put(p->user_ns);
+		p->user_ns = uns;
 		return 0;
 	}
 

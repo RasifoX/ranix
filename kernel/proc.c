@@ -294,6 +294,13 @@ pid_t proc_fork(uint64_t clone_flags)
 	               ? time_ns_get(parent->time_ns_new)
 	               : time_ns_get(parent->time_ns);
 	child->mnt_ns  = mnt_ns_get(parent->mnt_ns);
+	if (clone_flags & CLONE_NEWUSER) {
+		child->user_ns = user_ns_create_child(parent->user_ns ? parent->user_ns : &init_user_ns, parent->euid);
+		if (!child->user_ns) goto fail_early;
+		child->cap_effective = child->cap_permitted = CAP_FULL;
+	} else {
+		child->user_ns = user_ns_get(parent->user_ns);
+	}
 	child->ticks_remaining = sched_quantum_val;
 
 	{
@@ -324,6 +331,7 @@ fail_early:
 	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
 	if (child->time_ns) time_ns_put(child->time_ns);
 	if (child->mnt_ns) mnt_ns_put(child->mnt_ns);
+	if (child->user_ns) user_ns_put(child->user_ns);
 	if (owns_pidns) pid_ns_put(target_pidns);
 	cgroup_cancel_fork(parent);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
@@ -376,6 +384,7 @@ pid_t proc_vfork(void)
 	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
 	child->time_ns  = time_ns_get(parent->time_ns);
 	child->mnt_ns   = mnt_ns_get(parent->mnt_ns);
+	child->user_ns  = user_ns_get(parent->user_ns);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int pid = alloc_pid();
@@ -480,6 +489,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
 	child->time_ns  = time_ns_get(parent->time_ns);
 	child->mnt_ns   = mnt_ns_get(parent->mnt_ns);
+	child->user_ns  = user_ns_get(parent->user_ns);
 
 	child->clear_child_tid = ctid;
 
@@ -598,6 +608,8 @@ void task_exit(void)
 	if (p->time_ns_new) { time_ns_put(p->time_ns_new); p->time_ns_new = NULL; }
 	mnt_ns_put(p->mnt_ns);
 	p->mnt_ns = NULL;
+	user_ns_put(p->user_ns);
+	p->user_ns = NULL;
 	/* If this is a pid namespace's init (nr 1), capture that before detaching
 	 * so the reparent section can tear the namespace down; hold an extra ref so
 	 * it survives the put below. */
