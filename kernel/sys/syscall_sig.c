@@ -71,3 +71,51 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 	(void)tgid;
 	return sys_kill(tid, sig);
 }
+
+/* Return from a signal handler: restore the trap frame that signal_dispatch
+ * saved on the user stack (full register set + the pre-signal mask), so the
+ * interrupted code resumes exactly. Frame layout mirrors signal_dispatch. */
+static void sys_rt_sigreturn(arch_context_t *ctx)
+{
+	process_t *p = task_current();
+#if defined(__aarch64__)
+	/* Restore full frame saved by signal_dispatch */
+	uint64_t usp  = ctx->sp;
+	ctx->elr      = *(uint64_t *)(usp +   0);
+	ctx->regs[30] = *(uint64_t *)(usp +   8);
+	p->sig_mask   = *(uint64_t *)(usp +  16);
+	for (int _i = 0; _i <= 18; _i++)
+		ctx->regs[_i] = *(uint64_t *)(usp + 32 + (uint64_t)_i * 8);
+	ctx->regs[29] = *(uint64_t *)(usp + 184);
+	ctx->spsr     = *(uint64_t *)(usp + 192);
+	ctx->fpsr     = *(uint32_t *)(usp + 200);
+	ctx->fpcr     = *(uint32_t *)(usp + 204);
+	for (int _i = 0; _i < 64; _i++)
+		ctx->qregs[_i] = *(uint64_t *)(usp + 208 + (uint64_t)_i * 8);
+	ctx->sp       = usp + 736;
+#elif defined(__x86_64__)
+	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
+	 * Frame layout matches signal_dispatch: offsets from frame_base+8. */
+	uint64_t base = ctx->rsp;
+	p->sig_mask   = *(uint64_t *)(base +   0);
+	ctx->rip      = *(uint64_t *)(base +   8);
+	ctx->rsp      = *(uint64_t *)(base +  16);
+	ctx->rflags   = *(uint64_t *)(base +  24);
+	ctx->rax      = *(uint64_t *)(base +  32);
+	ctx->rbx      = *(uint64_t *)(base +  40);
+	ctx->rcx      = *(uint64_t *)(base +  48);
+	ctx->rdx      = *(uint64_t *)(base +  56);
+	ctx->rsi      = *(uint64_t *)(base +  64);
+	ctx->rdi      = *(uint64_t *)(base +  72);
+	ctx->rbp      = *(uint64_t *)(base +  80);
+	ctx->r8       = *(uint64_t *)(base +  88);
+	ctx->r9       = *(uint64_t *)(base +  96);
+	ctx->r10      = *(uint64_t *)(base + 104);
+	ctx->r11      = *(uint64_t *)(base + 112);
+	ctx->r12      = *(uint64_t *)(base + 120);
+	ctx->r13      = *(uint64_t *)(base + 128);
+	ctx->r14      = *(uint64_t *)(base + 136);
+	ctx->r15      = *(uint64_t *)(base + 144);
+	memcpy(ctx->fxsave, (void *)(base + 160), sizeof(ctx->fxsave));
+#endif
+}
