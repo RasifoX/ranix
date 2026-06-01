@@ -212,3 +212,37 @@ void wake_up(wait_queue_t *q)
 	q->tasks = NULL;
 	spin_unlock_irq(&q->lock, f);
 }
+
+/* ── poll/select wait-queue ───────────────────────────────────────────────────
+ * poll/select/epoll register on this shared queue and sleep event-driven (off
+ * the per-tick blanket wake). A producer that changes any fd's readiness calls
+ * poll_notify(); poll_block also arms a short backstop deadline so a producer
+ * that isn't wired yet costs latency, never a hang. */
+static wait_queue_t poll_wq = { SPINLOCK_INIT };
+
+void poll_notify(void) { wake_up(&poll_wq); }
+
+void poll_block(uint64_t deadline)
+{
+	extern volatile uint64_t kernel_ticks;
+	process_t *c = task_current();
+	uint64_t cap = kernel_ticks + 10;            /* backstop re-check */
+	uint64_t d   = (deadline < cap) ? deadline : cap;
+
+	uint64_t f = spin_lock_irq(&poll_wq.lock);
+	process_t *t = poll_wq.tasks; int found = 0;
+	while (t) { if (t == c) { found = 1; break; } t = t->wait_next; }
+	if (!found) { c->wait_next = poll_wq.tasks; poll_wq.tasks = c; }
+	c->state = PROC_SLEEPING;
+	c->sleeping_on_queue = 1;
+	c->wake_deadline = d;
+	spin_unlock_irq(&poll_wq.lock, f);
+
+	arch_yield();
+
+	c->wake_deadline = 0;
+	f = spin_lock_irq(&poll_wq.lock);
+	for (process_t **pp = &poll_wq.tasks; *pp; pp = &(*pp)->wait_next)
+		if (*pp == c) { *pp = c->wait_next; c->wait_next = NULL; break; }
+	spin_unlock_irq(&poll_wq.lock, f);
+}

@@ -130,6 +130,7 @@ void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len)
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
+    poll_notify();
 }
 
 /* ── UDP delivery ────────────────────────────────────────── */
@@ -167,4 +168,5 @@ void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
+    poll_notify();
 }
