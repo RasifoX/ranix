@@ -632,3 +632,135 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	return 0;
 }
 
+/* ── process lifecycle ───────────────────────────────────────────────────────
+ * exit, fork/vfork (both give the child its own address space — see vfork note),
+ * waitpid (reap a child or block until one is reapable), getpid, pipe2, and the
+ * x86 arch_prctl (set FS/GS base for TLS). The heavy lifting lives in sched.c
+ * (proc_fork, proc_reap, the wait helpers); these are the syscall entry points.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static long sys_exit(int code)
+{
+	process_t *p = task_current();
+	p->exit_code  = code;
+	vma_free_all(p);
+	task_exit();
+	return 0;
+}
+
+static long sys_getpid(void)
+{
+	process_t *p = task_current();
+	return (long)(p->tgid ? p->tgid : p->pid);
+}
+
+static long sys_fork(void)
+{
+	return (long)proc_fork();
+}
+
+static long sys_vfork(void)
+{
+	/* vfork-as-fork: give the child its own address space instead of
+	 * sharing the parent's stack. Sharing is unsafe under SMP — the
+	 * parent and child can run concurrently and corrupt the shared
+	 * user stack. fork semantics are always a valid vfork. */
+	return (long)proc_fork();
+}
+
+static long sys_pipe2(int *pipefd, int flags)
+{
+	int kfds[2];
+	if (vfs_pipe(kfds) != 0) return -1;
+	process_t *p = task_current();
+	if (flags & O_NONBLOCK) {
+		for (int i = 0; i < 2; i++) {
+			vfs_file_t *f = fd_get(p->fds, kfds[i]);
+			if (f) f->flags |= O_NONBLOCK;
+		}
+	}
+	if (flags & O_CLOEXEC) {
+		fd_set_cloexec(p->fds, kfds[0], 1);
+		fd_set_cloexec(p->fds, kfds[1], 1);
+	}
+	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
+	return 0;
+}
+
+#define WNOHANG 1
+
+extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
+                                      process_t **out_child, int *out_any_alive);
+extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep);
+
+static long sys_waitpid(pid_t pid, int *status, int flags)
+{
+	process_t *p = task_current();
+	int wnohang  = (flags & WNOHANG) != 0;
+
+	if (pid == -1) {
+		while (1) {
+			process_t *child = NULL;
+			int any_alive = 0;
+			proc_find_zombie_or_sleep(p->pid, p, !wnohang, &child, &any_alive);
+			if (child) {
+				int st = child->killed_by_sig
+				       ? (child->exit_code & 0x7F)
+				       : (child->exit_code & 0xFF) << 8;
+				pid_t result = child->pid;
+				proc_reap(child);
+				if (status && (uint64_t)status > 0x1000)
+					*status = st;
+				return (long)result;
+			}
+			if (!any_alive) return -10; /* ECHILD */
+			if (wnohang)    return 0;
+			arch_yield();
+		}
+	}
+
+	process_t *child = proc_find(pid);
+	if (!child || child->ppid != p->pid) return -10;
+
+	while (1) {
+		int r = proc_check_or_sleep(child, p, !wnohang);
+		if (r == 1) break;  /* zombie */
+		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
+			if (status && (uint64_t)status > 0x1000)
+				*status = (5 << 8) | 0x7f; /* WIFSTOPPED | SIGTRAP */
+			return (long)pid;
+		}
+		if (wnohang) return 0;
+		arch_yield();
+	}
+
+	child->reaped = 1;
+	int st = child->killed_by_sig
+	       ? (child->exit_code & 0x7F)
+	       : (child->exit_code & 0xFF) << 8;
+	proc_reap(child);
+	if (status && (uint64_t)status > 0x1000)
+		*status = st;
+	return (long)pid;
+}
+
+#if defined(__x86_64__)
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+
+static long sys_arch_prctl(int code, uint64_t addr)
+{
+	if (code == ARCH_SET_FS) {
+		__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
+		task_current()->tls_base = addr;
+		return 0;
+	}
+	if (code == ARCH_SET_GS) {
+		/* When kernel is running, USER GS is stored in KERNEL_GS_BASE MSR. */
+		__asm__ volatile("wrmsr" :: "c"(0xC0000102U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
+		return 0;
+	}
+	return -22;
+}
+#endif
+
