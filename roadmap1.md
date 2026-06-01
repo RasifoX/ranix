@@ -348,13 +348,13 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 Docker, Podman, LXC hepsi namespace + cgroups üstünde çalışıyor.
 Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 
-### Namespaces (3/8 TAM — hepsi self-contained olanlar; 2026-06-01)
+### Namespaces (4/8 TAM: UTS, IPC, time, mount; 2026-06-01)
 - [x] **UTS namespace**: unshare/clone(CLONE_NEWUTS), hostname/domainname izole; current_uts()
 - [x] **IPC namespace**: unshare/clone(CLONE_NEWIPC), SysV shm/sem + POSIX mqueue izole (owner-tag + ns destroy sweep)
 - [x] **time namespace**: unshare(CLONE_NEWTIME), CLOCK_MONOTONIC/BOOTTIME offset; /proc/<pid>/timens_offsets
 - [x] **unshare + setns** syscall (her üç ns için); clone bayrağı (time hariç — 0x80 signal-byte çakışması, Linux de yasak)
 - [x] **/proc/[pid]/ns/{uts,ipc,time}** — nsfs identity link + openable fd (setns için); namei "fops'lu symlink follow etme"
-- [ ] mount namespace: clone(CLONE_NEWNS) — büyük, global mount_list → per-process view
+- [x] **mount namespace**: unshare(CLONE_NEWNS) ✅ — splice→per-ns mount-following (namei), unshare/setns/identity, izolasyon testli (95d5398)
 - [ ] PID namespace: clone(CLONE_NEWPID) — en zor, scheduler/proc_find/waitpid ns-aware
 - [ ] network namespace: clone(CLONE_NEWNET) — net stack ns-aware
 - [ ] user namespace: clone(CLONE_NEWUSER), uid/gid mapping
