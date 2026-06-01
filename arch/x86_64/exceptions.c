@@ -81,13 +81,5 @@ void exc_dispatch(arch_context_t *ctx)
 		__builtin_unreachable();
 	}
 
-	kprintf("\n--- kernel fault ---\n");
-	kprintf("type:  #%d %s\n", (int)ctx->vector, exc_name(ctx->vector));
-	kprintf("RIP:   0x%016lx\n", ctx->rip);
-	kprintf("RSP:   0x%016lx\n", ctx->rsp);
-	kprintf("RFLAGS:0x%08lx\n", ctx->rflags);
-	kprintf("ERR:   0x%lx\n", ctx->error_code);
-	if (ctx->vector == 14)
-		kprintf("CR2:   0x%016lx\n", read_cr2());
-	kpanic("unhandled exception");
+	panic_report(exc_name(ctx->vector), ctx);
 }
