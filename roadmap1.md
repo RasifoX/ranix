@@ -348,7 +348,7 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 Docker, Podman, LXC hepsi namespace + cgroups üstünde çalışıyor.
 Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 
-### Namespaces (6/8 TAM: UTS, IPC, time, mount, PID, user; kalan: net, cgroup; 2026-06-01)
+### Namespaces (7/8 TAM: UTS, IPC, time, mount, PID, user, net; kalan: cgroup; 2026-06-01)
 - [x] **UTS namespace**: unshare/clone(CLONE_NEWUTS), hostname/domainname izole; current_uts()
 - [x] **IPC namespace**: unshare/clone(CLONE_NEWIPC), SysV shm/sem + POSIX mqueue izole (owner-tag + ns destroy sweep)
 - [x] **time namespace**: unshare(CLONE_NEWTIME), CLOCK_MONOTONIC/BOOTTIME offset; /proc/<pid>/timens_offsets
@@ -356,7 +356,7 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [x] **/proc/[pid]/ns/{uts,ipc,time}** — nsfs identity link + openable fd (setns için); namei "fops'lu symlink follow etme"
 - [x] **mount namespace**: unshare(CLONE_NEWNS) ✅ — splice→per-ns mount-following (namei), unshare/setns/identity, izolasyon testli (95d5398)
 - [x] **PID namespace**: clone/unshare(CLONE_NEWPID) ✅ — tam Linux modeli: per-ns (ns,nr) vektörü, getpid/getppid/kill/waitpid çevirisi, init(1) reaper (yetim reparent + ns-init ölünce ns SIGKILL), /proc/ns/pid+setns (af35c9b). kernel/pid.c
-- [ ] network namespace: clone(CLONE_NEWNET) — net stack ns-aware
+- [x] **network namespace**: clone/unshare(CLONE_NEWNET) ✅ — per-ns device registry + per-ns loopback + socket→ns + ns-scoped RX matching (tcp/udp/icmp); /proc/ns/net+setns (cde040b)
 - [x] **user namespace**: clone/unshare(CLONE_NEWUSER) ✅ — kuid modeli, uid_map/gid_map (write-once), getuid/getgid çevirisi, /proc/ns/user+setns, rootless temeli (2842b85). kernel/user_ns.c
 - Container için mount+pid şart; kalanlar somut ihtiyaç çıkınca
 
