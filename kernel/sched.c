@@ -7,6 +7,7 @@
 #include <kernel/cgroup.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>
+#include <kernel/bug.h>
 #include <kernel/cmdline.h>
 #include <kernel/tick.h>
 #include <kernel/elf.h>
@@ -477,7 +478,8 @@ void schedule(void)
 	process_t *prev = task_current();
 
 	cpu_context_t *cpu = arch_get_cpu_ctx();
-	
+	BUG_ON(cpu->magic != 0xCAFEBABE);   /* per-CPU area / GS-base corruption tripwire */
+
 	/* Always pass prev to sched_requeue_prev to clear on_cpu */
 	cpu->pending_requeue = prev;
 
