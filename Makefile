@@ -111,6 +111,7 @@ SRCS_KERNEL = \
     kernel/fs/ramfs.c \
     kernel/fs/pipe.c \
     kernel/fs/procfs.c \
+    kernel/fs/sysfs.c \
     kernel/fs/devfs.c \
     kernel/fs/mbr.c \
     kernel/fs/ext2.c \
