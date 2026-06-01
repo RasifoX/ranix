@@ -663,21 +663,36 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 	return in;
 }
 
-/* ── /proc/<pid>/ns/uts — namespace identity ("uts:[<inum>]") ─── */
+/* ── /proc/<pid>/ns/{uts,ipc} — namespace identity ("<kind>:[<inum>]") ── */
+
+enum { NS_UTS = 0, NS_IPC };
+static const char *ns_kinds[] = { "uts", "ipc" };
+#define NS_KINDS_N ((int)(sizeof(ns_kinds) / sizeof(ns_kinds[0])))
+
+typedef struct { int pid; int kind; } procfs_nslink_priv_t;
 
 static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
-	procfs_fddir_priv_t *pp = in->priv;
+	procfs_nslink_priv_t *pp = in->priv;
 	if (!pp) return -1;
 	process_t *p = pp->pid == 0 ? task_current() : proc_find((pid_t)pp->pid);
 	if (!p) return -1;
-	uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
+
+	const char *prefix;
+	unsigned long inum;
+	if (pp->kind == NS_IPC) {
+		ipc_namespace_t *ns = p->ipc_ns ? p->ipc_ns : &init_ipc_ns;
+		prefix = "ipc:["; inum = ns->inum;
+	} else {
+		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
+		prefix = "uts:["; inum = ns->inum;
+	}
+
 	char tmp[40]; int i = 0;
-	for (const char *s = "uts:["; *s; s++) tmp[i++] = *s;
-	unsigned long v = ns->inum;
+	for (const char *s = prefix; *s; s++) tmp[i++] = *s;
 	char rev[20]; int r = 0;
-	if (v == 0) rev[r++] = '0';
-	while (v) { rev[r++] = '0' + (int)(v % 10); v /= 10; }
+	if (inum == 0) rev[r++] = '0';
+	while (inum) { rev[r++] = '0' + (int)(inum % 10); inum /= 10; }
 	while (r) tmp[i++] = rev[--r];
 	tmp[i++] = ']';
 	tmp[i] = '\0';
@@ -689,14 +704,15 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 static vfs_iops_t procfs_nslink_iops = { .readlink = procfs_nslink_readlink };
 
 /*
- * Opening the ns link captures the target's UTS namespace and pins it for
- * the life of the fd, so setns(2) can rejoin exactly that namespace even
- * after the target process unshares or exits.
+ * Opening the ns link captures the target's namespace and pins it for the
+ * life of the fd, so setns(2) can rejoin exactly that namespace even after
+ * the target process unshares or exits. Separate fops per kind let setns
+ * tell a UTS fd from an IPC one.
  */
-static int procfs_nsfile_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+static int procfs_utsns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 {
 	(void)flags;
-	procfs_fddir_priv_t *pp = in->priv;
+	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
 	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
 	if (!p) return -1;
@@ -704,26 +720,55 @@ static int procfs_nsfile_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	return 0;
 }
 
-static int procfs_nsfile_close(vfs_file_t *f)
+static int procfs_utsns_close(vfs_file_t *f)
 {
 	uts_ns_put((uts_namespace_t *)f->priv);
 	f->priv = NULL;
 	return 0;
 }
 
-static vfs_fops_t procfs_nsfile_fops = {
-	.open  = procfs_nsfile_open,
-	.close = procfs_nsfile_close,
+static vfs_fops_t procfs_utsns_fops = {
+	.open  = procfs_utsns_open,
+	.close = procfs_utsns_close,
 };
 
-/* setns(2) helper: the UTS namespace an open ns fd refers to, or NULL */
+static int procfs_ipcns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_nslink_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = ipc_ns_get(p->ipc_ns);
+	return 0;
+}
+
+static int procfs_ipcns_close(vfs_file_t *f)
+{
+	ipc_ns_put((ipc_namespace_t *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_ipcns_fops = {
+	.open  = procfs_ipcns_open,
+	.close = procfs_ipcns_close,
+};
+
+/* setns(2) helpers: the namespace an open ns fd refers to, or NULL */
 uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
 {
-	if (!f || !f->inode || f->inode->fops != &procfs_nsfile_fops) return NULL;
+	if (!f || !f->inode || f->inode->fops != &procfs_utsns_fops) return NULL;
 	return (uts_namespace_t *)f->priv;
 }
 
-static vfs_inode_t *procfs_nslink_inode(int pid)
+ipc_namespace_t *nsfile_to_ipc(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_ipcns_fops) return NULL;
+	return (ipc_namespace_t *)f->priv;
+}
+
+static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
@@ -733,10 +778,10 @@ static vfs_inode_t *procfs_nslink_inode(int pid)
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->iops     = &procfs_nslink_iops;
-	in->fops     = &procfs_nsfile_fops;
-	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	in->fops     = (kind == NS_IPC) ? &procfs_ipcns_fops : &procfs_utsns_fops;
+	procfs_nslink_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
-	pp->pid = pid;
+	pp->pid = pid; pp->kind = kind;
 	in->priv = pp;
 	return in;
 }
@@ -745,19 +790,22 @@ static vfs_inode_t *procfs_nsdir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	if (strcmp(name, "uts") == 0) return procfs_nslink_inode(pid);
+	for (int k = 0; k < NS_KINDS_N; k++)
+		if (strcmp(name, ns_kinds[k]) == 0) return procfs_nslink_inode(pid, k);
 	return NULL;
 }
 
 static int procfs_nsdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= 1) return -1;
+	if (idx >= (uint32_t)NS_KINDS_N) return -1;
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	out->ino      = 0x8000 + (uint64_t)pid * 100 + 80;
+	const char *n = ns_kinds[idx];
+	int nlen = 0; while (n[nlen]) nlen++;
+	out->ino      = 0x8000 + (uint64_t)pid * 100 + 80 + idx;
 	out->mode     = S_IFLNK | 0777;
 	out->next_off = idx + 1;
-	memcpy(out->name, "uts", 4);
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
 	return 0;
 }
 

@@ -158,7 +158,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd \
                  userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_pipestress \
                  userspace/test_uts userspace/test_setns userspace/test_clonens \
-                 userspace/test_ipcns
+                 userspace/test_ipcns userspace/test_ipcsetns
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
