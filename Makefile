@@ -103,6 +103,7 @@ SRCS_KERNEL = \
     kernel/irq.c \
     kernel/kprintf.c \
     kernel/sched.c \
+    kernel/nsproxy.c \
     kernel/tty/fb_tty.c \
     kernel/sync.c \
     kernel/elf.c \
@@ -155,7 +156,8 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
                  userspace/test_fpsig userspace/test_cowrace userspace/bench userspace/test_clock \
                  userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd \
-                 userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_pipestress
+                 userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_pipestress \
+                 userspace/test_uts
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 

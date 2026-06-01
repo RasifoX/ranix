@@ -130,6 +130,9 @@ typedef struct process {
 
 	/* full path of the running image, for /proc/<pid>/exe */
 	char            exe_path[PROC_NAME_MAX];
+
+	/* namespaces (shared on fork, copied on unshare) */
+	struct uts_namespace *uts_ns;
 } process_t;
 
 /* scheduler */

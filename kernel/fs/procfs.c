@@ -13,7 +13,7 @@
 #include <kernel/net/net.h>
 #include <kernel/hal.h>
 
-extern char ranix_hostname[65];
+#include <kernel/nsproxy.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -412,8 +412,8 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
-	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,ranix_hostname); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
-	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"(none)\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->nodename); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->domainname); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_OVERCOMMIT:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_NGROUPS_MAX:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_PID_MAX:      { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"32768\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -455,8 +455,9 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		if (n > 0 && tmp[n-1] == '\n') n--;
 		if (n >= 65) return -22;
 		if (n > 0) {
-			memcpy(ranix_hostname, tmp, n);
-			ranix_hostname[n] = '\0';
+			uts_namespace_t *ns = current_uts();
+			memcpy(ns->nodename, tmp, n);
+			ns->nodename[n] = '\0';
 		}
 		return (ssize_t)len;
 	}

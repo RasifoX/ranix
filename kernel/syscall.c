@@ -1,6 +1,7 @@
 #include <kernel/syscall.h>
 #include <kernel/capabilities.h>
 #include <kernel/proc.h>
+#include <kernel/nsproxy.h>
 #include <kernel/elf.h>
 #include <kernel/vfs.h>
 #include <kernel/hal.h>
@@ -349,6 +350,7 @@ void syscall_handle(arch_context_t *ctx)
 		}
 		break;
 	}
+	case SYS_ARCH_UNSHARE: ret = sys_unshare((unsigned long)arg0); break;
 	case SYS_ARCH_EXECVE: ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
 	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
 	/* ── time ────────────────────────────────────────────── */

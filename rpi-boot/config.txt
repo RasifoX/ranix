@@ -1,0 +1,5 @@
+arm_64bit=1
+kernel=kernel8.img
+initramfs initramfs.cpio 0x02000000
+enable_uart=1
+dtoverlay=disable-bt
