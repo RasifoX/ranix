@@ -10,7 +10,7 @@ void icmp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     icmp_hdr_t *h = (icmp_hdr_t *)skb->data;
 
     if (h->type == ICMP_ECHO_REPLY) {
-        sock_icmp_deliver(ntohl(iph->src), skb->data, skb->len);
+        sock_icmp_deliver(dev->net_ns, ntohl(iph->src), skb->data, skb->len);
         skb_free(skb);
         return;
     }

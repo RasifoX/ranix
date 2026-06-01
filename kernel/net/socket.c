@@ -63,6 +63,7 @@ socket_t *sock_alloc(int domain, int type, int proto)
     s->proto  = proto;
     s->tcp_state = TCP_CLOSED;
     s->recv_lock = (spinlock_t)SPINLOCK_INIT;
+    s->net_ns    = current_net_ns();
     return s;
 }
 
@@ -88,13 +89,14 @@ int unix_send(socket_t *s, const void *data, uint16_t len)
 
 /* ── ICMP delivery to RAW sockets ───────────────────────── */
 
-void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len)
+void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
     socket_t *found = NULL;
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
+        if (s->net_ns != ns) continue;
         if (s->type != SOCK_RAW) continue;
         if (s->proto != 1 /* IPPROTO_ICMP */) continue;
         found = s;
@@ -135,7 +137,7 @@ void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len)
 
 /* ── UDP delivery ────────────────────────────────────────── */
 
-void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
+void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_port,
                       uint16_t dst_port, const void *data, uint16_t len)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
@@ -143,6 +145,7 @@ void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
+        if (s->net_ns != ns) continue;
         if (s->type != SOCK_DGRAM) continue;
         if (s->local_port != dst_port) continue;
         found = s;

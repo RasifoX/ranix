@@ -140,13 +140,13 @@ static uint16_t alloc_port(void)
 
 /* ── socket lookup ───────────────────────────────────────── */
 
-socket_t *tcp_sock_find(uint32_t local_ip, uint16_t local_port,
+socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t local_port,
                         uint32_t remote_ip, uint16_t remote_port)
 {
-    
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
+        if (s->net_ns != ns) continue;
         if (s->type != SOCK_STREAM) continue;
         if (s->local_port  != local_port)  continue;
         if (s->remote_port != remote_port) continue;
@@ -157,12 +157,12 @@ socket_t *tcp_sock_find(uint32_t local_ip, uint16_t local_port,
     return NULL;
 }
 
-socket_t *tcp_listen_find(uint16_t local_port)
+socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port)
 {
-    
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
+        if (s->net_ns != ns) continue;
         if (s->type != SOCK_STREAM) continue;
         if (s->tcp_state != TCP_LISTEN) continue;
         if (s->local_port != local_port) continue;
@@ -251,11 +251,11 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     uint16_t dlen = skb->len;
 
     /* find socket */
-    socket_t *s = tcp_sock_find(ntohl(iph->dst), dst_port, src_ip, src_port);
+    socket_t *s = tcp_sock_find(dev->net_ns, ntohl(iph->dst), dst_port, src_ip, src_port);
 
     if (!s) {
         /* check for listen socket */
-        socket_t *ls = tcp_listen_find(dst_port);
+        socket_t *ls = tcp_listen_find(dev->net_ns, dst_port);
         if (ls && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
             /* incoming SYN → create new socket, send SYN-ACK */
             socket_t *ns = sock_alloc(AF_INET, SOCK_STREAM, IP_PROTO_TCP);
@@ -321,7 +321,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->tcp_state = TCP_ESTABLISHED;
             retx_clear(s);
             /* move to listen socket's accept queue */
-            socket_t *ls = tcp_listen_find(s->local_port);
+            socket_t *ls = tcp_listen_find(s->net_ns, s->local_port);
             if (ls) {
                 s->accept_head = NULL; /* reuse field for list link */
                 /* append to ls->accept_head list using accept_tail chain */

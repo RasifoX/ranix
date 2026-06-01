@@ -55,10 +55,10 @@ void tcp_tick(void);
 void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
 
 /* Find a SOCK_STREAM socket by 4-tuple */
-socket_t *tcp_sock_find(uint32_t local_ip, uint16_t local_port,
+socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t local_port,
                         uint32_t remote_ip, uint16_t remote_port);
 
 /* Find a LISTEN socket by local port */
-socket_t *tcp_listen_find(uint16_t local_port);
+socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port);
 
 #endif

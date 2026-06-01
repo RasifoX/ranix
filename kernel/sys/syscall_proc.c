@@ -72,6 +72,13 @@ static long sys_unshare(unsigned long flags)
 		p->user_ns = ns;
 		p->cap_effective = p->cap_permitted = CAP_FULL;
 	}
+	if (flags & CLONE_NEWNET) {
+		/* moves the caller into a new network namespace (only loopback) */
+		net_namespace_t *ns = net_ns_create();
+		if (!ns) return -12;
+		net_ns_put(p->net_ns);
+		p->net_ns = ns;
+	}
 	if (flags & CLONE_NEWPID) {
 		/* applies to future children, not the caller (the caller's pid does
 		 * not change); the first child becomes nr 1 of the new ns */
@@ -147,6 +154,15 @@ static long sys_setns(int fd, int nstype)
 		user_ns_get(uns);
 		user_ns_put(p->user_ns);
 		p->user_ns = uns;
+		return 0;
+	}
+
+	net_namespace_t *nns = nsfile_to_net(f);
+	if (nns) {
+		if (nstype != 0 && nstype != CLONE_NEWNET) return -22;
+		net_ns_get(nns);
+		net_ns_put(p->net_ns);
+		p->net_ns = nns;
 		return 0;
 	}
 
