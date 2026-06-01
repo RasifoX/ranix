@@ -109,6 +109,7 @@ typedef struct vfs_file {
     int          flags;
     uint32_t     refcount;
     char         path[256];
+    void        *priv;       /* per-open private data (e.g. captured namespace) */
 } vfs_file_t;
 
 /* ── directory entry (path tree node) ───────────────────── */

@@ -45,6 +45,24 @@ static long sys_unshare(unsigned long flags)
 	return 0;
 }
 
+/*
+ * setns(2) — join the namespace referred to by an open ns fd. Only the UTS
+ * namespace is supported; nstype, if given, must match.
+ */
+static long sys_setns(int fd, int nstype)
+{
+	process_t *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f) return -9; /* EBADF */
+	uts_namespace_t *target = nsfile_to_uts(f);
+	if (!target) return -22; /* EINVAL: not a UTS namespace fd */
+	if (nstype != 0 && nstype != CLONE_NEWUTS) return -22;
+	uts_ns_get(target);
+	uts_ns_put(p->uts_ns);
+	p->uts_ns = target;
+	return 0;
+}
+
 /* ── time syscalls ───────────────────────────────────────── */
 
 typedef struct { int64_t tv_sec; int64_t tv_nsec; } linux_timespec_t;

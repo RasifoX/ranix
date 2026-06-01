@@ -688,6 +688,41 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 
 static vfs_iops_t procfs_nslink_iops = { .readlink = procfs_nslink_readlink };
 
+/*
+ * Opening the ns link captures the target's UTS namespace and pins it for
+ * the life of the fd, so setns(2) can rejoin exactly that namespace even
+ * after the target process unshares or exits.
+ */
+static int procfs_nsfile_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_fddir_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = uts_ns_get(p->uts_ns);
+	return 0;
+}
+
+static int procfs_nsfile_close(vfs_file_t *f)
+{
+	uts_ns_put((uts_namespace_t *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_nsfile_fops = {
+	.open  = procfs_nsfile_open,
+	.close = procfs_nsfile_close,
+};
+
+/* setns(2) helper: the UTS namespace an open ns fd refers to, or NULL */
+uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_nsfile_fops) return NULL;
+	return (uts_namespace_t *)f->priv;
+}
+
 static vfs_inode_t *procfs_nslink_inode(int pid)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -698,6 +733,7 @@ static vfs_inode_t *procfs_nslink_inode(int pid)
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->iops     = &procfs_nslink_iops;
+	in->fops     = &procfs_nsfile_fops;
 	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid;

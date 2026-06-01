@@ -351,6 +351,7 @@ void syscall_handle(arch_context_t *ctx)
 		break;
 	}
 	case SYS_ARCH_UNSHARE: ret = sys_unshare((unsigned long)arg0); break;
+	case SYS_ARCH_SETNS:   ret = sys_setns((int)arg0, (int)arg1); break;
 	case SYS_ARCH_EXECVE: ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
 	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
 	/* ── time ────────────────────────────────────────────── */

@@ -34,4 +34,9 @@ void             uts_ns_put(uts_namespace_t *ns);
 /* allocate a private copy of `old` with refcount 1 (NULL on OOM) */
 uts_namespace_t *uts_ns_clone(uts_namespace_t *old);
 
+/* the UTS namespace an open /proc/<pid>/ns/uts fd refers to (NULL if the fd
+ * is not such a namespace file); used by setns(2) */
+struct vfs_file;
+uts_namespace_t *nsfile_to_uts(struct vfs_file *f);
+
 #endif

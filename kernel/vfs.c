@@ -214,8 +214,11 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			d_is_volatile = 0;
 		}
 
-		/* follow symlinks */
-		if (S_ISLNK(child->inode->mode)) {
+		/* follow symlinks — except magic links that are also openable
+		 * objects (nsfs-style, e.g. /proc/<pid>/ns/uts): those carry fops,
+		 * so resolve to the link itself and let open() act on the object
+		 * rather than following its text. */
+		if (S_ISLNK(child->inode->mode) && !child->inode->fops) {
 			if (++symlink_depth > 8 ||
 			    !child->inode->iops || !child->inode->iops->readlink) {
 				spin_unlock_irq(&vfs_lock, f);
