@@ -191,7 +191,7 @@ fail:
 	return -1;
 }
 
-pid_t proc_fork(int new_uts_ns)
+pid_t proc_fork(uint64_t clone_flags)
 {
 	process_t *parent = task_current();
 	arch_save_tls(parent);
@@ -256,11 +256,17 @@ pid_t proc_fork(int new_uts_ns)
 		child->ctx = cctx;
 	}
 	child->tls_base        = parent->tls_base;
-	if (new_uts_ns) {
+	if (clone_flags & CLONE_NEWUTS) {
 		child->uts_ns = uts_ns_clone(parent->uts_ns);
 		if (!child->uts_ns) goto fail_early;
 	} else {
 		child->uts_ns = uts_ns_get(parent->uts_ns);
+	}
+	if (clone_flags & CLONE_NEWIPC) {
+		child->ipc_ns = ipc_ns_clone(parent->ipc_ns);
+		if (!child->ipc_ns) goto fail_early;
+	} else {
+		child->ipc_ns = ipc_ns_get(parent->ipc_ns);
 	}
 	child->ticks_remaining = sched_quantum_val;
 
@@ -287,6 +293,7 @@ fail_early:
 	if (child->fds)    fd_table_destroy(child->fds);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	if (child->uts_ns) uts_ns_put(child->uts_ns);
+	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -334,6 +341,7 @@ pid_t proc_vfork(void)
 	child->ctx      = cctx;
 	child->tls_base = parent->tls_base;
 	child->uts_ns   = uts_ns_get(parent->uts_ns);
+	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int pid = alloc_pid();
@@ -434,6 +442,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 
 	child->tls_base = tls ? tls : parent->tls_base;
 	child->uts_ns   = uts_ns_get(parent->uts_ns);
+	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
 
 	child->clear_child_tid = ctid;
 
@@ -544,6 +553,8 @@ void task_exit(void)
 
 	uts_ns_put(p->uts_ns);
 	p->uts_ns = NULL;
+	ipc_ns_put(p->ipc_ns);
+	p->ipc_ns = NULL;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;

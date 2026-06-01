@@ -14,6 +14,10 @@
  */
 
 #define CLONE_NEWUTS 0x04000000
+#define CLONE_NEWIPC 0x08000000
+
+/* shared global allocator for namespace identities (/proc/<pid>/ns/*) */
+unsigned long ns_inum_alloc(void);
 
 typedef struct uts_namespace {
 	int           refcount;
@@ -38,5 +42,22 @@ uts_namespace_t *uts_ns_clone(uts_namespace_t *old);
  * is not such a namespace file); used by setns(2) */
 struct vfs_file;
 uts_namespace_t *nsfile_to_uts(struct vfs_file *f);
+
+/*
+ * IPC namespace — isolates SysV shared memory / semaphores and POSIX message
+ * queues. Lifecycle lives in syscall_ipc.c (next to the object tables) so
+ * teardown can reclaim the namespace's IPC objects.
+ */
+typedef struct ipc_namespace {
+	int           refcount;
+	unsigned long inum;
+} ipc_namespace_t;
+
+extern ipc_namespace_t init_ipc_ns;
+ipc_namespace_t *current_ipc(void);
+ipc_namespace_t *ipc_ns_get(ipc_namespace_t *ns);
+void             ipc_ns_put(ipc_namespace_t *ns);
+ipc_namespace_t *ipc_ns_clone(ipc_namespace_t *old);
+ipc_namespace_t *nsfile_to_ipc(struct vfs_file *f);
 
 #endif

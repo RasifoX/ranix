@@ -35,12 +35,18 @@ static long sys_uname(linux_utsname_t *uts)
  */
 static long sys_unshare(unsigned long flags)
 {
+	process_t *p = task_current();
 	if (flags & CLONE_NEWUTS) {
-		process_t *p = task_current();
 		uts_namespace_t *ns = uts_ns_clone(p->uts_ns);
 		if (!ns) return -12; /* ENOMEM */
 		uts_ns_put(p->uts_ns);
 		p->uts_ns = ns;
+	}
+	if (flags & CLONE_NEWIPC) {
+		ipc_namespace_t *ns = ipc_ns_clone(p->ipc_ns);
+		if (!ns) return -12; /* ENOMEM */
+		ipc_ns_put(p->ipc_ns);
+		p->ipc_ns = ns;
 	}
 	return 0;
 }
