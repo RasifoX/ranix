@@ -403,10 +403,11 @@ static long sys_umount2(const char *target, int flags)
 
 static long sys_sethostname(const char *name, size_t len)
 {
-	if (len >= sizeof(ranix_hostname)) return -22;
+	uts_namespace_t *ns = current_uts();
+	if (len >= sizeof(ns->nodename)) return -22;
 	if (!access_ok(name, len)) return -14;
-	if (copy_from_user(ranix_hostname, name, len) != 0) return -14;
-	ranix_hostname[len] = '\0';
+	if (copy_from_user(ns->nodename, name, len) != 0) return -14;
+	ns->nodename[len] = '\0';
 	return 0;
 }
 
