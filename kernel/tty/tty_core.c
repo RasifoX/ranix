@@ -19,7 +19,7 @@
 #define ECHOKE  0x00000800
 #define IEXTEN  0x00008000
 
-/* c_cc indices (Linux AArch64/x86_64) */
+/* c_cc indices (termios) */
 #define VINTR    0
 #define VQUIT    1
 #define VERASE   2

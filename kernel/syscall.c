@@ -36,7 +36,7 @@
 #define PROT_WRITE 0x2
 #define PROT_EXEC  0x4
 
-/* Linux ABI stat struct — layout differs between x86_64 and aarch64 */
+/* stat struct (kernel ABI) — layout differs between x86_64 and aarch64 */
 #if defined(__x86_64__)
 typedef struct {
 	uint64_t st_dev;
@@ -711,7 +711,7 @@ static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldac
 	if (sig <= 0 || sig > NSIG || sigsetsize < 8) return -22;
 	if (sig == SIGKILL) return -22;
 
-	/* Linux struct sigaction: handler, flags, restorer, mask[N]
+	/* struct sigaction (kernel ABI): handler, flags, restorer, mask[N]
 	 * Our sigaction_t mirrors this layout. User struct may have larger
 	 * sa_mask (16 bytes for 128-bit RT sigset); we only store 64 bits. */
 	size_t copy_sz = sizeof(sigaction_t);
@@ -1253,7 +1253,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1); break;
 	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
 	case SYS_ARCH_SET_TID_ADDR:
-		/* Linux ABI: record the clear-on-exit address and return the tid. On
+		/* ABI: record the clear-on-exit address and return the tid. On
 		 * thread exit the kernel writes 0 there and futex-wakes it. */
 		task_current()->clear_child_tid = (uint32_t *)arg0;
 		ret = (long)task_current()->pid;
@@ -1295,7 +1295,7 @@ void syscall_handle(arch_context_t *ctx)
 		} else if (flags & CLONE_VM) {
 			/* Thread: share address space */
 			uint64_t newsp  = (uint64_t)arg1;
-			/* Linux ABI: x86_64 clone(flags,newsp,ptid,ctid,tls)
+			/* ABI: x86_64 clone(flags,newsp,ptid,ctid,tls)
 			 *            aarch64 clone(flags,newsp,ptid,tls,ctid) */
 			uint32_t *ptid  = (flags & CLONE_PTID)   ? (uint32_t*)arg2 : NULL;
 #if defined(__aarch64__)

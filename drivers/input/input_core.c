@@ -50,7 +50,7 @@ void input_sync(void)
     spin_unlock_irq(&ev_lock, f);
 }
 
-/* Map ASCII/escape sequences from serial input to Linux keycodes for evdev */
+/* Map ASCII/escape sequences from serial input to evdev keycodes */
 void input_inject_ascii(uint8_t c)
 {
     static int esc_st = 0;

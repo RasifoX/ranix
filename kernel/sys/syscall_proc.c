@@ -44,7 +44,7 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 
 extern spinlock_t sched_lock;
 
-/* ── futex: event-driven, per-address hash buckets (Linux futex_q model) ──────
+/* ── futex: event-driven, per-address hash buckets (futex_q model) ──────
  * Waiters are stack-allocated nodes linked into a bucket keyed by
  * (address space, uaddr). FUTEX_WAIT does an atomic value-check + enqueue under
  * futex_lock, then sleeps; FUTEX_WAKE dequeues and wakes — no fixed slot table,
@@ -326,7 +326,7 @@ static long sys_times(void *buf)
 static long sys_sysinfo(void *info)
 {
 	if (!info) return 0;
-	/* struct sysinfo layout (Linux ABI) */
+	/* struct sysinfo layout (kernel ABI) */
 	struct {
 		int64_t  uptime;
 		uint64_t loads[3];
