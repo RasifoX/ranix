@@ -661,7 +661,9 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
         }
         if (sfd->flags & O_NONBLOCK) return -11; /* EAGAIN */
         if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
-        task_sleep();
+        /* event-driven: task_signal wakes the owner when a signal is posted; the
+         * poll_block backstop re-checks otherwise. Off the per-tick blanket wake. */
+        poll_block((uint64_t)-1);
     }
 }
 
