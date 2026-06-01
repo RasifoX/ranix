@@ -136,6 +136,9 @@ typedef struct process {
 	struct ipc_namespace  *ipc_ns;
 	struct time_namespace *time_ns;
 	struct time_namespace *time_ns_new; /* pending time ns for children (unshare CLONE_NEWTIME) */
+
+	/* cgroup membership (NULL = root cgroup) */
+	void           *cgroup;
 } process_t;
 
 /* scheduler */

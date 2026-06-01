@@ -935,5 +935,7 @@ void vfs_init(void)
 	ext2_register();
 	extern void sysfs_register(void);
 	sysfs_register();
+	extern void cgroup_register(void);
+	cgroup_register();
 	kprintf("VFS: initialized\n");
 }

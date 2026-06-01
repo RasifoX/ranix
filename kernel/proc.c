@@ -200,6 +200,12 @@ pid_t proc_fork(uint64_t clone_flags)
 	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
 
+	/* cgroup pids limit: reject the fork if it would exceed pids.max. Charged
+	 * here; released by cgroup_cancel_fork on a later failure, or by
+	 * cgroup_exit when the child eventually exits. */
+	if (cgroup_can_fork(parent) != 0) { buddy_free(VIRT_TO_PHYS(child), 0); return -11; }
+	cgroup_fork_attach(child, parent);
+
 	child->ppid      = parent->pid;
 	child->pgrp      = parent->pgrp;
 	child->sid       = parent->sid;
@@ -299,6 +305,7 @@ fail_early:
 	if (child->uts_ns) uts_ns_put(child->uts_ns);
 	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
 	if (child->time_ns) time_ns_put(child->time_ns);
+	cgroup_cancel_fork(parent);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -565,6 +572,7 @@ void task_exit(void)
 	time_ns_put(p->time_ns);
 	p->time_ns = NULL;
 	if (p->time_ns_new) { time_ns_put(p->time_ns_new); p->time_ns_new = NULL; }
+	cgroup_exit(p);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
