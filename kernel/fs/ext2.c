@@ -505,7 +505,21 @@ static off_t ext2_seek(vfs_file_t *f, off_t off, int whence)
 
 /* ── write support ───────────────────────────────────────────── */
 
-static int write_block(ext2_fs_t *fs, uint32_t blkno, const void *buf)
+/* Block/inode bitmap addresses, combining the ext4 64BIT high halves. */
+static uint64_t bgd_block_bitmap(ext2_fs_t *fs, const ext2_bgd_t *b)
+{
+	uint64_t a = b->bg_block_bitmap_lo;
+	if (fs->desc_size >= 64) a |= (uint64_t)b->bg_block_bitmap_hi << 32;
+	return a;
+}
+static uint64_t bgd_inode_bitmap(ext2_fs_t *fs, const ext2_bgd_t *b)
+{
+	uint64_t a = b->bg_inode_bitmap_lo;
+	if (fs->desc_size >= 64) a |= (uint64_t)b->bg_inode_bitmap_hi << 32;
+	return a;
+}
+
+static int write_block(ext2_fs_t *fs, uint64_t blkno, const void *buf)
 {
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
 	if (fs->bdev->write(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
@@ -580,12 +594,13 @@ static uint32_t alloc_block(ext2_fs_t *fs, uint32_t pref_group)
 		uint32_t g = (pref_group + gi) % fs->num_groups;
 		ext2_bgd_t bgd;
 		if (read_bgd(fs, g, &bgd) != 0 || bgd.bg_free_blocks_count_lo == 0) continue;
-		if (read_block(fs, bgd.bg_block_bitmap_lo, bmp) != 0) continue;
+		uint64_t bbm = bgd_block_bitmap(fs, &bgd);
+		if (read_block(fs, bbm, bmp) != 0) continue;
 		uint32_t lim = fs->blocks_per_group;
 		for (uint32_t i = 0; i < lim; i++) {
 			if (!(bmp[i / 8] & (1u << (i & 7)))) {
 				bmp[i / 8] |= (1u << (i & 7));
-				write_block(fs, bgd.bg_block_bitmap_lo, bmp);
+				write_block(fs, bbm, bmp);
 				bgd.bg_free_blocks_count_lo--;
 				write_bgd(fs, g, &bgd);
 				ext2_free_page(bmp);
@@ -597,20 +612,21 @@ static uint32_t alloc_block(ext2_fs_t *fs, uint32_t pref_group)
 	return 0;
 }
 
-static void free_block(ext2_fs_t *fs, uint32_t blkno)
+static void free_block(ext2_fs_t *fs, uint64_t blkno)
 {
 	if (!blkno || blkno < fs->first_data_block) return;
-	uint32_t rel = blkno - fs->first_data_block;
-	uint32_t g   = rel / fs->blocks_per_group;
-	uint32_t bit = rel % fs->blocks_per_group;
+	uint64_t rel = blkno - fs->first_data_block;
+	uint32_t g   = (uint32_t)(rel / fs->blocks_per_group);
+	uint32_t bit = (uint32_t)(rel % fs->blocks_per_group);
 	if (g >= fs->num_groups) return;
 	ext2_bgd_t bgd;
 	if (read_bgd(fs, g, &bgd) != 0) return;
 	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return;
-	if (read_block(fs, bgd.bg_block_bitmap_lo, bmp) == 0) {
+	uint64_t bbm = bgd_block_bitmap(fs, &bgd);
+	if (read_block(fs, bbm, bmp) == 0) {
 		bmp[bit / 8] &= ~(1u << (bit & 7));
-		write_block(fs, bgd.bg_block_bitmap_lo, bmp);
+		write_block(fs, bbm, bmp);
 		bgd.bg_free_blocks_count_lo++;
 		write_bgd(fs, g, &bgd);
 	}
@@ -625,11 +641,12 @@ static uint32_t alloc_inode(ext2_fs_t *fs, uint32_t pref_group)
 		uint32_t g = (pref_group + gi) % fs->num_groups;
 		ext2_bgd_t bgd;
 		if (read_bgd(fs, g, &bgd) != 0 || bgd.bg_free_inodes_count_lo == 0) continue;
-		if (read_block(fs, bgd.bg_inode_bitmap_lo, bmp) != 0) continue;
+		uint64_t ibm = bgd_inode_bitmap(fs, &bgd);
+		if (read_block(fs, ibm, bmp) != 0) continue;
 		for (uint32_t i = 0; i < fs->inodes_per_group; i++) {
 			if (!(bmp[i / 8] & (1u << (i & 7)))) {
 				bmp[i / 8] |= (1u << (i & 7));
-				write_block(fs, bgd.bg_inode_bitmap_lo, bmp);
+				write_block(fs, ibm, bmp);
 				bgd.bg_free_inodes_count_lo--;
 				write_bgd(fs, g, &bgd);
 				ext2_free_page(bmp);
@@ -650,9 +667,10 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino)
 	if (read_bgd(fs, g, &bgd) != 0) return;
 	uint8_t *bmp = ext2_alloc_page();
 	if (!bmp) return;
-	if (read_block(fs, bgd.bg_inode_bitmap_lo, bmp) == 0) {
+	uint64_t ibm = bgd_inode_bitmap(fs, &bgd);
+	if (read_block(fs, ibm, bmp) == 0) {
 		bmp[bit / 8] &= ~(1u << (bit & 7));
-		write_block(fs, bgd.bg_inode_bitmap_lo, bmp);
+		write_block(fs, ibm, bmp);
 		bgd.bg_free_inodes_count_lo++;
 		write_bgd(fs, g, &bgd);
 	}
