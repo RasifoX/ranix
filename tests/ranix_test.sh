@@ -281,6 +281,7 @@ check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
 # ── 38. C test: AF_UNIX path socket ──────────────────────────
 check "c-unix-sock"  "OK"  "$(timeout 5 /bin/test_unix 2>/dev/null)"
 check "c-mqueue"     "OK"  "$(timeout 5 /bin/test_mqueue 2>/dev/null)"
+check "c-futex-timed" "OK" "$(timeout 8 /bin/test_futex_timed 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
