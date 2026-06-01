@@ -469,6 +469,11 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	p->name[nlen] = '\0';
 
+	/* remember the full path for /proc/<pid>/exe */
+	int el = 0;
+	while (kpath[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = kpath[el]; el++; }
+	p->exe_path[el] = '\0';
+
 	/* close O_CLOEXEC file descriptors before exec */
 	if (p->fds) {
 		for (int i = 0; i < p->fds->cap; i++) {

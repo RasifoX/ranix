@@ -127,6 +127,9 @@ typedef struct process {
 	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
 	int             ptrace_in_syscall;    /* currently sleeping in ptrace_do_stop */
 	uint32_t       *clear_child_tid;
+
+	/* full path of the running image, for /proc/<pid>/exe */
+	char            exe_path[PROC_NAME_MAX];
 } process_t;
 
 /* scheduler */
