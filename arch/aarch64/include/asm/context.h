@@ -28,7 +28,7 @@ typedef struct {
 #define ARCH_SPSR_KERNEL_TASK  0x00000005UL  /* EL1h, DAIF=0 */
 #define ARCH_SPSR_USER_TASK    0x00000000UL  /* EL0t, I=0 F=0 (all unmasked) */
 
-/* syscall register convention (Linux aarch64 ABI) */
+/* syscall register convention (aarch64 ABI) */
 #define CTX_SYSCALL_N(ctx)      ((ctx)->regs[8])
 #define CTX_SYSCALL_ARG0(ctx)   ((ctx)->regs[0])
 #define CTX_SYSCALL_ARG1(ctx)   ((ctx)->regs[1])
@@ -38,7 +38,7 @@ typedef struct {
 #define CTX_SYSCALL_ARG5(ctx)   ((ctx)->regs[5])
 #define CTX_SYSCALL_RET(ctx, v) ((ctx)->regs[0] = (uint64_t)(long)(v))
 
-/* Linux aarch64 syscall numbers */
+/* aarch64 syscall numbers */
 #define SYS_ARCH_GETCWD        17
 #define SYS_ARCH_EPOLL_CREATE1 20
 #define SYS_ARCH_EPOLL_CTL     21

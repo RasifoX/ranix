@@ -215,7 +215,7 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	if (!p) { pb_u64(&b, (uint64_t)pid); pb_str(&b, " (gone) Z 0\n"); return (int)(sz - b.rem); }
 	pb_u64(&b, p->pid); pb_char(&b, ' ');
 	pb_char(&b, '('); pb_str(&b, p->name); pb_char(&b, ')');
-	/* fields 3-52 matching Linux /proc/PID/stat layout */
+	/* fields 3-52 matching the /proc/PID/stat layout */
 	pb_str(&b, " R ");
 	pb_u64(&b, p->ppid);                   /* 4: ppid */
 	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 ");  /* 5-13: pgrp..cmajflt */
@@ -844,7 +844,7 @@ static vfs_inode_t *procfs_netdir_inode(void)
 typedef struct { const char *name; int type; } procfs_sysfile_t;
 
 static procfs_sysfile_t sys_kernel_files[] = {
-	{ "ostype",        PROC_F_SYS_HOSTNAME    }, /* reuse hostname slot for "Linux\n" below */
+	{ "ostype",        PROC_F_SYS_HOSTNAME    }, /* returns the hostname */
 	{ "hostname",      PROC_F_SYS_HOSTNAME    },
 	{ "domainname",    PROC_F_SYS_DOMAINNAME  },
 	{ "ngroups_max",   PROC_F_SYS_NGROUPS_MAX },

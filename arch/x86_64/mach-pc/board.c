@@ -100,7 +100,7 @@ void board_poweroff(void)
 
 void board_reset(void)
 {
-	/* Linux-style cf9 hard reset: read-modify-write with delay */
+	/* cf9 hard reset: read-modify-write with delay */
 	uint8_t cf9 = inb_port(0xcf9) & ~6;
 	outb_port(0xcf9, cf9 | 2);   /* assert RSTIN# */
 	for (volatile int i = 0; i < 100000; i++) __asm__ volatile("pause");
