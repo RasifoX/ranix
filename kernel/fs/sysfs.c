@@ -13,10 +13,22 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/net/net.h>
+#include <kernel/block.h>
 
 extern char ranix_hostname[];
+extern int  smp_ncpus;
 
-enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE };
+enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
+       SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE };
+
+static int put_u64(char *o, uint64_t v)
+{
+	char t[20]; int i = 0, n = 0;
+	if (v == 0) { o[0] = '0'; return 1; }
+	while (v) { t[i++] = (char)('0' + v % 10); v /= 10; }
+	while (i) o[n++] = t[--i];
+	return n;
+}
 
 typedef struct { int type; int dev; } sysfs_priv_t;
 
@@ -24,7 +36,9 @@ static uint64_t sys_ino_next = 0x9000;
 static uint64_t sys_ino_alloc(void) { return sys_ino_next++; }
 
 static vfs_iops_t sysfs_root_iops, sysfs_kernel_iops, sysfs_class_iops,
-                  sysfs_net_iops, sysfs_netdev_iops;
+                  sysfs_net_iops, sysfs_netdev_iops, sysfs_block_iops,
+                  sysfs_blockdev_iops, sysfs_devices_iops, sysfs_system_iops,
+                  sysfs_cpu_iops;
 static vfs_fops_t sysfs_file_fops;
 static vfs_fops_t sysfs_dir_fops = { 0 };
 
@@ -100,6 +114,16 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	}
 	case SF_NET_MTU:   n = put_str(tmp, "1500\n"); break;
 	case SF_NET_STATE: n = put_str(tmp, "up\n");   break;
+	case SF_BLK_SIZE: {
+		block_device_t *b = block_device_get(pr->dev);
+		if (b) { n = put_u64(tmp, b->size_blocks); tmp[n++] = '\n'; }
+		break;
+	}
+	case SF_CPU_ONLINE:
+	case SF_CPU_POSSIBLE:
+		if (smp_ncpus <= 1) { n = put_str(tmp, "0\n"); }
+		else { n = put_str(tmp, "0-"); n += put_u64(tmp + n, (uint64_t)(smp_ncpus - 1)); tmp[n++] = '\n'; }
+		break;
 	default:           n = 0; break;
 	}
 
@@ -121,15 +145,17 @@ static vfs_fops_t sysfs_file_fops = { .read = sysfs_file_read };
 static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
-	if (strcmp(name, "kernel") == 0) return sysfs_dir(&sysfs_kernel_iops, -1);
-	if (strcmp(name, "class")  == 0) return sysfs_dir(&sysfs_class_iops, -1);
+	if (strcmp(name, "kernel")  == 0) return sysfs_dir(&sysfs_kernel_iops, -1);
+	if (strcmp(name, "class")   == 0) return sysfs_dir(&sysfs_class_iops, -1);
+	if (strcmp(name, "block")   == 0) return sysfs_dir(&sysfs_block_iops, -1);
+	if (strcmp(name, "devices") == 0) return sysfs_dir(&sysfs_devices_iops, -1);
 	return NULL;
 }
 static int sysfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "kernel", "class" };
-	if (idx >= 2) return -1;
+	const char *names[] = { "kernel", "class", "block", "devices" };
+	if (idx >= 4) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
@@ -217,11 +243,99 @@ static int sysfs_netdev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 	return 0;
 }
 
-static vfs_iops_t sysfs_root_iops   = { .lookup = sysfs_root_lookup,   .readdir = sysfs_root_readdir   };
-static vfs_iops_t sysfs_kernel_iops = { .lookup = sysfs_kernel_lookup, .readdir = sysfs_kernel_readdir };
-static vfs_iops_t sysfs_class_iops  = { .lookup = sysfs_class_lookup,  .readdir = sysfs_class_readdir  };
-static vfs_iops_t sysfs_net_iops    = { .lookup = sysfs_net_lookup,    .readdir = sysfs_net_readdir    };
-static vfs_iops_t sysfs_netdev_iops = { .lookup = sysfs_netdev_lookup, .readdir = sysfs_netdev_readdir };
+/* ── /sys/block: one dir per block device ────────────────────── */
+static vfs_inode_t *sysfs_block_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	int cnt = block_device_count();
+	for (int i = 0; i < cnt; i++) {
+		block_device_t *b = block_device_get(i);
+		if (b && strcmp(b->name, name) == 0) return sysfs_dir(&sysfs_blockdev_iops, i);
+	}
+	return NULL;
+}
+static int sysfs_block_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	block_device_t *b = ((int)idx < block_device_count()) ? block_device_get((int)idx) : NULL;
+	if (!b) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	put_str(out->name, b->name); out->name[strlen(b->name)] = '\0';
+	return 0;
+}
+static vfs_inode_t *sysfs_blockdev_lookup(vfs_inode_t *dir, const char *name)
+{
+	sysfs_priv_t *pr = dir->priv;
+	if (strcmp(name, "size") == 0) return sysfs_file(SF_BLK_SIZE, pr ? pr->dev : 0);
+	return NULL;
+}
+static int sysfs_blockdev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = 1;
+	put_str(out->name, "size"); out->name[4] = '\0';
+	return 0;
+}
+
+/* ── /sys/devices/system/cpu/{online,possible} ───────────────── */
+static vfs_inode_t *sysfs_devices_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "system") == 0) return sysfs_dir(&sysfs_system_iops, -1);
+	return NULL;
+}
+static int sysfs_devices_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "system"); out->name[6] = '\0';
+	return 0;
+}
+static vfs_inode_t *sysfs_system_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "cpu") == 0) return sysfs_dir(&sysfs_cpu_iops, -1);
+	return NULL;
+}
+static int sysfs_system_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "cpu"); out->name[3] = '\0';
+	return 0;
+}
+static const struct { const char *name; int type; } cpu_files[] = {
+	{ "online", SF_CPU_ONLINE }, { "possible", SF_CPU_POSSIBLE },
+};
+static vfs_inode_t *sysfs_cpu_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (unsigned i = 0; i < 2; i++)
+		if (strcmp(cpu_files[i].name, name) == 0) return sysfs_file(cpu_files[i].type, -1);
+	return NULL;
+}
+static int sysfs_cpu_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	put_str(out->name, cpu_files[idx].name); out->name[strlen(cpu_files[idx].name)] = '\0';
+	return 0;
+}
+
+static vfs_iops_t sysfs_root_iops     = { .lookup = sysfs_root_lookup,     .readdir = sysfs_root_readdir     };
+static vfs_iops_t sysfs_kernel_iops   = { .lookup = sysfs_kernel_lookup,   .readdir = sysfs_kernel_readdir   };
+static vfs_iops_t sysfs_class_iops    = { .lookup = sysfs_class_lookup,    .readdir = sysfs_class_readdir    };
+static vfs_iops_t sysfs_net_iops      = { .lookup = sysfs_net_lookup,      .readdir = sysfs_net_readdir      };
+static vfs_iops_t sysfs_netdev_iops   = { .lookup = sysfs_netdev_lookup,   .readdir = sysfs_netdev_readdir   };
+static vfs_iops_t sysfs_block_iops    = { .lookup = sysfs_block_lookup,    .readdir = sysfs_block_readdir    };
+static vfs_iops_t sysfs_blockdev_iops = { .lookup = sysfs_blockdev_lookup, .readdir = sysfs_blockdev_readdir };
+static vfs_iops_t sysfs_devices_iops  = { .lookup = sysfs_devices_lookup,  .readdir = sysfs_devices_readdir  };
+static vfs_iops_t sysfs_system_iops   = { .lookup = sysfs_system_lookup,   .readdir = sysfs_system_readdir   };
+static vfs_iops_t sysfs_cpu_iops      = { .lookup = sysfs_cpu_lookup,      .readdir = sysfs_cpu_readdir      };
 
 int sysfs_mount(vfs_mount_t *mnt, void *data)
 {
