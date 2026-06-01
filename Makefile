@@ -147,6 +147,13 @@ BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
 all: initramfs $(TARGET)
 
+# Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
+USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server
+USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_ptrace \
+                 userspace/test_unix userspace/test_mqueue userspace/test_creds \
+                 userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
+                 userspace/test_fpsig userspace/test_cowrace userspace/bench userspace/test_clock
+
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
 CACHE_DIR          = .cache
@@ -181,15 +188,11 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
-$(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/test_mqueue $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
-	@cp userspace/init userspace/hello userspace/echo_server $(BUILD_DIR)/initramfs/bin/
-	@if [ -z "$(DEMO)" ]; then cp \
-	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
-	    userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
-	    userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/test_mqueue \
-	    $(BUILD_DIR)/initramfs/bin/; fi
+	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
+	@if [ -z "$(DEMO)" ]; then cp $(USER_TEST_BINS) $(BUILD_DIR)/initramfs/bin/; fi
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -238,53 +241,10 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 
-userspace/hello: userspace/hello.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/init: userspace/init.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/echo_server: userspace/echo_server.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_threads: userspace/test_threads.c
-	$(MUSL_CC) -static -no-pie -O2 -pthread -o $@ $<
-
-userspace/test_inotify: userspace/test_inotify.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_ptrace: userspace/test_ptrace.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_unix: userspace/test_unix.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_mqueue: userspace/test_mqueue.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_creds: userspace/test_creds.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_aslr: userspace/test_aslr.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_signalfd: userspace/test_signalfd.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_affinity: userspace/test_affinity.c
+# One rule for every userspace program. -lpthread is a no-op on musl (pthread
+# lives in libc), so it is safe for the non-threaded ones too.
+userspace/%: userspace/%.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
-
-userspace/test_fpsig: userspace/test_fpsig.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_cowrace: userspace/test_cowrace.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
-
-userspace/bench: userspace/bench.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
-
-userspace/test_clock: userspace/test_clock.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $<
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
@@ -303,7 +263,7 @@ $(BUILD_DIR)/%.o: %.S
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img userspace/hello userspace/sh userspace/init userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/test_mqueue userspace/*_elf.h
+	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img $(USER_CORE_BINS) $(USER_TEST_BINS) userspace/sh userspace/*_elf.h
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
