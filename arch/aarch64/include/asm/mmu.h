@@ -25,6 +25,7 @@
 #define PTE_RO      (1UL << 7)
 #define PTE_SHARE   (3UL << 8)
 #define PTE_AF      (1UL << 10)
+#define PTE_NG      (1UL << 11)  /* non-global: TLB entry tagged by ASID */
 
 #define PTE_ATTR_DEVICE     (MT_DEVICE_nGnRnE << 2)
 #define PTE_ATTR_NORMAL     (MT_NORMAL        << 2 | PTE_SHARE)

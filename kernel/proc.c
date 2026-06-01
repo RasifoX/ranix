@@ -128,7 +128,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	/* Switch to new VM to write to user stack */
 	extern vm_space_t *kernel_vm_space;
 	vm_space_t *old_vm = current->vm;
-	arch_vm_switch((uint64_t)p->vm->root);
+	arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 
 	uint64_t sp = ARCH_USER_STACK_TOP;
 	sp &= ~15ULL;
@@ -157,8 +157,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	arch_context_init_user(ctx, ei.entry, sp);
 
-	if (old_vm) arch_vm_switch((uint64_t)old_vm->root);
-	else arch_vm_switch((uint64_t)kernel_vm_space->root);
+	if (old_vm) arch_vm_switch((uint64_t)old_vm->root, old_vm->asid);
+	else arch_vm_switch((uint64_t)kernel_vm_space->root, 0);
 
 	p->ctx = ctx;
 	p->fds = fd_table_create();

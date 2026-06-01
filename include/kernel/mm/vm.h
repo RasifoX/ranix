@@ -14,6 +14,7 @@
 typedef struct {
 	uint64_t  *root;       /* physical address of top-level page table */
 	uint32_t   refcount;   /* number of processes/threads sharing this space */
+	uint32_t   asid;       /* aarch64 TLB tag (1..255; 0 = flush-on-switch); unused on x86 */
 	spinlock_t fault_lock; /* serializes fault resolution among shared threads */
 } vm_space_t;
 
@@ -32,7 +33,8 @@ void        vm_init_kernel(uint64_t root_phys);
 void       *ioremap(uint64_t phys_addr, size_t size, uint32_t flags);
 int         vm_handle_fault(uint64_t vaddr, int is_write);
 
-/* arch-specific: load page table into hardware */
-void arch_vm_switch(uint64_t root_phys);
+/* arch-specific: load page table into hardware. asid is the address space's
+ * TLB tag on aarch64 (0 forces a flush); ignored on x86_64. */
+void arch_vm_switch(uint64_t root_phys, uint32_t asid);
 
 #endif

@@ -21,6 +21,45 @@ static uint64_t alloc_table(void)
 	return (uint64_t)p;
 }
 
+/*
+ * ASID allocator (8-bit, TCR_EL1.AS=0). Each live user address space gets a
+ * unique tag 1..255 so context switches need no TLB flush. ASID 0 is the
+ * "flush-on-switch" sentinel: the kernel space and the rare pool-exhausted
+ * fallback use it, so two spaces can never alias under one tag.
+ *
+ * On free we broadcast `tlbi aside1is` for the tag, dropping its entries on
+ * every CPU before it can be reused — this is what keeps reuse safe on SMP
+ * without Linux's generation/reserved-asid machinery.
+ */
+#define ASID_MAX 256
+static uint64_t asid_bitmap[ASID_MAX / 64];   /* bit i set = ASID i in use */
+static spinlock_t asid_lock = SPINLOCK_INIT;
+
+static uint32_t asid_alloc(void)
+{
+	uint64_t f = spin_lock_irq(&asid_lock);
+	for (int i = 1; i < ASID_MAX; i++) {        /* 0 reserved as sentinel */
+		if (!(asid_bitmap[i >> 6] & (1UL << (i & 63)))) {
+			asid_bitmap[i >> 6] |= (1UL << (i & 63));
+			spin_unlock_irq(&asid_lock, f);
+			return (uint32_t)i;
+		}
+	}
+	spin_unlock_irq(&asid_lock, f);
+	return 0;   /* pool exhausted → flush-on-switch fallback */
+}
+
+static void asid_free(uint32_t asid)
+{
+	if (asid == 0) return;
+	/* drop this tag's TLB entries on every CPU so a future reuse is clean */
+	__asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb"
+	                 :: "r"((uint64_t)asid << 48) : "memory");
+	uint64_t f = spin_lock_irq(&asid_lock);
+	asid_bitmap[asid >> 6] &= ~(1UL << (asid & 63));
+	spin_unlock_irq(&asid_lock, f);
+}
+
 vm_space_t *vm_create(void)
 {
 	void *vs_phys = buddy_alloc(0);
@@ -34,6 +73,7 @@ vm_space_t *vm_create(void)
 	vs->root = (uint64_t *)root_phys;
 
 	vs->refcount = 1;
+	vs->asid = asid_alloc();
 	return vs;
 }
 
@@ -49,6 +89,8 @@ void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
+
+	asid_free(vs->asid);   /* invalidates this tag's TLB entries on all CPUs */
 
 	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
@@ -142,7 +184,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	uint64_t attr = PTE_ATTR_NORMAL;
 	if (flags & VM_NOCACHE)     attr = PTE_ATTR_NORMAL_NC;
 	if (flags & VM_DEVICE)      attr = PTE_ATTR_DEVICE;
-	if (flags & VM_USER)        attr |= PTE_USER;
+	if (flags & VM_USER)        attr |= PTE_USER | PTE_NG;
 	if (!(flags & VM_WRITE))    attr |= PTE_RO;
 
 	l3[l3i] = (paddr & ~0xFFFUL) | L3_PAGE | attr;
@@ -212,24 +254,27 @@ uint64_t arch_vm_get_paddr(uint64_t *l1_phys, uint64_t vaddr)
 	return (l3[l3i] & ~0xFFFUL);
 }
 
-void arch_vm_switch(uint64_t root_phys)
+void arch_vm_switch(uint64_t root_phys, uint32_t asid)
 {
-	/* Always reload TTBR0 and flush, but flush only THIS CPU's TLB (vmalle1,
-	 * non-shareable) instead of broadcasting to every core (vmalle1is). Each CPU
-	 * already flushes its own TLB when it switches away from a space, so a
-	 * freed+reused root cannot leave stale translations on any core — the
-	 * per-switch broadcast was unnecessary cost. (VA invalidations in vm_unmap/
-	 * mprotect stay broadcast: a live thread on another core must see the unmap.)
-	 * Zero-flush ASIDs would need a rollover-safe allocator + non-global PTEs —
-	 * a later step. */
-	__asm__ volatile(
-		"msr ttbr0_el1, %0\n"
-		"isb\n"
-		"tlbi vmalle1\n"
-		"dsb nsh\n"
-		"isb\n"
-		:: "r"(root_phys)
-	);
+	/* Load TTBR0 with the space's ASID in [63:48]. User PTEs are non-global
+	 * (PTE_NG), so they are tagged by ASID and a switch between two tagged
+	 * spaces needs NO TLB flush — the tags keep their entries apart. Only the
+	 * ASID-0 sentinel (kernel / pool-exhausted fallback) flushes, since
+	 * untagged spaces could otherwise alias. Reuse of a freed tag is made safe
+	 * by the broadcast tlbi in asid_free(). */
+	uint64_t ttbr = root_phys | ((uint64_t)asid << 48);
+	if (asid != 0) {
+		__asm__ volatile("msr ttbr0_el1, %0\n isb\n" :: "r"(ttbr));
+	} else {
+		__asm__ volatile(
+			"msr ttbr0_el1, %0\n"
+			"isb\n"
+			"tlbi vmalle1\n"
+			"dsb nsh\n"
+			"isb\n"
+			:: "r"(ttbr)
+		);
+	}
 }
 
 vm_space_t *vm_copy(vm_space_t *vs)
@@ -239,6 +284,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
 	new_vs->root = NULL;
 	new_vs->refcount = 1;
+	new_vs->asid = asid_alloc();
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t root_phys = alloc_table();
