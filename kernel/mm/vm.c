@@ -89,13 +89,18 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 
 	if (!is_write) goto out;
 
-	/* Check if this page belongs to a VMA_SHARED region — shared, not COW */
+	/* Find the VMA covering this page. VMA_SHARED is mapped writable directly
+	 * (not COW'd). A write to a page whose VMA lacks VMA_WRITE is a real
+	 * protection violation — e.g. an mprotect'd read-only region — so leave
+	 * ret = -1 and let the caller raise SIGSEGV. Pages with no VMA (heap/brk)
+	 * fall through to the COW path below. */
 	for (vma_t *v = p->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_SHARED) {
 				ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 				goto out;
 			}
+			if (!(v->flags & VMA_WRITE)) goto out;
 			break;
 		}
 	}

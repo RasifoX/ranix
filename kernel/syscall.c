@@ -598,7 +598,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* record initial VMAs */
 	vma_add(p, USER_STACK_TOP_ - USER_STACK_PAGES_ * PAGE_SIZE,
 	        USER_STACK_PAGES_ * PAGE_SIZE, VMA_USER | VMA_READ | VMA_WRITE);
-	vma_add(p, ei.load_bias, ei.load_end - ei.load_bias, VMA_USER | VMA_READ | VMA_EXEC);
+	vma_add(p, ei.load_bias, ei.load_end - ei.load_bias,
+	        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
 
 	/* build SysV ABI initial stack */
 	uint64_t uargv[EXEC_MAXARGS + 1];
@@ -973,6 +974,18 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 			vm_map(p->vm, va, (uint64_t)pg, vmflags);
 		}
 	}
+
+	/* Keep VMA permissions in sync so the fault handler enforces the new prot
+	 * (a later write to a now-read-only page must fault). Whole-VMA update —
+	 * sub-VMA mprotect ranges adopt the new prot for the whole VMA. */
+	uint32_t vmaflags = VMA_USER;
+	if (prot & PROT_READ)  vmaflags |= VMA_READ;
+	if (prot & PROT_WRITE) vmaflags |= VMA_WRITE;
+	if (prot & PROT_EXEC)  vmaflags |= VMA_EXEC;
+	for (vma_t *v = p->vmas; v; v = v->next)
+		if (v->vaddr < addr + len && addr < v->vaddr + v->size)
+			v->flags = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON));
+
 	return 0;
 }
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)

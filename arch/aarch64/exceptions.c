@@ -59,7 +59,9 @@
 
         process_t *p = task_current();
 
-        /* EL0 faults — kill the offending process instead of panicking */
+        /* EL0 fault — kill the offending process with SIGSEGV status instead of
+         * panicking. (Delivering SIGSEGV to a user handler needs a nested-fault-
+         * safe signal path on both arches — a separate change.) */
         if (elr < 0xFFFF000000000000UL) {
             kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x ISS=0x%x\n",
                     (int)p->pid, p->name, elr, far, ec, iss);
@@ -76,6 +78,8 @@
                 if (!saved_fp || saved_fp == fp) break;
                 fp = saved_fp;
             }
+            p->killed_by_sig = 1;
+            p->exit_code     = SIGSEGV;
             task_exit();
             __builtin_unreachable();
         }

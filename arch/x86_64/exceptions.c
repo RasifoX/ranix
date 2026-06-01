@@ -53,6 +53,8 @@ void exc_dispatch(arch_context_t *ctx)
 			kprintf("  CR2=0x%lx\n", read_cr2());
 		kprintf("  rax=0x%lx rbx=0x%lx rbp=0x%lx rsp=0x%lx\n",
 		        ctx->rax, ctx->rbx, ctx->rbp, ctx->rsp);
+		p->killed_by_sig = 1;
+		p->exit_code     = SIGSEGV;
 		task_exit();
 		__builtin_unreachable();
 	}
