@@ -18,10 +18,10 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 - **Event-driven çekirdek:** per-tick blanket-wake SİLİNDİ; her blocking primitive event-driven. sched.c → sched/proc/signal + syscall.c kategori split.
 - **x86_64 SMP ÇALIŞIYOR** (4/4 CPU) — eski "triple fault" maddesi geçersiz.
 - **mprotect/W^X enforcement** (güvenlik) + loopback net + TCP/UDP testleri.
-- **Namespaces (v0.7.5): UTS + IPC + time TAM** (unshare/clone/setns/identity). nsproxy altyapısı + nsfs deseni.
-- **Dinamik linker (v0.8) ÇALIŞIYOR:** PT_INTERP + ld.so; iki arch dinamik binary çalıştırıyor. Kernel relokasyon yapmıyor — ld.so userspace'de yapıyor.
-- **procfs compat:** /proc/<pid>/{exe,cwd,root,comm,ns/*,timens_offsets}, /proc/filesystems.
-- Test 192 → **221/221** (iki arch).
+- **v0.7.5 TAM:** 8/8 namespace (uts/ipc/time/mount/pid/user/net/cgroup) + cgroups v2 (pids/memory/cpu/freezer) + gerçek rootless container. Ranix container çalıştırıyor.
+- **Dinamik linker (v0.8) ÇALIŞIYOR:** PT_INTERP + ld.so + dinamik bash + dlopen/multi-DSO. Kernel relokasyon yapmıyor — ld.so userspace'de.
+- **aarch64 ASID** (ctx-switch TLB flush yok); **procfs compat** (exe/cwd/root/comm/ns/*/cgroup/uid_map/...).
+- Test 192 → **238/238** (iki arch).
 
 **2026-05-30 — kronik bellek bozulması çözüldü** (3 temel bug: COW double-free, FP/SIMD signal'da korunmuyordu, exec I-cache CPU-lokal). + fork/unmap kilit tamamlandı, x86 FP paritesi. Gerçek Pi4'te 5/5 koşu 192/192. Detay: v0.7 bölümü.
 
@@ -366,8 +366,8 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [x] **PID controller: pids.max / pids.current** — subtree sayımı + fork'ta EAGAIN (fork-bomb koruması) ✅
 - [ ] /sys/fs/cgroup kanonik path (şu an /cgroup; sysfs'in fs/cgroup mountpoint sunması gerek)
 - [x] **memory controller: memory.max / memory.current** ✅ — user-page charge (mmap + fault stack/COW), limit aşımı kill (4da2eb0). Not: munmap uncharge exit-granular.
-- [ ] CPU controller: cpu.weight, cpu.max (scheduler weight gerek)
-- [ ] freezer: cgroup.freeze
+- [x] **CPU controller: cpu.weight** ✅ — scheduler quantum'una ölçek (ec6baa5); cpu.max (bandwidth throttle) ileride
+- [x] **freezer: cgroup.freeze** ✅ — frozen subtree scheduler'da requeue-skip ile parklanır (a94d1b2)
 
 ### sysfs (/sys) — temel iskelet ✅ (2026-06-01)
 - [x] /sys pseudo-fs (vfs_register_fs); /sys/kernel/{ostype,osrelease,hostname}
