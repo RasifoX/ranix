@@ -175,7 +175,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
