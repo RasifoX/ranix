@@ -341,7 +341,8 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 ### Kapasite hedefleri — Linux'a EŞİT veya FAZLA (compile-time sabit YOK, hepsi runtime)
 > Kural: Ranix donanımın verdiğini sonuna kadar kullanmalı; "yapılıyorsa daha fazlası".
 - [x] **Çekirdek:** MAX_CPUS→**1024** + **dinamik per-CPU** ✅ (kstack/irq/ctx/idle çekirdek sayısına göre buddy'den; statik yalnız all_cpus+boot_sync ~50KB). aarch64 FDT + x86 ACPI MADT auto-detect; aarch64 -smp8→8/8, x86 -smp16→16/16. ≥2048 için kstack vmalloc gerek (follow-up).
-- [~] **RAM:** x86_64 4GB → **512 GB** ✅ (direct-map PDPT 512 entry; -m 6G doğrulandı). aarch64 zaten 512 GB. ≥128TB/5-level = follow-up.
+- [x] **RAM (x86):** 4GB → **~127 TB** ✅ (direct map PML4[256..510] boyunca genişler, statik PDPT havuzu NOLOAD; -m 6G doğrulandı, >512GB host'ta test edilemez). **Linux 4-level direct map 64TB → bizimki fazla.** >127TB için 5-level (LA57) = follow-up (her page-walk 4→5 conditional, invaziv).
+  - **RAM (aarch64): 512 GB (39-bit VA, T0SZ=25) — Linux'un ALTINDA** (Linux 48/52-bit = 256TB+). 48-bit için 4. tablo seviyesi (L0) gerek = ayrı invaziv rework (follow-up).
 - [x] **Disk:** 64-bit LBA ✅ + **GPT** ✅ (CRC32 header doğrulama + backup-header fallback, >2TB) + **ext4 extent read** ✅ + **ext4 64BIT** ✅ (uint64_t blok-no + bg_*_hi/s_blocks_count_hi → >16TB FS adreslenebilir; desc=64 test'li). Kalan: GPT entry-array CRC, ext4 write-64bit.
 - [~] **Sayfa boyutu:** 4K + **2M hugepage** ✅ + **1G hugepage** ✅ (MAP_HUGE_1GB, iki arch; boot-time refcount'lu havuz, ayrı yüksek VA penceresi, fork 1G-COW; x86 -m6G/aarch64 -m4G test'li). THP (otomatik promosyon/khugepaged) = follow-up.
 - [ ] **Açık dosya / process / PID:** dinamik tablo, RAM'le ölçeklenen üst sınır (statik cap yok)
