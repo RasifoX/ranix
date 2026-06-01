@@ -29,6 +29,7 @@ typedef struct cgroup {
 	long            nr_procs;   /* processes in this subtree */
 	long            mem_max;    /* memory.max bytes, -1 = unlimited */
 	long            mem_cur;    /* memory.current bytes in this subtree */
+	int             frozen;     /* cgroup.freeze: 1 = this subtree is frozen */
 } cgroup_t;
 
 static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0, .mem_max = -1 };
@@ -58,6 +59,14 @@ void cgroup_uncharge_mem(void *cgp, long n)
 		if (c->mem_cur < 0) c->mem_cur = 0;
 	}
 	spin_unlock_irq(&cg_lock, f);
+}
+
+/* a process is frozen if its cgroup or any ancestor has cgroup.freeze set */
+int cgroup_frozen(void *cgp)
+{
+	for (cgroup_t *c = cgp ? (cgroup_t *)cgp : &cgroup_root; c; c = c->parent)
+		if (c->frozen) return 1;
+	return 0;
 }
 
 /* ── cgroup namespace ──────────────────────────────────────── */
@@ -185,9 +194,9 @@ void cgroup_exit(struct process *p)
 
 /* ── cgroupfs ────────────────────────────────────────────────── */
 
-enum { CG_PROCS = 0, CG_PIDS_MAX, CG_PIDS_CURRENT, CG_CONTROLLERS, CG_MEM_MAX, CG_MEM_CUR, CG_NFILES };
+enum { CG_PROCS = 0, CG_PIDS_MAX, CG_PIDS_CURRENT, CG_CONTROLLERS, CG_MEM_MAX, CG_MEM_CUR, CG_FREEZE, CG_NFILES };
 static const char *cg_files[] = { "cgroup.procs", "pids.max", "pids.current", "cgroup.controllers",
-                                  "memory.max", "memory.current" };
+                                  "memory.max", "memory.current", "cgroup.freeze" };
 
 typedef struct { cgroup_t *cg; int file; } cg_priv_t;   /* file=-1 → directory */
 
@@ -226,6 +235,9 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 	case CG_MEM_CUR:
 		n = cg_putlong(tmp, pr->cg->mem_cur); tmp[n++] = '\n';
 		break;
+	case CG_FREEZE:
+		tmp[n++] = pr->cg->frozen ? '1' : '0'; tmp[n++] = '\n';
+		break;
 	case CG_CONTROLLERS:
 		for (const char *s = "pids memory\n"; *s; s++) tmp[n++] = *s;
 		break;
@@ -261,6 +273,10 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	if (pr->file == CG_MEM_MAX) {
 		if (kb[0] == 'm') { pr->cg->mem_max = -1; }             /* "max" */
 		else { long v = 0; for (int i = 0; kb[i] >= '0' && kb[i] <= '9'; i++) v = v*10 + (kb[i]-'0'); pr->cg->mem_max = v; }
+		return (ssize_t)len;
+	}
+	if (pr->file == CG_FREEZE) {
+		pr->cg->frozen = (kb[0] == '1');
 		return (ssize_t)len;
 	}
 	if (pr->file == CG_PROCS) {
