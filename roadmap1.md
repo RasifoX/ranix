@@ -284,8 +284,9 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [ ] per-CPU variables (this_cpu_read/write)
 - [ ] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR)
 
-### x86_64 RAM genişletme
-- [ ] boot.S direct map: 4 entry → 64 entry (4 GB → 64 GB)
+### x86_64 RAM genişletme (→ Linux seviyesi, bkz Kapasite hedefleri)
+- [ ] boot.S direct map: 4 entry → RAM'e göre dinamik (4 GB → ≥128 TB); 1G huge page
+- [ ] 5-level paging (LA57) opsiyonu — PB-sınıfı adresleme
 - [ ] PHYS_TO_VIRT sınırını kaldır — 64-bit PML4 tam kullanımı
 
 ### Test hedefleri
@@ -322,13 +323,22 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 
 ### Dinamik runtime-growable ölçeklenme (compile-time config YASAK)
 - [ ] MAX_CPUS sabiti kalk → CPU sayısına göre dinamik (per-CPU veri alanları)
-- [ ] proctab/runqueue/scheduler tam dinamik (1 ↔ 128 çekirdek, aynı binary)
-- [ ] bellek yapıları RAM miktarına uyarlanır (128MB ↔ 512GB, mem_map/buddy dinamik)
+- [ ] proctab/runqueue/scheduler tam dinamik (1 ↔ binlerce çekirdek, aynı binary)
+- [ ] bellek yapıları RAM miktarına uyarlanır (128MB ↔ TB+, mem_map/buddy dinamik)
 - [ ] per-CPU değişkenler + RCU-benzeri primitif (Linux'tan miras, üstüne iyileştir;
       dinamik AMA kilitsiz hot-path — global kmalloc'a bağlama, "akmalı")
 - [ ] devtmpfs + ttyN dinamik (sabit sayı yok)
 - [ ] global sched_lock → per-CPU rq-lock (ölçeklenme engeli)
 - [ ] ASID'li TLB (aarch64) — her vm_switch'te tam flush yerine; lazy-switch güvenli olur
+
+### Kapasite hedefleri — Linux'a EŞİT veya FAZLA (compile-time sabit YOK, hepsi runtime)
+> Kural: Ranix donanımın verdiğini sonuna kadar kullanmalı; "yapılıyorsa daha fazlası".
+- [ ] **Çekirdek:** şu an MAX_CPUS=4 → dinamik, ≥8192 (Linux CONFIG_MAXSMP seviyesi)
+- [ ] **RAM:** x86_64 şu an 4 GB (direct map 4×1GB) → ≥128 TB (4-level), 5-level paging ile PB sınıfı; aarch64 zaten 512 GB → 52-bit VA ile artır
+- [ ] **Disk:** 64-bit LBA, ≥16 TB tek disk; ext4 (≤1 EB FS / ≤16 TB dosya) [v1.0]
+- [ ] **Sayfa boyutu:** 4K + 2M + 1G hugepage (THP dahil) — şu an yalnız 4K
+- [ ] **Açık dosya / process / PID:** dinamik tablo, RAM'le ölçeklenen üst sınır (statik cap yok)
+- [ ] Ölçüt: aynı binary 1 çekirdek/128 MB cihazda da, binlerce çekirdek/TB sunucuda da çalışır
 
 ---
 
@@ -630,6 +640,36 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 - [ ] KDE Plasma veya XFCE oturumu açılıyor
 - [ ] `wine notepad` çalışıyor
 - [ ] Üçüncü taraf biri "Ranix Debian" kurup masaüstü açabiliyor (gerçek fark görülür)
+
+---
+
+## Kapsam Tamamlama — v1.0'dan ÖNCE kapanmalı (2026-06-01 Linux karşılaştırmasından)
+
+> Kullanıcı kararı: karşılaştırmada çıkan tüm eksikler tam sürümden önce tamamlanmalı.
+> Bazıları ilgili versiyon bölümlerinde de var; burada toplu takip + eksik olanlar.
+
+### Donanım / sürücü
+- [ ] **USB host stack:** xHCI (USB3) + EHCI (USB2) controller — şu an yalnız "USB HID" bahsi var, host controller YOK
+- [ ] USB hub + enumeration + mass storage (USB'den boot)
+- [ ] **NUMA** topolojisi (çok soketli) — node-aware buddy + scheduler
+
+### Bellek
+- [ ] **THP** (transparent huge pages) — otomatik 2M promotion (MAP_HUGETLB + swap zaten Uzun Vade'de)
+
+### Güvenlik (landlock dışı)
+- [ ] **LSM framework** (hook altyapısı) + **SELinux veya AppArmor** (en az biri) — MAC
+- [ ] **kTLS** (in-kernel TLS) — opsiyonel, perf
+
+### Güç yönetimi
+- [ ] **suspend/resume** (S3 / S0ix) — cpufreq zaten v0.9/Uzun Vade'de
+
+### Ağ (v1.0 öncesi netleşsin)
+- [ ] **TCP congestion control** (Reno/CUBIC) + pencere ölçekleme — şu an LAN-only, WAN zayıf
+- [ ] **IPv6** temel (SLAAC) — şu an yalnız IPv4
+
+### Mimari KARAR gerektirenler (yapılacak mı?)
+- [ ] **32-bit userspace** (ia32/aarch32 compat) — muhtemelen NON-GOAL (saf 64-bit); karar netleşsin
+- [ ] **LKM** (yüklenebilir modül) — Ranix monolitik-statik felsefesi; muhtemelen NON-GOAL (driver=derleme-içi), gerekirse imzalı modül
 
 ---
 
