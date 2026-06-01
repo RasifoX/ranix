@@ -74,15 +74,27 @@ setup_page_tables:
 	or   $0x3, %eax
 	mov  %eax, pdpt_hh + 510*8
 
-	/* direct map: PML4[256] → pdpt_dm, 1GB huge pages (PDPE1GB, no PD needed) */
+	/* direct map: PML4[256] → pdpt_dm, 1GB huge pages (PDPE1GB, no PD needed).
+	 * Fill all 512 entries → 512 GB physical (matches aarch64's range); the
+	 * PMM only manages RAM the memory map reports, so unbacked entries are
+	 * just page-table slots that are never touched. */
 	mov  $pdpt_dm, %eax
 	or   $0x3, %eax
 	mov  %eax, pml4 + 256*8
 
-	mov  $0x83,         %eax; mov %eax, pdpt_dm        /* 0..1GB  */
-	mov  $0x40000083,   %eax; mov %eax, pdpt_dm + 8    /* 1..2GB  */
-	mov  $0x80000083,   %eax; mov %eax, pdpt_dm + 16   /* 2..3GB  */
-	mov  $0xC0000083,   %eax; mov %eax, pdpt_dm + 24   /* 3..4GB  */
+	mov  $0, %ecx
+.fill_dm:
+	mov  %ecx, %eax            /* low dword: ((i & 3) << 30) | 0x83 */
+	and  $3, %eax
+	shl  $30, %eax
+	or   $0x83, %eax
+	mov  %eax, pdpt_dm(, %ecx, 8)
+	mov  %ecx, %eax            /* high dword: i >> 2 (bits above 4 GB) */
+	shr  $2, %eax
+	mov  %eax, pdpt_dm + 4(, %ecx, 8)
+	inc  %ecx
+	cmp  $512, %ecx
+	jl   .fill_dm
 
 	/* fill pd: 0..1GB in 2MB pages (kernel text at -2GB uses pdpt_hh → pd) */
 	mov  $0, %ecx
