@@ -1302,9 +1302,17 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		fs->cache[i].lru_ts = 0;
 	}
 
-	kprintf("ext2: bs=%u ino_sz=%u groups=%u desc=%u %s\n",
+	kprintf("ext2: bs=%u ino_sz=%u groups=%u desc=%u %s%s\n",
 	        bs, fs->inode_size, fs->num_groups, fs->desc_size,
-	        (sb->s_feature_incompat & 0x80) ? "64bit" : "32bit");
+	        (sb->s_feature_incompat & 0x80) ? "64bit" : "32bit",
+	        (sb->s_feature_compat & 0x4) ? " journal" : "");
+
+	/* A journal needing recovery (INCOMPAT_RECOVER) means committed
+	 * transactions haven't been checkpointed to their final blocks. We don't
+	 * replay jbd2 yet, so reads see the pre-crash (consistent but possibly
+	 * stale) state; warn rather than silently treat it as clean. */
+	if (sb->s_feature_incompat & 0x4)
+		kprintf("ext2: WARNING journal needs recovery (jbd2 replay not implemented)\n");
 
 	ext2_free_page(sb_buf);
 
