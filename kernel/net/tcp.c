@@ -267,7 +267,9 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         retx_clear(s);
         process_t *w = s->connect_waiter; s->connect_waiter = NULL;
         if (w) task_wake(w);
+        uint64_t lf = spin_lock_irq(&s->recv_lock);
         w = s->recv_waiter; s->recv_waiter = NULL;
+        spin_unlock_irq(&s->recv_lock, lf);
         if (w) task_wake(w);
         tcp_wake_close(s);
         skb_free(skb); return;
@@ -497,7 +499,9 @@ void tcp_tick(void)
             s->tcp_state = TCP_CLOSED;
             retx_clear(s);
             tcp_wake_close(s);
+            uint64_t lf = spin_lock_irq(&s->recv_lock);
             process_t *w = s->recv_waiter; s->recv_waiter = NULL;
+            spin_unlock_irq(&s->recv_lock, lf);
             if (w) task_wake(w);
             continue;
         }
