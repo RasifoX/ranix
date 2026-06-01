@@ -333,10 +333,10 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 
 ### Kapasite hedefleri — Linux'a EŞİT veya FAZLA (compile-time sabit YOK, hepsi runtime)
 > Kural: Ranix donanımın verdiğini sonuna kadar kullanmalı; "yapılıyorsa daha fazlası".
-- [~] **Çekirdek:** MAX_CPUS 4→**64** ✅. aarch64 FDT + **x86 ACPI MADT** auto-detect ✅ (x86 -smp 16→16/16 doğrulandı). Tam dinamik ≥8192 = follow-up.
+- [x] **Çekirdek:** MAX_CPUS→**1024** + **dinamik per-CPU** ✅ (kstack/irq/ctx/idle çekirdek sayısına göre buddy'den; statik yalnız all_cpus+boot_sync ~50KB). aarch64 FDT + x86 ACPI MADT auto-detect; aarch64 -smp8→8/8, x86 -smp16→16/16. ≥2048 için kstack vmalloc gerek (follow-up).
 - [~] **RAM:** x86_64 4GB → **512 GB** ✅ (direct-map PDPT 512 entry; -m 6G doğrulandı). aarch64 zaten 512 GB. ≥128TB/5-level = follow-up.
-- [~] **Disk:** 64-bit LBA ✅ (block katmanı baştan `uint64_t lba`); **GPT** ✅ (header@LBA1, 64-bit start/end, >2TB diskler) + **ext4 extent read** ✅ (GPT→ext4 mount /mnt, x86 test). 64BIT incompat (>16TB FS, large bgd) + GPT CRC/backup = follow-up.
-- [~] **Sayfa boyutu:** 4K + **2M hugepage** ✅ (MAP_HUGETLB, iki arch; eager populate, fork COW 4K'ya bölünür, munmap blok-free). 1G + THP = follow-up (1G buddy üstü, bootmem reservation gerekir).
+- [x] **Disk:** 64-bit LBA ✅ + **GPT** ✅ (CRC32 header doğrulama + backup-header fallback, >2TB) + **ext4 extent read** ✅ + **ext4 64BIT** ✅ (uint64_t blok-no + bg_*_hi/s_blocks_count_hi → >16TB FS adreslenebilir; desc=64 test'li). Kalan: GPT entry-array CRC, ext4 write-64bit.
+- [~] **Sayfa boyutu:** 4K + **2M hugepage** ✅ + **1G hugepage** ✅ (MAP_HUGE_1GB, iki arch; boot-time refcount'lu havuz, ayrı yüksek VA penceresi, fork 1G-COW; x86 -m6G/aarch64 -m4G test'li). THP (otomatik promosyon/khugepaged) = follow-up.
 - [ ] **Açık dosya / process / PID:** dinamik tablo, RAM'le ölçeklenen üst sınır (statik cap yok)
 - [ ] Ölçüt: aynı binary 1 çekirdek/128 MB cihazda da, binlerce çekirdek/TB sunucuda da çalışır
 
