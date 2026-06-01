@@ -1043,6 +1043,20 @@ void task_sleep_interruptible(void) {
 	arch_yield();
 }
 
+/* Mark SLEEPING (sleeping_on_queue=1) then drop `lock`, atomically against a
+ * waker holding the same lock. The caller has published its wakeup handle (a
+ * waiter field) under `lock`; the waker wakes it with task_wake. IRQs stay
+ * masked between the two unlocks, so the registration can't be preempted. */
+void task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags) {
+	process_t *c = task_current();
+	uint64_t sf = spin_lock_irq(&sched_lock);
+	c->sleeping_on_queue = 1;
+	c->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, sf);
+	spin_unlock_irq(lock, lock_flags);
+	arch_yield();
+}
+
 /* Sleep until tick `deadline` (or a signal). Woken by the deadline sweep in
  * sched_tick, not the per-tick blanket wake — no churn while sleeping. */
 void task_sleep_until(uint64_t deadline) {
