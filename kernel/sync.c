@@ -85,6 +85,159 @@ uint32_t atomic_sub_fetch32(volatile uint32_t *p, uint32_t v)
 #endif
 }
 
+uint64_t atomic_fetch_add64(volatile uint64_t *p, uint64_t v)
+{
+#if defined(__aarch64__)
+	uint64_t old, nw; uint32_t res;
+	__asm__ volatile(
+		"1: ldaxr %0, [%3]\n"
+		"   add   %1, %0, %4\n"
+		"   stlxr %w2, %1, [%3]\n"
+		"   cbnz  %w2, 1b\n"
+		: "=&r"(old), "=&r"(nw), "=&r"(res)
+		: "r"(p), "r"(v) : "memory");
+	return old;
+#elif defined(__x86_64__)
+	__asm__ volatile("lock xaddq %0, %1" : "+r"(v), "+m"(*p) :: "memory");
+	return v;
+#else
+	uint64_t old = *p; *p = old + v; return old;
+#endif
+}
+
+uint64_t atomic_sub_fetch64(volatile uint64_t *p, uint64_t v)
+{
+#if defined(__aarch64__)
+	uint64_t nw; uint32_t res;
+	__asm__ volatile(
+		"1: ldaxr %0, [%2]\n"
+		"   sub   %0, %0, %3\n"
+		"   stlxr %w1, %0, [%2]\n"
+		"   cbnz  %w1, 1b\n"
+		: "=&r"(nw), "=&r"(res) : "r"(p), "r"(v) : "memory");
+	return nw;
+#elif defined(__x86_64__)
+	uint64_t neg = (uint64_t)(-(int64_t)v);
+	__asm__ volatile("lock xaddq %0, %1" : "+r"(neg), "+m"(*p) :: "memory");
+	return neg - v;
+#else
+	*p -= v; return *p;
+#endif
+}
+
+/* Compare-and-swap: if *p == old, store new. Returns the value *p held before. */
+uint32_t atomic_cmpxchg32(volatile uint32_t *p, uint32_t old, uint32_t nw)
+{
+#if defined(__aarch64__)
+	uint32_t prev; uint32_t res;
+	__asm__ volatile(
+		"1: ldaxr %w0, [%2]\n"
+		"   cmp   %w0, %w3\n"
+		"   b.ne  2f\n"
+		"   stlxr %w1, %w4, [%2]\n"
+		"   cbnz  %w1, 1b\n"
+		"2:\n"
+		: "=&r"(prev), "=&r"(res) : "r"(p), "r"(old), "r"(nw) : "memory", "cc");
+	return prev;
+#elif defined(__x86_64__)
+	uint32_t prev;
+	__asm__ volatile("lock cmpxchgl %2, %1"
+		: "=a"(prev), "+m"(*p) : "r"(nw), "0"(old) : "memory");
+	return prev;
+#else
+	uint32_t prev = *p; if (prev == old) *p = nw; return prev;
+#endif
+}
+
+uint64_t atomic_cmpxchg64(volatile uint64_t *p, uint64_t old, uint64_t nw)
+{
+#if defined(__aarch64__)
+	uint64_t prev; uint32_t res;
+	__asm__ volatile(
+		"1: ldaxr %0, [%2]\n"
+		"   cmp   %0, %3\n"
+		"   b.ne  2f\n"
+		"   stlxr %w1, %4, [%2]\n"
+		"   cbnz  %w1, 1b\n"
+		"2:\n"
+		: "=&r"(prev), "=&r"(res) : "r"(p), "r"(old), "r"(nw) : "memory", "cc");
+	return prev;
+#elif defined(__x86_64__)
+	uint64_t prev;
+	__asm__ volatile("lock cmpxchgq %2, %1"
+		: "=a"(prev), "+m"(*p) : "r"(nw), "0"(old) : "memory");
+	return prev;
+#else
+	uint64_t prev = *p; if (prev == old) *p = nw; return prev;
+#endif
+}
+
+/* Atomic bit-set / bit-clear on a 32-bit word (returns the previous value). */
+uint32_t atomic_or32(volatile uint32_t *p, uint32_t v)
+{
+#if defined(__aarch64__)
+	uint32_t old, nw, res;
+	__asm__ volatile(
+		"1: ldaxr %w0, [%3]\n"
+		"   orr   %w1, %w0, %w4\n"
+		"   stlxr %w2, %w1, [%3]\n"
+		"   cbnz  %w2, 1b\n"
+		: "=&r"(old), "=&r"(nw), "=&r"(res) : "r"(p), "r"(v) : "memory");
+	return old;
+#elif defined(__x86_64__)
+	uint32_t old, prev;
+	do { old = *p; prev = atomic_cmpxchg32(p, old, old | v); } while (prev != old);
+	return old;
+#else
+	uint32_t old = *p; *p = old | v; return old;
+#endif
+}
+
+uint32_t atomic_and32(volatile uint32_t *p, uint32_t v)
+{
+#if defined(__aarch64__)
+	uint32_t old, nw, res;
+	__asm__ volatile(
+		"1: ldaxr %w0, [%3]\n"
+		"   and   %w1, %w0, %w4\n"
+		"   stlxr %w2, %w1, [%3]\n"
+		"   cbnz  %w2, 1b\n"
+		: "=&r"(old), "=&r"(nw), "=&r"(res) : "r"(p), "r"(v) : "memory");
+	return old;
+#elif defined(__x86_64__)
+	uint32_t old, prev;
+	do { old = *p; prev = atomic_cmpxchg32(p, old, old & v); } while (prev != old);
+	return old;
+#else
+	uint32_t old = *p; *p = old & v; return old;
+#endif
+}
+
+/* Verify the atomic RMW assembly produces correct results (the LL/SC loops and
+ * LOCK forms are easy to mis-encode). Panics on mismatch so a broken build can
+ * never boot. Concurrency itself is exercised by the SMP cow-race test, which
+ * pounds the vm refcount through atomic_fetch_add32/sub32. */
+void atomic_selftest(void)
+{
+	volatile uint64_t q = 0;
+	if (atomic_fetch_add64(&q, 5) != 0 || q != 5) kpanic("atomic64 add");
+	if (atomic_sub_fetch64(&q, 2) != 3 || q != 3) kpanic("atomic64 sub");
+
+	volatile uint32_t v = 10;
+	if (atomic_cmpxchg32(&v, 10, 20) != 10 || v != 20) kpanic("cmpxchg32 hit");
+	if (atomic_cmpxchg32(&v, 10, 30) != 20 || v != 20) kpanic("cmpxchg32 miss");
+
+	volatile uint64_t w = 0x1ULL << 40;
+	if (atomic_cmpxchg64(&w, 0x1ULL << 40, 0x2ULL << 40) != (0x1ULL << 40) ||
+	    w != (0x2ULL << 40)) kpanic("cmpxchg64");
+
+	volatile uint32_t b = 0xF0;
+	if (atomic_or32(&b, 0x0F) != 0xF0 || b != 0xFF) kpanic("or32");
+	if (atomic_and32(&b, 0xF0) != 0xFF || b != 0xF0) kpanic("and32");
+
+	kprintf("atomic: selftest ok\n");
+}
+
 /* Owner tracking is unsafe until the per-CPU context pointer (tpidr_el1 / gs
  * base) is established in arch_cpu_init; enabled from main right after. */
 volatile int spin_diag_on = 0;

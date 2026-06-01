@@ -21,6 +21,12 @@ void spin_unlock(spinlock_t *l);
 /* v8.0-safe atomic RMW for shared refcounts (no LSE dependency). */
 uint32_t atomic_fetch_add32(volatile uint32_t *p, uint32_t v);
 uint32_t atomic_sub_fetch32(volatile uint32_t *p, uint32_t v);
+uint64_t atomic_fetch_add64(volatile uint64_t *p, uint64_t v);
+uint64_t atomic_sub_fetch64(volatile uint64_t *p, uint64_t v);
+uint32_t atomic_cmpxchg32(volatile uint32_t *p, uint32_t old, uint32_t nw);
+uint64_t atomic_cmpxchg64(volatile uint64_t *p, uint64_t old, uint64_t nw);
+uint32_t atomic_or32(volatile uint32_t *p, uint32_t v);
+uint32_t atomic_and32(volatile uint32_t *p, uint32_t v);
 /* IRQ-safe variants — use these from interrupt context */
 uint64_t spin_lock_irq(spinlock_t *l);
 void     spin_unlock_irq(spinlock_t *l, uint64_t flags);

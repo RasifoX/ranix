@@ -209,6 +209,9 @@ void kernel_main(void)
 	extern volatile int spin_diag_on;
 	spin_diag_on = 1;
 
+	extern void atomic_selftest(void);
+	atomic_selftest();
+
 	if (fdt_ok == 0) {
 		uint32_t cl_len;
 		const void *cl_val = fdt_get_prop("chosen", "bootargs", &cl_len);
