@@ -2,7 +2,7 @@
 .global _start
 
 /*
- * ARM64 Linux kernel header — required so QEMU passes DTB in x0.
+ * ARM64 kernel image header — required so QEMU passes the DTB in x0.
  * code0 = branch over header; magic 0x644d5241 at offset 0x38.
  */
 _start:

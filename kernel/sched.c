@@ -48,7 +48,7 @@ static int proctab_ensure(void)
 	return proctab_grow();
 }
 
-/* Linux-style pid allocation: hand out fresh, monotonically climbing pids up
+/* Monotonic climbing pid allocation: hand out fresh pids up
  * to PID_MAX before ever reusing a freed one. Quick reuse is unsafe — a stale
  * reference to a dead pid (a `timeout` parent's liveness probe / kill, musl's
  * __thread_list_lock keyed on a tid) would then land on an unrelated process

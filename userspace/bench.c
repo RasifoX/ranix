@@ -4,7 +4,7 @@
  * Measures the kernel fast paths that decide "does Ranix flow":
  * syscall latency, context-switch latency, fork/exec throughput, pipe
  * bandwidth, mmap and page-fault cost. Prints one "BENCH:" line per metric
- * so results can be diffed against Linux on the same hardware.
+ * so results can be diffed against a reference kernel.
  *
  * Timing uses the ARM generic virtual counter (cntvct_el0), readable from
  * EL0, giving sub-microsecond resolution — unlike the 10ms tick clock.

@@ -3,7 +3,7 @@
 
 #include <uapi/types.h>
 
-/* Capability bit numbers (Linux-compatible subset) */
+/* Capability bit numbers (standard subset) */
 #define CAP_CHOWN            0
 #define CAP_DAC_OVERRIDE     1
 #define CAP_DAC_READ_SEARCH  2
@@ -29,7 +29,7 @@
 
 #define cap_has(set, cap)  (!!((set) & (1ULL << (cap))))
 
-/* capget/capset userspace ABI (Linux __user_cap_header_struct / __user_cap_data_struct) */
+/* capget/capset userspace ABI (__user_cap_header_struct / __user_cap_data_struct) */
 typedef struct {
 	uint32_t version;
 	int      pid;
