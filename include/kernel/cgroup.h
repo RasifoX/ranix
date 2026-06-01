@@ -17,6 +17,7 @@ int  cgroup_mount(struct vfs_mount *mnt, void *data);
 int  cgroup_charge_mem(void *cg, long n);   /* 0 ok, -1 over memory.max */
 void cgroup_uncharge_mem(void *cg, long n);
 int  cgroup_frozen(void *cg);               /* 1 if cg or an ancestor is frozen */
+int  cgroup_cpu_weight(void *cg);           /* cpu.weight (1..10000, 100 = baseline) */
 
 /* cgroup namespace */
 struct cgroup_namespace;
