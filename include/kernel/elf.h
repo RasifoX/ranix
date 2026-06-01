@@ -58,8 +58,12 @@ typedef struct {
 	uint64_t load_bias;  /* 0 for ET_EXEC; base for ET_DYN */
 	uint16_t phnum;
 	uint16_t phentsize;
+	char     interp[128]; /* PT_INTERP path, "" if statically linked */
 } elf_info_t;
 
-int elf_load(vm_space_t *vm, const void *data, size_t len, elf_info_t *info);
+/* load_bias_hint: base for an ET_DYN image (0 = pick a default); ignored for
+ * ET_EXEC. Used to place the dynamic linker away from the main executable. */
+int elf_load(vm_space_t *vm, const void *data, size_t len,
+             uint64_t load_bias_hint, elf_info_t *info);
 
 #endif
