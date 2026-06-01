@@ -211,6 +211,10 @@ void kernel_main(void)
 	vfs_mkdir("/run",  0755);
 	vfs_mkdir("/run/shm", 0777);
 	vfs_mount("/run/shm", "ramfs", NULL);
+	/* cgroup2 hierarchy (pids controller). Canonical path is /sys/fs/cgroup;
+	 * mounted here until sysfs exposes that mountpoint. */
+	vfs_mkdir("/cgroup", 0755);
+	vfs_mount("/cgroup", "cgroup2", NULL);
 	initrd_init();
 
 	sched_init();

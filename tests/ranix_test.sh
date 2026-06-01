@@ -311,6 +311,7 @@ check "c-time-ns"    "timens-ok" "$(timeout 10 /bin/test_timens 2>/dev/null)"
 check "dynamic-link" "dynamic-ok" "$(timeout 10 /bin/test_dynamic 2>/dev/null)"
 check "shared-lib"   "sharedlib-ok" "$(timeout 10 /bin/test_sharedlib 2>/dev/null)"
 check "dlopen"       "dlopen-ok" "$(timeout 10 /bin/test_dlopen 2>/dev/null)"
+check "cgroup-pids"  "cgroup-ok" "$(timeout 15 /bin/test_cgroup 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
