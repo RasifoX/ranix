@@ -16,9 +16,10 @@
 #define CLONE_NEWUTS 0x04000000
 
 typedef struct uts_namespace {
-	int  refcount;
-	char nodename[65];   /* hostname */
-	char domainname[65];
+	int           refcount;
+	unsigned long inum;          /* unique identity, exposed via /proc/<pid>/ns/uts */
+	char          nodename[65];  /* hostname */
+	char          domainname[65];
 } uts_namespace_t;
 
 extern uts_namespace_t init_uts_ns;

@@ -663,6 +663,91 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 	return in;
 }
 
+/* ── /proc/<pid>/ns/uts — namespace identity ("uts:[<inum>]") ─── */
+
+static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+{
+	procfs_fddir_priv_t *pp = in->priv;
+	if (!pp) return -1;
+	process_t *p = pp->pid == 0 ? task_current() : proc_find((pid_t)pp->pid);
+	if (!p) return -1;
+	uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
+	char tmp[40]; int i = 0;
+	for (const char *s = "uts:["; *s; s++) tmp[i++] = *s;
+	unsigned long v = ns->inum;
+	char rev[20]; int r = 0;
+	if (v == 0) rev[r++] = '0';
+	while (v) { rev[r++] = '0' + (int)(v % 10); v /= 10; }
+	while (r) tmp[i++] = rev[--r];
+	tmp[i++] = ']';
+	tmp[i] = '\0';
+	if ((size_t)(i + 1) > sz) return -1;
+	memcpy(buf, tmp, (size_t)i + 1);
+	return 0;
+}
+
+static vfs_iops_t procfs_nslink_iops = { .readlink = procfs_nslink_readlink };
+
+static vfs_inode_t *procfs_nslink_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFLNK | 0777;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->iops     = &procfs_nslink_iops;
+	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid = pid;
+	in->priv = pp;
+	return in;
+}
+
+static vfs_inode_t *procfs_nsdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	if (strcmp(name, "uts") == 0) return procfs_nslink_inode(pid);
+	return NULL;
+}
+
+static int procfs_nsdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	if (idx >= 1) return -1;
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	out->ino      = 0x8000 + (uint64_t)pid * 100 + 80;
+	out->mode     = S_IFLNK | 0777;
+	out->next_off = idx + 1;
+	memcpy(out->name, "uts", 4);
+	return 0;
+}
+
+static vfs_iops_t procfs_nsdir_iops = {
+	.lookup  = procfs_nsdir_lookup,
+	.readdir = procfs_nsdir_readdir,
+};
+
+static vfs_inode_t *procfs_nsdir_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFDIR | 0555;
+	in->nlink    = 2;
+	in->refcount = 1;
+	in->iops     = &procfs_nsdir_iops;
+	in->fops     = &procfs_dir_fops;
+	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid = pid;
+	in->priv = pp;
+	return in;
+}
+
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
@@ -670,6 +755,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 	int pid = pp->pid;
 	if (strcmp(name, "fd") == 0)
 		return procfs_fddir_inode(pid);
+	if (strcmp(name, "ns") == 0)
+		return procfs_nsdir_inode(pid);
 	for (int i = 0; i < PID_LINKS_N; i++) {
 		if (strcmp(pid_links[i], name) == 0)
 			return procfs_pidlink_inode(pid, i);
@@ -683,7 +770,7 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 
 static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= (uint32_t)(PID_FILES_N + 1 + PID_LINKS_N)) return -1;
+	if (idx >= (uint32_t)(PID_FILES_N + 2 + PID_LINKS_N)) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	if (idx < PID_FILES_N) {
@@ -698,13 +785,18 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 		out->mode     = S_IFDIR | 0555;
 		out->next_off = idx + 1;
 		memcpy(out->name, "fd", 3);
-	} else {
+	} else if (idx < (uint32_t)(PID_FILES_N + 1 + PID_LINKS_N)) {
 		const char *n = pid_links[idx - PID_FILES_N - 1];
 		int nlen = 0; while (n[nlen]) nlen++;
 		out->ino      = 0x8000 + (uint64_t)pid * 100 + 90 + (idx - PID_FILES_N - 1);
 		out->mode     = S_IFLNK | 0777;
 		out->next_off = idx + 1;
 		memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	} else {
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + 81;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = idx + 1;
+		memcpy(out->name, "ns", 3);
 	}
 	return 0;
 }

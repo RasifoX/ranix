@@ -6,11 +6,13 @@
 
 uts_namespace_t init_uts_ns = {
 	.refcount   = 1,
+	.inum       = 0xF0000000UL,
 	.nodename   = "ranix",
 	.domainname = "(none)",
 };
 
 static spinlock_t ns_lock;
+static unsigned long ns_inum_next = 0xF0000001UL;
 
 uts_namespace_t *current_uts(void)
 {
@@ -45,5 +47,8 @@ uts_namespace_t *uts_ns_clone(uts_namespace_t *old)
 	if (!ns) return NULL;
 	memcpy(ns, old, sizeof(*ns));
 	ns->refcount = 1;
+	uint64_t f = spin_lock_irq(&ns_lock);
+	ns->inum = ns_inum_next++;
+	spin_unlock_irq(&ns_lock, f);
 	return ns;
 }
