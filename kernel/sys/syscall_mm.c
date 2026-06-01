@@ -194,16 +194,30 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 		}
 	}
 
-	/* Keep VMA permissions in sync so the fault handler enforces the new prot
-	 * (a later write to a now-read-only page must fault). Whole-VMA update —
-	 * sub-VMA mprotect ranges adopt the new prot for the whole VMA. */
+	/* Keep VMA permissions in sync so the fault handler enforces the new prot.
+	 * Split any VMA that the range only partially covers, so the new prot
+	 * applies to exactly [addr, addr+len) — applying it to the whole VMA would
+	 * e.g. strip write from a binary's data segment when ld.so makes its small
+	 * RELRO sub-region read-only. */
 	uint32_t vmaflags = VMA_USER;
 	if (prot & PROT_READ)  vmaflags |= VMA_READ;
 	if (prot & PROT_WRITE) vmaflags |= VMA_WRITE;
 	if (prot & PROT_EXEC)  vmaflags |= VMA_EXEC;
-	for (vma_t *v = p->vmas; v; v = v->next)
-		if (v->vaddr < addr + len && addr < v->vaddr + v->size)
-			v->flags = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON));
+	for (vma_t *v = p->vmas; v; v = v->next) {
+		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
+		if (vend <= addr || vstart >= addr + len) continue; /* no overlap */
+		uint64_t lo = addr > vstart ? addr : vstart;
+		uint64_t hi = (addr + len) < vend ? (addr + len) : vend;
+		uint32_t newf = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON));
+		if (vstart == lo && vend == hi) {
+			v->flags = newf;                       /* whole VMA */
+		} else {
+			uint32_t oldf = v->flags;              /* carve out the middle */
+			if (vstart < lo) vma_add(p, vstart, lo - vstart, oldf);
+			if (hi < vend)   vma_add(p, hi, vend - hi, oldf);
+			v->vaddr = lo; v->size = hi - lo; v->flags = newf;
+		}
+	}
 
 	return 0;
 }
