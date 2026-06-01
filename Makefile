@@ -127,6 +127,7 @@ SRCS_KERNEL = \
     kernel/fs/sysfs.c \
     kernel/fs/devfs.c \
     kernel/fs/mbr.c \
+    kernel/fs/gpt.c \
     kernel/fs/ext2.c \
     kernel/pci.c \
     kernel/block.c \
@@ -333,6 +334,20 @@ ranix-disk.img:
 	mkfs.ext2 -b 1024 -L ranix-disk $@ 2>/dev/null
 	@echo "[OK] ranix-disk.img ready"
 
+# GPT-partitioned disk with an ext4 partition holding /hello.txt — used by the
+# test suite to exercise GPT parsing + ext4 read end to end (x86_64 only, where
+# virtio-blk is available).
+$(BUILD_DIR)/gpt-test.img:
+	@mkdir -p $(BUILD_DIR)/diskseed
+	@printf 'ranix-gpt-ok' > $(BUILD_DIR)/diskseed/hello.txt
+	dd if=/dev/zero of=$(BUILD_DIR)/part.img bs=1M count=12 2>/dev/null
+	mkfs.ext4 -F -q -O ^has_journal,^metadata_csum,^64bit -b 1024 \
+	    -d $(BUILD_DIR)/diskseed $(BUILD_DIR)/part.img >/dev/null 2>&1
+	dd if=/dev/zero of=$@ bs=1M count=16 2>/dev/null
+	sgdisk -n 1:2048:+12M -t 1:8300 $@ >/dev/null 2>&1
+	dd if=$(BUILD_DIR)/part.img of=$@ bs=512 seek=2048 conv=notrunc 2>/dev/null
+	@echo "[OK] gpt-test.img"
+
 # Boot with virtio-blk disk attached (x86_64 only)
 qemu-disk: iso disk-image
 	$(QEMU_CMD) -nographic -cdrom ranix.iso \
@@ -360,10 +375,11 @@ TEST_TIMEOUT ?= 180
 TEST_LOG = $(BUILD_DIR)/serial-test.log
 
 ifeq ($(ARCH),x86_64)
-test: iso
+test: iso $(BUILD_DIR)/gpt-test.img
 	@rm -f $(TEST_LOG)
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 512M -display none \
-	    -serial file:$(TEST_LOG) -cdrom ranix.iso || true
+	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
+	    -drive file=$(BUILD_DIR)/gpt-test.img,format=raw,if=virtio || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)

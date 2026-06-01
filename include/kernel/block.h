@@ -16,6 +16,12 @@ typedef struct block_device {
 } block_device_t;
 
 int  block_device_register(block_device_t *dev);
+
+/* Register a partition slice of parent as "<parent>p<idx>". Reads/writes are
+ * offset by start_lba. Shared by the MBR and GPT probers. */
+block_device_t *block_partition_add(block_device_t *parent, uint64_t start_lba,
+                                    uint64_t nr_sectors, int idx);
+
 block_device_t *block_device_find(const char *name);
 int  block_device_count(void);
 block_device_t *block_device_get(int index);
