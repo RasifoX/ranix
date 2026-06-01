@@ -59,7 +59,8 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 
 static long sys_kill(pid_t pid, int sig)
 {
-	process_t *p = proc_find(pid);
+	/* pid is namespace-local; resolve through the caller's pid namespace */
+	process_t *p = pidns_find(current_pid_ns(), (int)pid);
 	if (!p) return -3; /* ESRCH */
 	task_signal(p, sig);
 	return 0;

@@ -6,6 +6,7 @@
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
 #include <kernel/config.h>
+#include <kernel/pid_namespace.h>
 
 #define PROC_NAME_MAX  256
 
@@ -137,6 +138,13 @@ typedef struct process {
 	struct time_namespace *time_ns;
 	struct mnt_namespace  *mnt_ns;
 	struct time_namespace *time_ns_new; /* pending time ns for children (unshare CLONE_NEWTIME) */
+
+	/* pid namespace: ns this process lives in, a pending ns for its children
+	 * (unshare CLONE_NEWPID), and its nr in each ancestor ns */
+	struct pid_namespace *pid_ns;
+	struct pid_namespace *pid_ns_new;
+	struct { struct pid_namespace *ns; int nr; } pidnrs[PIDNS_MAX_LEVEL];
+	int                   pid_levels;
 
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;
