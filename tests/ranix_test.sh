@@ -286,6 +286,7 @@ check "c-poll"       "OK"  "$(timeout 8 /bin/test_poll 2>/dev/null)"
 check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
 check "c-eventfd"    "OK"  "$(timeout 8 /bin/test_eventfd 2>/dev/null)"
 check "c-mmap"       "OK"  "$(timeout 8 /bin/test_mmap 2>/dev/null)"
+check "c-pipestress" "OK" "$(timeout 60 /bin/test_pipestress 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
 
