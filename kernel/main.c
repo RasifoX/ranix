@@ -273,6 +273,8 @@ void kernel_main(void)
 	input_core_init();
 	extern void tty_core_init(void);
 	tty_core_init();
+	extern void pty_init(void);
+	pty_init();
 
 	/* Auto-detect and mount first ext2/ext4 disk partition */
 	{
