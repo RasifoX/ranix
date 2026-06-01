@@ -499,3 +499,198 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
 	return (long)done;
 }
 
+/* ── system control & odds and ends ──────────────────────────────────────────
+ * reboot/poweroff, the kernel log (syslog), resource limits (prlimit64),
+ * scheduler affinity (a stub — we don't pin), prctl (mostly process name),
+ * getrandom (drains the splitmix64 PRNG in syscall.c), and statx. Grouped here
+ * as the miscellaneous tail of the syscall surface.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
+{
+	(void)arg;
+	kprintf("sys_reboot: magic1=%x magic2=%x cmd=%x\n",
+	        (uint32_t)magic1, (uint32_t)magic2, (uint32_t)cmd);
+	if ((uint32_t)magic1 != 0xfee1dead) { kprintf("bad magic1\n"); return -22; }
+	if ((uint32_t)magic2 != 0x28121969 &&
+	    (uint32_t)magic2 != 0x05121996 &&
+	    (uint32_t)magic2 != 0x16041998 &&
+	    (uint32_t)magic2 != 0x20112000) { kprintf("bad magic2\n"); return -22; }
+	kprintf("reboot: system going down\n");
+	if (cmd == 0x4321fedc) /* LINUX_REBOOT_CMD_POWER_OFF */
+		board_poweroff();
+	board_reset();
+	for (;;) __asm__ volatile("" ::: "memory");
+	return 0;
+}
+
+static long sys_syslog(int type, char *buf, int len)
+{
+	if ((type == 2 || type == 3 || type == 4) && buf && len > 0) {
+		uint64_t phys = (uint64_t)buddy_alloc(1);
+		if (!phys) return -12;
+		char *tmp = (char *)PHYS_TO_VIRT(phys);
+		size_t cap = (size_t)len < 8192 ? (size_t)len : 8192;
+		size_t n = kprintf_read_log(tmp, cap);
+		long r = copy_to_user(buf, tmp, n) == 0 ? (long)n : -14;
+		buddy_free(phys, 1);
+		return r;
+	}
+	if (type == 10)
+		return (long)kprintf_log_len();
+	return 0;
+}
+
+static long sys_utimensat(int dirfd, const char *path, const void *times, int flags)
+{
+	(void)times; (void)flags;
+	if (!path) return 0;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+	vfs_stat_t st;
+	if (vfs_stat(kp, &st) != 0) return -2; /* ENOENT */
+	return 0;
+}
+
+static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
+{
+	(void)pid; (void)new_limit;
+	if (old_limit) {
+		uint64_t limits[2];
+		switch (resource) {
+		case 3:  /* RLIMIT_STACK  */ limits[0] = limits[1] = 8UL << 20; break;
+		case 7:  /* RLIMIT_NOFILE */ limits[0] = limits[1] = FD_MAX; break;
+		default: limits[0] = limits[1] = (uint64_t)-1; break; /* RLIM_INFINITY */
+		}
+		copy_to_user(old_limit, limits, 16);
+	}
+	return 0;
+}
+
+static long sys_sched_yield(void) { yield(); return 0; }
+
+static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
+{
+	(void)pid; (void)len; (void)mask;
+	return 0;
+}
+
+static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
+{
+	(void)pid;
+	if (len >= 8 && access_ok(mask, len)) {
+		extern int smp_ncpus;
+		uint64_t m = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
+		copy_to_user(mask, &m, 8);
+		return 8;
+	}
+	return -22; /* EINVAL */
+}
+
+#define PR_SET_NAME    15
+#define PR_GET_NAME    16
+#define PR_SET_DUMPABLE 4
+#define PR_GET_DUMPABLE 3
+#define PR_SET_PDEATHSIG 1
+#define PR_SET_CHILD_SUBREAPER 36
+
+static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5)
+{
+	(void)arg3; (void)arg4; (void)arg5;
+	process_t *p = task_current();
+	switch (option) {
+	case PR_SET_NAME: {
+		char name[16];
+		if (strncpy_from_user(name, (const void *)(uintptr_t)arg2, 16) >= 0) {
+			name[15] = '\0';
+			int len = 0;
+			while (name[len] && len < PROC_NAME_MAX - 1) len++;
+			memcpy(p->name, name, len);
+			p->name[len] = '\0';
+		}
+		return 0;
+	}
+	case PR_GET_NAME: {
+		char name[16];
+		memset(name, 0, sizeof(name));
+		int len = 0;
+		while (p->name[len] && len < 15) { name[len] = p->name[len]; len++; }
+		copy_to_user((void *)(uintptr_t)arg2, name, 16);
+		return 0;
+	}
+	case PR_SET_DUMPABLE:
+		p->dumpable = (arg2 == 1) ? 1 : 0;
+		return 0;
+	case PR_GET_DUMPABLE:
+		return p->dumpable;
+	default: return 0;
+	}
+}
+
+static long sys_getrandom(void *buf, size_t len, unsigned int flags)
+{
+	(void)flags;
+	if (!access_ok(buf, len)) return -14;
+	uint8_t *dst = buf;
+	for (size_t i = 0; i < len; ) {
+		uint64_t r = rng_next();
+		size_t chunk = len - i < 8 ? len - i : 8;
+		for (size_t j = 0; j < chunk; j++, i++)
+			dst[i] = (uint8_t)(r >> (j * 8));
+	}
+	return (long)len;
+}
+
+typedef struct {
+	uint32_t stx_mask;
+	uint32_t stx_blksize;
+	uint64_t stx_attributes;
+	uint32_t stx_nlink;
+	uint32_t stx_uid;
+	uint32_t stx_gid;
+	uint16_t stx_mode;
+	uint16_t __pad1;
+	uint64_t stx_ino;
+	uint64_t stx_size;
+	uint64_t stx_blocks;
+	uint64_t stx_attributes_mask;
+	int64_t  stx_atime_sec; uint32_t stx_atime_nsec; int32_t _a;
+	int64_t  stx_btime_sec; uint32_t stx_btime_nsec; int32_t _b;
+	int64_t  stx_ctime_sec; uint32_t stx_ctime_nsec; int32_t _c;
+	int64_t  stx_mtime_sec; uint32_t stx_mtime_nsec; int32_t _m;
+	uint32_t stx_rdev_major;
+	uint32_t stx_rdev_minor;
+	uint32_t stx_dev_major;
+	uint32_t stx_dev_minor;
+} linux_statx_t;
+
+static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask, linux_statx_t *buf)
+{
+	(void)flags; (void)mask;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, dirfd, path);
+	if (r) return r;
+
+	vfs_stat_t ks;
+	r = vfs_stat(kp, &ks);
+	if (r < 0) return -2;
+
+	linux_statx_t sx;
+	memset(&sx, 0, sizeof(sx));
+	sx.stx_mask       = 0x7FF;
+	sx.stx_blksize    = 4096;
+	sx.stx_nlink      = ks.nlink;
+	sx.stx_uid        = ks.uid;
+	sx.stx_gid        = ks.gid;
+	sx.stx_mode       = (uint16_t)ks.mode;
+	sx.stx_ino        = ks.ino;
+	sx.stx_size       = (uint64_t)ks.size;
+	sx.stx_blocks     = (ks.size + 511) / 512;
+	sx.stx_dev_major  = 0;
+	sx.stx_dev_minor  = 1;
+	sx.stx_rdev_major = (uint32_t)(ks.rdev >> 8);
+	sx.stx_rdev_minor = (uint32_t)(ks.rdev & 0xFF);
+	return copy_to_user(buf, &sx, sizeof(sx));
+}
+
