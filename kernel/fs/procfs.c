@@ -586,6 +586,39 @@ typedef struct {
 	int pid;
 } procfs_piddir_priv_t;
 
+/* ── /proc/<pid>/exe symlink → running image's full path ─────── */
+
+static int procfs_exelink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+{
+	int pid = in->priv ? *(int *)in->priv : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	const char *path = p->exe_path[0] ? p->exe_path : p->name;
+	size_t n = strlen(path);
+	if (n + 1 > sz) return -1;
+	memcpy(buf, path, n + 1);
+	return 0;
+}
+
+static vfs_iops_t procfs_exelink_iops = { .readlink = procfs_exelink_readlink };
+
+static vfs_inode_t *procfs_exelink_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFLNK | 0777;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->iops     = &procfs_exelink_iops;
+	int *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	*pr = pid;
+	in->priv = pr;
+	return in;
+}
+
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
@@ -593,6 +626,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 	int pid = pp->pid;
 	if (strcmp(name, "fd") == 0)
 		return procfs_fddir_inode(pid);
+	if (strcmp(name, "exe") == 0)
+		return procfs_exelink_inode(pid);
 	for (int i = 0; i < PID_FILES_N; i++) {
 		if (strcmp(pid_files[i].name, name) == 0)
 			return procfs_inode_file(pid, pid_files[i].type);
@@ -602,7 +637,7 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 
 static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= (uint32_t)(PID_FILES_N + 1)) return -1;
+	if (idx >= (uint32_t)(PID_FILES_N + 2)) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	if (idx < PID_FILES_N) {
@@ -612,11 +647,16 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 		const char *n = pid_files[idx].name;
 		int nlen = 0; while (n[nlen]) nlen++;
 		memcpy(out->name, n, nlen); out->name[nlen] = '\0';
-	} else {
+	} else if (idx == PID_FILES_N) {
 		out->ino      = 0x8000 + (uint64_t)pid * 100 + 99;
 		out->mode     = S_IFDIR | 0555;
 		out->next_off = idx + 1;
 		memcpy(out->name, "fd", 3);
+	} else {
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + 98;
+		out->mode     = S_IFLNK | 0777;
+		out->next_off = idx + 1;
+		memcpy(out->name, "exe", 4);
 	}
 	return 0;
 }
