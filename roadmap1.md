@@ -10,9 +10,18 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.7 SMP tamamlandı — gerçek Pi4'te 4-core, 192-test suite kararlı, 5/5 SIFIR çökme)
+## Neredeyiz (v0.8 dinamik linker çalışıyor — iki arch dinamik binary, 221-test suite)
 
-**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi (statx/copy_file_range/memfd/inotify/epoll/futex/clone var), ama mimari olarak Linux 1.x (single-core, statik binary, ext2, dinamik linker yok).
+**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi; artık **dinamik binary + 3 namespace** de var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces 🔶 (3/8); kalan: glibc, mount/pid namespace, ext4.
+
+**2026-06-01 — büyük oturum (bu oturum):**
+- **Event-driven çekirdek:** per-tick blanket-wake SİLİNDİ; her blocking primitive event-driven. sched.c → sched/proc/signal + syscall.c kategori split.
+- **x86_64 SMP ÇALIŞIYOR** (4/4 CPU) — eski "triple fault" maddesi geçersiz.
+- **mprotect/W^X enforcement** (güvenlik) + loopback net + TCP/UDP testleri.
+- **Namespaces (v0.7.5): UTS + IPC + time TAM** (unshare/clone/setns/identity). nsproxy altyapısı + nsfs deseni.
+- **Dinamik linker (v0.8) ÇALIŞIYOR:** PT_INTERP + ld.so; iki arch dinamik binary çalıştırıyor. Kernel relokasyon yapmıyor — ld.so userspace'de yapıyor.
+- **procfs compat:** /proc/<pid>/{exe,cwd,root,comm,ns/*,timens_offsets}, /proc/filesystems.
+- Test 192 → **221/221** (iki arch).
 
 **2026-05-30 — kronik bellek bozulması çözüldü** (3 temel bug: COW double-free, FP/SIMD signal'da korunmuyordu, exec I-cache CPU-lokal). + fork/unmap kilit tamamlandı, x86 FP paritesi. Gerçek Pi4'te 5/5 koşu 192/192. Detay: v0.7 bölümü.
 
@@ -329,15 +338,17 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 Docker, Podman, LXC hepsi namespace + cgroups üstünde çalışıyor.
 Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 
-### Namespaces
-- [ ] PID namespace: clone(CLONE_NEWPID), /proc içeriği izole
-- [ ] mount namespace: clone(CLONE_NEWNS), her container kendi mount tree'si
-- [ ] UTS namespace: clone(CLONE_NEWUTS), hostname izole
-- [ ] network namespace: clone(CLONE_NEWNET), izole network stack
-- [ ] IPC namespace: clone(CLONE_NEWIPC), SysV IPC izolasyonu
+### Namespaces (3/8 TAM — hepsi self-contained olanlar; 2026-06-01)
+- [x] **UTS namespace**: unshare/clone(CLONE_NEWUTS), hostname/domainname izole; current_uts()
+- [x] **IPC namespace**: unshare/clone(CLONE_NEWIPC), SysV shm/sem + POSIX mqueue izole (owner-tag + ns destroy sweep)
+- [x] **time namespace**: unshare(CLONE_NEWTIME), CLOCK_MONOTONIC/BOOTTIME offset; /proc/<pid>/timens_offsets
+- [x] **unshare + setns** syscall (her üç ns için); clone bayrağı (time hariç — 0x80 signal-byte çakışması, Linux de yasak)
+- [x] **/proc/[pid]/ns/{uts,ipc,time}** — nsfs identity link + openable fd (setns için); namei "fops'lu symlink follow etme"
+- [ ] mount namespace: clone(CLONE_NEWNS) — büyük, global mount_list → per-process view
+- [ ] PID namespace: clone(CLONE_NEWPID) — en zor, scheduler/proc_find/waitpid ns-aware
+- [ ] network namespace: clone(CLONE_NEWNET) — net stack ns-aware
 - [ ] user namespace: clone(CLONE_NEWUSER), uid/gid mapping
-- [ ] unshare syscall; setns syscall
-- [ ] /proc/[pid]/ns/ — namespace fd'leri
+- Container için mount+pid şart; kalanlar somut ihtiyaç çıkınca
 
 ### cgroups v2
 - [ ] cgroupfs mount (/sys/fs/cgroup)
@@ -346,9 +357,11 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [ ] PID controller: pids.max — fork bomb koruması
 - [ ] freezer: cgroup.freeze
 
-### sysfs (/sys)
-- [ ] /sys/fs/, /sys/devices/, /sys/class/ temel iskelet
-- [ ] glibc ve udev /sys'e bağlı — dinamik linker'dan önce gerekli
+### sysfs (/sys) — temel iskelet ✅ (2026-06-01)
+- [x] /sys pseudo-fs (vfs_register_fs); /sys/kernel/{ostype,osrelease,hostname}
+- [x] /sys/class/net/<dev>/{address,mtu,operstate}; /sys/block/<dev>/size
+- [x] /sys/devices/system/cpu/{online,possible}
+- [ ] /sys/fs/cgroup (cgroups ile birlikte)
 - [ ] /sys/kernel/mm/transparent_hugepage stub
 - [ ] /sys/bus/pci/devices — PCI device listing
 
@@ -371,18 +384,24 @@ glibc'nin çalışması için önce dinamik linker ve
 bir dizi /proc + syscall önkoşulu tamamlanmalı.
 Dinamik linker + glibc birlikte gelir — sıra önemli.
 
-### ELF Dinamik Linker
+### ELF Dinamik Linker — ÇALIŞIYOR (musl ld.so ile, 2026-06-01, iki arch)
 
-- [ ] PT_INTERP segment işleme — interpreter path okuma (/lib/ld-musl veya /lib/ld-linux)
-- [ ] execve: interpreter'ı ELF gibi yükle, AT_BASE'i interpreter load adresine set et
+> KİLİT İÇGÖRÜ: kernel relokasyon motoru YAZMIYOR. Kernel ana binary + interp'i
+> (musl libc.so = ld.so) yükleyip interp entry'sine atlar; ld.so userspace'de TÜM
+> relokasyonları + library yüklemeyi yapar. Aşağıdaki R_* relokasyonları KERNEL'de
+> değil, ld.so'da — bizim yazmamıza gerek yok.
+
+- [x] PT_INTERP segment işleme — interpreter path okuma (out->interp[128])
+- [x] execve: interpreter'ı ELF gibi yükle (mmap base'e), AT_BASE = interp load adresi, jump = interp entry, AT_ENTRY = ana binary
+- [x] elf_load load_bias_hint param (interp'i ana binary'den ayrı yere koymak için)
+- [x] ld-musl-<arch>.so.1 initramfs /lib/'de (toolchain libc.so kopyalanıyor)
+- [x] R_*_RELATIVE / GLOB_DAT / JUMP_SLOT — **ld.so yapıyor** (kernel'de değil)
+- [x] TLS: x86_64 FS, aarch64 TPIDR_EL0 (zaten var; dinamik binary'lerde ld.so kuruyor)
 - [ ] execveat — dirfd + relative path ile exec
-- [ ] R_X86_64_RELATIVE / R_AARCH64_RELATIVE — base relocation
-- [ ] R_X86_64_GLOB_DAT / R_AARCH64_GLOB_DAT — GOT symbol relocation
-- [ ] R_X86_64_JUMP_SLOT / R_AARCH64_JUMP_SLOT — PLT lazy binding
-- [ ] R_X86_64_IRELATIVE / R_AARCH64_IRELATIVE — IFUNC resolver (glibc string functions)
-- [ ] PT_GNU_RELRO: mprotect(PROT_READ) ile RELRO segment'i kilitle
-- [ ] TLS static model: x86_64 FS, aarch64 TPIDR_EL0 (zaten var, loader entegrasyonu)
-- [ ] dlopen / dlsym / dlclose — runtime shared library yükleme
+- [ ] R_*_IRELATIVE — IFUNC (musl kullanmaz; glibc gelince ld.so tarafında gerekli)
+- [ ] PT_GNU_RELRO mprotect(PROT_READ) — ld.so yapar; bizde mprotect var, doğrula
+- [ ] dlopen / dlsym / dlclose — runtime shared library (çoklu .so senaryosu)
+- [ ] dinamik bash (şu an static-pie → dinamik + shared libc) ⏳ SIRADAKİ
 
 ### mmap & memory tamamlama
 - [ ] MAP_FIXED güvenilir (şu an temel var)
@@ -398,11 +417,10 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [ ] AT_BASE — interpreter load adresi (dinamik linker yüklenince düzeltilmeli)
 
 ### glibc için gerekli /proc eksikleri
-- [ ] /proc/self/exe → readlink — glibc runtime path için
-- [ ] /proc/self/status: Tgid, Threads, SigBlk, SigIgn satırları ekle
-- [ ] /proc/self/cmdline — null-separated argv
-- [ ] /proc/sys/vm/overcommit_memory stub (glibc memory check eder)
-- [ ] /proc/sys/kernel/osrelease — glibc bu satırı okur
+- [x] /proc/self/exe → readlink (+ /proc/<pid>/{cwd,root,comm,ns/*}) (2026-06-01)
+- [x] /proc/self/cmdline — null-separated argv
+- [x] /proc/sys/vm/overcommit_memory + /proc/sys/kernel/osrelease (zaten var)
+- [ ] /proc/self/status: Tgid var; Threads, SigBlk, SigIgn satırları ekle
 
 ### glibc için gerekli yeni syscall'lar
 - [ ] clone3 — glibc 2.36+ thread creation (clone'a graceful fallback var ama olsun)
@@ -418,10 +436,11 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [ ] AT_SYSINFO_EHDR auxv entry
 
 ### Test hedefleri
-- [ ] musl dinamik linked "hello world" çalışıyor
-- [ ] glibc 2.38 dinamik linked "hello world" çalışıyor (x86_64 + aarch64)
-- [ ] ldd libc.so.6 → doğru path
-- [ ] dynamically linked pthread test geçiyor (glibc ile)
+- [x] musl dinamik linked "hello world" çalışıyor (test_dynamic, iki arch) ✅
+- [ ] dinamik bash çalışıyor (sıradaki)
+- [ ] dlopen / çoklu shared .so senaryosu
+- [ ] glibc 2.38 dinamik linked "hello world" (v0.8.5 — glibc portu)
+- [ ] dynamically linked pthread test geçiyor
 
 ---
 
