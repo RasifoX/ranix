@@ -73,26 +73,41 @@ int gpt_probe(block_device_t *dev)
 	uint64_t entry_lba   = rd64(sec + 72);
 	uint32_t num_entries = rd32(sec + 80);
 	uint32_t entry_size  = rd32(sec + 84);
+	uint32_t stored_crc  = rd32(sec + 88);
+	buddy_free(sec_phys, 0);
 
-	if (entry_size < 128 || entry_size > 512) { buddy_free(sec_phys, 0); return -1; }
-	if (num_entries > GPT_MAX_ENTRIES) num_entries = GPT_MAX_ENTRIES;
-
+	if (entry_size < 128 || entry_size > 512) return -1;
 	if (from_backup)
 		kprintf("gpt: primary header invalid, using backup at LBA %lu\n",
 		        (unsigned long)(dev->size_blocks - 1));
 
-	uint32_t per_sector = 512 / entry_size;
-	int found = 0;
+	/* Read the whole entry array into one buffer so we can CRC-verify it and
+	 * parse without re-reading. Cap the buffer; arrays beyond it skip the CRC. */
+	uint64_t bytes  = (uint64_t)num_entries * entry_size;
+	uint64_t sectors = (bytes + 511) / 512;
+	uint64_t pages   = (sectors * 512 + 4095) / 4096;
+	int order = 0;
+	while (((uint64_t)1 << order) < pages) order++;
+	if (order > 6) return -1;                       /* > 256 KB array: unsupported */
+	uint64_t buf_phys = (uint64_t)buddy_alloc(order);
+	if (!buf_phys) return -1;
+	uint8_t *arr = (uint8_t *)PHYS_TO_VIRT(buf_phys);
 
-	for (uint32_t i = 0; i < num_entries; i++) {
-		uint32_t sec_idx = i / per_sector;
-		uint32_t in_sec  = i % per_sector;
-
-		if (in_sec == 0) {
-			if (dev->read(dev, entry_lba + sec_idx, sec, 1) != 0) break;
+	for (uint64_t s = 0; s < sectors; s++) {
+		if (dev->read(dev, entry_lba + s, arr + s * 512, 1) != 0) {
+			buddy_free(buf_phys, order);
+			return -1;
 		}
-		uint8_t *e = sec + in_sec * entry_size;
+	}
+	if (crc32(arr, (uint32_t)bytes) != stored_crc) {  /* corrupt entry array */
+		buddy_free(buf_phys, order);
+		return -1;
+	}
 
+	if (num_entries > GPT_MAX_ENTRIES) num_entries = GPT_MAX_ENTRIES;
+	int found = 0;
+	for (uint32_t i = 0; i < num_entries; i++) {
+		uint8_t *e = arr + (uint64_t)i * entry_size;
 		if (guid_is_zero(e)) continue;           /* unused slot */
 		uint64_t first = rd64(e + 32);
 		uint64_t last  = rd64(e + 40);
@@ -105,6 +120,6 @@ int gpt_probe(block_device_t *dev)
 		found++;
 	}
 
-	buddy_free(sec_phys, 0);
+	buddy_free(buf_phys, order);
 	return found > 0 ? 0 : -1;
 }
