@@ -11,6 +11,7 @@
 #include <kernel/proc.h>
 #include <kernel/block.h>
 #include <kernel/fs/mbr.h>
+#include <kernel/fs/gpt.h>
 
 extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
@@ -243,8 +244,9 @@ void kernel_main(void)
 		for (int bi = 0; bi < ndev; bi++) {
 			block_device_t *bd = block_device_get(bi);
 			if (!bd) continue;
-			/* try MBR — registers partitions as bdev->name + "p0" etc. */
-			mbr_probe(bd);
+			/* GPT first (a GPT disk has only a protective MBR); fall back to MBR */
+			if (gpt_probe(bd) != 0)
+				mbr_probe(bd);
 		}
 		/* try mounting first block device or partition as ext2/ext4 */
 		int total = block_device_count();

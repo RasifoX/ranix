@@ -29,6 +29,50 @@ int block_device_register(block_device_t *dev)
     return 0;
 }
 
+typedef struct {
+    block_device_t *parent;
+    uint64_t        start;
+} part_priv_t;
+
+static int part_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
+{
+    part_priv_t *p = dev->priv;
+    return p->parent->read(p->parent, p->start + lba, buf, count);
+}
+
+static int part_write(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
+{
+    part_priv_t *p = dev->priv;
+    return p->parent->write(p->parent, p->start + lba, buf, count);
+}
+
+block_device_t *block_partition_add(block_device_t *parent, uint64_t start_lba,
+                                    uint64_t nr_sectors, int idx)
+{
+    part_priv_t    *pp = kmalloc(sizeof(*pp));
+    block_device_t *pd = kmalloc(sizeof(*pd));
+    if (!pp || !pd) { kfree(pp); kfree(pd); return NULL; }
+
+    pp->parent = parent;
+    pp->start  = start_lba;
+
+    memset(pd, 0, sizeof(*pd));
+    int n = 0;
+    while (parent->name[n] && n < 28) { pd->name[n] = parent->name[n]; n++; }
+    pd->name[n++] = 'p';
+    if (idx >= 10) pd->name[n++] = (char)('0' + idx / 10);
+    pd->name[n++] = (char)('0' + idx % 10);
+    pd->name[n]   = '\0';
+
+    pd->size_blocks = nr_sectors;
+    pd->read        = part_read;
+    pd->write       = part_write;
+    pd->priv        = pp;
+
+    if (block_device_register(pd) != 0) { kfree(pp); kfree(pd); return NULL; }
+    return pd;
+}
+
 block_device_t *block_device_find(const char *name)
 {
     uint64_t f = spin_lock_irq(&block_lock);
