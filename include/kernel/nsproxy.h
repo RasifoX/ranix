@@ -13,6 +13,7 @@
  * permanent and never freed.
  */
 
+#define CLONE_NEWNS   0x00020000
 #define CLONE_NEWUTS  0x04000000
 #define CLONE_NEWIPC  0x08000000
 #define CLONE_NEWTIME 0x00000080

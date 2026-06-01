@@ -162,6 +162,22 @@ typedef struct vma {
 void       vfs_init(void);
 int        vfs_mount(const char *path, const char *fstype, void *data);
 const char *vfs_fstype_name(int idx);
+
+/* mount namespace — each holds a private list of mounts; processes following
+ * different namespaces see different mount trees. */
+typedef struct mnt_namespace {
+    int            refcount;
+    unsigned long  inum;
+    struct vfs_mount *mounts;
+} mnt_namespace_t;
+
+extern mnt_namespace_t init_mnt_ns;
+mnt_namespace_t *current_mnt_ns(void);
+mnt_namespace_t *mnt_ns_get(mnt_namespace_t *ns);
+void             mnt_ns_put(mnt_namespace_t *ns);
+mnt_namespace_t *mnt_ns_clone(mnt_namespace_t *old);
+struct vfs_file;
+mnt_namespace_t *nsfile_to_mnt(struct vfs_file *f);
 int        vfs_umount(const char *path);
 int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_close(int fd);

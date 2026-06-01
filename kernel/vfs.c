@@ -7,8 +7,10 @@
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/nsproxy.h>
 
 static vfs_dentry_t *root_dentry = NULL;
+static vfs_dentry_t *follow_mounts(vfs_dentry_t *d);
 
 vfs_inotify_fn_t vfs_inotify_hook = NULL;
 
@@ -113,7 +115,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	while (wi < 511 && path[wi]) { work[wi] = path[wi]; wi++; }
 	work[wi] = '\0';
 
-	vfs_dentry_t *d = root_dentry;
+	vfs_dentry_t *d = follow_mounts(root_dentry);
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
 	int d_is_volatile = 0;          /* d points to volatile_dentry (not in dentry tree) */
@@ -255,7 +257,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			continue;
 		}
 
-		d = child;
+		d = follow_mounts(child);
 		p = end;
 	}
 
@@ -293,9 +295,74 @@ const char *vfs_fstype_name(int idx)
 	return ft ? ft->name : NULL;
 }
 
-/* ── mount list ──────────────────────────────────────────── */
+/* ── mount namespaces ──────────────────────────────────────── */
 
-static vfs_mount_t *mount_list = NULL;
+mnt_namespace_t init_mnt_ns = { .refcount = 1, .inum = 0xF0000004UL, .mounts = NULL };
+static spinlock_t mntns_lock = SPINLOCK_INIT;
+
+mnt_namespace_t *current_mnt_ns(void)
+{
+	process_t *p = task_current();
+	return (p && p->mnt_ns) ? p->mnt_ns : &init_mnt_ns;
+}
+
+mnt_namespace_t *mnt_ns_get(mnt_namespace_t *ns)
+{
+	if (!ns) ns = &init_mnt_ns;
+	if (ns != &init_mnt_ns) {
+		uint64_t f = spin_lock_irq(&mntns_lock);
+		ns->refcount++;
+		spin_unlock_irq(&mntns_lock, f);
+	}
+	return ns;
+}
+
+mnt_namespace_t *mnt_ns_clone(mnt_namespace_t *old)
+{
+	if (!old) old = &init_mnt_ns;
+	mnt_namespace_t *ns = kmalloc(sizeof(*ns));
+	if (!ns) return NULL;
+	ns->refcount = 1;
+	ns->inum     = ns_inum_alloc();
+	ns->mounts   = NULL;
+	/* copy the mount entries; the underlying filesystems stay shared */
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	for (vfs_mount_t *m = old->mounts; m; m = m->next) {
+		vfs_mount_t *nm = kmalloc(sizeof(*nm));
+		if (!nm) continue;
+		*nm = *m;
+		nm->next   = ns->mounts;
+		ns->mounts = nm;
+	}
+	spin_unlock_irq(&vfs_lock, f);
+	return ns;
+}
+
+void mnt_ns_put(mnt_namespace_t *ns)
+{
+	if (!ns || ns == &init_mnt_ns) return;
+	uint64_t f = spin_lock_irq(&mntns_lock);
+	int last = (--ns->refcount == 0);
+	spin_unlock_irq(&mntns_lock, f);
+	if (last) {
+		for (vfs_mount_t *m = ns->mounts, *nx; m; m = nx) { nx = m->next; kfree(m); }
+		kfree(ns);
+	}
+}
+
+/* If d is a mountpoint in the current namespace, return the mount's root
+ * (following stacked mounts). Caller holds vfs_lock. */
+static vfs_dentry_t *follow_mounts(vfs_dentry_t *d)
+{
+	mnt_namespace_t *ns = current_mnt_ns();
+	int moved = 1, guard = 0;
+	while (moved && guard++ < 64) {
+		moved = 0;
+		for (vfs_mount_t *m = ns->mounts; m; m = m->next)
+			if (m->mountpoint == d) { d = m->root; moved = 1; break; }
+	}
+	return d;
+}
 
 int vfs_mount(const char *path, const char *fstype, void *data)
 {
@@ -321,6 +388,7 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 
 	if (fill(mnt, data) != 0) { kfree(mnt); return -1; }
 
+	mnt_namespace_t *mns = current_mnt_ns();
 	f = spin_lock_irq(&vfs_lock);
 	if (strcmp(path, "/") == 0) {
 		root_dentry = mnt->root;
@@ -335,10 +403,13 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 		}
 		mnt->mountpoint  = mp;
 		mnt->orig_inode  = mp->inode;
-		mp->inode = mnt->root->inode;
+		/* No inode splice: path resolution follows mounts per-namespace
+		 * (follow_mounts). Point the mounted root's parent at the
+		 * mountpoint's parent so ".." crosses back out of the mount. */
+		if (mnt->root) mnt->root->parent = mp->parent;
 	}
-	mnt->next  = mount_list;
-	mount_list = mnt;
+	mnt->next   = mns->mounts;
+	mns->mounts = mnt;
 	spin_unlock_irq(&vfs_lock, f);
 	return 0;
 }
@@ -347,32 +418,25 @@ int vfs_umount(const char *path)
 {
 	if (!path || path[0] != '/') return -22;
 
-	vfs_dentry_t *mp = vfs_dentry_resolve(path);
-	if (!mp || !mp->inode) return -2;
+	/* resolve follows the mount, so this is the mounted root dentry */
+	vfs_dentry_t *root = vfs_dentry_resolve(path);
+	if (!root) return -2;
 
+	mnt_namespace_t *mns = current_mnt_ns();
 	uint64_t f = spin_lock_irq(&vfs_lock);
 	vfs_mount_t *prev = NULL;
-	vfs_mount_t *mnt  = mount_list;
+	vfs_mount_t *mnt  = mns->mounts;
 	while (mnt) {
-		if (mnt->mountpoint == mp) break;
+		if (mnt->root == root) break;
 		prev = mnt;
 		mnt  = mnt->next;
 	}
 	if (!mnt) { spin_unlock_irq(&vfs_lock, f); return -22; }
 
 	if (prev) prev->next = mnt->next;
-	else      mount_list = mnt->next;
-
-	mp->inode = mnt->orig_inode;
-	/* flush stale children cached from the now-unmounted fs */
-	vfs_dentry_t *ch = mp->child;
-	mp->child = NULL;
+	else      mns->mounts = mnt->next;
 	spin_unlock_irq(&vfs_lock, f);
-	while (ch) {
-		vfs_dentry_t *nx = ch->next;
-		kfree(ch);
-		ch = nx;
-	}
+
 	kfree(mnt);
 	return 0;
 }
