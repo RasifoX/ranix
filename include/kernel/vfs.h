@@ -160,6 +160,7 @@ typedef struct vma {
 /* ── VFS interface ───────────────────────────────────────── */
 void       vfs_init(void);
 int        vfs_mount(const char *path, const char *fstype, void *data);
+const char *vfs_fstype_name(int idx);
 int        vfs_umount(const char *path);
 int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_close(int fd);
