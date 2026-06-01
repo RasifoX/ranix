@@ -365,8 +365,8 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [x] **cgroupfs (cgroup2)** — hierarchy, mkdir subgroups, cgroup.procs; kernel/cgroup.c (512d53a)
 - [x] **PID controller: pids.max / pids.current** — subtree sayımı + fork'ta EAGAIN (fork-bomb koruması) ✅
 - [ ] /sys/fs/cgroup kanonik path (şu an /cgroup; sysfs'in fs/cgroup mountpoint sunması gerek)
-- [ ] memory controller: memory.max, memory.current (bellek accounting hook'u gerek)
-- [ ] CPU controller: cpu.weight, cpu.max
+- [x] **memory controller: memory.max / memory.current** ✅ — user-page charge (mmap + fault stack/COW), limit aşımı kill (4da2eb0). Not: munmap uncharge exit-granular.
+- [ ] CPU controller: cpu.weight, cpu.max (scheduler weight gerek)
 - [ ] freezer: cgroup.freeze
 
 ### sysfs (/sys) — temel iskelet ✅ (2026-06-01)
