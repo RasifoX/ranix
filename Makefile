@@ -153,7 +153,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_unix userspace/test_mqueue userspace/test_creds \
                  userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
                  userspace/test_fpsig userspace/test_cowrace userspace/bench userspace/test_clock \
-                 userspace/test_futex_timed
+                 userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
