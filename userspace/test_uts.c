@@ -14,11 +14,16 @@ int main(void)
 
 	pid_t pid = fork();
 	if (pid == 0) {
+		char ns_before[64] = {0}, ns_after[64] = {0};
+		readlink("/proc/self/ns/uts", ns_before, sizeof(ns_before) - 1);
 		if (unshare(CLONE_NEWUTS) != 0) _exit(2);
+		readlink("/proc/self/ns/uts", ns_after, sizeof(ns_after) - 1);
 		sethostname("child-host", 10);
 		struct utsname u;
 		uname(&u);
-		_exit(strcmp(u.nodename, "child-host") == 0 ? 0 : 3);
+		int ok = strcmp(u.nodename, "child-host") == 0 &&
+		         strcmp(ns_before, ns_after) != 0;
+		_exit(ok ? 0 : 3);
 	}
 
 	int st;
