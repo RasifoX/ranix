@@ -300,6 +300,10 @@ check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
 check "c-eventfd"    "OK"  "$(timeout 8 /bin/test_eventfd 2>/dev/null)"
 check "c-mmap"       "OK"  "$(timeout 8 /bin/test_mmap 2>/dev/null)"
 check "c-hugepage"   "OK"  "$(timeout 8 /bin/test_hugepage 2>/dev/null)"
+# GPT + ext4: only where a virtio-blk disk is attached (x86_64 test target)
+if ls /sys/block 2>/dev/null | grep -q vblk; then
+check "gpt-ext4"     "ranix-gpt-ok" "$(cat /mnt/hello.txt 2>/dev/null)"
+fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"
 check "sys-net-state" "up"  "$(cat /sys/class/net/lo/operstate 2>/dev/null)"
