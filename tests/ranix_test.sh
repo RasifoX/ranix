@@ -219,6 +219,7 @@ check "proc-self-cwd"     "1"  "$([ -n \"$(readlink /proc/self/cwd)\" ] && echo 
 check "proc-self-root"    "/"  "$(readlink /proc/self/root)"
 check "proc-self-comm"    "1"  "$([ -n \"$(cat /proc/self/comm)\" ] && echo 1)"
 check "proc-self-ns-uts"  "uts" "$(readlink /proc/self/ns/uts | cut -d: -f1)"
+check "proc-self-ns-ipc"  "ipc" "$(readlink /proc/self/ns/ipc | cut -d: -f1)"
 check "proc-filesystems"  "1"  "$(grep -c ext2 /proc/filesystems)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
@@ -304,6 +305,7 @@ check "c-uts-ns"     "uts-ok" "$(timeout 10 /bin/test_uts 2>/dev/null)"
 check "c-setns"      "setns-ok" "$(timeout 10 /bin/test_setns 2>/dev/null)"
 check "c-clone-ns"   "clonens-ok" "$(timeout 10 /bin/test_clonens 2>/dev/null)"
 check "c-ipc-ns"     "ipcns-ok" "$(timeout 10 /bin/test_ipcns 2>/dev/null)"
+check "c-ipc-setns"  "ipcsetns-ok" "$(timeout 10 /bin/test_ipcsetns 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"

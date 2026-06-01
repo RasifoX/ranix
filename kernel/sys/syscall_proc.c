@@ -60,13 +60,26 @@ static long sys_setns(int fd, int nstype)
 	process_t *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
 	if (!f) return -9; /* EBADF */
-	uts_namespace_t *target = nsfile_to_uts(f);
-	if (!target) return -22; /* EINVAL: not a UTS namespace fd */
-	if (nstype != 0 && nstype != CLONE_NEWUTS) return -22;
-	uts_ns_get(target);
-	uts_ns_put(p->uts_ns);
-	p->uts_ns = target;
-	return 0;
+
+	uts_namespace_t *uts = nsfile_to_uts(f);
+	if (uts) {
+		if (nstype != 0 && nstype != CLONE_NEWUTS) return -22;
+		uts_ns_get(uts);
+		uts_ns_put(p->uts_ns);
+		p->uts_ns = uts;
+		return 0;
+	}
+
+	ipc_namespace_t *ipc = nsfile_to_ipc(f);
+	if (ipc) {
+		if (nstype != 0 && nstype != CLONE_NEWIPC) return -22;
+		ipc_ns_get(ipc);
+		ipc_ns_put(p->ipc_ns);
+		p->ipc_ns = ipc;
+		return 0;
+	}
+
+	return -22; /* EINVAL: not a namespace fd */
 }
 
 /* ── time syscalls ───────────────────────────────────────── */
