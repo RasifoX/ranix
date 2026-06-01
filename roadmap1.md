@@ -537,14 +537,14 @@ Claude CLI için TLS şart.
 - [x] RSDP/RSDT/XSDT parse — ACPI table discovery ✅ (arch/x86_64/acpi.c)
 - [x] MADT okuma — CPU listesi ✅ (LAPIC/x2APIC say; -smp16→16/16)
 - [ ] HPET timer — PIT'e alternatif, yüksek çözünürlük
-- [ ] ACPI_POWEROFF (S5) — shutdown -h gerçekten kapanmalı
+- [x] ACPI_POWEROFF (S5) ✅ (board_poweroff: isa-debug-exit + PIIX4 0x604/0xb004)
 
 ### PCIe İyileştirmeleri
 - [ ] MSI/MSI-X interrupt — NVMe için şart
 - [ ] PCIe capability walk — device feature discovery
 
 ### Terminal (pseudo-terminal)
-- [ ] ptmx / pts — pseudo-terminal (SSH için şart)
+- [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN; raw mode)
 - [ ] proper TTY line discipline (canonical mod, erase, kill, intr)
 - [ ] TIOCSWINSZ window resize
 - [ ] openpty / forkpty
