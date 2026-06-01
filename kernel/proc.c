@@ -14,6 +14,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
+	p->magic = PROC_MAGIC;
 
 	process_t *current = task_current();
 	p->ppid  = current ? current->pid : 0;
@@ -68,6 +69,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
+	p->magic = PROC_MAGIC;
 
 	process_t *current = task_current();
 	p->ppid  = current->pid;
@@ -202,6 +204,7 @@ pid_t proc_fork(uint64_t clone_flags)
 	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
+	child->magic = PROC_MAGIC;
 
 	/* cgroup pids limit: reject the fork if it would exceed pids.max. Charged
 	 * here; released by cgroup_cancel_fork on a later failure, or by
@@ -360,6 +363,7 @@ pid_t proc_vfork(void)
 	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
+	child->magic = PROC_MAGIC;
 
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
@@ -450,6 +454,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!child) return -1;
 	memset(child, 0, sizeof(*child));
+	child->magic = PROC_MAGIC;
 
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
@@ -584,6 +589,7 @@ void proc_wait(pid_t pid)
 void task_exit(void)
 {
 	process_t *p = task_current();
+	KASSERT(p->magic == PROC_MAGIC);
 	/* Re-entry guard: if this process is already exiting (e.g. a second
 	 * fatal signal, or it was resumed from a runqueue while dying), do not
 	 * run the teardown again — just leave the CPU and never return. */
@@ -803,6 +809,7 @@ int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep)
 
 void proc_reap(process_t *child)
 {
+	KASSERT(child->magic == PROC_MAGIC);
 	pid_t cpid = child->pid;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -824,5 +831,6 @@ void proc_reap(process_t *child)
 	 */
 	if (child->kstack)
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
+	child->magic = 0;   /* poison before free: trips a later use-after-free */
 	buddy_free(VIRT_TO_PHYS(child), 0);
 }
