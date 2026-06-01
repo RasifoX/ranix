@@ -152,6 +152,7 @@ typedef struct process {
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;
 	struct cgroup_namespace *cgroup_ns;
+	long            mem_charged;   /* bytes charged to the cgroup memory controller */
 } process_t;
 
 /* scheduler */
