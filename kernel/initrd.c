@@ -140,7 +140,7 @@ void initrd_init(void)
     vfs_mkdir("/etc", 0755);
     static const char hosts[]   = "127.0.0.1\tlocalhost\n";
     static const char resolv[]  = "nameserver 8.8.8.8\n";
-    static const char environ[] = "LANG=C\nPATH=/bin:/usr/bin\nTERM=linux\n";
+    static const char environ[] = "LANG=C\nPATH=/bin:/usr/bin\nTERM=vt100\n";
     if (!vfs_dentry_resolve("/etc/passwd"))
         vfs_kernel_install("/etc/passwd",      (const uint8_t *)"root:x:0:0:root:/root:/bin/bash\n", 32);
     if (!vfs_dentry_resolve("/etc/group"))

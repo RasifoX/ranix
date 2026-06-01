@@ -33,7 +33,7 @@ int main(void)
         }
     }
 
-    char *envp[] = { "PATH=/bin:/mnt/usr/bin:/mnt/bin", "HOME=/root", "PWD=/", "TERM=linux", NULL };
+    char *envp[] = { "PATH=/bin:/mnt/usr/bin:/mnt/bin", "HOME=/root", "PWD=/", "TERM=vt100", NULL };
 
     /* if /test.sh exists, run it once and poweroff */
     {
