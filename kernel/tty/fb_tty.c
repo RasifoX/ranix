@@ -161,6 +161,13 @@ static void put_codepoint(u32 cp)
         _cur_col = 0;
     } else if (cp == '\b') {
         if (_cur_col > 0) { _cur_col--; draw_glyph(_cur_col, _cur_row, ' '); }
+    } else if (cp == '\t') {
+        _cur_col = (_cur_col + 8) & ~7u;
+        if (_cur_col >= _cols) { _cur_col = 0; _cur_row++; }
+    } else if (cp < 0x20 || cp == 0x7F) {
+        /* other C0 controls (BEL, NUL, ...) and DEL print nothing — they must
+         * not advance the cursor the way a glyph would (a serial terminal just
+         * beeps/ignores them; the framebuffer must match). */
     } else {
         draw_glyph(_cur_col, _cur_row, cp);
         if (++_cur_col >= _cols) { _cur_col = 0; _cur_row++; }
