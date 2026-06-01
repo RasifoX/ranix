@@ -113,6 +113,7 @@ void vm_destroy(vm_space_t *vs)
 			if ((l2[j] & 3) != 3) {
 				/* 2MB block */
 				if (l2[j] & PTE_USER) {
+					huge2m_account(-1);
 					uint64_t pa = l2[j] & ~0x1FFFFFUL;
 					for (int k = 0; k < 512; k++)
 						pmm_free((void *)(pa + (uint64_t)k * PAGE_SIZE));
@@ -229,10 +230,14 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 
 	/* L2 block descriptor: valid + bit[1]=0 (block, not table) + AF. */
 	uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
+	uint64_t old = l2[l2i];
 	l2[l2i] = (paddr & ~0x1FFFFFUL) | PTE_VALID | PTE_AF | attr;
 
 	__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
 	                 :: "r"((vaddr & ~0x1FFFFFUL) >> 12) : "memory");
+	/* replacing a 4K leaf table (THP collapse): reclaim the orphaned table */
+	if ((old & PTE_VALID) && (old & 3) == 3) buddy_free(old & ~0xFFFUL, 0);
+	if (flags & VM_USER) huge2m_account(1);
 	return 0;
 }
 
@@ -307,6 +312,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 	/* Free the physical page(s) if user-owned (outside the lock; pmm has its own). */
 	if (huge_base) {
+		huge2m_account(-1);
 		for (int i = 0; i < 512; i++)
 			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 	} else if ((pte & PTE_VALID) && (pte & PTE_USER))

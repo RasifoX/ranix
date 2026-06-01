@@ -86,6 +86,7 @@ void vm_destroy(vm_space_t *vs)
 				if (!(l2[k] & PTE_P)) continue;
 				if (l2[k] & PTE_PS) {
 					if (l2[k] & PTE_U) {
+						huge2m_account(-1);
 						uint64_t pa = l2[k] & ~0x1FFFFFUL;
 						for (int l = 0; l < 512; l++)
 							pmm_free((void *)(pa + (uint64_t)l * PAGE_SIZE));
@@ -174,11 +175,15 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (!pd_phys)  return -1;
 
 	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pd_phys);
+	uint64_t old = pd[(vaddr >> 21) & 0x1FF];
 	uint64_t entry = (paddr & ~0x1FFFFFUL) | PTE_P | PTE_PS;
 	if (flags & VM_WRITE)   entry |= PTE_W;
 	if (flags & VM_USER)    entry |= PTE_U;
 	if (flags & VM_NOCACHE) entry |= PTE_PWT | PTE_PCD;
 	pd[(vaddr >> 21) & 0x1FF] = entry;
+	/* replacing a 4K leaf table (THP collapse): reclaim the now-orphaned table */
+	if ((old & PTE_P) && !(old & PTE_PS)) buddy_free(old & ~0xFFFUL, 0);
+	if (flags & VM_USER) huge2m_account(1);
 
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 	return 0;
@@ -240,6 +245,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	if (huge1g) {
 		huge1g_put(huge1g);
 	} else if (huge_base) {
+		huge2m_account(-1);
 		for (int i = 0; i < 512; i++)
 			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 	} else if ((pte & PTE_P) && (pte & PTE_U))

@@ -297,10 +297,52 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	return 0;
 }
 
-/* No page cache to advise or flush — accept and ignore. */
+#define MADV_HUGEPAGE 14
+
+/* Transparent hugepages: collapse a 2 MB-aligned span of sole-owned, fully
+ * present anonymous 4K pages into one 2 MB block, preserving contents. Shared
+ * (post-fork) or partly-unmapped spans are skipped. Reuses the 2 MB block
+ * machinery, so the result COW-splits/unmaps/frees like any hugepage. */
+static void thp_collapse(process_t *p, uint64_t va)
+{
+	vma_t *vma = NULL;
+	for (vma_t *v = p->vmas; v; v = v->next)
+		if (va >= v->vaddr && va + HUGE_PAGE_SIZE <= v->vaddr + v->size) { vma = v; break; }
+	if (!vma) return;
+	if (!(vma->flags & VMA_ANON) || !(vma->flags & VMA_WRITE) || (vma->flags & VMA_SHARED))
+		return;
+
+	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+	uint64_t pa0 = arch_vm_get_paddr(p->vm->root, va);
+	if (!pa0) return;
+	for (int j = 0; j < 512; j++) {
+		uint64_t pa = arch_vm_get_paddr(p->vm->root, va + (uint64_t)j * PAGE_SIZE);
+		if (!pa) return;
+		page_t *pg = paddr_to_page(pa);
+		if (!pg || pg->refcount != 1) return;   /* absent or shared → skip */
+	}
+
+	void *blk = buddy_alloc(9);   /* 2 MB */
+	if (!blk) return;
+	for (int j = 0; j < 512; j++) {
+		uint64_t pa = arch_vm_get_paddr(p->vm->root, va + (uint64_t)j * PAGE_SIZE);
+		memcpy((void *)PHYS_TO_VIRT((uint64_t)blk + (uint64_t)j * PAGE_SIZE),
+		       (void *)PHYS_TO_VIRT(pa), PAGE_SIZE);
+	}
+	for (uint64_t v = va; v < va + HUGE_PAGE_SIZE; v += PAGE_SIZE)
+		vm_unmap(p->vm, v);               /* frees the old 4K pages + empties the table */
+	if (vm_map_huge(p->vm, va, (uint64_t)blk, VM_USER | VM_READ | VM_WRITE) != 0)
+		buddy_free((uint64_t)blk, 9);
+}
+
 static long sys_madvise(uint64_t addr, size_t len, int advice)
 {
-	(void)addr; (void)len; (void)advice;
+	if (advice != MADV_HUGEPAGE) return 0;   /* others: no page cache → no-op */
+	process_t *p = task_current();
+	uint64_t start = (addr + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+	uint64_t end   = (addr + len) & HUGE_PAGE_MASK;
+	for (uint64_t va = start; va < end; va += HUGE_PAGE_SIZE)
+		thp_collapse(p, va);
 	return 0;
 }
 
