@@ -12,7 +12,15 @@ uts_namespace_t init_uts_ns = {
 };
 
 static spinlock_t ns_lock;
-static unsigned long ns_inum_next = 0xF0000001UL;
+static unsigned long ns_inum_next = 0xF0000100UL;
+
+unsigned long ns_inum_alloc(void)
+{
+	uint64_t f = spin_lock_irq(&ns_lock);
+	unsigned long v = ns_inum_next++;
+	spin_unlock_irq(&ns_lock, f);
+	return v;
+}
 
 uts_namespace_t *current_uts(void)
 {
@@ -47,8 +55,6 @@ uts_namespace_t *uts_ns_clone(uts_namespace_t *old)
 	if (!ns) return NULL;
 	memcpy(ns, old, sizeof(*ns));
 	ns->refcount = 1;
-	uint64_t f = spin_lock_irq(&ns_lock);
-	ns->inum = ns_inum_next++;
-	spin_unlock_irq(&ns_lock, f);
+	ns->inum = ns_inum_alloc();
 	return ns;
 }
