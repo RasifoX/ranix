@@ -346,7 +346,7 @@ void syscall_handle(arch_context_t *ctx)
 			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? ctid_arg : NULL;
 			ret = (long)proc_clone_thread(newsp, tls, clear_tid, ptid, set_tid);
 		} else {
-			ret = (long)proc_fork((flags & CLONE_NEWUTS) ? 1 : 0);
+			ret = (long)proc_fork(flags);
 		}
 		break;
 	}
