@@ -41,8 +41,34 @@ _start:
 	or   $0x20, %eax          /* PAE */
 	mov  %eax, %cr4
 
+	/* 5-level paging when the CPU has LA57 (CPUID.7.0:ECX[16]). pml5 reuses the
+	 * existing pml4: pml5[0]/[504]/[511] all point to it, which reproduces the
+	 * 48-bit-canonical kernel mappings at their 57-bit slots (identity@0,
+	 * direct-map@504, kernel-text@511). User VA (<2^48) always uses pml5[0]. */
+	mov  $7, %eax
+	xor  %ecx, %ecx
+	cpuid
+	test $(1 << 16), %ecx
+	jz   .four_level
+
+	mov  $pml4, %eax
+	or   $0x3, %eax
+	mov  %eax, pml5
+	mov  %eax, pml5 + 504*8
+	mov  %eax, pml5 + 511*8
+
+	mov  %cr4, %eax
+	or   $(1 << 12), %eax     /* CR4.LA57 */
+	mov  %eax, %cr4
+
+	mov  $pml5, %eax
+	mov  %eax, %cr3
+	movb $1, la57_enabled
+	jmp  .cr3_set
+.four_level:
 	mov  $pml4, %eax
 	mov  %eax, %cr3
+.cr3_set:
 
 	mov  $0xC0000080, %ecx    /* EFER */
 	rdmsr
@@ -141,6 +167,8 @@ long_mode_high:
 
 .section ".bss.boot"
 .balign 4096
+.global pml5
+pml5:    .skip 4096
 .global pml4
 pml4:    .skip 4096
 pdpt:    .skip 4096
@@ -152,6 +180,9 @@ pdpt_dm: .skip 4096
 .balign 16
 boot_stack32:     .skip 4096
 boot_stack32_top:
+
+.global la57_enabled
+la57_enabled: .skip 8
 
 .section ".data.boot", "aw"
 .balign 8

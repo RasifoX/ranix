@@ -61,7 +61,19 @@ trampoline_start:
 	or   $0x20, %eax
 	mov  %eax, %cr4
 
-	/* Load PML4 */
+	/* 5-level paging if the CPU has LA57 (the BSP enabled it the same way);
+	 * setup_trampoline() then hands us a PML5 in TDATA_PML4. */
+	mov  $7, %eax
+	xor  %ecx, %ecx
+	cpuid
+	test $(1 << 16), %ecx
+	jz   .Lno_la57
+	mov  %cr4, %eax
+	or   $(1 << 12), %eax     /* CR4.LA57 */
+	mov  %eax, %cr4
+.Lno_la57:
+
+	/* Load top-level table (PML5 under 5-level, else PML4) */
 	mov  $(TRAMP_PHYS + DATA_OFF + TDATA_PML4), %ebx
 	mov  (%ebx), %eax
 	mov  %eax, %cr3
