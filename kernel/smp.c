@@ -23,10 +23,10 @@ cpu_context_t *all_cpus[MAX_CPUS];
  * costs almost nothing and a 4-core box doesn't carry 1024 cores' worth of
  * kernel stacks. Non-static so arch code can reference them.
  */
-cpu_context_t  *ap_cpu_ctxs;
-uint8_t       (*ap_kstacks)   [KSTACK_SIZE];
-uint8_t       (*ap_irq_stacks)[KSTACK_SIZE];
-process_t      *ap_idle_procs;
+cpu_context_t  *ap_cpu_ctxs;       /* contiguous (small per element) */
+uint8_t       **ap_kstacks;        /* per-CPU: each a physically-contiguous stack */
+uint8_t       **ap_irq_stacks;     /* (kernel stacks must be phys-contiguous for the */
+process_t      **ap_idle_procs;    /*  pre-MMU AP entry — so no single big array cap) */
 
 /*
  * Separate initial trap-frames for secondary idle processes — kept off the
@@ -50,10 +50,11 @@ static void *percpu_alloc(uint64_t n)
 }
 
 /*
- * AP trampoline sync block — in .data.boot so VMA == physical address,
- * accessible from pre-MMU trampoline code via adr/pc-relative addressing.
+ * AP trampoline sync block — in .bss.boot (NOLOAD, zeroed by boot.S) so VMA ==
+ * physical address and it's reachable from pre-MMU trampoline code, without
+ * bloating the binary by MAX_CPUS*sizeof zeros the way .data.boot would.
  */
-__attribute__((section(".data.boot")))
+__attribute__((section(".bss.boot")))
 volatile struct ap_boot_sync {
 	uint64_t ttbr0_phys;    /* offset  0 — aarch64: physical TTBR0 */
 	uint64_t ttbr1_phys;    /* offset  8 — aarch64: physical TTBR1 */
@@ -87,12 +88,22 @@ void smp_init(void)
 	 * we fall back to uniprocessor rather than risk a half-built AP. */
 	if (ncpus > 1) {
 		ap_cpu_ctxs       = percpu_alloc((uint64_t)ncpus * sizeof(cpu_context_t));
-		ap_kstacks        = percpu_alloc((uint64_t)ncpus * KSTACK_SIZE);
-		ap_irq_stacks     = percpu_alloc((uint64_t)ncpus * KSTACK_SIZE);
-		ap_idle_procs     = percpu_alloc((uint64_t)ncpus * sizeof(process_t));
 		ap_idle_init_ctxs = percpu_alloc((uint64_t)ncpus * sizeof(arch_context_t));
-		if (!ap_cpu_ctxs || !ap_kstacks || !ap_irq_stacks ||
-		    !ap_idle_procs || !ap_idle_init_ctxs) {
+		ap_kstacks        = percpu_alloc((uint64_t)ncpus * sizeof(uint8_t *));
+		ap_irq_stacks     = percpu_alloc((uint64_t)ncpus * sizeof(uint8_t *));
+		ap_idle_procs     = percpu_alloc((uint64_t)ncpus * sizeof(process_t *));
+		int ok = ap_cpu_ctxs && ap_idle_init_ctxs && ap_kstacks &&
+		         ap_irq_stacks && ap_idle_procs;
+		/* Per-CPU stacks/procs allocated individually so no single allocation
+		 * caps the core count (one big array would hit the buddy's 32 MB limit
+		 * near ~2048 CPUs). Each kstack is its own contiguous block. */
+		for (int i = 1; ok && i < ncpus; i++) {
+			ap_kstacks[i]    = percpu_alloc(KSTACK_SIZE);
+			ap_irq_stacks[i] = percpu_alloc(KSTACK_SIZE);
+			ap_idle_procs[i] = percpu_alloc(sizeof(process_t));
+			if (!ap_kstacks[i] || !ap_irq_stacks[i] || !ap_idle_procs[i]) ok = 0;
+		}
+		if (!ok) {
 			kprintf("SMP: per-CPU alloc failed, staying uniprocessor\n");
 			ncpus = 1;
 		}
@@ -181,7 +192,7 @@ void secondary_cpu_main(int cpu_id)
 	cpu->magic        = 0xCAFEBABE;
 	cpu->irq_stack    = ap_irq_stacks[cpu_id] + KSTACK_SIZE;
 
-	process_t *p = &ap_idle_procs[cpu_id];
+	process_t *p = ap_idle_procs[cpu_id];
 	memset(p, 0, sizeof(*p));
 	p->pid          = 0;
 	p->state        = PROC_RUNNING;

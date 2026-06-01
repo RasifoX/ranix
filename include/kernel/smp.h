@@ -3,11 +3,11 @@
 
 #include <kernel/hal.h>
 
-/* Ceiling for the statically-sized arrays (all_cpus[], ap_boot_sync[]); the
- * bulky per-CPU memory is allocated dynamically to the detected count in
- * smp_init(), so this stays cheap (~50 KB) to keep high. A single buddy alloc
- * caps kstacks near ~2048 CPUs; beyond that needs vmalloc (follow-up). */
-#define MAX_CPUS 1024
+/* Ceiling for the statically-sized arrays (all_cpus[] pointers + .data.boot
+ * ap_boot_sync[]); the bulky per-CPU memory is allocated dynamically to the
+ * detected count in smp_init(), each stack as its own block — so no single
+ * allocation caps the core count. ~330 KB static at 8192 (Linux CONFIG_MAXSMP). */
+#define MAX_CPUS 8192
 
 extern int smp_ncpus;
 extern cpu_context_t *all_cpus[MAX_CPUS];
