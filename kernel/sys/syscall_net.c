@@ -111,7 +111,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
         } else {
             while ((rc = tcp_send(s, kbuf, (uint16_t)len)) == -11) {
                 s->connect_waiter = task_current();
-                task_sleep();
+                poll_block((uint64_t)-1);
                 process_t *p = task_current();
                 if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
             }
@@ -369,8 +369,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         int rc;
         while ((rc = tcp_send(s, kbuf, (uint16_t)len)) == -11) {
             s->connect_waiter = task_current();
-            task_sleep();
-            process_t *p = task_current();
+            poll_block((uint64_t)-1);
             if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
         }
         r = rc < 0 ? rc : (long)len;
