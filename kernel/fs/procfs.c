@@ -665,8 +665,8 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 
 /* ── /proc/<pid>/ns/{uts,ipc} — namespace identity ("<kind>:[<inum>]") ── */
 
-enum { NS_UTS = 0, NS_IPC, NS_TIME };
-static const char *ns_kinds[] = { "uts", "ipc", "time" };
+enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT };
+static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt" };
 #define NS_KINDS_N ((int)(sizeof(ns_kinds) / sizeof(ns_kinds[0])))
 
 typedef struct { int pid; int kind; } procfs_nslink_priv_t;
@@ -686,6 +686,9 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	} else if (pp->kind == NS_TIME) {
 		time_namespace_t *ns = p->time_ns ? p->time_ns : &init_time_ns;
 		prefix = "time:["; inum = ns->inum;
+	} else if (pp->kind == NS_MNT) {
+		mnt_namespace_t *ns = p->mnt_ns ? p->mnt_ns : &init_mnt_ns;
+		prefix = "mnt:["; inum = ns->inum;
 	} else {
 		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
 		prefix = "uts:["; inum = ns->inum;
@@ -781,6 +784,29 @@ static vfs_fops_t procfs_timens_fops = {
 	.close = procfs_timens_close,
 };
 
+static int procfs_mntns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_nslink_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = mnt_ns_get(p->mnt_ns);
+	return 0;
+}
+
+static int procfs_mntns_close(vfs_file_t *f)
+{
+	mnt_ns_put((mnt_namespace_t *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_mntns_fops = {
+	.open  = procfs_mntns_open,
+	.close = procfs_mntns_close,
+};
+
 /* setns(2) helpers: the namespace an open ns fd refers to, or NULL */
 uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
 {
@@ -800,6 +826,12 @@ time_namespace_t *nsfile_to_time(vfs_file_t *f)
 	return (time_namespace_t *)f->priv;
 }
 
+mnt_namespace_t *nsfile_to_mnt(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_mntns_fops) return NULL;
+	return (mnt_namespace_t *)f->priv;
+}
+
 static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -811,7 +843,8 @@ static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 	in->refcount = 1;
 	in->iops     = &procfs_nslink_iops;
 	in->fops     = (kind == NS_IPC)  ? &procfs_ipcns_fops  :
-	               (kind == NS_TIME) ? &procfs_timens_fops : &procfs_utsns_fops;
+	               (kind == NS_TIME) ? &procfs_timens_fops :
+	               (kind == NS_MNT)  ? &procfs_mntns_fops  : &procfs_utsns_fops;
 	procfs_nslink_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid; pp->kind = kind;

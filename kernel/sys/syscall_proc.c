@@ -57,6 +57,12 @@ static long sys_unshare(unsigned long flags)
 			p->time_ns_new = ns;
 		}
 	}
+	if (flags & CLONE_NEWNS) {
+		mnt_namespace_t *ns = mnt_ns_clone(p->mnt_ns);
+		if (!ns) return -12; /* ENOMEM */
+		mnt_ns_put(p->mnt_ns);
+		p->mnt_ns = ns;
+	}
 	return 0;
 }
 
@@ -94,6 +100,15 @@ static long sys_setns(int fd, int nstype)
 		time_ns_get(tns);
 		time_ns_put(p->time_ns);
 		p->time_ns = tns;
+		return 0;
+	}
+
+	mnt_namespace_t *mns = nsfile_to_mnt(f);
+	if (mns) {
+		if (nstype != 0 && nstype != CLONE_NEWNS) return -22;
+		mnt_ns_get(mns);
+		mnt_ns_put(p->mnt_ns);
+		p->mnt_ns = mns;
 		return 0;
 	}
 
