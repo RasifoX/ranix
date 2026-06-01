@@ -14,6 +14,7 @@
 
 #define NSIG           64
 #define SIGKILL        9
+#define SIGSTOP        19    /* uncatchable + unblockable, like SIGKILL */
 #define SIGSEGV        11
 #define SIGTERM        15
 #define SIGCHLD        17
