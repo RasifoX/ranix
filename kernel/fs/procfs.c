@@ -14,6 +14,7 @@
 #include <kernel/hal.h>
 
 #include <kernel/nsproxy.h>
+#include <kernel/cgroup.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -665,8 +666,8 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 
 /* ── /proc/<pid>/ns/{uts,ipc} — namespace identity ("<kind>:[<inum>]") ── */
 
-enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID, NS_USER, NS_NET };
-static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user", "net" };
+enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID, NS_USER, NS_NET, NS_CGROUP };
+static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user", "net", "cgroup" };
 #define NS_KINDS_N ((int)(sizeof(ns_kinds) / sizeof(ns_kinds[0])))
 
 typedef struct { int pid; int kind; } procfs_nslink_priv_t;
@@ -698,6 +699,8 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	} else if (pp->kind == NS_NET) {
 		net_namespace_t *ns = p->net_ns ? p->net_ns : &init_net_ns;
 		prefix = "net:["; inum = ns->inum;
+	} else if (pp->kind == NS_CGROUP) {
+		prefix = "cgroup:["; inum = cgroup_ns_inum(p->cgroup_ns);
 	} else {
 		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
 		prefix = "uts:["; inum = ns->inum;
@@ -885,6 +888,29 @@ static vfs_fops_t procfs_netns_fops = {
 	.close = procfs_netns_close,
 };
 
+static int procfs_cgroupns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_nslink_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = cgroup_ns_get(p->cgroup_ns);
+	return 0;
+}
+
+static int procfs_cgroupns_close(vfs_file_t *f)
+{
+	cgroup_ns_put((struct cgroup_namespace *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_cgroupns_fops = {
+	.open  = procfs_cgroupns_open,
+	.close = procfs_cgroupns_close,
+};
+
 /* setns(2) helpers: the namespace an open ns fd refers to, or NULL */
 uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
 {
@@ -928,6 +954,12 @@ net_namespace_t *nsfile_to_net(vfs_file_t *f)
 	return (net_namespace_t *)f->priv;
 }
 
+struct cgroup_namespace *nsfile_to_cgroup(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_cgroupns_fops) return NULL;
+	return (struct cgroup_namespace *)f->priv;
+}
+
 static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -943,7 +975,8 @@ static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 	               (kind == NS_MNT)  ? &procfs_mntns_fops  :
 	               (kind == NS_PID)  ? &procfs_pidns_fops  :
 	               (kind == NS_USER) ? &procfs_userns_fops :
-	               (kind == NS_NET)  ? &procfs_netns_fops  : &procfs_utsns_fops;
+	               (kind == NS_NET)  ? &procfs_netns_fops  :
+	               (kind == NS_CGROUP) ? &procfs_cgroupns_fops : &procfs_utsns_fops;
 	procfs_nslink_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid; pp->kind = kind;
@@ -1149,6 +1182,45 @@ static vfs_inode_t *procfs_uidmap_inode(int pid, int is_gid)
 	return in;
 }
 
+/* ── /proc/<pid>/cgroup — cgroup v2 membership ("0::<path>") ── */
+
+static ssize_t procfs_cgroup_read(vfs_file_t *f, void *buf, size_t len)
+{
+	procfs_fddir_priv_t *pr = f->inode->priv;
+	int pid = pr ? pr->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	char tmp[160];
+	tmp[0] = '0'; tmp[1] = ':'; tmp[2] = ':';
+	int n = 3 + cgroup_proc_path(p, tmp + 3, (int)sizeof(tmp) - 4);
+	tmp[n++] = '\n';
+	if (f->pos >= (off_t)n) return 0;
+	size_t avail = (size_t)(n - f->pos);
+	if (len > avail) len = avail;
+	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	f->pos += (off_t)len;
+	return (ssize_t)len;
+}
+
+static vfs_fops_t procfs_cgroup_fops = { .read = procfs_cgroup_read };
+
+static vfs_inode_t *procfs_cgroup_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFREG | 0444;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->fops     = &procfs_cgroup_fops;
+	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid = pid;
+	in->priv = pp;
+	return in;
+}
+
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
@@ -1164,6 +1236,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_uidmap_inode(pid, 0);
 	if (strcmp(name, "gid_map") == 0)
 		return procfs_uidmap_inode(pid, 1);
+	if (strcmp(name, "cgroup") == 0)
+		return procfs_cgroup_inode(pid);
 	for (int i = 0; i < PID_LINKS_N; i++) {
 		if (strcmp(pid_links[i], name) == 0)
 			return procfs_pidlink_inode(pid, i);

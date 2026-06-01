@@ -151,6 +151,7 @@ typedef struct process {
 
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;
+	struct cgroup_namespace *cgroup_ns;
 } process_t;
 
 /* scheduler */

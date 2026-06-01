@@ -79,6 +79,13 @@ static long sys_unshare(unsigned long flags)
 		net_ns_put(p->net_ns);
 		p->net_ns = ns;
 	}
+	if (flags & CLONE_NEWCGROUP) {
+		/* the caller's current cgroup becomes the root of the new ns's view */
+		struct cgroup_namespace *ns = cgroup_ns_create();
+		if (!ns) return -12;
+		cgroup_ns_put(p->cgroup_ns);
+		p->cgroup_ns = ns;
+	}
 	if (flags & CLONE_NEWPID) {
 		/* applies to future children, not the caller (the caller's pid does
 		 * not change); the first child becomes nr 1 of the new ns */
@@ -163,6 +170,15 @@ static long sys_setns(int fd, int nstype)
 		net_ns_get(nns);
 		net_ns_put(p->net_ns);
 		p->net_ns = nns;
+		return 0;
+	}
+
+	struct cgroup_namespace *cns = nsfile_to_cgroup(f);
+	if (cns) {
+		if (nstype != 0 && nstype != CLONE_NEWCGROUP) return -22;
+		cgroup_ns_get(cns);
+		cgroup_ns_put(p->cgroup_ns);
+		p->cgroup_ns = cns;
 		return 0;
 	}
 
