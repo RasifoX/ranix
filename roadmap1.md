@@ -329,7 +329,7 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
       dinamik AMA kilitsiz hot-path — global kmalloc'a bağlama, "akmalı")
 - [ ] devtmpfs + ttyN dinamik (sabit sayı yok)
 - [ ] global sched_lock → per-CPU rq-lock (ölçeklenme engeli)
-- [ ] ASID'li TLB (aarch64) — her vm_switch'te tam flush yerine; lazy-switch güvenli olur
+- [x] **ASID'li TLB (aarch64)** ✅ — per-space 8-bit tag + PTE_NG; switch'te flush YOK (asid!=0). asid 0 = flush-sentinel (kernel/fallback); free'de `tlbi aside1is` (SMP-safe reuse). 5x temiz suite; gerçek-Pi4 stress kaldı.
 
 ### Kapasite hedefleri — Linux'a EŞİT veya FAZLA (compile-time sabit YOK, hepsi runtime)
 > Kural: Ranix donanımın verdiğini sonuna kadar kullanmalı; "yapılıyorsa daha fazlası".
