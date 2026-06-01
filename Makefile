@@ -134,6 +134,7 @@ SRCS_KERNEL = \
     kernel/mm/buddy.c \
     kernel/mm/vm.c \
     kernel/mm/pmm.c \
+    kernel/mm/hugetlb.c \
     kernel/mm/heap.c \
     kernel/mm/vmalloc.c \
     kernel/lib/string.c \
@@ -174,7 +175,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -375,9 +376,11 @@ TEST_TIMEOUT ?= 180
 TEST_LOG = $(BUILD_DIR)/serial-test.log
 
 ifeq ($(ARCH),x86_64)
+# -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
+# exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
 test: iso $(BUILD_DIR)/gpt-test.img
 	@rm -f $(TEST_LOG)
-	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 512M -display none \
+	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
 	    -drive file=$(BUILD_DIR)/gpt-test.img,format=raw,if=virtio || true
 else

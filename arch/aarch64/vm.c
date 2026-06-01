@@ -3,6 +3,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
@@ -97,9 +98,13 @@ void vm_destroy(vm_space_t *vs)
 	uint64_t l1_phys = (uint64_t)vs->root;
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < PT_ENTRIES; i++) {
 		if (!(l1[i] & PTE_VALID)) continue;
-		if ((l1[i] & 3) != 3) continue; /* Block mapping */
+		if ((l1[i] & 3) != 3) {
+			/* 1 GB L1 block */
+			if (l1[i] & PTE_USER) huge1g_put(l1[i] & ~0x3FFFFFFFUL);
+			continue;
+		}
 
 		uint64_t l2_phys = l1[i] & ~0xFFFUL;
 		uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
@@ -231,6 +236,27 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	return 0;
 }
 
+/* Map a 1 GB block at L1. paddr must be 1 GB-aligned. */
+int vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+{
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1i = (vaddr >> 30) & 0x1FF;
+
+	if ((l1[l1i] & PTE_VALID) && (l1[l1i] & 3) == 3) return -1;  /* a table is there */
+
+	uint64_t attr = PTE_ATTR_NORMAL;
+	if (flags & VM_NOCACHE)  attr = PTE_ATTR_NORMAL_NC;
+	if (flags & VM_DEVICE)   attr = PTE_ATTR_DEVICE;
+	if (flags & VM_USER)     attr |= PTE_USER | PTE_NG;
+	if (!(flags & VM_WRITE)) attr |= PTE_RO;
+
+	l1[l1i] = (paddr & ~0x3FFFFFFFUL) | PTE_VALID | PTE_AF | attr;
+
+	__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
+	                 :: "r"((vaddr & ~0x3FFFFFFFUL) >> 12) : "memory");
+	return 0;
+}
+
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
@@ -240,9 +266,19 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	/* Serialize against concurrent faults in a shared address space (threads),
 	 * so a sibling COW and this unmap cannot race the same leaf PTE. */
 	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
-	uint64_t pte = 0, huge_base = 0;
+	uint64_t pte = 0, huge_base = 0, huge1g = 0;
 
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	if ((l1[l1i] & PTE_VALID) && (l1[l1i] & 3) != 3) {
+		/* 1 GB L1 block */
+		if (l1[l1i] & PTE_USER) huge1g = l1[l1i] & ~0x3FFFFFFFUL;
+		l1[l1i] = 0;
+		__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
+		                 :: "r"((vaddr & ~0x3FFFFFFFUL) >> 12) : "memory");
+		spin_unlock_irq(&vs->fault_lock, lf);
+		if (huge1g) huge1g_put(huge1g);
+		return;
+	}
 	if (l1[l1i] & PTE_VALID) {
 		uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[l1i] & ~0xFFFUL);
 		if (l2[l2i] & PTE_VALID) {
@@ -341,13 +377,20 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
 
-	for (int i = 2; i < PT_ENTRIES; i++)
-		l1_new[i] = l1_old[i];
-
-	for (int i = 0; i < 2; i++) {
+	/* Walk the whole 512 GB user L1: low user mappings live in the first two
+	 * 1 GB slots, 1 GB hugepages in their own high window. Empty slots skip. */
+	for (int i = 0; i < PT_ENTRIES; i++) {
 		if (!(l1_old[i] & PTE_VALID)) continue;
 		if ((l1_old[i] & 3) != 3) {
-			l1_new[i] = l1_old[i];
+			/* 1 GB L1 block: COW it — write-protect both + bump pool refcount;
+			 * a write fault copies the whole 1 GB. */
+			uint64_t entry = l1_old[i];
+			if (entry & PTE_USER) {
+				entry |= PTE_RO;
+				l1_old[i] = entry;
+				huge1g_get(entry & ~0x3FFFFFFFUL);
+			}
+			l1_new[i] = entry;
 			continue;
 		}
 

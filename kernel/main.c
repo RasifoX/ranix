@@ -8,6 +8,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/proc.h>
 #include <kernel/block.h>
 #include <kernel/fs/mbr.h>
@@ -44,7 +45,7 @@ static void add_range(uint64_t base, uint64_t end,
 struct _pmm_ctx {
 	uint64_t  free_start;
 	uint64_t  clip_lo, clip_hi;
-	uint64_t  exc[4][2];
+	uint64_t  exc[8][2];
 	int       n_exc;
 	uint64_t  total_free;
 };
@@ -59,6 +60,15 @@ static void _pmm_add(uint64_t b, uint64_t s, void *ud)
 	if (base >= end) return;
 	add_range(base, end, c->exc, c->n_exc);
 	c->total_free += end - base;
+}
+
+/* Find the largest contiguous region — the 1 GB hugepage pool is carved from
+ * its top so a reserved block never straddles a PCI hole / RAM split. */
+struct _big_ctx { uint64_t base, end; };
+static void _pmm_biggest(uint64_t b, uint64_t s, void *ud)
+{
+	struct _big_ctx *c = ud;
+	if (s > c->end - c->base) { c->base = b; c->end = b + s; }
 }
 
 struct _max_ctx { uint64_t max; int n; };
@@ -100,7 +110,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	uint64_t meta_size = pmm_init(start, max_limit);
 	uint64_t free_start = start + meta_size;
 
-	uint64_t exc[4][2] = {0};
+	uint64_t exc[8][2] = {0};
 	int n_exc = 0;
 	if (fb_phys && fb_phys < max_limit) {
 		exc[n_exc][0] = fb_phys;
@@ -130,7 +140,30 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 			n_exc++;
 		}
 	}
-	/* sort exclusions by start address (bubble sort, 3 elements max) */
+	/* Carve 1 GB-aligned blocks off the top of the largest contiguous region
+	 * for the 1 GB hugepage pool, leaving a margin for the buddy allocator.
+	 * The window is excluded from the buddy add so those blocks are never
+	 * handed out. Small systems reserve nothing → 1G mmap returns ENOMEM. */
+	struct _big_ctx bc = { 0, 0 };
+	board_foreach_mem_region(_pmm_biggest, &bc);
+	uint64_t pool_lo = bc.end & HUGE_1G_MASK;   /* exclusive top, walked down */
+	uint64_t reg_lo  = bc.base > free_start ? bc.base : free_start;
+	int hp_blocks = 0;
+	while (hp_blocks < 8 && pool_lo >= HUGE_1G_SIZE &&
+	       pool_lo - HUGE_1G_SIZE >= reg_lo + (512UL << 20)) {
+		pool_lo -= HUGE_1G_SIZE;
+		hp_blocks++;
+	}
+	if (hp_blocks > 0) {
+		hugetlb_1g_reserve(pool_lo, hp_blocks);
+		if (n_exc < 8) {
+			exc[n_exc][0] = pool_lo;
+			exc[n_exc][1] = pool_lo + (uint64_t)hp_blocks * HUGE_1G_SIZE;
+			n_exc++;
+		}
+	}
+
+	/* sort exclusions by start address (bubble sort) */
 	for (int i = 0; i < n_exc - 1; i++)
 		for (int j = 0; j < n_exc - 1 - i; j++)
 			if (exc[j][0] > exc[j+1][0]) {
