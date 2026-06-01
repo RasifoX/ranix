@@ -102,6 +102,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	p->brk          = ei.load_end;
 	p->mmap_next    = ARCH_USER_MMAP_BASE;
+	p->huge1g_next  = HUGE1G_VA_BASE;
 	p->vfork_parent = -1;
 	p->reaped       = 0;
 
@@ -234,6 +235,7 @@ pid_t proc_fork(uint64_t clone_flags)
 	child->cap_inheritable = parent->cap_inheritable;
 	child->brk       = parent->brk;
 	child->mmap_next = parent->mmap_next;
+	child->huge1g_next = parent->huge1g_next;
 	child->reaped    = 0;
 	child->vfork_parent = -1;
 

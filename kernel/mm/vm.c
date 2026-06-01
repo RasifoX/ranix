@@ -2,6 +2,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/sync.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
@@ -103,6 +104,27 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	 * fall through to the COW path below. */
 	for (vma_t *v = p->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
+			if (v->flags & VMA_HUGE_1G) {
+				/* 1 GB hugepage COW: copy the whole block (hugetlb pages are
+				 * never split). Shared or sole-owner blocks just go writable. */
+				if (!(v->flags & VMA_WRITE)) goto out;
+				uint64_t base = paddr & HUGE_1G_MASK;
+				uint64_t va1g = vaddr & HUGE_1G_MASK;
+				if (!(v->flags & VMA_SHARED) && huge1g_refcount(base) > 1) {
+					uint64_t nb = huge1g_alloc();
+					if (!nb) goto out;
+					memcpy((void *)PHYS_TO_VIRT(nb), (void *)PHYS_TO_VIRT(base), HUGE_1G_SIZE);
+					if (vm_map_huge_1g(p->vm, va1g, nb, VM_USER | VM_READ | VM_WRITE) == 0) {
+						huge1g_put(base);
+						ret = 0;
+					} else {
+						huge1g_put(nb);
+					}
+				} else {
+					ret = vm_map_huge_1g(p->vm, va1g, base, VM_USER | VM_READ | VM_WRITE);
+				}
+				goto out;
+			}
 			if (v->flags & VMA_SHARED) {
 				ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
 				goto out;
