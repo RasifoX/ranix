@@ -115,7 +115,7 @@ static uint64_t get_or_alloc(uint64_t table_phys, uint64_t idx, uint64_t eflags)
 		if (table[idx] & PTE_PS) {
 			/* split 2MB huge page into 512 4KB pages */
 			uint64_t base = table[idx] & ~0x1FFFFFUL;
-			uint64_t attr = table[idx] & (PTE_P | PTE_W);
+			uint64_t attr = table[idx] & (PTE_P | PTE_W | PTE_U);
 			uint64_t pt_phys  = alloc_table();
 			if (!pt_phys) return 0;
 			uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
@@ -159,19 +159,46 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	return 0;
 }
 
+/* Map a 2 MB block at the PD level. paddr must be 2 MB-aligned. */
+int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+{
+	uint64_t eflags = PTE_P | PTE_W | PTE_U;
+
+	uint64_t pdp_phys = get_or_alloc((uint64_t)vs->root, (vaddr >> 39) & 0x1FF, eflags);
+	if (!pdp_phys) return -1;
+	uint64_t pd_phys  = get_or_alloc(pdp_phys,           (vaddr >> 30) & 0x1FF, eflags);
+	if (!pd_phys)  return -1;
+
+	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pd_phys);
+	uint64_t entry = (paddr & ~0x1FFFFFUL) | PTE_P | PTE_PS;
+	if (flags & VM_WRITE)   entry |= PTE_W;
+	if (flags & VM_USER)    entry |= PTE_U;
+	if (flags & VM_NOCACHE) entry |= PTE_PWT | PTE_PCD;
+	pd[(vaddr >> 21) & 0x1FF] = entry;
+
+	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+	return 0;
+}
+
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
 	/* Serialize against concurrent faults in a shared address space. */
 	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
 	uint64_t pte = 0;
 
+	uint64_t huge_base = 0;
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	if (l4[(vaddr >> 39) & 0x1FF] & PTE_P) {
 		uint64_t *pdp = (uint64_t *)PHYS_TO_VIRT(l4[(vaddr >> 39) & 0x1FF] & ~0xFFFUL);
 		if (pdp[(vaddr >> 30) & 0x1FF] & PTE_P) {
 			uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdp[(vaddr >> 30) & 0x1FF] & ~0xFFFUL);
-			if (pd[(vaddr >> 21) & 0x1FF] & PTE_P) {
-				uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(vaddr >> 21) & 0x1FF] & ~0xFFFUL);
+			uint64_t pde = pd[(vaddr >> 21) & 0x1FF];
+			if ((pde & PTE_P) && (pde & PTE_PS)) {
+				if (pde & PTE_U) huge_base = pde & ~0x1FFFFFUL;
+				pd[(vaddr >> 21) & 0x1FF] = 0;
+				__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
+			} else if (pde & PTE_P) {
+				uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pde & ~0xFFFUL);
 				pte = pt[(vaddr >> 12) & 0x1FF];
 				pt[(vaddr >> 12) & 0x1FF] = 0;
 				__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
@@ -181,7 +208,10 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 	spin_unlock_irq(&vs->fault_lock, lf);
 
-	if ((pte & PTE_P) && (pte & PTE_U))
+	if (huge_base) {
+		for (int i = 0; i < 512; i++)
+			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
+	} else if ((pte & PTE_P) && (pte & PTE_U))
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
 
