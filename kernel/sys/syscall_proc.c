@@ -516,13 +516,49 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (!new_vm) { kfree(buf); kfree(kstrs); return -12; }
 
 	elf_info_t ei = {0};
-	if (elf_load(new_vm, buf, (size_t)st.size, &ei) != 0) {
+	if (elf_load(new_vm, buf, (size_t)st.size, 0, &ei) != 0) {
 		kfree(buf);
 		vm_destroy(new_vm);
 		kfree(kstrs);
 		return -8;
 	}
 	kfree(buf);
+
+	/* entry point and aux values; overridden below for dynamic executables */
+	uint64_t jump_entry = ei.entry;   /* where the kernel transfers control */
+	uint64_t at_base    = 0;          /* AT_BASE: dynamic linker load base */
+	uint64_t interp_lo = 0, interp_hi = 0;
+	/* ASLR mmap base; the dynamic linker (if any) loads at its bottom */
+	uint64_t mmap_base  = USER_MMAP_BASE_ + ((rng_next() & 0xffffULL) << 12);
+
+	/* Dynamically linked: load the interpreter (ld.so) too and enter it
+	 * instead of the executable. It performs relocations in userspace, then
+	 * jumps to the executable's entry (passed via AT_ENTRY). */
+	if (ei.interp[0]) {
+		vfs_stat_t ist = {0};
+		if (vfs_stat(ei.interp, &ist) != 0 || ist.size == 0) {
+			vm_destroy(new_vm); kfree(kstrs); return -8;
+		}
+		uint8_t *ibuf = kmalloc(ist.size);
+		if (!ibuf) { vm_destroy(new_vm); kfree(kstrs); return -12; }
+		int ifd = vfs_open(ei.interp, O_RDONLY, 0);
+		if (ifd < 0) { kfree(ibuf); vm_destroy(new_vm); kfree(kstrs); return -8; }
+		vfs_read(ifd, ibuf, ist.size);
+		vfs_close(ifd);
+
+		elf_info_t ii = {0};
+		if (elf_load(new_vm, ibuf, (size_t)ist.size, mmap_base, &ii) != 0) {
+			kfree(ibuf); vm_destroy(new_vm); kfree(kstrs); return -8;
+		}
+		kfree(ibuf);
+
+		jump_entry = ii.entry;
+		at_base    = mmap_base;
+		interp_lo  = ii.load_bias;
+		interp_hi  = ii.load_end;
+		/* keep subsequent mmap allocations above the interpreter image */
+		mmap_base  = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	}
 
 	/* map user stack */
 	for (int j = 0; j < USER_STACK_PAGES_; j++) {
@@ -602,8 +638,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
 	p->brk       = ei.load_end;
-	/* ASLR: randomize mmap base within a 1 GB window (page-aligned) */
-	p->mmap_next = USER_MMAP_BASE_ + ((rng_next() & 0xffffULL) << 12);
+	p->mmap_next = mmap_base;
 	p->dumpable  = 1;
 	arch_vm_switch((uint64_t)new_vm->root);
 	if (old_vm) vm_destroy(old_vm);
@@ -613,6 +648,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	        USER_STACK_PAGES_ * PAGE_SIZE, VMA_USER | VMA_READ | VMA_WRITE);
 	vma_add(p, ei.load_bias, ei.load_end - ei.load_bias,
 	        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
+	if (interp_hi > interp_lo)
+		vma_add(p, interp_lo, interp_hi - interp_lo,
+		        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
 
 	/* build SysV ABI initial stack */
 	uint64_t uargv[EXEC_MAXARGS + 1];
@@ -687,7 +725,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	PUSH_AUX(12, 0);
 	PUSH_AUX(11, 0);
 	PUSH_AUX(9,  ei.entry);
-	PUSH_AUX(7,  0);
+	PUSH_AUX(7,  at_base);
 	PUSH_AUX(6,  PAGE_SIZE);
 	PUSH_AUX(5,  ei.phnum);
 	PUSH_AUX(4,  ei.phentsize);
@@ -704,7 +742,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	sp -= 8; *(uint64_t *)sp = (uint64_t)argc;
 
 	/* reinitialise context frame */
-	arch_context_init_user(p->ctx, ei.entry, sp);
+	arch_context_init_user(p->ctx, jump_entry, sp);
 
 	/* reset TLS */
 	p->tls_base = 0;

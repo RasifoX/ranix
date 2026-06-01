@@ -6,9 +6,17 @@ MUSL_CC_X86_64  ?= $(HOME)/opt/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
 
 ifeq ($(ARCH),aarch64)
     MUSL_CC = $(MUSL_CC_AARCH64)
+    MUSL_SYSROOT = $(HOME)/opt/aarch64-linux-musl-cross/aarch64-linux-musl
 else ifeq ($(ARCH),x86_64)
     MUSL_CC = $(MUSL_CC_X86_64)
+    MUSL_SYSROOT = $(HOME)/opt/x86_64-linux-musl-cross/x86_64-linux-musl
 endif
+
+# musl's libc.so IS the dynamic linker; ship it where PT_INTERP points. (The
+# toolchain's ld-musl-*.so.1 is a symlink to an absolute install path that does
+# not exist here, so copy the real libc.so.)
+LDSO_NAME = ld-musl-$(ARCH).so.1
+LDSO_SRC  = $(MUSL_SYSROOT)/lib/libc.so
 
 CC  = clang --target=$(ARCH)-none-elf
 AS  = clang --target=$(ARCH)-none-elf
@@ -158,7 +166,8 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd \
                  userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_pipestress \
                  userspace/test_uts userspace/test_setns userspace/test_clonens \
-                 userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens
+                 userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
+                 userspace/test_dynamic
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -199,6 +208,8 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
 	@if [ -z "$(DEMO)" ]; then cp $(USER_TEST_BINS) $(BUILD_DIR)/initramfs/bin/; fi
+	@mkdir -p $(BUILD_DIR)/initramfs/lib
+	@cp $(LDSO_SRC) $(BUILD_DIR)/initramfs/lib/$(LDSO_NAME)
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -251,6 +262,11 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 # lives in libc), so it is safe for the non-threaded ones too.
 userspace/%: userspace/%.c
 	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
+
+# dynamically linked (PT_INTERP → /lib/ld-musl-*.so.1); exercises the in-kernel
+# dynamic-linker loading path. Explicit rule overrides the static one above.
+userspace/test_dynamic: userspace/test_dynamic.c
+	$(MUSL_CC) -O2 -o $@ $<
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
