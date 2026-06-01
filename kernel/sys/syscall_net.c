@@ -32,11 +32,14 @@ static int sock_close_vfs(vfs_file_t *file)
     if (s->type == SOCK_STREAM &&
         s->tcp_state != TCP_CLOSED && s->tcp_state != TCP_LISTEN) {
         tcp_close(s);
+        uint64_t cf = spin_lock_irq(&s->recv_lock);
         while (s->tcp_state != TCP_CLOSED &&
                s->tcp_state != TCP_TIME_WAIT) {
             s->close_waiter = task_current();
-            task_sleep();
+            task_sleep_unlock(&s->recv_lock, cf);
+            cf = spin_lock_irq(&s->recv_lock);
         }
+        spin_unlock_irq(&s->recv_lock, cf);
     }
     sock_free(s);
     kfree(in);
@@ -319,13 +322,22 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     int rc = tcp_connect(s);
     if (rc < 0) return rc;
 
-    /* block until ESTABLISHED or RST */
+    /* block until ESTABLISHED or RST — event-driven: tcp_input updates tcp_state
+     * then wakes connect_waiter under recv_lock, so registering + re-checking
+     * under the same lock is atomic against the waker (no lost wakeup, no poll). */
+    uint64_t cf = spin_lock_irq(&s->recv_lock);
     while (s->tcp_state == TCP_SYN_SENT) {
         s->connect_waiter = task_current();
-        task_sleep();
-        process_t *p = task_current();
-        if (task_has_actionable_signal()) { s->connect_waiter = NULL; return -4; }
+        task_sleep_unlock(&s->recv_lock, cf);
+        if (task_has_actionable_signal()) {
+            cf = spin_lock_irq(&s->recv_lock);
+            s->connect_waiter = NULL;
+            spin_unlock_irq(&s->recv_lock, cf);
+            return -4;
+        }
+        cf = spin_lock_irq(&s->recv_lock);
     }
+    spin_unlock_irq(&s->recv_lock, cf);
     return (s->tcp_state == TCP_ESTABLISHED) ? 0 : -111; /* ECONNREFUSED */
 }
 
@@ -532,13 +544,21 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
     if (!ls) return -9;
     if (ls->tcp_state != TCP_LISTEN) return -22;
 
-    /* wait for a completed connection */
+    /* wait for a completed connection — tcp_input enqueues it then wakes
+     * accept_waiter under recv_lock, so this register + re-check is atomic. */
+    uint64_t af = spin_lock_irq(&ls->recv_lock);
     while (!ls->accept_head) {
         ls->accept_waiter = task_current();
-        task_sleep();
-        process_t *p = task_current();
-        if (task_has_actionable_signal()) { ls->accept_waiter = NULL; return -4; }
+        task_sleep_unlock(&ls->recv_lock, af);
+        if (task_has_actionable_signal()) {
+            af = spin_lock_irq(&ls->recv_lock);
+            ls->accept_waiter = NULL;
+            spin_unlock_irq(&ls->recv_lock, af);
+            return -4;
+        }
+        af = spin_lock_irq(&ls->recv_lock);
     }
+    spin_unlock_irq(&ls->recv_lock, af);
 
     /* dequeue from accept list (accept_head chained via accept_head field of child) */
     socket_t *ns = ls->accept_head;
