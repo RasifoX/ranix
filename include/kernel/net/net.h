@@ -62,6 +62,7 @@ typedef struct netdev {
 void net_register(netdev_t *dev);
 netdev_t *net_dev(int idx);          /* NULL if idx out of range */
 netdev_t *net_dev_by_ip(uint32_t ip);
+netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
 
 /* Called from scheduler tick / idle loop — drains RX queues */
 void net_poll(void);
