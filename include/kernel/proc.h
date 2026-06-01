@@ -129,6 +129,8 @@ typedef struct process {
 	int             ptrace_stop;          /* 0=running, 1=entry stop, 2=exit stop */
 	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
 	int             ptrace_in_syscall;    /* currently sleeping in ptrace_do_stop */
+	int             single_step;          /* PTRACE_SINGLESTEP: trap after each insn (TF on user return) */
+	void           *uctx;                 /* last trap frame entered from ring3 (ptrace task_pt_regs) */
 	uint32_t       *clear_child_tid;
 
 	/* full path of the running image, for /proc/<pid>/exe */

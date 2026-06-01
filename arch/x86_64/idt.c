@@ -66,6 +66,7 @@ void idt_init(void)
 
 	for (int i = 0; i < 20; i++)
 		idt_set_gate(i, exc_stubs[i], 0x8E);  /* present, ring0, interrupt gate */
+	idt_set_gate(3, exc_stub_3, 0xEE);  /* #BP: DPL=3 so a ring-3 int3 traps (gdb breakpoints) */
 
 	/* hardware IRQs from PIC */
 	static void *irq_stubs[16] = {

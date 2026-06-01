@@ -65,6 +65,11 @@ common_exc:
 	jz 1f
 	swapgs
 1:	save_context
+	/* Publish this frame as task->ctx so ptrace GETREGS/single-step act on the
+	 * trapping registers (and the TF re-arm lands on the frame we iret with). */
+	movq %rsp, %r15
+	call task_current
+	movq %r15, 16(%rax)
 	movq %rsp, %rdi
 	call exc_dispatch
 	restore_context

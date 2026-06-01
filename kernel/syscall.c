@@ -193,6 +193,7 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig);
 void syscall_handle(arch_context_t *ctx)
 {
 	arch_get_cpu_ctx()->wd_where = "syscall";
+	{ process_t *cur = task_current(); if (cur) cur->uctx = ctx; }   /* ptrace task_pt_regs: syscalls always enter from user */
 	long n    = (long)CTX_SYSCALL_N(ctx);
 	long arg0 = (long)CTX_SYSCALL_ARG0(ctx);
 	long arg1 = (long)CTX_SYSCALL_ARG1(ctx);
