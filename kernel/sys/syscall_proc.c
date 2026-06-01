@@ -9,15 +9,14 @@ typedef struct {
 	char domainname[65];
 } linux_utsname_t;
 
-char ranix_hostname[65] = "ranix";
-
 static long sys_uname(linux_utsname_t *uts)
 {
 	if (!uts) return -14;
+	uts_namespace_t *ns = current_uts();
 	linux_utsname_t k;
 	memset(&k, 0, sizeof(k));
 	memcpy(k.sysname,    "Ranix",   6);
-	memcpy(k.nodename,   ranix_hostname, sizeof(ranix_hostname));
+	memcpy(k.nodename,   ns->nodename,   sizeof(k.nodename));
 	memcpy(k.release,    "1.0.0",   6);
 	memcpy(k.version,    "#1 SMP",  7);
 #if defined(__x86_64__)
@@ -25,8 +24,25 @@ static long sys_uname(linux_utsname_t *uts)
 #else
 	memcpy(k.machine,    "aarch64", 8);
 #endif
-	memcpy(k.domainname, "(none)",  7);
+	memcpy(k.domainname, ns->domainname, sizeof(k.domainname));
 	return copy_to_user(uts, &k, sizeof(k));
+}
+
+/*
+ * unshare(2) — detach the caller from namespaces shared with its parent.
+ * Only CLONE_NEWUTS is supported: it gives the caller a private copy of the
+ * UTS namespace, so later sethostname/uname changes stay local.
+ */
+static long sys_unshare(unsigned long flags)
+{
+	if (flags & CLONE_NEWUTS) {
+		process_t *p = task_current();
+		uts_namespace_t *ns = uts_ns_clone(p->uts_ns);
+		if (!ns) return -12; /* ENOMEM */
+		uts_ns_put(p->uts_ns);
+		p->uts_ns = ns;
+	}
+	return 0;
 }
 
 /* ── time syscalls ───────────────────────────────────────── */

@@ -256,6 +256,7 @@ pid_t proc_fork(void)
 		child->ctx = cctx;
 	}
 	child->tls_base        = parent->tls_base;
+	child->uts_ns          = uts_ns_get(parent->uts_ns);
 	child->ticks_remaining = sched_quantum_val;
 
 	{
@@ -326,6 +327,7 @@ pid_t proc_vfork(void)
 	CTX_SYSCALL_RET(cctx, 0);
 	child->ctx      = cctx;
 	child->tls_base = parent->tls_base;
+	child->uts_ns   = uts_ns_get(parent->uts_ns);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int pid = alloc_pid();
@@ -425,6 +427,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	}
 
 	child->tls_base = tls ? tls : parent->tls_base;
+	child->uts_ns   = uts_ns_get(parent->uts_ns);
 
 	child->clear_child_tid = ctid;
 
@@ -532,6 +535,9 @@ void task_exit(void)
 		arch_get_cpu_ctx()->wd_where = "exit:futex";
 		futex_wake_addr(cctid);
 	}
+
+	uts_ns_put(p->uts_ns);
+	p->uts_ns = NULL;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
