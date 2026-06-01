@@ -184,11 +184,12 @@ $(BASH_CACHED):
 $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_server userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/test_mqueue $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
-	@cp userspace/init userspace/hello userspace/echo_server \
+	@cp userspace/init userspace/hello userspace/echo_server $(BUILD_DIR)/initramfs/bin/
+	@if [ -z "$(DEMO)" ]; then cp \
 	    userspace/test_threads userspace/test_inotify userspace/test_ptrace userspace/test_unix \
 	    userspace/test_creds userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
 	    userspace/test_cowrace userspace/test_fpsig userspace/bench userspace/test_clock userspace/test_mqueue \
-	    $(BUILD_DIR)/initramfs/bin/
+	    $(BUILD_DIR)/initramfs/bin/; fi
 	@if [ ! -s "$(BUSYBOX_APK_CACHED)" ]; then \
 		echo "Downloading busybox for $(ARCH)..."; \
 		if [ "$(ARCH)" = "aarch64" ]; then \
@@ -214,7 +215,7 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 	@chmod u+s $(BUILD_DIR)/initramfs/bin/su
 	@cp "$(BASH_CACHED)" $(BUILD_DIR)/initramfs/bin/bash
 	@chmod +x $(BUILD_DIR)/initramfs/bin/bash
-	@if [ -f doomgeneric/doomgeneric ]; then \
+	@if [ -z "$(DEMO)" ] && [ -f doomgeneric/doomgeneric ]; then \
 		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
 		NEED_ARCH="$(ARCH)"; \
 		if [ "$$NEED_ARCH" = "x86_64" ] && [ "$$DOOM_ARCH" = "X86-64" ]; then \
@@ -223,10 +224,10 @@ $(BUILD_DIR)/initramfs.cpio: userspace/init userspace/hello userspace/echo_serve
 			cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
 		fi \
 	fi
-	@if [ -f doom1.wad ]; then \
+	@if [ -z "$(DEMO)" ] && [ -f doom1.wad ]; then \
 		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
 	fi
-	@if [ -f tests/ranix_test.sh ]; then cp tests/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
+	@if [ -z "$(DEMO)" ] && [ -f tests/ranix_test.sh ]; then cp tests/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
 	@printf 'root:x:0:0:root:/root:/bin/bash\ntest:x:1000:1000:Test User:/home/test:/bin/sh\n' \
 	    > $(BUILD_DIR)/initramfs/etc/passwd
 	@rm -f $(BUILD_DIR)/initramfs/etc/shadow
@@ -345,6 +346,20 @@ qemu-disk: iso disk-image
 image: all
 	llvm-objcopy -O binary $(TARGET) kernel8.img
 	@echo "[OK] kernel8.img hazır"
+
+# Minimal bash-only Ranix for Raspberry Pi 4 — no tests, just a shell.
+# Output: pi4-dist/ {kernel8.img, initramfs.cpio, config.txt}. Copy onto an SD
+# alongside the Pi firmware (start4.elf, fixup4.dat, bcm2711-rpi-4-b.dtb).
+.PHONY: pi-demo
+pi-demo:
+	$(MAKE) clean
+	$(MAKE) ARCH=aarch64 BOARD=raspi4 DEMO=1 image
+	@rm -f $(BUILD_DIR)/initramfs.cpio
+	$(MAKE) ARCH=aarch64 BOARD=raspi4 DEMO=1 initramfs
+	@mkdir -p pi4-dist
+	@cp kernel8.img $(BUILD_DIR)/initramfs.cpio pi4-dist/
+	@printf 'arm_64bit=1\nkernel=kernel8.img\ninitramfs initramfs.cpio followkernel\nenable_uart=1\n' > pi4-dist/config.txt
+	@echo "[OK] Ranix Pi demo → pi4-dist/ (kernel8.img + initramfs.cpio + config.txt)"
 
 TEST_TIMEOUT ?= 180
 TEST_LOG = $(BUILD_DIR)/serial-test.log
