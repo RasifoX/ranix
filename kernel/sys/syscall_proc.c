@@ -63,6 +63,15 @@ static long sys_unshare(unsigned long flags)
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = ns;
 	}
+	if (flags & CLONE_NEWPID) {
+		/* applies to future children, not the caller (the caller's pid does
+		 * not change); the first child becomes nr 1 of the new ns */
+		if (!p->pid_ns_new) {
+			pid_namespace_t *ns = pid_ns_create_child(p->pid_ns ? p->pid_ns : &init_pid_ns);
+			if (!ns) return -12; /* ENOMEM */
+			p->pid_ns_new = ns;
+		}
+	}
 	return 0;
 }
 
@@ -109,6 +118,17 @@ static long sys_setns(int fd, int nstype)
 		mnt_ns_get(mns);
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = mns;
+		return 0;
+	}
+
+	pid_namespace_t *pns = nsfile_to_pid(f);
+	if (pns) {
+		if (nstype != 0 && nstype != CLONE_NEWPID) return -22;
+		/* like unshare(CLONE_NEWPID): the caller's own pid ns is unchanged;
+		 * the joined ns becomes the ns for its future children */
+		pid_ns_get(pns);
+		if (p->pid_ns_new) pid_ns_put(p->pid_ns_new);
+		p->pid_ns_new = pns;
 		return 0;
 	}
 
@@ -792,7 +812,10 @@ static long sys_exit(int code)
 static long sys_getpid(void)
 {
 	process_t *p = task_current();
-	return (long)(p->tgid ? p->tgid : p->pid);
+	pid_t glead = p->tgid ? p->tgid : p->pid;
+	process_t *leader = (glead == (pid_t)p->pid) ? p : proc_find(glead);
+	int nr = task_pid_nr_ns(leader ? leader : p, current_pid_ns());
+	return nr ? (long)nr : (long)glead;   /* nr==global in the init ns */
 }
 
 static long sys_fork(void)
@@ -848,7 +871,8 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 				int st = child->killed_by_sig
 				       ? (child->exit_code & 0x7F)
 				       : (child->exit_code & 0xFF) << 8;
-				pid_t result = child->pid;
+				int v = task_pid_nr_ns(child, current_pid_ns());
+				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
 				proc_reap(child);
 				if (status && (uint64_t)status > 0x1000)
 					*status = st;
@@ -860,7 +884,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 		}
 	}
 
-	process_t *child = proc_find(pid);
+	process_t *child = pidns_find(current_pid_ns(), (int)pid);
 	if (!child || child->ppid != p->pid) return -10;
 
 	while (1) {

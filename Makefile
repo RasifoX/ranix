@@ -113,6 +113,7 @@ SRCS_KERNEL = \
     kernel/sched.c \
     kernel/nsproxy.c \
     kernel/cgroup.c \
+    kernel/pid.c \
     kernel/tty/fb_tty.c \
     kernel/sync.c \
     kernel/elf.c \
@@ -169,7 +170,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_uts userspace/test_setns userspace/test_clonens \
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
-                 userspace/test_cgroup userspace/test_mountns
+                 userspace/test_cgroup userspace/test_mountns userspace/test_pidns
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
