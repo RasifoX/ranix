@@ -104,6 +104,7 @@ typedef struct {
 #define SYS_ARCH_SYSINFO       179
 #define SYS_ARCH_CLONE         220
 #define SYS_ARCH_UNSHARE        97
+#define SYS_ARCH_SETNS         268
 #define SYS_ARCH_VFORK          58
 #define SYS_ARCH_EXECVE        221
 #define SYS_ARCH_BRK           214
