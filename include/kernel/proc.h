@@ -10,6 +10,7 @@
 #include <kernel/user_namespace.h>
 
 #define PROC_NAME_MAX  256
+#define PROC_MAGIC     0x52414e58u   /* "RANX" — set at PCB alloc, checked at teardown */
 
 #define NSIG           64
 #define SIGKILL        9
@@ -156,6 +157,8 @@ typedef struct process {
 	void           *cgroup;
 	struct cgroup_namespace *cgroup_ns;
 	long            mem_charged;   /* bytes charged to the cgroup memory controller */
+
+	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */
 } process_t;
 
 /* scheduler */
