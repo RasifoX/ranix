@@ -9,6 +9,8 @@
 #define MB2_TAG_TYPE_MODULE     3
 #define MB2_TAG_TYPE_MMAP       6
 #define MB2_TAG_TYPE_FRAMEBUFFER 8
+#define MB2_TAG_TYPE_ACPI_OLD   14
+#define MB2_TAG_TYPE_ACPI_NEW   15
 
 typedef struct {
     uint32_t type;
@@ -69,6 +71,9 @@ static uint32_t _mb2_size = 0;
 
 void mb2_get_reserved(uint64_t *base, uint32_t *size) { *base = _mb2_base; *size = _mb2_size; }
 
+static uint64_t _rsdp_phys = 0;
+uint64_t mb2_get_rsdp(void) { return _rsdp_phys; }
+
 void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
 {
     if (ptr == 0) return;
@@ -109,6 +114,13 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
             boot_initrd_start = (uint64_t)mod->mod_start;
             boot_initrd_size  = (uint64_t)(mod->mod_end - mod->mod_start);
             kprintf("MB2: found module start=%x end=%x\n", mod->mod_start, mod->mod_end);
+        } else if (tag->type == MB2_TAG_TYPE_ACPI_OLD ||
+                   tag->type == MB2_TAG_TYPE_ACPI_NEW) {
+            /* The tag carries a copy of the RSDP; the boot identity map makes
+             * its VA equal its PA, so this is the physical address acpi.c
+             * re-reads through the direct map. New (v2) wins if both present. */
+            if (_rsdp_phys == 0 || tag->type == MB2_TAG_TYPE_ACPI_NEW)
+                _rsdp_phys = (uint64_t)(p + 8);
         } else if (tag->type == MB2_TAG_TYPE_FRAMEBUFFER) {
             mb2_fb_tag_t *fb = (mb2_fb_tag_t *)(p + 8);
             if (fb->type == 1 && fb->bpp == 32) {

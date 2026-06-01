@@ -45,6 +45,9 @@
 
 static volatile uint32_t *lapic;
 
+/* logical cpu index -> physical APIC id (filled by ACPI MADT parse) */
+extern uint32_t cpu_apic_id[];
+
 static inline uint32_t lapic_read(uint32_t reg)        { return lapic[reg / 4]; }
 static inline void     lapic_write(uint32_t reg, uint32_t val) { lapic[reg / 4] = val; }
 
@@ -141,18 +144,20 @@ void arch_smp_boot_cpu(int cpu_id)
 
 	setup_trampoline(cpu_id);
 
+	uint32_t apic_id = cpu_apic_id[cpu_id];
+
 	/* INIT-SIPI-SIPI sequence per Intel spec */
-	lapic_write(LAPIC_ICR_HI, (uint32_t)cpu_id << 24);
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
 	lapic_write(LAPIC_ICR_LO, ICR_INIT | ICR_ASSERT | ICR_LEVEL);
 	io_delay();
-	lapic_write(LAPIC_ICR_HI, (uint32_t)cpu_id << 24);
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
 	lapic_write(LAPIC_ICR_LO, ICR_INIT | ICR_LEVEL);
 	io_delay();
 
-	lapic_write(LAPIC_ICR_HI, (uint32_t)cpu_id << 24);
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
 	lapic_write(LAPIC_ICR_LO, ICR_SIPI | (TRAMP_PHYS >> 12));
 	io_delay();
-	lapic_write(LAPIC_ICR_HI, (uint32_t)cpu_id << 24);
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
 	lapic_write(LAPIC_ICR_LO, ICR_SIPI | (TRAMP_PHYS >> 12));
 }
 
@@ -205,7 +210,7 @@ void arch_secondary_init(int cpu_id)
 void arch_smp_ipi_send(int cpu_id)
 {
 	if (!lapic) return;
-	lapic_write(LAPIC_ICR_HI, (uint32_t)cpu_id << 24);
+	lapic_write(LAPIC_ICR_HI, cpu_apic_id[cpu_id] << 24);
 	lapic_write(LAPIC_ICR_LO, ICR_FIXED | 0xF0);
 }
 

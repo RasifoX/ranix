@@ -57,10 +57,10 @@ void smp_init(void)
 	fdt_info_t *fi = fdt_get_info();
 	int ncpus = (int)fi->num_cpus;
 #else
-	/* x86_64: QEMU starts CPUs according to -smp flag.
-	 * For now, detect via ACPI MADT or use a fixed count.
-	 * Use FDT for aarch64 only; x86_64 reads ncpus from bootloader. */
-	int ncpus = 4; /* matches -smp 4 in test target */
+	/* x86_64: the ACPI MADT lists one enabled Local APIC per CPU. */
+	extern int acpi_detect_cpus(void);
+	int ncpus = acpi_detect_cpus();
+	if (ncpus <= 0) ncpus = 1;
 #endif
 	if (ncpus <= 0) ncpus = 1;
 	if (ncpus > MAX_CPUS) ncpus = MAX_CPUS;
