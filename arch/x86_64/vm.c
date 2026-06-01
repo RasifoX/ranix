@@ -6,6 +6,7 @@
 #include <kernel/mm/hugetlb.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/bug.h>
 #include <asm/mmu.h>
 
 #define PT_ENTRIES  512
@@ -78,6 +79,7 @@ vm_space_t *vm_create(void)
 	}
 
 	vs->refcount = 1;
+	vs->magic = VM_SPACE_MAGIC;
 	return vs;
 }
 
@@ -85,16 +87,17 @@ vm_space_t *vm_get(vm_space_t *vs)
 {
 	/* Atomic: threads share a vm; concurrent create/exit on different CPUs
 	 * would otherwise race this refcount and free the page tables early. */
-	if (vs) atomic_fetch_add32(&vs->refcount, 1);
+	if (vs) { KASSERT(vs->magic == VM_SPACE_MAGIC); atomic_fetch_add32(&vs->refcount, 1); }
 	return vs;
 }
 
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
+	KASSERT(vs->magic == VM_SPACE_MAGIC);
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
 
-	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
+	if (!vs->root) { vs->magic = 0; buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
 	uint64_t l4_phys = user_pml4(vs);   /* under pml5[0] in 5-level */
 	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(l4_phys);
@@ -143,6 +146,7 @@ void vm_destroy(vm_space_t *vs)
 
 	buddy_free(l4_phys, 0);                                  /* user PML4 */
 	if (la57) buddy_free((uint64_t)vs->root, 0);     /* PML5 */
+	vs->magic = 0;                                   /* poison before free: trips a later use-after-free */
 	buddy_free(VIRT_TO_PHYS(vs), 0);
 }
 
@@ -332,6 +336,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->root = NULL;
 	new_vs->refcount = 1;
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
+	new_vs->magic = VM_SPACE_MAGIC;
 
 	uint64_t root_phys = alloc_table();   /* the new user PML4 */
 	if (!root_phys) goto oom;

@@ -6,6 +6,7 @@
 #include <kernel/mm/hugetlb.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/bug.h>
 #include <asm/mmu.h>
 
 #define PT_ENTRIES  512
@@ -103,6 +104,7 @@ vm_space_t *vm_create(void)
 
 	vs->refcount = 1;
 	vs->asid = asid_alloc();
+	vs->magic = VM_SPACE_MAGIC;
 	return vs;
 }
 
@@ -110,18 +112,19 @@ vm_space_t *vm_get(vm_space_t *vs)
 {
 	/* Atomic: threads share a vm; concurrent create/exit on different CPUs
 	 * would otherwise race this refcount and free the page tables early. */
-	if (vs) atomic_fetch_add32(&vs->refcount, 1);
+	if (vs) { KASSERT(vs->magic == VM_SPACE_MAGIC); atomic_fetch_add32(&vs->refcount, 1); }
 	return vs;
 }
 
 void vm_destroy(vm_space_t *vs)
 {
 	if (!vs) return;
+	KASSERT(vs->magic == VM_SPACE_MAGIC);
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
 
 	asid_free(vs->asid);   /* invalidates this tag's TLB entries on all CPUs */
 
-	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
+	if (!vs->root) { vs->magic = 0; buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
 	uint64_t l1_phys = user_l1(vs);   /* under L0[0] */
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
@@ -168,6 +171,7 @@ void vm_destroy(vm_space_t *vs)
 
 	buddy_free(l1_phys, 0);            /* user L1 */
 	buddy_free((uint64_t)vs->root, 0); /* L0 */
+	vs->magic = 0;                     /* poison before free: trips a later use-after-free */
 	buddy_free(VIRT_TO_PHYS(vs), 0);
 }
 
@@ -411,6 +415,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->refcount = 1;
 	new_vs->asid = asid_alloc();
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
+	new_vs->magic = VM_SPACE_MAGIC;
 
 	uint64_t l0_phys     = alloc_table();   /* new L0 */
 	uint64_t l1_new_root = alloc_table();   /* new user L1 */

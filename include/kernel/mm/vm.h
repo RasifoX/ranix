@@ -19,11 +19,14 @@
  * collides with them. */
 #define HUGE1G_VA_BASE  0x100000000UL   /* 4 GB */
 
+#define VM_SPACE_MAGIC 0x564D5350u   /* "VMSP" — set at create, checked at lifecycle ops */
+
 typedef struct {
 	uint64_t  *root;       /* physical address of top-level page table */
 	uint32_t   refcount;   /* number of processes/threads sharing this space */
 	uint32_t   asid;       /* aarch64 TLB tag (1..255; 0 = flush-on-switch); unused on x86 */
 	spinlock_t fault_lock; /* serializes fault resolution among shared threads */
+	uint32_t   magic;      /* VM_SPACE_MAGIC; corruption/use-after-free tripwire */
 } vm_space_t;
 
 extern vm_space_t *kernel_vm_space;
