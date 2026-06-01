@@ -12,6 +12,21 @@ static struct {
 static int        pool_n = 0;
 static spinlock_t pool_lock = SPINLOCK_INIT;
 
+static long nr_huge2m = 0;   /* 2 MB user blocks currently mapped */
+
+void huge2m_account(int delta)
+{
+	uint64_t f = spin_lock_irq(&pool_lock);
+	nr_huge2m += delta;
+	if (nr_huge2m < 0) nr_huge2m = 0;
+	spin_unlock_irq(&pool_lock, f);
+}
+
+uint64_t huge2m_kb(void)
+{
+	return (uint64_t)nr_huge2m * (2UL * 1024);   /* 2 MB per block, in KiB */
+}
+
 void hugetlb_1g_reserve(uint64_t base, int nblocks)
 {
 	for (int i = 0; i < nblocks && pool_n < MAX_1G_BLOCKS; i++) {

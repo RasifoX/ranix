@@ -4,6 +4,7 @@
 #include <kernel/cmdline.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
@@ -113,6 +114,7 @@ static int fill_meminfo(char *buf, size_t sz)
 	pb_str(&b, "SwapFree:       "); pb_u64kib(&b, 0);
 	pb_str(&b, "Active:         "); pb_u64kib(&b, used);
 	pb_str(&b, "Inactive:       "); pb_u64kib(&b, 0);
+	pb_str(&b, "AnonHugePages:  "); pb_u64kib(&b, huge2m_kb() * 1024);
 	return (int)(sz - b.rem);
 }
 
