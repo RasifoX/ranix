@@ -214,6 +214,7 @@ check "sysctl-hostname-cmd"    "ranix" "$(hostname)"
 # ── 28. /proc entries ─────────────────────────────────────────
 check "proc-self-status"  "1"  "$([ -f /proc/self/status ] && echo 1)"
 check "proc-self-maps"    "1"  "$([ -f /proc/self/maps ] && echo 1)"
+check "proc-self-exe"     "1"  "$([ -n \"$(readlink /proc/self/exe)\" ] && echo 1)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
 check "proc-version"      "1"  "$([ -f /proc/version ] && echo 1)"
