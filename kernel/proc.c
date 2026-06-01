@@ -346,6 +346,7 @@ pid_t proc_vfork(void)
 		CTX_SYSCALL_RET(parent->ctx, child->pid);
 
 	parent->state = PROC_SLEEPING;
+	parent->sleeping_on_queue = 1;  /* woken by proc_vfork_exec_notify (exec) or task_exit (exit) */
 	arch_get_cpu_ctx()->need_resched = 1;
 
 	spin_unlock_irq(&sched_lock, f);
