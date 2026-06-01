@@ -322,6 +322,7 @@ check "pid-ns"       "pidns-ok" "$(timeout 10 /bin/test_pidns 2>/dev/null)"
 check "user-ns"      "userns-ok" "$(timeout 10 /bin/test_userns 2>/dev/null)"
 check "net-ns"      "netns-ok" "$(timeout 10 /bin/test_netns 2>/dev/null)"
 check "cgroup-ns"   "cgroupns-ok" "$(timeout 10 /bin/test_cgroupns 2>/dev/null)"
+check "container"     "container-ok" "$(timeout 12 /bin/test_container 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
