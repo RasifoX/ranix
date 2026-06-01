@@ -56,6 +56,28 @@ int pci_find(uint16_t vendor, uint16_t device, uint8_t *rbus, uint8_t *rdev, uin
 	return -1;
 }
 
+/* Find a device by class/subclass/prog-IF (scans all functions). Lets us match
+ * any vendor's AHCI controller (class 01:06:01) rather than a fixed device ID. */
+int pci_find_class(uint8_t cls, uint8_t sub, uint8_t prog,
+                   uint8_t *rbus, uint8_t *rdev, uint8_t *rfn)
+{
+	for (int b = 0; b < 256; b++) {
+		for (int d = 0; d < 32; d++) {
+			for (int f = 0; f < 8; f++) {
+				uint32_t id = pci_read32((uint8_t)b, (uint8_t)d, (uint8_t)f, PCI_VENDOR_ID);
+				if ((id & 0xFFFF) == 0xFFFF) continue;
+				uint32_t c = pci_read32((uint8_t)b, (uint8_t)d, (uint8_t)f, 0x08);
+				if ((c >> 24) == cls && ((c >> 16) & 0xFF) == sub &&
+				    ((c >> 8) & 0xFF) == prog) {
+					*rbus = (uint8_t)b; *rdev = (uint8_t)d; *rfn = (uint8_t)f;
+					return 0;
+				}
+			}
+		}
+	}
+	return -1;
+}
+
 #else
 
 uint32_t pci_read32(uint8_t b, uint8_t d, uint8_t f, uint8_t r) { (void)b;(void)d;(void)f;(void)r; return 0xFFFFFFFF; }
@@ -63,5 +85,6 @@ uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t r) { (void)b;(void)
 void pci_write32(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint32_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
 void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint16_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
 int pci_find(uint16_t v, uint16_t d, uint8_t *rb, uint8_t *rd, uint8_t *rf) { (void)v;(void)d;(void)rb;(void)rd;(void)rf; return -1; }
+int pci_find_class(uint8_t c, uint8_t s, uint8_t p, uint8_t *rb, uint8_t *rd, uint8_t *rf) { (void)c;(void)s;(void)p;(void)rb;(void)rd;(void)rf; return -1; }
 
 #endif
