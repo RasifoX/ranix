@@ -137,8 +137,8 @@ void vm_activate(void)
 	}
 	if (t->vm) {
 		arch_set_user_kstack((uint64_t)t->kstack + KSTACK_SIZE);
-		arch_vm_switch((uint64_t)t->vm->root);
+		arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
 	} else if (kernel_pt_phys) {
-		arch_vm_switch(kernel_pt_phys);
+		arch_vm_switch(kernel_pt_phys, 0);
 	}
 }

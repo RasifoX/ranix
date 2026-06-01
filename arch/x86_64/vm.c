@@ -208,8 +208,9 @@ uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 	return (pt[p1i] & ~0xFFFUL);
 }
 
-void arch_vm_switch(uint64_t root_phys)
+void arch_vm_switch(uint64_t root_phys, uint32_t asid)
 {
+	(void)asid;   /* x86_64 flushes non-global TLB on CR3 reload; PCID is later */
 	/* Skip the CR3 reload (which flushes the non-global TLB) when the
 	 * address space is unchanged — avoids needless flushes on thread
 	 * switches and same-task re-runs. */
