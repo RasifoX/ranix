@@ -305,8 +305,7 @@ static long sys_semop(int semid, const sembuf_t *usops, size_t nsops)
             int n = sops[i].sem_num;
             if (sops[i].sem_op < 0 && arr->sems[n].val + sops[i].sem_op < 0) {
                 arr->sems[n].waiter = task_current();
-                spin_unlock_irq(&sem_lock, f);
-                task_sleep();
+                task_sleep_unlock(&sem_lock, f);
                 break;
             }
         }
@@ -431,8 +430,7 @@ static ssize_t mqfd_read(vfs_file_t *file, void *buf, size_t len)
         }
         if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -11; }
         mq->recv_waiter = task_current();
-        spin_unlock_irq(&mq_lock, f);
-        task_sleep();
+        task_sleep_unlock(&mq_lock, f);
     }
 }
 
@@ -459,8 +457,7 @@ static ssize_t mqfd_write(vfs_file_t *file, const void *buf, size_t len)
         }
         if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -11; }
         mq->send_waiter = task_current();
-        spin_unlock_irq(&mq_lock, f);
-        task_sleep();
+        task_sleep_unlock(&mq_lock, f);
     }
 }
 
