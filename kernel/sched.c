@@ -421,11 +421,10 @@ void sched_tick(void)
 				arch_get_cpu_ctx()->need_resched = 1;
 			}
 		}
-		if (t->state == PROC_SLEEPING && !t->sleeping_on_queue) {
-			t->state = PROC_READY;
-			if (!t->on_cpu) runqueue_add(t);
-			arch_get_cpu_ctx()->need_resched = 1;
-		}
+		/* The per-tick "wake every sleeper and let it re-check" blanket is gone:
+		 * every blocking primitive is now event-driven (woken by its producer) or
+		 * deadline-armed (the wake_deadline sweep above). This loop only runs the
+		 * itimer countdown and deadline sweep now. */
 	}
 
 	spin_unlock_irq(&sched_lock, f);
