@@ -285,6 +285,7 @@ check "c-futex-timed" "OK" "$(timeout 8 /bin/test_futex_timed 2>/dev/null)"
 check "c-poll"       "OK"  "$(timeout 8 /bin/test_poll 2>/dev/null)"
 check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
 check "c-eventfd"    "OK"  "$(timeout 8 /bin/test_eventfd 2>/dev/null)"
+check "c-mmap"       "OK"  "$(timeout 8 /bin/test_mmap 2>/dev/null)"
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
