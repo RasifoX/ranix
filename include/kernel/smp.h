@@ -3,7 +3,7 @@
 
 #include <kernel/hal.h>
 
-#define MAX_CPUS 4
+#define MAX_CPUS 64   /* cap; FDT/detected count used at boot. Fully dynamic = follow-up */
 
 extern int smp_ncpus;
 extern cpu_context_t *all_cpus[MAX_CPUS];
