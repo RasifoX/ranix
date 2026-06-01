@@ -48,6 +48,15 @@ static long sys_unshare(unsigned long flags)
 		ipc_ns_put(p->ipc_ns);
 		p->ipc_ns = ns;
 	}
+	if (flags & CLONE_NEWTIME) {
+		/* the new time ns applies to future children, not the caller, so its
+		 * offsets can still be set via /proc/self/timens_offsets */
+		if (!p->time_ns_new) {
+			time_namespace_t *ns = time_ns_clone(p->time_ns);
+			if (!ns) return -12; /* ENOMEM */
+			p->time_ns_new = ns;
+		}
+	}
 	return 0;
 }
 
@@ -76,6 +85,15 @@ static long sys_setns(int fd, int nstype)
 		ipc_ns_get(ipc);
 		ipc_ns_put(p->ipc_ns);
 		p->ipc_ns = ipc;
+		return 0;
+	}
+
+	time_namespace_t *tns = nsfile_to_time(f);
+	if (tns) {
+		if (nstype != 0 && nstype != CLONE_NEWTIME) return -22;
+		time_ns_get(tns);
+		time_ns_put(p->time_ns);
+		p->time_ns = tns;
 		return 0;
 	}
 
@@ -300,12 +318,24 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
 }
 
+#define CLOCK_MONOTONIC  1
+#define CLOCK_BOOTTIME   7
+
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
-	(void)clkid;
 	if (!tp) return -14;
 	linux_timespec_t k;
 	mono_time(&k.tv_sec, &k.tv_nsec);
+
+	/* time namespace offsets apply to the monotonic clocks, not realtime */
+	if (clkid == CLOCK_MONOTONIC || clkid == CLOCK_BOOTTIME) {
+		time_namespace_t *ns = current_time_ns();
+		long osec  = (clkid == CLOCK_BOOTTIME) ? ns->boot_sec  : ns->mono_sec;
+		long onsec = (clkid == CLOCK_BOOTTIME) ? ns->boot_nsec : ns->mono_nsec;
+		k.tv_sec  += osec;
+		k.tv_nsec += onsec;
+		if (k.tv_nsec >= 1000000000L) { k.tv_sec++; k.tv_nsec -= 1000000000L; }
+	}
 	return copy_to_user(tp, &k, sizeof(k));
 }
 

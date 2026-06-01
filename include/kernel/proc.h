@@ -132,8 +132,10 @@ typedef struct process {
 	char            exe_path[PROC_NAME_MAX];
 
 	/* namespaces (shared on fork, copied on unshare) */
-	struct uts_namespace *uts_ns;
-	struct ipc_namespace *ipc_ns;
+	struct uts_namespace  *uts_ns;
+	struct ipc_namespace  *ipc_ns;
+	struct time_namespace *time_ns;
+	struct time_namespace *time_ns_new; /* pending time ns for children (unshare CLONE_NEWTIME) */
 } process_t;
 
 /* scheduler */
