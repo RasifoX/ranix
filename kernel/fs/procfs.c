@@ -665,8 +665,8 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 
 /* ── /proc/<pid>/ns/{uts,ipc} — namespace identity ("<kind>:[<inum>]") ── */
 
-enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID };
-static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid" };
+enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID, NS_USER };
+static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user" };
 #define NS_KINDS_N ((int)(sizeof(ns_kinds) / sizeof(ns_kinds[0])))
 
 typedef struct { int pid; int kind; } procfs_nslink_priv_t;
@@ -692,6 +692,9 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	} else if (pp->kind == NS_PID) {
 		pid_namespace_t *ns = p->pid_ns ? p->pid_ns : &init_pid_ns;
 		prefix = "pid:["; inum = ns->inum;
+	} else if (pp->kind == NS_USER) {
+		user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
+		prefix = "user:["; inum = ns->inum;
 	} else {
 		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
 		prefix = "uts:["; inum = ns->inum;
@@ -833,6 +836,29 @@ static vfs_fops_t procfs_pidns_fops = {
 	.close = procfs_pidns_close,
 };
 
+static int procfs_userns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_nslink_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = user_ns_get(p->user_ns);
+	return 0;
+}
+
+static int procfs_userns_close(vfs_file_t *f)
+{
+	user_ns_put((user_namespace_t *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_userns_fops = {
+	.open  = procfs_userns_open,
+	.close = procfs_userns_close,
+};
+
 /* setns(2) helpers: the namespace an open ns fd refers to, or NULL */
 uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
 {
@@ -864,6 +890,12 @@ pid_namespace_t *nsfile_to_pid(vfs_file_t *f)
 	return (pid_namespace_t *)f->priv;
 }
 
+user_namespace_t *nsfile_to_user(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_userns_fops) return NULL;
+	return (user_namespace_t *)f->priv;
+}
+
 static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -877,7 +909,8 @@ static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 	in->fops     = (kind == NS_IPC)  ? &procfs_ipcns_fops  :
 	               (kind == NS_TIME) ? &procfs_timens_fops :
 	               (kind == NS_MNT)  ? &procfs_mntns_fops  :
-	               (kind == NS_PID)  ? &procfs_pidns_fops  : &procfs_utsns_fops;
+	               (kind == NS_PID)  ? &procfs_pidns_fops  :
+	               (kind == NS_USER) ? &procfs_userns_fops : &procfs_utsns_fops;
 	procfs_nslink_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid; pp->kind = kind;
@@ -1031,6 +1064,58 @@ static vfs_inode_t *procfs_timens_off_inode(int pid)
 	return in;
 }
 
+/* ── /proc/<pid>/{uid,gid}_map — user namespace id mappings ──── */
+
+typedef struct { int pid; int is_gid; } procfs_uidmap_priv_t;
+
+static ssize_t procfs_uidmap_read(vfs_file_t *f, void *buf, size_t len)
+{
+	procfs_uidmap_priv_t *pr = f->inode->priv;
+	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
+	if (!p) return -1;
+	user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
+	char tmp[256];
+	int n = user_ns_format_map(ns, tmp, sizeof(tmp), pr->is_gid);
+	if (f->pos >= (off_t)n) return 0;
+	size_t avail = (size_t)(n - f->pos);
+	if (len > avail) len = avail;
+	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	f->pos += (off_t)len;
+	return (ssize_t)len;
+}
+
+static ssize_t procfs_uidmap_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	procfs_uidmap_priv_t *pr = f->inode->priv;
+	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
+	if (!p || !p->user_ns) return -1;   /* only a non-initial user ns is mappable */
+	char kb[256];
+	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
+	if (copy_from_user(kb, buf, n) != 0) return -14;
+	kb[n] = '\0';
+	if (user_ns_set_map(p->user_ns, kb, pr->is_gid) != 0) return -1;
+	return (ssize_t)len;
+}
+
+static vfs_fops_t procfs_uidmap_fops = { .read = procfs_uidmap_read, .write = procfs_uidmap_write };
+
+static vfs_inode_t *procfs_uidmap_inode(int pid, int is_gid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFREG | 0644;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->fops     = &procfs_uidmap_fops;
+	procfs_uidmap_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	pr->pid = pid; pr->is_gid = is_gid;
+	in->priv = pr;
+	return in;
+}
+
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
@@ -1042,6 +1127,10 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_nsdir_inode(pid);
 	if (strcmp(name, "timens_offsets") == 0)
 		return procfs_timens_off_inode(pid);
+	if (strcmp(name, "uid_map") == 0)
+		return procfs_uidmap_inode(pid, 0);
+	if (strcmp(name, "gid_map") == 0)
+		return procfs_uidmap_inode(pid, 1);
 	for (int i = 0; i < PID_LINKS_N; i++) {
 		if (strcmp(pid_links[i], name) == 0)
 			return procfs_pidlink_inode(pid, i);
