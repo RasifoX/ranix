@@ -22,6 +22,27 @@ static uint64_t alloc_table(void)
 	return (uint64_t)p;
 }
 
+/* 48-bit VA / 4-level: vs->root is the L0 table. User VA sits under L0[0];
+ * kernel VAs (e.g. ioremap on kernel_vm_space) under L0[511]. The L1/L2/L3 walk
+ * below is unchanged — only the L0 slot is selected by the address. */
+static uint64_t user_l1(vm_space_t *vs)
+{
+	uint64_t *l0 = (uint64_t *)PHYS_TO_VIRT((uint64_t)vs->root);
+	return l0[0] & ~0xFFFUL;
+}
+
+static uint64_t l1_for(vm_space_t *vs, uint64_t vaddr, int alloc)
+{
+	uint64_t *l0 = (uint64_t *)PHYS_TO_VIRT((uint64_t)vs->root);
+	uint64_t l0i = (vaddr >> 39) & 0x1FF;
+	if (l0[l0i] & PTE_VALID) return l0[l0i] & ~0xFFFUL;
+	if (!alloc) return 0;
+	uint64_t l1 = alloc_table();
+	if (!l1) return 0;
+	l0[l0i] = l1 | L12_TABLE;
+	return l1;
+}
+
 /*
  * ASID allocator (8-bit, TCR_EL1.AS=0). Each live user address space gets a
  * unique tag 1..255 so context switches need no TLB flush. ASID 0 is the
@@ -69,9 +90,16 @@ vm_space_t *vm_create(void)
 	vs->root = NULL;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
-	uint64_t root_phys = alloc_table();
-	if (!root_phys) { buddy_free(VIRT_TO_PHYS(vs), 0); return NULL; }
-	vs->root = (uint64_t *)root_phys;
+	uint64_t l0_phys = alloc_table();
+	uint64_t l1_phys = alloc_table();
+	if (!l0_phys || !l1_phys) {
+		if (l0_phys) buddy_free(l0_phys, 0);
+		if (l1_phys) buddy_free(l1_phys, 0);
+		buddy_free(VIRT_TO_PHYS(vs), 0);
+		return NULL;
+	}
+	((uint64_t *)PHYS_TO_VIRT(l0_phys))[0] = l1_phys | L12_TABLE;
+	vs->root = (uint64_t *)l0_phys;
 
 	vs->refcount = 1;
 	vs->asid = asid_alloc();
@@ -95,7 +123,7 @@ void vm_destroy(vm_space_t *vs)
 
 	if (!vs->root) { buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
-	uint64_t l1_phys = (uint64_t)vs->root;
+	uint64_t l1_phys = user_l1(vs);   /* under L0[0] */
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 
 	for (int i = 0; i < PT_ENTRIES; i++) {
@@ -138,13 +166,16 @@ void vm_destroy(vm_space_t *vs)
 		buddy_free(l2_phys, 0);
 	}
 
-	buddy_free(l1_phys, 0);
+	buddy_free(l1_phys, 0);            /* user L1 */
+	buddy_free((uint64_t)vs->root, 0); /* L0 */
 	buddy_free(VIRT_TO_PHYS(vs), 0);
 }
 
 int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1p = l1_for(vs, vaddr, 1);
+	if (!l1p) return -1;
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1p);
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
 	uint64_t l2i = (vaddr >> 21) & 0x1FF;
 	uint64_t l3i = (vaddr >> 12) & 0x1FF;
@@ -208,7 +239,9 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 /* Map a 2 MB block at L2. paddr must be 2 MB-aligned. */
 int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1p = l1_for(vs, vaddr, 1);
+	if (!l1p) return -1;
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1p);
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
 	uint64_t l2i = (vaddr >> 21) & 0x1FF;
 
@@ -244,7 +277,9 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 /* Map a 1 GB block at L1. paddr must be 1 GB-aligned. */
 int vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 {
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1p = l1_for(vs, vaddr, 1);
+	if (!l1p) return -1;
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1p);
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
 
 	if ((l1[l1i] & PTE_VALID) && (l1[l1i] & 3) == 3) return -1;  /* a table is there */
@@ -273,7 +308,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
 	uint64_t pte = 0, huge_base = 0, huge1g = 0;
 
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1p = l1_for(vs, vaddr, 0);
+	if (!l1p) { spin_unlock_irq(&vs->fault_lock, lf); return; }
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1p);
 	if ((l1[l1i] & PTE_VALID) && (l1[l1i] & 3) != 3) {
 		/* 1 GB L1 block */
 		if (l1[l1i] & PTE_USER) huge1g = l1[l1i] & ~0x3FFFFFFFUL;
@@ -319,9 +356,13 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
 
-uint64_t arch_vm_get_paddr(uint64_t *l1_phys, uint64_t vaddr)
+uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
 {
-	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
+	/* Caller passes vs->root (the L0); descend the address's L0 slot. */
+	uint64_t *l0 = (uint64_t *)PHYS_TO_VIRT((uint64_t)l0_phys);
+	uint64_t l0i = (vaddr >> 39) & 0x1FF;
+	if (!(l0[l0i] & PTE_VALID)) return 0;
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l0[l0i] & ~0xFFFUL);
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
 	uint64_t l2i = (vaddr >> 21) & 0x1FF;
 	uint64_t l3i = (vaddr >> 12) & 0x1FF;
@@ -371,17 +412,23 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->asid = asid_alloc();
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
-	uint64_t root_phys = alloc_table();
-	if (!root_phys) goto oom;
-	new_vs->root = (uint64_t *)root_phys;
+	uint64_t l0_phys     = alloc_table();   /* new L0 */
+	uint64_t l1_new_root = alloc_table();   /* new user L1 */
+	if (!l0_phys || !l1_new_root) {
+		if (l0_phys) buddy_free(l0_phys, 0);
+		if (l1_new_root) buddy_free(l1_new_root, 0);
+		goto oom;
+	}
+	((uint64_t *)PHYS_TO_VIRT(l0_phys))[0] = l1_new_root | L12_TABLE;
+	new_vs->root = (uint64_t *)l0_phys;
 
 	/* Lock the parent across the walk: sibling threads sharing this space may
 	 * be faulting concurrently, and vm_copy both reads and write-protects the
 	 * parent's leaf PTEs (for COW) while bumping page refcounts. */
 	uint64_t lf = spin_lock_irq(&vs->fault_lock);
 
-	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(vs->root);
-	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(root_phys);
+	uint64_t *l1_old = (uint64_t *)PHYS_TO_VIRT(user_l1(vs));
+	uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(l1_new_root);
 
 	/* Walk the whole 512 GB user L1: low user mappings live in the first two
 	 * 1 GB slots, 1 GB hugepages in their own high window. Empty slots skip. */

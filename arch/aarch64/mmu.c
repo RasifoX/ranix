@@ -2,10 +2,17 @@
 #include <kernel/mm/vm.h>
 #include <asm/mmu.h>
 
-/* physical — VMA=LMA (in .bss.boot, before high-half section) */
+/* physical — VMA=LMA (in .bss.boot, before high-half section).
+ * 48-bit VA / 4-level: L0 is the TTBR root. L0[0]→L1 (TTBR0, low 512GB) and
+ * L0_high[511]→L1_high (TTBR1, the kernel window at VIRT_OFFSET); the existing
+ * L1 tables keep their layout one level down. */
+__attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l0[512];
+__attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l0_high[512];
 __attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l1[512];
 __attribute__((section(".bss.boot"), aligned(4096))) uint64_t kernel_l1_high[512];
 __attribute__((section(".bss.boot"), aligned(4096))) static uint64_t l2[512];
+
+#define VIRT_OFFSET_L0_IDX  511   /* (0xFFFFFF8000000000 >> 39) & 0x1FF */
 
 extern void enable_mmu(uint64_t ttbr0_phys, uint64_t ttbr1_phys);
 
@@ -46,13 +53,17 @@ void mmu_tables_init(void)
 		kernel_l1_high[i] = entry;
 	}
 
-	enable_mmu((uint64_t)kernel_l1, (uint64_t)kernel_l1_high);
+	/* L0 roots over the existing L1 tables (4-level / 48-bit VA). */
+	kernel_l0[0] = (uint64_t)kernel_l1 | PTE_TABLE | PTE_VALID;
+	kernel_l0_high[VIRT_OFFSET_L0_IDX] = (uint64_t)kernel_l1_high | PTE_TABLE | PTE_VALID;
+
+	enable_mmu((uint64_t)kernel_l0, (uint64_t)kernel_l0_high);
 }
 
 void mmu_init(void)
 {
-	vm_init_kernel((uint64_t)kernel_l1_high);
-	vm_set_kernel_pt((uint64_t)kernel_l1);
+	vm_init_kernel((uint64_t)kernel_l0_high);
+	vm_set_kernel_pt((uint64_t)kernel_l0);
 }
 
 /* Clean the boot page tables to the point of coherency so a secondary CPU,
@@ -66,6 +77,8 @@ static void clean_page(uint64_t *page)
 
 void mmu_clean_tables_poc(void)
 {
+	clean_page(kernel_l0);
+	clean_page(kernel_l0_high);
 	clean_page(kernel_l1);
 	clean_page(kernel_l1_high);
 	clean_page(l2);

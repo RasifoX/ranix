@@ -6,7 +6,7 @@ enable_mmu:
 	ldr x2, =0x000000000044FF00
 	msr mair_el1, x2
 
-	ldr x2, =0xB7193519		/* T0SZ=25 T1SZ=25 TG0=4KB TG1=4KB */
+	ldr x2, =0xB7103510		/* T0SZ=16 T1SZ=16 (48-bit VA, 4-level) TG0=4KB TG1=4KB */
 	msr tcr_el1, x2
 	isb
 
