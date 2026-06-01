@@ -82,6 +82,10 @@ void signal_dispatch(arch_context_t *tf)
 	process_t *p = task_current();
 	if (!p) return;
 
+	/* (Re)arm single-step TF on this user return, independent of signals. */
+	extern void ptrace_apply_singlestep(arch_context_t *);
+	ptrace_apply_singlestep(tf);
+
 	uint64_t mask = p->sig_pending & ~p->sig_mask;
 	if (!mask) return;
 

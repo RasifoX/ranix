@@ -2,6 +2,7 @@
 #define PTRACE_PEEKDATA   2
 #define PTRACE_POKEDATA   5
 #define PTRACE_CONT       7
+#define PTRACE_SINGLESTEP 9
 #define PTRACE_GETREGS   12
 #define PTRACE_SETREGS   13
 #define PTRACE_ATTACH    16
@@ -31,6 +32,38 @@ static void ptrace_do_stop(process_t *p)
 		task_wake(tracer);
 	task_sleep_interruptible();   /* resumed by the tracer's task_wake (PTRACE_CONT) or a signal */
 	p->ptrace_in_syscall = 0;
+}
+
+/* A debug trap (single-step #DB / breakpoint #BP) hit the current traced
+ * process: report a SIGTRAP stop to the tracer, sleep until continued. Returns 1
+ * if traced (handled — don't kill). Called from the arch exception path. */
+int ptrace_trap(void)
+{
+	process_t *p = task_current();
+	if (!p->tracer) return 0;
+	p->ptrace_stop          = 1;
+	p->ptrace_stop_reported = 0;
+	ptrace_do_stop(p);
+	p->ptrace_stop          = 0;
+	p->ptrace_stop_reported = 0;
+	return 1;
+}
+
+/* Applied at every return to user mode (from signal_dispatch and exc_dispatch):
+ * the single-step state is a per-process flag, not a saved-frame bit, so it
+ * survives the scheduler's context save/restore across the ptrace stop. TF is
+ * (re)set on whatever frame is about to iret to user — Linux's TIF_SINGLESTEP
+ * model. aarch64 software-step is a separate mechanism (TODO). */
+void ptrace_apply_singlestep(arch_context_t *c)
+{
+#if defined(__x86_64__)
+	process_t *p = task_current();
+	if (!p || (c->cs & 3) != 3) return;   /* only on user returns */
+	if (p->single_step) c->rflags |= (1UL << 8);   /* RFLAGS.TF */
+	else                c->rflags &= ~(1UL << 8);
+#else
+	(void)c;
+#endif
 }
 
 static void ptrace_stop_check(arch_context_t *ctx, int is_exit)
@@ -83,9 +116,11 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 
 	case PTRACE_CONT:
 	case PTRACE_SYSCALL:
+	case PTRACE_SINGLESTEP:
 		if (tracee->tracer != (pid_t)p->pid)
 			return -1;
 		tracee->ptrace_opts          = (request == PTRACE_SYSCALL) ? 1 : 0;
+		tracee->single_step          = (request == PTRACE_SINGLESTEP) ? 1 : 0;
 		tracee->ptrace_stop          = 0;
 		tracee->ptrace_stop_reported = 0;
 		if (tracee->ptrace_in_syscall) {
@@ -95,11 +130,11 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 		return 0;
 
 	case PTRACE_GETREGS: {
-		if (!tracee->ctx)
+		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
+		if (!c)
 			return -5; /* EIO */
 		ptrace_regs_t ur;
 		__builtin_memset(&ur, 0, sizeof(ur));
-		arch_context_t *c = tracee->ctx;
 #if defined(__x86_64__)
 		ur.r15 = c->r15; ur.r14 = c->r14; ur.r13 = c->r13; ur.r12 = c->r12;
 		ur.rbp = c->rbp; ur.rbx = c->rbx;
@@ -119,12 +154,12 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	}
 
 	case PTRACE_SETREGS: {
-		if (!tracee->ctx)
+		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
+		if (!c)
 			return -5;
 		ptrace_regs_t ur;
 		if (copy_from_user(&ur, (const void *)data, sizeof(ur)) != 0)
 			return -14;
-		arch_context_t *c = tracee->ctx;
 #if defined(__x86_64__)
 		c->r15 = ur.r15; c->r14 = ur.r14; c->r13 = ur.r13; c->r12 = ur.r12;
 		c->rbp = ur.rbp; c->rbx = ur.rbx;

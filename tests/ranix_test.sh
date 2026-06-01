@@ -338,6 +338,7 @@ check "container"     "container-ok" "$(timeout 12 /bin/test_container 2>/dev/nu
 
 # ── 39. C test: ptrace ────────────────────────────────────────
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
+check "c-singlestep" "OK"  "$(timeout 8 /bin/test_singlestep 2>/dev/null)"
 
 # ── 40. misc ─────────────────────────────────────────────────
 check "uname-has-output"  "1"    "$(uname -r | wc -c | awk '{print ($1>0)?1:0}')"
