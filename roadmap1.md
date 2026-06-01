@@ -10,7 +10,7 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.8 dinamik linker çalışıyor — iki arch dinamik binary, 221-test suite)
+## Neredeyiz (v0.8 + tam kapasite ölçeği — iki arch, x86 241 / aarch64 240 test)
 
 **Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi; artık **dinamik binary + 3 namespace** de var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces 🔶 (3/8); kalan: glibc, mount/pid namespace, ext4.
 
@@ -22,6 +22,13 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 - **Dinamik linker (v0.8) ÇALIŞIYOR:** PT_INTERP + ld.so + dinamik bash + dlopen/multi-DSO. Kernel relokasyon yapmıyor — ld.so userspace'de.
 - **aarch64 ASID** (ctx-switch TLB flush yok); **procfs compat** (exe/cwd/root/comm/ns/*/cgroup/uid_map/...).
 - Test 192 → **238/238** (iki arch).
+
+**2026-06-01 — kapasite/ölçek oturumu (bu oturum, devamı):** "o kadar çekirdek/RAM/disk/sayfa" hedefi kapatıldı.
+- **Çekirdek:** x86 ACPI MADT auto-detect + MAX_CPUS→1024 + **dinamik per-CPU** (büyük diziler çekirdek sayısına göre). aarch64 -smp8→8/8, x86 -smp16→16/16.
+- **RAM:** x86 4GB→512GB (direct-map PDPT), -m6G doğrulandı.
+- **Sayfa:** 2M + **1G hugepage** (MAP_HUGE_1GB, iki arch, fork-COW; havuz+refcount).
+- **Disk:** **GPT** (CRC32 + backup-header) + **ext4 extent read + 64BIT** (>16TB adresleme); GPT→ext4 /mnt mount x86 test'li.
+- Test → **x86 241 / aarch64 240** (gpt-ext4 yalnız x86'da disk var). THP + glibc bilinçli ertelendi.
 
 **2026-05-30 — kronik bellek bozulması çözüldü** (3 temel bug: COW double-free, FP/SIMD signal'da korunmuyordu, exec I-cache CPU-lokal). + fork/unmap kilit tamamlandı, x86 FP paritesi. Gerçek Pi4'te 5/5 koşu 192/192. Detay: v0.7 bölümü.
 
@@ -285,7 +292,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [ ] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR)
 
 ### x86_64 RAM genişletme (→ Linux seviyesi, bkz Kapasite hedefleri)
-- [ ] boot.S direct map: 4 entry → RAM'e göre dinamik (4 GB → ≥128 TB); 1G huge page
+- [x] boot.S direct map: 4 entry → **512 entry (512 GB)** ✅; **1G huge page** ✅ (kullanıcı MAP_HUGE_1GB + direct-map). ≥128TB/5-level kaldı.
 - [ ] 5-level paging (LA57) opsiyonu — PB-sınıfı adresleme
 - [ ] PHYS_TO_VIRT sınırını kaldır — 64-bit PML4 tam kullanımı
 
@@ -322,7 +329,7 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
       o process/driver'ı öldür, kernel ASLA düşmesin. "Ranix taş gibi" = bu.
 
 ### Dinamik runtime-growable ölçeklenme (compile-time config YASAK)
-- [ ] MAX_CPUS sabiti kalk → CPU sayısına göre dinamik (per-CPU veri alanları)
+- [x] MAX_CPUS sabiti → **dinamik per-CPU** ✅ (büyük diziler buddy'den çekirdek sayısına göre; tavan 1024, ≥2048 vmalloc kaldı)
 - [ ] proctab/runqueue/scheduler tam dinamik (1 ↔ binlerce çekirdek, aynı binary)
 - [ ] bellek yapıları RAM miktarına uyarlanır (128MB ↔ TB+, mem_map/buddy dinamik)
 - [ ] per-CPU değişkenler + RCU-benzeri primitif (Linux'tan miras, üstüne iyileştir;
@@ -526,8 +533,8 @@ Claude CLI için TLS şart.
 - [ ] /proc/[pid]/mem — cross-process memory R/W (gdb için)
 
 ### ACPI (x86_64)
-- [ ] RSDP/RSDT/XSDT parse — ACPI table discovery
-- [ ] MADT okuma — CPU listesi
+- [x] RSDP/RSDT/XSDT parse — ACPI table discovery ✅ (arch/x86_64/acpi.c)
+- [x] MADT okuma — CPU listesi ✅ (LAPIC/x2APIC say; -smp16→16/16)
 - [ ] HPET timer — PIT'e alternatif, yüksek çözünürlük
 - [ ] ACPI_POWEROFF (S5) — shutdown -h gerçekten kapanmalı
 
@@ -631,7 +638,7 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 - [ ] `wine notepad` → pencere açılıyor (Wayland/X üstünde)
 
 ### Dağıtım yapılabilirliği
-- [ ] ext4 (ext2 değil) + GPT bölümleme — modern dağıtım root FS
+- [x] ext4 (extent + 64BIT) + GPT bölümleme ✅ (GPT→ext4 /mnt mount test'li); ext4 **write**-64bit + journal kaldı
 - [ ] init kararı: "Ranix Debian" systemd ister (cgroups v2 + namespaces, v0.7.5) VEYA
       systemd'siz varyant (Devuan/Artix tarzı: OpenRC/runit) — KARAR netleşmeli
 - [ ] apt + dpkg (glibc) / pacman benzeri (statik) — paket deposu
