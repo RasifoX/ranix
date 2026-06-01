@@ -235,6 +235,17 @@ void kernel_main(void)
 	irq_init();
 	board_irq_init();
 
+	/* "panic_test" on the kernel command line forces a fault so the branded
+	 * panic screen can be witnessed on real hardware (and in CI). An undefined
+	 * instruction traps on every board, independent of the memory map. */
+	if (cmdline_has("panic_test")) {
+#if defined(__x86_64__)
+		__asm__ volatile("ud2");
+#else
+		__asm__ volatile("udf #0");
+#endif
+	}
+
 	vfs_init();
 	vfs_mount("/", "ramfs", NULL);
 	vfs_mkdir("/dev",  0755);
