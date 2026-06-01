@@ -16,7 +16,7 @@ void udp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     if (skb->len < payload_len) { skb_free(skb); return; }
     skb->len = payload_len;
 
-    sock_udp_deliver(ntohl(iph->src), src_port, dst_port, skb->data, payload_len);
+    sock_udp_deliver(dev->net_ns, ntohl(iph->src), src_port, dst_port, skb->data, payload_len);
     skb_free(skb);
 }
 

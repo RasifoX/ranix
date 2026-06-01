@@ -57,10 +57,31 @@ typedef struct netdev {
     spinlock_t  rx_lock;
     skb_t      *rx_head;
     skb_t      *rx_tail;
+
+    struct net_namespace *net_ns;     /* owning network namespace */
 } netdev_t;
 
+/* ── network namespace ───────────────────────────────────────
+ * Each holds its own set of devices (a fresh ns has only its private
+ * loopback); sockets and device lookups are scoped to a namespace so two
+ * namespaces are isolated network stacks. */
+typedef struct net_namespace {
+    int           refcount;
+    unsigned long inum;
+    netdev_t      lo;                 /* this namespace's private loopback */
+} net_namespace_t;
+
+extern net_namespace_t init_net_ns;
+net_namespace_t *current_net_ns(void);
+net_namespace_t *net_ns_get(net_namespace_t *ns);
+void             net_ns_put(net_namespace_t *ns);
+net_namespace_t *net_ns_create(void);   /* new ns with its own loopback */
+
+struct vfs_file;
+net_namespace_t *nsfile_to_net(struct vfs_file *f);
+
 void net_register(netdev_t *dev);
-netdev_t *net_dev(int idx);          /* NULL if idx out of range */
+netdev_t *net_dev(int idx);          /* idx-th device in the current namespace */
 netdev_t *net_dev_by_ip(uint32_t ip);
 netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
 

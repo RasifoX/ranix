@@ -3,6 +3,9 @@
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
+#include <kernel/proc.h>
+#include <kernel/sync.h>
+#include <kernel/nsproxy.h>
 
 /* ── SKB allocator (heap-based, no fixed pool) ───────────── */
 
@@ -28,6 +31,69 @@ static netdev_t **devs;
 static int        ndevs;
 static int        devs_cap;
 
+static int lo_tx(netdev_t *dev, skb_t *skb);   /* defined below */
+
+/* ── network namespaces ──────────────────────────────────── */
+
+net_namespace_t init_net_ns = { .refcount = 1, .inum = 0xF0000007UL };
+static spinlock_t netns_lock = SPINLOCK_INIT;
+
+net_namespace_t *current_net_ns(void)
+{
+    process_t *p = task_current();
+    return (p && p->net_ns) ? p->net_ns : &init_net_ns;
+}
+
+net_namespace_t *net_ns_get(net_namespace_t *ns)
+{
+    if (!ns) ns = &init_net_ns;
+    if (ns != &init_net_ns) {
+        uint64_t f = spin_lock_irq(&netns_lock);
+        ns->refcount++;
+        spin_unlock_irq(&netns_lock, f);
+    }
+    return ns;
+}
+
+static void netdev_unregister(netdev_t *dev)
+{
+    for (int i = 0; i < ndevs; i++)
+        if (devs[i] == dev) {
+            for (int j = i; j < ndevs - 1; j++) devs[j] = devs[j + 1];
+            ndevs--;
+            return;
+        }
+}
+
+void net_ns_put(net_namespace_t *ns)
+{
+    if (!ns || ns == &init_net_ns) return;
+    uint64_t f = spin_lock_irq(&netns_lock);
+    int last = (--ns->refcount == 0);
+    spin_unlock_irq(&netns_lock, f);
+    if (last) {
+        netdev_unregister(&ns->lo);   /* its private loopback */
+        kfree(ns);
+    }
+}
+
+net_namespace_t *net_ns_create(void)
+{
+    net_namespace_t *ns = kmalloc(sizeof(*ns));
+    if (!ns) return NULL;
+    memset(ns, 0, sizeof(*ns));
+    ns->refcount = 1;
+    ns->inum     = ns_inum_alloc();
+    memcpy(ns->lo.name, "lo", 3);
+    ns->lo.ip      = 0x7f000001;       /* 127.0.0.1, isolated to this ns */
+    ns->lo.mask    = 0xff000000;
+    ns->lo.tx      = lo_tx;
+    ns->lo.rx_lock = (spinlock_t)SPINLOCK_INIT;
+    ns->lo.net_ns  = ns;
+    net_register(&ns->lo);
+    return ns;
+}
+
 void net_register(netdev_t *dev)
 {
     if (ndevs >= devs_cap) {
@@ -37,6 +103,7 @@ void net_register(netdev_t *dev)
         if (devs) { memcpy(nb, devs, (size_t)ndevs * sizeof(netdev_t *)); kfree(devs); }
         devs = nb; devs_cap = nc;
     }
+    if (!dev->net_ns) dev->net_ns = current_net_ns();
     devs[ndevs++] = dev;
     kprintf("net: registered %s  ip=%u.%u.%u.%u  mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
         dev->name,
@@ -48,13 +115,18 @@ void net_register(netdev_t *dev)
 
 netdev_t *net_dev(int idx)
 {
-    return (idx >= 0 && idx < ndevs) ? devs[idx] : NULL;
+    net_namespace_t *ns = current_net_ns();
+    int k = 0;
+    for (int i = 0; i < ndevs; i++)
+        if (devs[i]->net_ns == ns && k++ == idx) return devs[i];
+    return NULL;
 }
 
 netdev_t *net_dev_by_ip(uint32_t ip)
 {
+    net_namespace_t *ns = current_net_ns();
     for (int i = 0; i < ndevs; i++)
-        if (devs[i]->ip == ip) return devs[i];
+        if (devs[i]->net_ns == ns && devs[i]->ip == ip) return devs[i];
     return NULL;
 }
 
@@ -126,8 +198,6 @@ uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len)
  * back into the receive path, so lo's tx just enqueues. Having lo guarantees
  * there is always at least one device — a socket never ends up with a NULL
  * dev — and lets 127.0.0.1 work even with no NIC. */
-static netdev_t lo_dev;
-
 static int lo_tx(netdev_t *dev, skb_t *skb)
 {
     netdev_rx_enqueue(dev, skb);
@@ -138,19 +208,22 @@ static int lo_tx(netdev_t *dev, skb_t *skb)
  * (127/8 traffic loops back regardless of which device carries it — ip_tx.) */
 netdev_t *net_default_dev(void)
 {
+    net_namespace_t *ns = current_net_ns();
     for (int i = 0; i < ndevs; i++)
-        if ((devs[i]->ip >> 24) != 127) return devs[i];
-    return ndevs ? devs[0] : NULL;
+        if (devs[i]->net_ns == ns && (devs[i]->ip >> 24) != 127) return devs[i];
+    return &ns->lo;   /* a namespace always has its own loopback */
 }
 
 /* ── init ────────────────────────────────────────────────── */
 
 void net_init(void)
 {
-    memcpy(lo_dev.name, "lo", 3);
-    lo_dev.ip      = 0x7f000001;        /* 127.0.0.1 */
-    lo_dev.mask    = 0xff000000;        /* 127/8 */
-    lo_dev.tx      = lo_tx;
-    lo_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
-    net_register(&lo_dev);
+    netdev_t *lo = &init_net_ns.lo;
+    memcpy(lo->name, "lo", 3);
+    lo->ip      = 0x7f000001;        /* 127.0.0.1 */
+    lo->mask    = 0xff000000;        /* 127/8 */
+    lo->tx      = lo_tx;
+    lo->rx_lock = (spinlock_t)SPINLOCK_INIT;
+    lo->net_ns  = &init_net_ns;
+    net_register(lo);
 }

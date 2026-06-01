@@ -665,8 +665,8 @@ static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 
 /* ── /proc/<pid>/ns/{uts,ipc} — namespace identity ("<kind>:[<inum>]") ── */
 
-enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID, NS_USER };
-static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user" };
+enum { NS_UTS = 0, NS_IPC, NS_TIME, NS_MNT, NS_PID, NS_USER, NS_NET };
+static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user", "net" };
 #define NS_KINDS_N ((int)(sizeof(ns_kinds) / sizeof(ns_kinds[0])))
 
 typedef struct { int pid; int kind; } procfs_nslink_priv_t;
@@ -695,6 +695,9 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	} else if (pp->kind == NS_USER) {
 		user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
 		prefix = "user:["; inum = ns->inum;
+	} else if (pp->kind == NS_NET) {
+		net_namespace_t *ns = p->net_ns ? p->net_ns : &init_net_ns;
+		prefix = "net:["; inum = ns->inum;
 	} else {
 		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
 		prefix = "uts:["; inum = ns->inum;
@@ -859,6 +862,29 @@ static vfs_fops_t procfs_userns_fops = {
 	.close = procfs_userns_close,
 };
 
+static int procfs_netns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)flags;
+	procfs_nslink_priv_t *pp = in->priv;
+	int pid = pp ? pp->pid : 0;
+	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	if (!p) return -1;
+	f->priv = net_ns_get(p->net_ns);
+	return 0;
+}
+
+static int procfs_netns_close(vfs_file_t *f)
+{
+	net_ns_put((net_namespace_t *)f->priv);
+	f->priv = NULL;
+	return 0;
+}
+
+static vfs_fops_t procfs_netns_fops = {
+	.open  = procfs_netns_open,
+	.close = procfs_netns_close,
+};
+
 /* setns(2) helpers: the namespace an open ns fd refers to, or NULL */
 uts_namespace_t *nsfile_to_uts(vfs_file_t *f)
 {
@@ -896,6 +922,12 @@ user_namespace_t *nsfile_to_user(vfs_file_t *f)
 	return (user_namespace_t *)f->priv;
 }
 
+net_namespace_t *nsfile_to_net(vfs_file_t *f)
+{
+	if (!f || !f->inode || f->inode->fops != &procfs_netns_fops) return NULL;
+	return (net_namespace_t *)f->priv;
+}
+
 static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -910,7 +942,8 @@ static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 	               (kind == NS_TIME) ? &procfs_timens_fops :
 	               (kind == NS_MNT)  ? &procfs_mntns_fops  :
 	               (kind == NS_PID)  ? &procfs_pidns_fops  :
-	               (kind == NS_USER) ? &procfs_userns_fops : &procfs_utsns_fops;
+	               (kind == NS_USER) ? &procfs_userns_fops :
+	               (kind == NS_NET)  ? &procfs_netns_fops  : &procfs_utsns_fops;
 	procfs_nslink_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid; pp->kind = kind;
