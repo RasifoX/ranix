@@ -695,7 +695,7 @@ static long sys_getpid(void)
 
 static long sys_fork(void)
 {
-	return (long)proc_fork();
+	return (long)proc_fork(0);
 }
 
 static long sys_vfork(void)
@@ -704,7 +704,7 @@ static long sys_vfork(void)
 	 * sharing the parent's stack. Sharing is unsafe under SMP — the
 	 * parent and child can run concurrently and corrupt the shared
 	 * user stack. fork semantics are always a valid vfork. */
-	return (long)proc_fork();
+	return (long)proc_fork(0);
 }
 
 static long sys_pipe2(int *pipefd, int flags)
