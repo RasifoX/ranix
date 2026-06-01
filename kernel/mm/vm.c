@@ -33,6 +33,7 @@ void vm_init_kernel(uint64_t root_phys)
 {
 	kernel_pt_phys = root_phys;
 	_kernel_vm_space.root = (uint64_t *)root_phys;
+	_kernel_vm_space.magic = VM_SPACE_MAGIC;
 }
 
 void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
