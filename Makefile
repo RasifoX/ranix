@@ -174,7 +174,7 @@ initramfs: $(BUILD_DIR)/initramfs.cpio
 CACHE_DIR          = .cache
 BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
 BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
-BASH_CACHED        = $(CACHE_DIR)/bash-static-$(ARCH)
+BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
 
 bash-static: $(BASH_CACHED)
 
@@ -185,23 +185,21 @@ $(BASH_CACHED):
 		wget -q "$(BASH_SRC_URL)" -O "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz" || \
 		    { rm -f "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz"; echo "ERROR: bash download failed"; exit 1; }; \
 	fi
-	@echo "Building static bash for $(ARCH)..."
+	@echo "Building dynamic bash for $(ARCH)..."
 	@rm -rf "$(CACHE_DIR)/bash-build-$(ARCH)"
 	@mkdir -p "$(CACHE_DIR)/bash-build-$(ARCH)"
 	@tar xzf "$(CACHE_DIR)/bash-$(BASH_VER).tar.gz" -C "$(CACHE_DIR)/bash-build-$(ARCH)" --strip-components=1
 	@cd "$(CACHE_DIR)/bash-build-$(ARCH)" && \
 	    CC="$(MUSL_CC)" \
 	    CFLAGS="-O2" \
-	    LDFLAGS="-static" \
 	    ./configure --host=$(ARCH)-linux-musl \
 	                --without-bash-malloc \
 	                --disable-nls \
-	                --enable-static-link \
 	                > /dev/null 2>&1 && \
 	    $(MAKE) -j$$(nproc) > /dev/null 2>&1
 	@cp "$(CACHE_DIR)/bash-build-$(ARCH)/bash" "$@"
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
-	@echo "[OK] bash-static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
+	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
 $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
