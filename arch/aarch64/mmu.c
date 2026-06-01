@@ -72,7 +72,17 @@ void mmu_clean_tables_poc(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
+/* The kernel direct map is TTBR1 (kernel_l1_high): PHYS_TO_VIRT(p) lands at
+ * its L1 index p>>30. Boot fills only 0-8GB; fill the rest up to max_phys with
+ * 1GB blocks so all RAM (to the 39-bit / 512GB TTBR1 window) is reachable.
+ * Past 512GB needs a 4th level (48-bit VA) — a separate rework. */
 void arch_map_high_memory(uint64_t max_phys)
 {
-	(void)max_phys;
+	uint64_t last = (max_phys - 1) >> 30;
+	if (last > 511) last = 511;
+	for (uint64_t idx = 8; idx <= last; idx++) {
+		if (kernel_l1_high[idx] & PTE_VALID) continue;
+		kernel_l1_high[idx] = (idx << 30) | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_NORMAL;
+	}
+	__asm__ volatile("dsb ishst; isb" ::: "memory");
 }
