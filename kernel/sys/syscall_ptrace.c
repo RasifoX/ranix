@@ -144,17 +144,17 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 
 	case PTRACE_PEEKDATA: {
 		uint64_t val = 0;
-		arch_vm_switch((uint64_t)tracee->vm->root);
+		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
 		val = *(volatile uint64_t *)addr;
-		arch_vm_switch((uint64_t)p->vm->root);
+		arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 		(void)data;
 		return (long)val;
 	}
 
 	case PTRACE_POKEDATA: {
-		arch_vm_switch((uint64_t)tracee->vm->root);
+		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
 		*(volatile uint64_t *)addr = (uint64_t)data;
-		arch_vm_switch((uint64_t)p->vm->root);
+		arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 		return 0;
 	}
 
