@@ -3,6 +3,7 @@
 #include <kernel/pid_namespace.h>
 #include <kernel/user_namespace.h>
 #include <kernel/capabilities.h>
+#include <kernel/net/net.h>
 #include <kernel/cgroup.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>

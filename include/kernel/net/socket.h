@@ -90,6 +90,8 @@ typedef struct socket {
     struct socket *unix_peer;
     char           unix_path[108];  /* bound path; [0]=='\0' → abstract namespace */
     int            unix_path_len;   /* 0 = not bound, >0 = length of unix_path */
+
+    struct net_namespace *net_ns;   /* network namespace this socket lives in */
 } socket_t;
 
 /* Per-process socket table — max 16 sockets per process for now */
@@ -99,12 +101,12 @@ typedef struct socket {
 socket_t *sock_alloc(int domain, int type, int proto);
 void      sock_free(socket_t *s);
 
-/* UDP delivery hook */
-void sock_udp_deliver(uint32_t src_ip, uint16_t src_port,
+/* UDP delivery hook (ns = the receiving device's network namespace) */
+void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_port,
                       uint16_t dst_port, const void *data, uint16_t len);
 
 /* ICMP echo-reply delivery to RAW sockets */
-void sock_icmp_deliver(uint32_t src_ip, const void *data, uint16_t len);
+void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len);
 
 /* Global socket table */
 void      sock_register(socket_t *s);

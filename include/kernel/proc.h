@@ -147,6 +147,7 @@ typedef struct process {
 	struct { struct pid_namespace *ns; int nr; } pidnrs[PIDNS_MAX_LEVEL];
 	int                   pid_levels;
 	struct user_namespace *user_ns;
+	struct net_namespace  *net_ns;
 
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;
