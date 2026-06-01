@@ -92,10 +92,35 @@ static void retx_clear(socket_t *s)
     s->retx_count    = 0;
 }
 
+/* Wake the connect()/accept()/close() sleeper. The caller has already updated
+ * tcp_state (and any accept queue), so a waiter that re-checks its condition
+ * under recv_lock after we release it sees the new state — the read+clear here
+ * happening-after the state write makes a lost wakeup structurally impossible,
+ * without locking the whole TCP state machine. */
 static void tcp_wake_close(socket_t *s)
 {
+    uint64_t f = spin_lock_irq(&s->recv_lock);
     process_t *w = s->close_waiter;
     s->close_waiter = NULL;
+    spin_unlock_irq(&s->recv_lock, f);
+    if (w) task_wake(w);
+}
+
+static void tcp_wake_connect(socket_t *s)
+{
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    process_t *w = s->connect_waiter;
+    s->connect_waiter = NULL;
+    spin_unlock_irq(&s->recv_lock, f);
+    if (w) task_wake(w);
+}
+
+static void tcp_wake_accept(socket_t *ls)
+{
+    uint64_t f = spin_lock_irq(&ls->recv_lock);
+    process_t *w = ls->accept_waiter;
+    ls->accept_waiter = NULL;
+    spin_unlock_irq(&ls->recv_lock, f);
     if (w) task_wake(w);
 }
 
@@ -265,10 +290,9 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     if (flags & TCP_RST) {
         s->tcp_state = TCP_CLOSED;
         retx_clear(s);
-        process_t *w = s->connect_waiter; s->connect_waiter = NULL;
-        if (w) task_wake(w);
+        tcp_wake_connect(s);
         uint64_t lf = spin_lock_irq(&s->recv_lock);
-        w = s->recv_waiter; s->recv_waiter = NULL;
+        process_t *w = s->recv_waiter; s->recv_waiter = NULL;
         spin_unlock_irq(&s->recv_lock, lf);
         if (w) task_wake(w);
         tcp_wake_close(s);
@@ -286,8 +310,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->tcp_state  = TCP_ESTABLISHED;
             retx_clear(s);
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            process_t *w = s->connect_waiter; s->connect_waiter = NULL;
-            if (w) task_wake(w);
+            tcp_wake_connect(s);
         }
         break;
 
@@ -305,8 +328,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
                 if (!ls->accept_head) ls->accept_head = s;
                 else                  ls->accept_tail->accept_head = s;
                 ls->accept_tail = s;
-                process_t *w = ls->accept_waiter; ls->accept_waiter = NULL;
-                if (w) task_wake(w);
+                tcp_wake_accept(ls);
             }
         }
         break;
@@ -320,9 +342,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             }
             s->snd_wnd = ntohs(th->window);
             /* wake a blocked send() on any ACK (window or snd_una advance) */
-            process_t *w = s->connect_waiter;
-            s->connect_waiter = NULL;
-            if (w) task_wake(w);
+            tcp_wake_connect(s);
         }
         /* deliver data */
         if (dlen > 0 && seq == s->rcv_nxt) {
@@ -353,9 +373,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->snd_una = ack;
             if (s->snd_una == s->snd_nxt) retx_clear(s);
             s->snd_wnd = ntohs(th->window);
-            process_t *w = s->connect_waiter;
-            s->connect_waiter = NULL;
-            if (w) task_wake(w);
+            tcp_wake_connect(s);
         }
         break;
 
