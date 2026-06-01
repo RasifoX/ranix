@@ -32,6 +32,7 @@
 #define MAP_PRIVATE   0x02
 #define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
+#define MAP_HUGETLB   0x40000
 
 /* mmap prot */
 #define PROT_READ  0x1

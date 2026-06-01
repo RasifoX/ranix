@@ -199,6 +199,38 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	return 0;
 }
 
+/* Map a 2 MB block at L2. paddr must be 2 MB-aligned. */
+int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
+{
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
+	uint64_t l1i = (vaddr >> 30) & 0x1FF;
+	uint64_t l2i = (vaddr >> 21) & 0x1FF;
+
+	uint64_t l2_phys;
+	if (l1[l1i] & PTE_VALID) {
+		if ((l1[l1i] & 3) != 3) return -1;
+		l2_phys = l1[l1i] & ~0xFFFUL;
+	} else {
+		l2_phys = alloc_table();
+		if (!l2_phys) return -1;
+		l1[l1i] = l2_phys | L12_TABLE;
+	}
+
+	uint64_t attr = PTE_ATTR_NORMAL;
+	if (flags & VM_NOCACHE)  attr = PTE_ATTR_NORMAL_NC;
+	if (flags & VM_DEVICE)   attr = PTE_ATTR_DEVICE;
+	if (flags & VM_USER)     attr |= PTE_USER | PTE_NG;
+	if (!(flags & VM_WRITE)) attr |= PTE_RO;
+
+	/* L2 block descriptor: valid + bit[1]=0 (block, not table) + AF. */
+	uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
+	l2[l2i] = (paddr & ~0x1FFFFFUL) | PTE_VALID | PTE_AF | attr;
+
+	__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
+	                 :: "r"((vaddr & ~0x1FFFFFUL) >> 12) : "memory");
+	return 0;
+}
+
 void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 {
 	uint64_t l1i = (vaddr >> 30) & 0x1FF;
@@ -208,30 +240,40 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	/* Serialize against concurrent faults in a shared address space (threads),
 	 * so a sibling COW and this unmap cannot race the same leaf PTE. */
 	uint64_t lf  = spin_lock_irq(&vs->fault_lock);
-	uint64_t pte = 0;
+	uint64_t pte = 0, huge_base = 0;
 
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(vs->root);
 	if (l1[l1i] & PTE_VALID) {
 		uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[l1i] & ~0xFFFUL);
 		if (l2[l2i] & PTE_VALID) {
-			uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
-			pte = l3[l3i];
-			l3[l3i] = 0;
-			__asm__ volatile(
-				"dsb ishst\n"
-				"tlbi vaae1is, %0\n"
-				"dsb ish\n"
-				"isb\n"
-				:: "r"(vaddr >> 12)
-			);
+			if ((l2[l2i] & 3) != 3) {
+				/* 2 MB block */
+				if (l2[l2i] & PTE_USER) huge_base = l2[l2i] & ~0x1FFFFFUL;
+				l2[l2i] = 0;
+				__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
+				                 :: "r"((vaddr & ~0x1FFFFFUL) >> 12) : "memory");
+			} else {
+				uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
+				pte = l3[l3i];
+				l3[l3i] = 0;
+				__asm__ volatile(
+					"dsb ishst\n"
+					"tlbi vaae1is, %0\n"
+					"dsb ish\n"
+					"isb\n"
+					:: "r"(vaddr >> 12)
+				);
+			}
 		}
 	}
 
 	spin_unlock_irq(&vs->fault_lock, lf);
 
-	/* Free the physical page if it was a user allocation (outside the lock;
-	 * pmm has its own). */
-	if ((pte & PTE_VALID) && (pte & PTE_USER))
+	/* Free the physical page(s) if user-owned (outside the lock; pmm has its own). */
+	if (huge_base) {
+		for (int i = 0; i < 512; i++)
+			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
+	} else if ((pte & PTE_VALID) && (pte & PTE_USER))
 		pmm_free((void *)(pte & ~0xFFFUL));
 }
 

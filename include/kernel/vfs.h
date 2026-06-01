@@ -150,6 +150,7 @@ typedef struct {
 #define VMA_USER   0x8
 #define VMA_ANON   0x10
 #define VMA_SHARED 0x20  /* MAP_SHARED — pages not COW'd on fork */
+#define VMA_HUGE   0x40  /* MAP_HUGETLB — backed by 2 MB blocks */
 
 typedef struct vma {
     uint64_t    vaddr;

@@ -11,6 +11,9 @@
 #define VM_NOCACHE (1 << 4)
 #define VM_DEVICE  (1 << 5)
 
+#define HUGE_PAGE_SIZE  (2UL * 1024 * 1024)
+#define HUGE_PAGE_MASK  (~(HUGE_PAGE_SIZE - 1))
+
 typedef struct {
 	uint64_t  *root;       /* physical address of top-level page table */
 	uint32_t   refcount;   /* number of processes/threads sharing this space */
@@ -25,6 +28,7 @@ vm_space_t *vm_copy(vm_space_t *vs);
 vm_space_t *vm_get(vm_space_t *vs);   /* increment refcount */
 void        vm_destroy(vm_space_t *vs); /* decrement refcount; free when 0 */
 int         vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
+int         vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 void        vm_unmap(vm_space_t *vs, uint64_t vaddr);
 void        vm_activate(void);
 void        vm_set_kernel_pt(uint64_t phys);
