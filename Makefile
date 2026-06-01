@@ -341,7 +341,7 @@ $(BUILD_DIR)/gpt-test.img:
 	@mkdir -p $(BUILD_DIR)/diskseed
 	@printf 'ranix-gpt-ok' > $(BUILD_DIR)/diskseed/hello.txt
 	dd if=/dev/zero of=$(BUILD_DIR)/part.img bs=1M count=12 2>/dev/null
-	mkfs.ext4 -F -q -O ^has_journal,^metadata_csum,^64bit -b 1024 \
+	mkfs.ext4 -F -q -O ^has_journal,^metadata_csum,64bit -b 1024 \
 	    -d $(BUILD_DIR)/diskseed $(BUILD_DIR)/part.img >/dev/null 2>&1
 	dd if=/dev/zero of=$@ bs=1M count=16 2>/dev/null
 	sgdisk -n 1:2048:+12M -t 1:8300 $@ >/dev/null 2>&1
