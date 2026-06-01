@@ -256,6 +256,21 @@ static int fill_proc_comm(char *buf, size_t sz, int pid)
 	return (int)(sz - b.rem);
 }
 
+static int fill_proc_filesystems(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	for (int i = 0; ; i++) {
+		const char *name = vfs_fstype_name(i);
+		if (!name) break;
+		/* block-backed filesystems omit the "nodev" tag */
+		if (strcmp(name, "ext2") != 0) pb_str(&b, "nodev");
+		pb_char(&b, '\t');
+		pb_str(&b, name);
+		pb_char(&b, '\n');
+	}
+	return (int)(sz - b.rem);
+}
+
 static int fill_proc_maps(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
@@ -298,6 +313,7 @@ typedef struct {
 #define PROC_F_STAT      5
 #define PROC_F_LOADAVG   6
 #define PROC_F_CMDLINE   7
+#define PROC_F_FILESYSTEMS 8
 #define PROC_F_P_STATUS  10
 #define PROC_F_P_STAT    11
 #define PROC_F_P_CMDLINE 12
@@ -344,8 +360,9 @@ static const struct {
 	{ "stat",     PROC_F_STAT     },
 	{ "loadavg",  PROC_F_LOADAVG  },
 	{ "cmdline",  PROC_F_CMDLINE  },
+	{ "filesystems", PROC_F_FILESYSTEMS },
 };
-#define ROOT_FILES_N 8
+#define ROOT_FILES_N ((int)(sizeof(root_files) / sizeof(root_files[0])))
 
 /* static file table for per-pid subdirs */
 static const struct {
@@ -383,6 +400,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_STAT:     n = fill_stat(tmp,     PROCFS_BUF_SIZE); break;
 	case PROC_F_LOADAVG:  n = fill_loadavg(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_CMDLINE:  n = fill_cmdline(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_FILESYSTEMS: n = fill_proc_filesystems(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;

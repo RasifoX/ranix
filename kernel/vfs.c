@@ -283,6 +283,13 @@ void vfs_register_fs(const char *name, int (*fill)(vfs_mount_t *, void *))
 	spin_unlock_irq(&vfs_lock, f);
 }
 
+const char *vfs_fstype_name(int idx)
+{
+	vfs_fstype_t *ft = fstype_list;
+	for (int i = 0; ft && i < idx; i++) ft = ft->next;
+	return ft ? ft->name : NULL;
+}
+
 /* ── mount list ──────────────────────────────────────────── */
 
 static vfs_mount_t *mount_list = NULL;
