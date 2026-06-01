@@ -146,7 +146,7 @@ void mutex_lock(mutex_t *m)
 			return;
 		}
 		spin_unlock_irq(&m->guard, f);
-		task_sleep();
+		poll_block((uint64_t)-1);
 	}
 }
 

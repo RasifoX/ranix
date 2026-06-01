@@ -487,7 +487,7 @@ void proc_wait(pid_t pid)
 			break;
 		}
 		spin_unlock_irq(&sched_lock, f);
-		task_sleep();
+		poll_block((uint64_t)-1);
 	}
 }
 

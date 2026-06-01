@@ -82,6 +82,7 @@ static void buf_push(tty_t *t, char c)
     if (next != t->in_tail) {
         t->input_buf[t->in_head] = c;
         t->in_head = next;
+        poll_notify();   /* wake a blocked tty read / poller */
     }
 }
 
@@ -185,7 +186,7 @@ static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
             if (copied > 0) break;
             if (f->flags & O_NONBLOCK) return -11;
             fb_tty_flush();
-            task_sleep();
+            poll_block((uint64_t)-1);
         }
     }
     return copied;
