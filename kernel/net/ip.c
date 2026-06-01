@@ -17,7 +17,8 @@ void ip_rx(netdev_t *dev, skb_t *skb)
     if (ihl < 20 || skb->len < ihl) { skb_free(skb); return; }
 
     uint32_t dst = ntohl(iph->dst);
-    if (dst != dev->ip && dst != 0xffffffff && dst != (dev->ip | ~dev->mask))
+    if (dst != dev->ip && dst != 0xffffffff && dst != (dev->ip | ~dev->mask) &&
+        (dst >> 24) != 127)   /* 127/8 = loopback, looped back by ip_tx */
     { skb_free(skb); return; }  /* not for us */
 
     ip_hdr_t iph_copy = *iph;    /* save before pull */
@@ -43,6 +44,18 @@ int ip_tx(netdev_t *dev, skb_t *skb, uint32_t dst_ip, uint8_t proto)
     iph->src      = htonl(dev->ip);
     iph->dst      = htonl(dst_ip);
     iph->checksum = inet_cksum(iph, sizeof(ip_hdr_t));
+
+    /* loopback: a frame addressed to ourselves (our own IP, or 127/8) is
+     * delivered back up the receive path instead of going on the wire — the
+     * host NIC/slirp would not reflect our own packet back to us. */
+    if (dst_ip == dev->ip || (dst_ip >> 24) == 127) {
+        eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
+        memcpy(eh->dst, dev->mac, 6);
+        memcpy(eh->src, dev->mac, 6);
+        eh->type = htons(ETH_P_IP);
+        netdev_rx_enqueue(dev, skb);
+        return 0;
+    }
 
     /* resolve next-hop MAC */
     uint32_t nexthop = dst_ip;
