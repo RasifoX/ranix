@@ -586,23 +586,35 @@ typedef struct {
 	int pid;
 } procfs_piddir_priv_t;
 
-/* ── /proc/<pid>/exe symlink → running image's full path ─────── */
+/* ── /proc/<pid>/{exe,cwd,root} symlinks ─────────────────────── */
 
-static int procfs_exelink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+enum { PIDLINK_EXE = 0, PIDLINK_CWD, PIDLINK_ROOT };
+static const char *pid_links[] = { "exe", "cwd", "root" };
+#define PID_LINKS_N ((int)(sizeof(pid_links) / sizeof(pid_links[0])))
+
+typedef struct { int pid; int kind; } procfs_pidlink_priv_t;
+
+static int procfs_pidlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
-	int pid = in->priv ? *(int *)in->priv : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	procfs_pidlink_priv_t *pr = in->priv;
+	if (!pr) return -1;
+	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
 	if (!p) return -1;
-	const char *path = p->exe_path[0] ? p->exe_path : p->name;
+	const char *path;
+	switch (pr->kind) {
+	case PIDLINK_CWD:  path = p->cwd[0] ? p->cwd : "/"; break;
+	case PIDLINK_ROOT: path = "/"; break;
+	default:           path = p->exe_path[0] ? p->exe_path : p->name; break;
+	}
 	size_t n = strlen(path);
 	if (n + 1 > sz) return -1;
 	memcpy(buf, path, n + 1);
 	return 0;
 }
 
-static vfs_iops_t procfs_exelink_iops = { .readlink = procfs_exelink_readlink };
+static vfs_iops_t procfs_pidlink_iops = { .readlink = procfs_pidlink_readlink };
 
-static vfs_inode_t *procfs_exelink_inode(int pid)
+static vfs_inode_t *procfs_pidlink_inode(int pid, int kind)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
@@ -611,10 +623,10 @@ static vfs_inode_t *procfs_exelink_inode(int pid)
 	in->mode     = S_IFLNK | 0777;
 	in->nlink    = 1;
 	in->refcount = 1;
-	in->iops     = &procfs_exelink_iops;
-	int *pr = kmalloc(sizeof(*pr));
+	in->iops     = &procfs_pidlink_iops;
+	procfs_pidlink_priv_t *pr = kmalloc(sizeof(*pr));
 	if (!pr) { kfree(in); return NULL; }
-	*pr = pid;
+	pr->pid = pid; pr->kind = kind;
 	in->priv = pr;
 	return in;
 }
@@ -626,8 +638,10 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 	int pid = pp->pid;
 	if (strcmp(name, "fd") == 0)
 		return procfs_fddir_inode(pid);
-	if (strcmp(name, "exe") == 0)
-		return procfs_exelink_inode(pid);
+	for (int i = 0; i < PID_LINKS_N; i++) {
+		if (strcmp(pid_links[i], name) == 0)
+			return procfs_pidlink_inode(pid, i);
+	}
 	for (int i = 0; i < PID_FILES_N; i++) {
 		if (strcmp(pid_files[i].name, name) == 0)
 			return procfs_inode_file(pid, pid_files[i].type);
@@ -637,7 +651,7 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 
 static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= (uint32_t)(PID_FILES_N + 2)) return -1;
+	if (idx >= (uint32_t)(PID_FILES_N + 1 + PID_LINKS_N)) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	if (idx < PID_FILES_N) {
@@ -653,10 +667,12 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 		out->next_off = idx + 1;
 		memcpy(out->name, "fd", 3);
 	} else {
-		out->ino      = 0x8000 + (uint64_t)pid * 100 + 98;
+		const char *n = pid_links[idx - PID_FILES_N - 1];
+		int nlen = 0; while (n[nlen]) nlen++;
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + 90 + (idx - PID_FILES_N - 1);
 		out->mode     = S_IFLNK | 0777;
 		out->next_off = idx + 1;
-		memcpy(out->name, "exe", 4);
+		memcpy(out->name, n, nlen); out->name[nlen] = '\0';
 	}
 	return 0;
 }
