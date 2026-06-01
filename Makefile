@@ -119,6 +119,7 @@ SRCS_KERNEL = \
     kernel/user_ns.c \
     kernel/tty/fb_tty.c \
     kernel/sync.c \
+    kernel/ksyms.c \
     kernel/elf.c \
     kernel/syscall.c \
     kernel/vfs.c \
@@ -147,7 +148,7 @@ SRCS_KERNEL = \
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
 SRCS_ASM = $(SRCS_ARCH_ASM)
 
-CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
+CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall -fno-omit-frame-pointer $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
 LDFLAGS = -nostdlib
 
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
@@ -285,9 +286,20 @@ userspace/test_sharedlib: userspace/test_sharedlib.c userspace/libfoo.so
 userspace/test_dlopen: userspace/test_dlopen.c
 	$(MUSL_CC) -O2 -o $@ $<
 
-$(TARGET): $(OBJS)
+# Two-pass link for in-kernel panic symbolization: stage1 fixes .text addresses,
+# gen_ksyms emits the symbol table + build identity into .rodata (after .text,
+# so addresses stay valid), and the final link folds it in.
+$(BUILD_DIR)/ranix.stage1.elf: $(OBJS)
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) -o $@
+
+$(BUILD_DIR)/ksyms.o: $(BUILD_DIR)/ranix.stage1.elf scripts/gen_ksyms.sh
+	sh scripts/gen_ksyms.sh $< $(ARCH) > $(BUILD_DIR)/ksyms_gen.c
+	$(CC) $(CFLAGS) -c $(BUILD_DIR)/ksyms_gen.c -o $@
+
+$(TARGET): $(OBJS) $(BUILD_DIR)/ksyms.o
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -T $(LINKER) $(OBJS) $(BUILD_DIR)/ksyms.o -o $@
 	@if [ "$(ARCH)" = "aarch64" ] && [ "$(BOARD)" != "raspi4" ]; then \
 		llvm-objcopy -O binary $@ $(BUILD_DIR)/ranix.bin; \
 	fi
