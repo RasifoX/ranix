@@ -923,5 +923,7 @@ void vfs_init(void)
 	procfs_register();
 	devfs_register();
 	ext2_register();
+	extern void sysfs_register(void);
+	sysfs_register();
 	kprintf("VFS: initialized\n");
 }
