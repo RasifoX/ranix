@@ -11,6 +11,7 @@
 
 #define NSIG           64
 #define SIGKILL        9
+#define SIGSEGV        11
 #define SIGTERM        15
 #define SIGCHLD        17
 
