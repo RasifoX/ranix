@@ -77,7 +77,17 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             spin_unlock_irq(&s->recv_lock, f);
             size_t n = skb->len < len ? skb->len : len;
             if (n) copy_to_user(buf, skb->data, n);
-            skb_free(skb);
+            /* stream: a short read consumes only n bytes; keep the rest queued */
+            if (s->type == SOCK_STREAM && n < skb->len) {
+                skb->data += n; skb->len -= (uint16_t)n;
+                uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                skb->next = s->recv_head;
+                s->recv_head = skb;
+                if (!s->recv_tail) s->recv_tail = skb;
+                spin_unlock_irq(&s->recv_lock, f2);
+            } else {
+                skb_free(skb);
+            }
             return (ssize_t)(n ? n : 0);  /* 0 = EOF (FIN) */
         }
         /* EOF: TCP half-closed or AF_UNIX peer disconnected */
@@ -449,7 +459,17 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
                 }
                 copy_to_user(uaddr, &sa, sizeof(sa));
             }
-            skb_free(skb);
+            /* stream: a short read consumes only n bytes; keep the rest queued */
+            if (s->type == SOCK_STREAM && n < skb->len) {
+                skb->data += n; skb->len -= (uint16_t)n;
+                uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                skb->next = s->recv_head;
+                s->recv_head = skb;
+                if (!s->recv_tail) s->recv_tail = skb;
+                spin_unlock_irq(&s->recv_lock, f2);
+            } else {
+                skb_free(skb);
+            }
             return (long)n;
         }
         if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
