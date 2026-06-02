@@ -30,6 +30,8 @@ static void gsock_ensure(void)
 void sock_register(socket_t *s)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
+    for (int i = 0; i < gsock_cap; i++)
+        if (gsock[i] == s) { spin_unlock_irq(&gsock_lock, f); return; }  /* already registered */
     /* find empty slot */
     for (int i = 0; i < gsock_cap; i++) {
         if (!gsock[i]) { gsock[i] = s; spin_unlock_irq(&gsock_lock, f); return; }
@@ -160,6 +162,8 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     memcpy(skb->data, data, len);
     skb->len = len;
+    skb->src_ip   = src_ip;
+    skb->src_port = src_port;
 
     uint64_t sf = spin_lock_irq(&found->recv_lock);
     skb->next = NULL;
