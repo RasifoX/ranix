@@ -314,7 +314,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 
 ### Locking
 - [x] ticket spinlock → daha fair ✅ (2026-06-03: FIFO head/tail, atomic_fetch_add; iki arch SMP suite)
-- [ ] TLB shootdown IPI (fork/mmap sonrası remote flush) — şu an her vm_switch'te
+- [ ] TLB shootdown IPI (fork/mmap sonrası remote flush) — aarch64 ✅ tlbi-inner-shareable (donanım broadcast); x86 synchronous IPI shootdown kaldı (büyük SMP, deadlock-safe tasarım). Şu an x86 her vm_switch'te
       tam `tlbi vmalle1is` (ağır ama doğru)
 - [ ] per-CPU variables (this_cpu_read/write)
 - [x] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR) ✅ (kernel/sync.c)
