@@ -597,13 +597,12 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
         }
         af = spin_lock_irq(&ls->recv_lock);
     }
-    spin_unlock_irq(&ls->recv_lock, af);
-
-    /* dequeue from accept list (accept_head chained via accept_head field of child) */
+    /* dequeue under the lock — the net RX thread enqueues under it concurrently */
     socket_t *ns = ls->accept_head;
     ls->accept_head = ns->accept_head;
     if (!ls->accept_head) ls->accept_tail = NULL;
     ns->accept_head = NULL;
+    spin_unlock_irq(&ls->recv_lock, af);
 
     /* fill peer addr if requested */
     if (ua) {
