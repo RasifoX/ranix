@@ -198,6 +198,46 @@ static void panic_sym(uint64_t pc)
     else   kprintf("    0x%016lx\n", pc);
 }
 
+/* Turn a raw fault address + access kind into a human reading: which region of
+ * the address space it lands in and the most likely root cause. This is where we
+ * go past a Linux oops — it dumps the numbers and leaves you to interpret them;
+ * we name the region and venture a diagnosis. is_perm = permission/protection
+ * fault (page present), else the page was not mapped. */
+static void panic_fault_detail(uint64_t fa, uint64_t sp, int is_write,
+                               int is_perm, int is_fetch, int compact, int tiny)
+{
+    if (tiny) return;   /* tiniest screens: the decode line in the core is enough */
+
+    const char *region;
+    if (fa < 0x1000)                     region = "null page (NULL + small offset)";
+    else if (fa < 0x10000)               region = "low memory (likely NULL-derived ptr)";
+    else if (fa >= 0xFFFF000000000000UL) region = "kernel space";
+    else                                 region = "user space";
+
+    const char *cause;
+    if (fa < 0x10000)
+        cause = is_fetch ? "call through NULL/garbage function pointer"
+                         : "NULL-pointer dereference";
+    else if (sp && (fa > sp ? fa - sp : sp - fa) < 0x4000)
+        cause = "stack overflow / out-of-bounds stack access";
+    else if (is_perm && is_write)
+        cause = "write to read-only page (W^X, .rodata, or un-COW'd)";
+    else if (is_perm && is_fetch)
+        cause = "execute from no-execute page (W^X violation)";
+    else if (is_perm)
+        cause = "protection violation on a mapped page";
+    else
+        cause = "unmapped memory (use-after-free, wild pointer, or unstack-grown)";
+
+    /* Mid-size screens (80x25) get one combined line; big screens get both. */
+    if (compact)
+        kprintf("  analysis %s \xc2\xb7 likely %s\n", region, cause);
+    else {
+        kprintf("  region  %s\n", region);
+        kprintf("  reason  likely %s\n", cause);
+    }
+}
+
 /* Branded panic screen — plain ASCII, no color and no timestamps, so it reads
  * identically on a monochrome framebuffer and a serial line. Rich enough that a
  * photo of the screen is sufficient to diagnose: symbolized fault site and call
@@ -260,14 +300,40 @@ void panic_report(const char *msg, arch_context_t *ctx)
 
     kprintf("  stop    %s\n", msg);
 #if defined(__x86_64__)
-    if (ctx && ctx->vector == 14)
+    if (ctx && ctx->vector == 14) {
         kprintf("  fault   %s %s at 0x%016lx in %s mode\n",
                 (ctx->error_code & 2)  ? "write" : (ctx->error_code & 16 ? "exec" : "read"),
                 (ctx->error_code & 1)  ? "(protection)" : "(not present)",
                 cr2, (ctx->error_code & 4) ? "user" : "kernel");
+        panic_fault_detail(cr2, sp, (ctx->error_code & 2) != 0,
+                           (ctx->error_code & 1) != 0, (ctx->error_code & 16) != 0,
+                           compact, tiny);
+    }
 #else
-    if (ctx)
+    if (ctx) {
         kprintf("  fault   ESR 0x%08lx  FAR 0x%016lx\n", esr, far);
+        uint32_t ec2 = (uint32_t)(esr >> 26) & 0x3F;
+        if (ec2 == 0x20 || ec2 == 0x21 || ec2 == 0x24 || ec2 == 0x25) {
+            uint32_t fsc = (uint32_t)esr & 0x3F;
+            int      lvl = fsc & 3, has_lvl = 0, is_perm = 0;
+            const char *kind;
+            if      (fsc <= 0x03)                 { kind = "address size fault"; has_lvl = 1; }
+            else if (fsc <= 0x07)                 { kind = "translation fault";  has_lvl = 1; }
+            else if (fsc >= 0x08 && fsc <= 0x0B)  { kind = "access flag fault";  has_lvl = 1; }
+            else if (fsc >= 0x0C && fsc <= 0x0F)  { kind = "permission fault";   has_lvl = 1; is_perm = 1; }
+            else if (fsc == 0x10)                   kind = "external abort";
+            else if (fsc == 0x21)                   kind = "alignment fault";
+            else                                    kind = "fault";
+            int is_fetch = (ec2 == 0x20 || ec2 == 0x21);
+            int is_write = !is_fetch && (esr & (1u << 6));
+            if (!tiny) {
+                kprintf("  decode  %s", kind);
+                if (has_lvl) kprintf(" L%d", lvl);
+                kprintf(" \xc2\xb7 %s\n", is_fetch ? "instruction fetch" : (is_write ? "write" : "read"));
+            }
+            panic_fault_detail(far, sp, is_write, is_perm, is_fetch, compact, tiny);
+        }
+    }
 #endif
     uint64_t off = 0;
     const char *sym = ksym_lookup(pc, &off);
