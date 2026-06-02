@@ -62,7 +62,8 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     th->ack      = (flags & TCP_ACK) ? htonl(ack) : 0;
     th->data_off = (sizeof(tcp_hdr_t) / 4) << 4;
     th->flags    = flags;
-    th->window   = htons(TCP_RCV_WND);
+    uint32_t rwnd = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+    th->window   = htons((uint16_t)(rwnd > 65535 ? 65535 : rwnd));
     th->checksum = 0;
     th->checksum = tcp_cksum(s->local_ip ? s->local_ip : s->dev->ip,
                              s->remote_ip, th, skb->len);
@@ -216,6 +217,19 @@ void tcp_sock_free(socket_t *s)
     s->ooo_head = NULL;
 }
 
+/* The app drained n bytes from the recv buffer; the advertised window grows.
+ * If it reopened from (near) zero, send a window-update ACK so a sender that
+ * stalled on a full window resumes. */
+void tcp_rx_consumed(socket_t *s, uint32_t n)
+{
+    if (s->type != SOCK_STREAM) return;
+    uint32_t before = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+    s->rcv_buffered = (n > s->rcv_buffered) ? 0 : s->rcv_buffered - n;
+    uint32_t after = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+    if (s->tcp_state == TCP_ESTABLISHED && before < TCP_MSS && after >= TCP_MSS)
+        tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+}
+
 /* Wake the connect()/accept()/close() sleeper. The caller has already updated
  * tcp_state (and any accept queue), so a waiter that re-checks its condition
  * under recv_lock after we release it sees the new state — the read+clear here
@@ -312,6 +326,7 @@ void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len)
     if (s->recv_tail) s->recv_tail->next = skb;
     else              s->recv_head = skb;
     s->recv_tail = skb;
+    s->rcv_buffered += len;
     process_t *w = s->recv_waiter;
     s->recv_waiter = NULL;
     spin_unlock_irq(&s->recv_lock, f);

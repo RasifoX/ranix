@@ -88,6 +88,7 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             } else {
                 skb_free(skb);
             }
+            if (n) { extern void tcp_rx_consumed(socket_t *, uint32_t); tcp_rx_consumed(s, (uint32_t)n); }
             return (ssize_t)(n ? n : 0);  /* 0 = EOF (FIN) */
         }
         /* EOF: TCP half-closed or AF_UNIX peer disconnected */
@@ -470,6 +471,7 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
             } else {
                 skb_free(skb);
             }
+            if (s->type == SOCK_STREAM && n) { extern void tcp_rx_consumed(socket_t *, uint32_t); tcp_rx_consumed(s, (uint32_t)n); }
             return (long)n;
         }
         if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
