@@ -10,9 +10,19 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.8 + tam kapasite ölçeği — iki arch, x86 241 / aarch64 240 test)
+## Neredeyiz (v0.9 — ağ Linux-sınıfı + güvenlik/ABI olgun — iki arch, x86 277 / aarch64 275 test)
 
-**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11 (2017) seviyesi; artık **dinamik binary + 3 namespace** de var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces 🔶 (3/8); kalan: glibc, mount/pid namespace, ext4.
+**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11+ ; dinamik binary + **8/8 namespace** + cgroups v2 + container + **seccomp (STRICT+BPF)** var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces ✅ (8/8), TLS/DNS/DHCP ✅, IPv6 loopback dual-stack ✅; **kalan büyük blok: glibc** (Claude CLI'nin anahtarı).
+
+**2026-06-02 — büyük ağ + ABI + güvenlik oturumu (bu oturum, ~11 commit, iki arch yeşil):**
+- **Ağ:** TCP timestamps (RFC 7323); SACK; **skb headroom kök-bug** (64→128, latent buffer-underflow); **IPv6 loopback dual-stack** — IPv6 başlık + ICMPv6 + UDP + TCP over ::1 (pseudo-header cksum, family-aware tcp.c, c-ping6/udp6/tcp6). NDP (komşu keşfi) + SLAAC + virtio-net multicast RX yazıldı (working-tree) — gerçek-ağ doğrulaması Pi4+modem bekliyor (WSL2 IPv6 kapalı, slirp ipv6=on bozuk).
+- **v0.8 ABI:** execveat, clone3, pidfd_open/send_signal, /proc Threads gerçek sayım.
+- **v0.7 çekirdek:** atomic_t/atomic64_t Linux API; **SCHED_FIFO/RR** + sched_setscheduler ailesi (RT runqueue-önce).
+- **v0.7.5:** **seccomp** STRICT + BPF FILTER (cBPF interpreter; Docker/systemd sandboxing).
+- **v0.9 debug:** **/proc/pid/mem** cross-process R/W (gdb; ptrace-vm-switch mekanizması). Terminal (TTY line discipline ICANON/ISIG + TIOCGWINSZ/TIOCSWINSZ) zaten vardı.
+- DERS: musl `sched_*`/`seccomp` wrapper'ları libc-side short-circuit → testlerde RAW syscall().
+
+**(eski) v0.8 + kapasite ölçeği — x86 241 / aarch64 240**: dinamik binary, 8/8 namespace, cgroups v2, dinamik linker, ASID, 5-level/48-bit, GPT+ext4, 1G hugepage.
 
 **2026-06-01 — büyük oturum (bu oturum):**
 - **Event-driven çekirdek:** per-tick blanket-wake SİLİNDİ; her blocking primitive event-driven. sched.c → sched/proc/signal + syscall.c kategori split.
