@@ -943,11 +943,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	PUSH_AUX(31, at_execfn_addr);
 	PUSH_AUX(25, at_random_addr);
 	PUSH_AUX(23, 0);
+	PUSH_AUX(26, 0);   /* AT_HWCAP2 — no extra feature bits advertised */
 	PUSH_AUX(17, TIMER_HZ);
 #if defined(__aarch64__)
-	PUSH_AUX(16, 3);
+	PUSH_AUX(16, 3);   /* AT_HWCAP: HWCAP_FP | HWCAP_ASIMD */
 #else
-	PUSH_AUX(16, 0);
+	PUSH_AUX(16, 0);   /* AT_HWCAP: x86-64 glibc reads CPUID directly */
 #endif
 	PUSH_AUX(14, 0);
 	PUSH_AUX(13, 0);
