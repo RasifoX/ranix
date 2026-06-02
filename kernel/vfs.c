@@ -606,9 +606,13 @@ int vfs_open(const char *path, int flags, mode_t mode)
 {
 	process_t *p = task_current();
 	if (!p->fds) return -1;
+	return vfs_open_fds(p->fds, p->euid, p->egid, p->umask, path, flags, mode);
+}
 
-	uid_t uid = p ? p->euid : 0;
-	gid_t gid = p ? p->egid : 0;
+int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
+                 const char *path, int flags, mode_t mode)
+{
+	if (!fds) return -1;
 
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	vfs_inode_t  *inode = NULL;
@@ -637,7 +641,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		if (pr) return pr;
 
 		const char *fname = slash + 1;
-		mode_t cmode = mode & ~(p ? p->umask : 022);
+		mode_t cmode = mode & ~umask;
 		if (parent->inode->iops->create(parent->inode, fname, cmode) != 0)
 			return -1;
 
@@ -672,9 +676,9 @@ int vfs_open(const char *path, int flags, mode_t mode)
 		return -1;
 	}
 
-	int fd = fd_alloc(p->fds, f);
+	int fd = fd_alloc(fds, f);
 	if (fd < 0) { kfree(f); return -1; }
-	if (flags & O_CLOEXEC) BM_SET(p->fds->cloexec, fd);
+	if (flags & O_CLOEXEC) BM_SET(fds->cloexec, fd);
 	return fd;
 }
 
