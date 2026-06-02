@@ -59,6 +59,7 @@ typedef struct socket {
     skb_t      *recv_head;
     skb_t      *recv_tail;
     process_t  *recv_waiter;    /* process sleeping in recvfrom */
+    uint32_t    rcv_buffered;   /* bytes queued but unread — shrinks advertised window */
 
     /* TCP */
     int         tcp_state;
