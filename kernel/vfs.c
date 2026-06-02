@@ -884,6 +884,39 @@ int vfs_stat(const char *path, vfs_stat_t *out)
 	return 0;
 }
 
+/* Like vfs_stat, but does NOT follow a final symlink (lstat): resolve the parent
+ * directory, then look up the last component directly so a symlink reports as
+ * S_IFLNK instead of its target. */
+int vfs_lstat(const char *path, vfs_stat_t *out)
+{
+	int len = (int)strlen(path);
+	const char *slash = path + (len > 0 ? len - 1 : 0);
+	while (slash > path && *slash != '/') slash--;
+	if (slash[1] == '\0') return vfs_stat(path, out);   /* trailing slash / root */
+
+	char parent_path[256];
+	int plen = (int)(slash - path);
+	if (plen == 0) { parent_path[0] = '/'; parent_path[1] = '\0'; }
+	else           { memcpy(parent_path, path, (size_t)plen); parent_path[plen] = '\0'; }
+	const char *fname = slash + 1;
+
+	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
+	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->lookup)
+		return -1;
+	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
+	if (!in) return -1;
+
+	int rc = 0;
+	if (in->iops && in->iops->stat) {
+		rc = in->iops->stat(in, out);
+	} else {
+		out->ino = in->ino; out->mode = in->mode; out->nlink = in->nlink;
+		out->uid = in->uid; out->gid = in->gid; out->size = in->size; out->rdev = in->rdev;
+	}
+	if (!in->cached) kfree(in);
+	return rc;
+}
+
 int vfs_rename(const char *old_path, const char *new_path)
 {
 	/* parse old path */

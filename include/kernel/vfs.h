@@ -192,6 +192,7 @@ int        vfs_kernel_install(const char *path, const void *data, size_t len);
 int        vfs_symlink(const char *target, const char *linkpath);
 
 int        vfs_stat(const char *path, vfs_stat_t *out);
+int        vfs_lstat(const char *path, vfs_stat_t *out);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
 int        vfs_chmod(const char *path, mode_t mode);

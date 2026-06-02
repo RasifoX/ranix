@@ -372,7 +372,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SYSINFO: ret = sys_sysinfo((void*)arg0); break;
 #if defined(__x86_64__)
 	case SYS_ARCH_STAT:    ret = sys_stat_path((const char*)arg0, (linux_stat_t*)arg1); break;
-	case SYS_ARCH_LSTAT:   ret = sys_stat_path((const char*)arg0, (linux_stat_t*)arg1); break;
+	case SYS_ARCH_LSTAT:   ret = sys_lstat_path((const char*)arg0, (linux_stat_t*)arg1); break;
 	case SYS_ARCH_ACCESS:  ret = sys_access((const char*)arg0, (int)arg1); break;
 	case SYS_ARCH_SELECT:  ret = sys_select((int)arg0, (uint64_t*)arg1, (uint64_t*)arg2, (uint64_t*)arg3, (linux_timeval_t*)arg4); break;
 	case SYS_ARCH_POLL:    ret = sys_poll((linux_pollfd_t*)arg0, (uint64_t)arg1, (int)arg2); break;
