@@ -335,6 +335,7 @@ check "c-pathsweep"  "OK"  "$(timeout 12 /bin/test_pathsweep 2>/dev/null | tail 
 check "c-spairsweep" "OK"  "$(timeout 10 /bin/test_spairsweep 2>/dev/null | tail -1)"
 check "c-bigdir"     "OK"  "$(timeout 15 /bin/test_bigdir 2>/dev/null | tail -1)"
 check "c-ptysweep"   "OK"  "$(timeout 10 /bin/test_ptysweep 2>/dev/null | tail -1)"
+check "c-envsweep"   "OK"  "$(timeout 10 /bin/test_envsweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
