@@ -108,16 +108,20 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
         int rc;
         if (s->domain == AF_UNIX) {
             rc = unix_send(s, kbuf, (uint16_t)len);
-        } else {
-            while ((rc = tcp_send(s, kbuf, (uint16_t)len)) == -11) {
-                s->connect_waiter = task_current();
-                poll_block((uint64_t)-1);
-                process_t *p = task_current();
-                if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
-            }
+            kfree(kbuf);
+            return rc < 0 ? rc : (ssize_t)len;
+        }
+        /* TCP: tcp_send queues at most one MSS; cap the request so the uint16
+         * length can't truncate, and report what it actually took so the caller
+         * loops for the rest. */
+        uint16_t chunk = len > 65535 ? 65535 : (uint16_t)len;
+        while ((rc = tcp_send(s, kbuf, chunk)) == -11) {
+            s->connect_waiter = task_current();
+            poll_block((uint64_t)-1);
+            if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
         }
         kfree(kbuf);
-        return rc < 0 ? rc : (ssize_t)len;
+        return rc;
     }
     return -38;
 }
@@ -372,7 +376,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             poll_block((uint64_t)-1);
             if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
         }
-        r = rc < 0 ? rc : (long)len;
+        r = rc;   /* bytes tcp_send actually queued (clamped to MSS); caller loops for the rest */
     } else if (s->type == SOCK_DGRAM) {
         /* an unbound socket needs a source port and a delivery registration, or
          * the peer's reply lands on port 0 and matches nothing */
