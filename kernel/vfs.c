@@ -710,6 +710,9 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 	vfs_file_t *f = fd_get(p->fds, fd);
 	if (!f) return -9; /* EBADF */
 	if (!f->inode->fops || !f->inode->fops->write) return -22; /* EINVAL */
+	/* O_APPEND: each write lands at end of file, regardless of the seek pos. */
+	if ((f->flags & O_APPEND) && S_ISREG(f->inode->mode))
+		f->pos = (off_t)f->inode->size;
 	return f->inode->fops->write(f, buf, len);
 }
 
