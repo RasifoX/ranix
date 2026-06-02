@@ -221,8 +221,20 @@ static int ramfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	ramfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
+	/* Synthesize "." and ".." — POSIX directories must list them, and readdir
+	 * consumers (find, rm -r, du) expect them. (".." ino approximated by self;
+	 * ramfs doesn't track the parent, and the name+type are what matters.) */
+	if (idx == 0 || idx == 1) {
+		out->ino      = dir->ino;
+		out->mode     = dir->mode;
+		out->next_off = idx + 1;
+		out->name[0]  = '.';
+		out->name[1]  = (idx == 1) ? '.' : '\0';
+		out->name[2]  = '\0';
+		return 0;
+	}
 	ramfs_entry_t *e = rd->entries;
-	for (uint32_t i = 0; i < idx && e; i++) e = e->next;
+	for (uint32_t i = 0; i < idx - 2 && e; i++) e = e->next;
 	if (!e) return -1;
 	out->ino      = e->inode->ino;
 	out->mode     = e->inode->mode;
