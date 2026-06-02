@@ -209,7 +209,7 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_char(&b, '\n');
 	pb_str(&b, "VmSize:\t"); pb_u64(&b, (p->brk ? p->brk : 0) / 1024); pb_str(&b, " kB\n");
 	pb_str(&b, "VmRSS:\t"); pb_u64(&b, 64); pb_str(&b, " kB\n");
-	pb_str(&b, "Threads:\t1\n");
+	pb_str(&b, "Threads:\t"); pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, '\n');
 	uint64_t sigign = 0, sigcgt = 0;
 	for (int _i = 0; _i < NSIG; _i++) {
 		void *h = (void *)p->sig_actions[_i].sa_handler;
