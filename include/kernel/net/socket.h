@@ -134,6 +134,8 @@ void      sock_free(socket_t *s);
 /* UDP delivery hook (ns = the receiving device's network namespace) */
 void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_port,
                       uint16_t dst_port, const void *data, uint16_t len);
+void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t src_port,
+                       uint16_t dst_port, const void *data, uint16_t len);
 
 /* ICMP echo-reply delivery to RAW sockets */
 void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len);
