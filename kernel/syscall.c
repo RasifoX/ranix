@@ -278,6 +278,11 @@ static long seccomp_run_filter(process_t *p, long nr,
 void syscall_handle(arch_context_t *ctx)
 {
 	arch_get_cpu_ctx()->wd_where = "syscall";
+	/* Kernel-stack canary on trap entry too (not just on the way back out in
+	 * signal_dispatch): catch an overflow from the previous kernel path before
+	 * this syscall builds more frames on a already-clobbered stack. */
+	extern void kstack_check(void);
+	kstack_check();
 	{ process_t *cur = task_current(); if (cur) cur->uctx = ctx; }   /* ptrace task_pt_regs: syscalls always enter from user */
 	long n    = (long)CTX_SYSCALL_N(ctx);
 	long arg0 = (long)CTX_SYSCALL_ARG0(ctx);
