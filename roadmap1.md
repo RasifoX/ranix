@@ -346,9 +346,9 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 - [ ] "10'da 1 = sorun var, çözülür" — non-determinizm sıfırlanmadan üste inşa yok
 
 ### Sessiz bozulmayı gürültülü yap (invariant katmanı)
-- [ ] poison-on-free: serbest sayfaya pattern bas, alloc'ta kontrol (UAF-read yakala)
-- [ ] process_t / vm_space_t / kstack magic alanları — bozulma anında lokalize panic
-- [ ] kstack canary trap-giriş/çıkışta da kontrol (şu an sadece schedule'da)
+- [x] poison-on-free: serbest sayfaya pattern bas, alloc'ta kontrol (UAF-read yakala) ✅ (buddy_poison + buddy_poison_ok + double-free guard)
+- [x] process_t / vm_space_t / kstack magic alanları — bozulma anında lokalize panic ✅ (PROC_MAGIC, VM_SPACE_MAGIC, cpu->magic+BUG_ON, HEAP_MAGIC)
+- [x] kstack canary trap-giriş/çıkışta da kontrol (şu an sadece schedule'da) ✅ (2026-06-03: syscall_handle girişi + signal_dispatch çıkışı)
 - [ ] ucuz invariant'lar KALICI (gerekçeyi belgeler; AI slop değil) — pahalılar CONFIG_DEBUG
 
 ### Robustness modeli (Linux'u takip et)
