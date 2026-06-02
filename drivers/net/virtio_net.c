@@ -284,7 +284,14 @@ static void vnet_poll(netdev_t *dev)
 
     __asm__ volatile("dsb sy" ::: "memory");
 
-    while (p->rx_last != p->rx_used->idx) {
+    /* Snapshot the used index: process exactly what the device has completed by
+     * now and stop. Chasing a live index while notifying per packet lets the
+     * device refill as fast as we drain and never terminates; anything that
+     * arrives mid-drain is picked up by the next poll. */
+    uint16_t used_idx = p->rx_used->idx;
+    int rearmed = 0;
+
+    while (p->rx_last != used_idx) {
         vring_used_elem_t *u = &p->rx_used->ring[p->rx_last % VNET_Q];
         uint32_t desc_id = u->id;
         uint32_t rcv_len = u->len;
@@ -304,12 +311,15 @@ static void vnet_poll(netdev_t *dev)
 
         /* re-arm descriptor */
         p->rx_avail->ring[p->rx_avail->idx % VNET_Q] = (uint16_t)desc_id;
-        __asm__ volatile("dsb sy" ::: "memory");
         p->rx_avail->idx++;
-        __asm__ volatile("dsb sy" ::: "memory");
-        vw(p, VNET_QUEUE_NTFY, 0);   /* notify RX queue (index 0) */
+        rearmed = 1;
 
         p->rx_last++;
+    }
+
+    if (rearmed) {
+        __asm__ volatile("dsb sy" ::: "memory");
+        vw(p, VNET_QUEUE_NTFY, 0);   /* one notify after re-arming the batch */
     }
 }
 
