@@ -15,7 +15,7 @@ void task_wake(process_t *p);
 #define TCP_RTO_INIT    100   /* 1s before the first RTT sample (RFC 6298 §2.1) */
 #define TCP_RTO_MIN     20    /* 200ms floor */
 #define TCP_RTO_MAX     6000  /* 60s ceiling */
-#define TCP_RCV_WND     8192
+#define TCP_RCV_WND     65535
 
 /* ── checksum ────────────────────────────────────────────── */
 
