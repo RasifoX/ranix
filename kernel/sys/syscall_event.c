@@ -369,7 +369,7 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->flags    = O_RDWR;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1; close() frees */
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
@@ -497,7 +497,7 @@ static int inotify_close_vfs(vfs_file_t *file)
         inst->active = 0;
         spin_unlock_irq(&inot_pool_lock, f);
     }
-    kfree(file->inode);
+    file->inode->priv = NULL;   /* inst is pool-managed; vfs_close frees the inode */
     return 0;
 }
 
@@ -538,7 +538,7 @@ static long sys_inotify_init1(int flags)
     if (!f) { kfree(in); inst->active = 0; return -12; }
     memset(f, 0, sizeof(*f));
     f->inode    = in;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1; close() frees */
     f->flags    = flags & O_NONBLOCK;
 
     process_t *p = task_current();
