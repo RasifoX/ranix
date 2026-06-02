@@ -268,15 +268,6 @@ static void tcp_wake_connect(socket_t *s)
     if (w) task_wake(w);
 }
 
-static void tcp_wake_accept(socket_t *ls)
-{
-    uint64_t f = spin_lock_irq(&ls->recv_lock);
-    process_t *w = ls->accept_waiter;
-    ls->accept_waiter = NULL;
-    spin_unlock_irq(&ls->recv_lock, f);
-    if (w) task_wake(w);
-}
-
 /* ── port allocation ─────────────────────────────────────── */
 
 static uint16_t   next_ephemeral  = 49152;
@@ -501,12 +492,17 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             /* move to listen socket's accept queue */
             socket_t *ls = tcp_listen_find(s->net_ns, s->local_port);
             if (ls) {
-                s->accept_head = NULL; /* reuse field for list link */
-                /* append to ls->accept_head list using accept_tail chain */
+                /* enqueue on the listener's accept list and wake the acceptor —
+                 * all under ls->recv_lock so it can't race accept()'s dequeue */
+                uint64_t af = spin_lock_irq(&ls->recv_lock);
+                s->accept_head = NULL; /* reuse field as list link */
                 if (!ls->accept_head) ls->accept_head = s;
                 else                  ls->accept_tail->accept_head = s;
                 ls->accept_tail = s;
-                tcp_wake_accept(ls);
+                process_t *aw = ls->accept_waiter;
+                ls->accept_waiter = NULL;
+                spin_unlock_irq(&ls->recv_lock, af);
+                if (aw) task_wake(aw);
             }
         }
         break;
