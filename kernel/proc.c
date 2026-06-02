@@ -117,6 +117,32 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	p->vfork_parent = -1;
 	p->reaped       = 0;
 
+	/* Dynamically linked init: load its interpreter (ld.so) and enter that
+	 * instead — the loader relocates the image and jumps to the real entry,
+	 * which it reads from AT_ENTRY. Same contract execve(2) honours. */
+	uint64_t jump_entry = ei.entry;
+	uint64_t at_base    = 0;
+	if (ei.interp[0]) {
+		vfs_stat_t ist = {0};
+		if (vfs_stat(ei.interp, &ist) == 0 && ist.size > 0) {
+			uint8_t *ibuf = kmalloc(ist.size);
+			if (ibuf) {
+				int ifd = vfs_open(ei.interp, O_RDONLY, 0);
+				if (ifd >= 0) {
+					vfs_read(ifd, ibuf, ist.size);
+					vfs_close(ifd);
+					elf_info_t ii = {0};
+					if (elf_load(p->vm, ibuf, (size_t)ist.size, p->mmap_next, &ii) == 0) {
+						jump_entry   = ii.entry;
+						at_base      = p->mmap_next;
+						p->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+					}
+				}
+				kfree(ibuf);
+			}
+		}
+	}
+
 	for (int i = 0; i < ARCH_USER_STACK_PAGES; i++) {
 		void *spage_phys = buddy_alloc(0);
 		if (!spage_phys) goto fail;
@@ -157,6 +183,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	/* auxv */
 	sp -= 16; ((uint64_t*)sp)[0] = 0; ((uint64_t*)sp)[1] = 0; /* AT_NULL */
 	sp -= 16; ((uint64_t*)sp)[0] = 9; ((uint64_t*)sp)[1] = ei.entry; /* AT_ENTRY */
+	sp -= 16; ((uint64_t*)sp)[0] = 7; ((uint64_t*)sp)[1] = at_base; /* AT_BASE */
 	sp -= 16; ((uint64_t*)sp)[0] = 6; ((uint64_t*)sp)[1] = PAGE_SIZE; /* AT_PAGESZ */
 	sp -= 16; ((uint64_t*)sp)[0] = 5; ((uint64_t*)sp)[1] = ei.phnum; /* AT_PHNUM */
 	sp -= 16; ((uint64_t*)sp)[0] = 4; ((uint64_t*)sp)[1] = ei.phentsize; /* AT_PHENT */
@@ -168,7 +195,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	sp -= 8; *(uint64_t*)sp = at_execfn; /* argv[0] */
 	sp -= 8; *(uint64_t*)sp = 1; /* argc */
 
-	arch_context_init_user(ctx, ei.entry, sp);
+	arch_context_init_user(ctx, jump_entry, sp);
 
 	if (old_vm) arch_vm_switch((uint64_t)old_vm->root, old_vm->asid);
 	else arch_vm_switch((uint64_t)kernel_vm_space->root, 0);
