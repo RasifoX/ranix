@@ -289,6 +289,12 @@ netdev_t *net_route_dev(uint32_t dst_ip)
     return net_default_dev();
 }
 
+netdev_t *net_route_dev6(const in6_addr_t *dst)
+{
+    if (in6_eq(dst, &in6addr_loopback)) return &current_net_ns()->lo;
+    return net_default_dev();
+}
+
 /* ── init ────────────────────────────────────────────────── */
 
 void net_init(void)

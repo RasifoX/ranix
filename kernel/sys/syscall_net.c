@@ -271,6 +271,15 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
         return unix_reg_add(s->unix_path, pathlen, s);
     }
 
+    if (family == AF_INET6) {
+        sockaddr_in6_t sa6;
+        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+        s->local_ip6  = sa6.sin6_addr;
+        s->local_port = ntohs(sa6.sin6_port);
+        sock_register(s);
+        return 0;
+    }
+
     sockaddr_in_t sa;
     if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
     s->local_ip   = ntohl(sa.sin_addr);
@@ -366,12 +375,15 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
     /* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx */
     if (s->domain == AF_INET6) {
         in6_addr_t dst6;
+        uint16_t   dst_port6;
         if (uaddr) {
             sockaddr_in6_t sa6;
             if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
-            dst6 = sa6.sin6_addr;
+            dst6      = sa6.sin6_addr;
+            dst_port6 = ntohs(sa6.sin6_port);
         } else {
-            dst6 = s->remote_ip6;
+            dst6      = s->remote_ip6;
+            dst_port6 = s->remote_port;
         }
         if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
         uint8_t *kb = kmalloc(len);
@@ -395,6 +407,17 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 if (rc >= 0) { rr = (long)len; break; }
                 if (rc != -1) { rr = rc; break; }
                 net_poll();   /* drain RX — NDP reply may arrive (later phase) */
+            }
+        } else if (s->type == SOCK_DGRAM) {
+            if (!s->local_port) { extern uint16_t alloc_port(void); s->local_port = alloc_port(); }
+            sock_register(s);
+            netdev_t *txdev = net_route_dev6(&dst6);
+            for (int attempt = 0; attempt < 64; attempt++) {
+                int rc = udp6_tx(txdev, &dst6, s->local_port, dst_port6,
+                                 kb, (uint16_t)len);
+                if (rc >= 0) { rr = (long)len; break; }
+                if (rc != -1) { rr = rc; break; }
+                net_poll();   /* NDP resolution (later phase) */
             }
         }
         kfree(kb);

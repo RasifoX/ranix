@@ -1,5 +1,6 @@
 #include <kernel/net/ipv6.h>
 #include <kernel/net/icmpv6.h>
+#include <kernel/net/udp.h>
 #include <kernel/net/eth.h>
 #include <kernel/lib/string.h>
 
@@ -70,6 +71,7 @@ void ipv6_rx(netdev_t *dev, skb_t *skb)
 
     switch (ip6_copy.next_hdr) {
     case IP6_NH_ICMPV6: icmpv6_rx(dev, skb, &ip6_copy); break;
+    case IP6_NH_UDP:    udp6_rx(dev, skb, &ip6_copy);   break;
     default:            skb_free(skb); break;
     }
 }
