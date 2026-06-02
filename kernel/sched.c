@@ -217,6 +217,10 @@ static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
 	p->sched_next = NULL;
 	if (!cpu->rq_tail) {
 		cpu->rq_head = cpu->rq_tail = p;
+	} else if (p->sched_policy != SCHED_NORMAL) {
+		/* real-time (SCHED_FIFO/RR): run ahead of normal tasks */
+		p->sched_next = cpu->rq_head;
+		cpu->rq_head = p;
 	} else {
 		cpu->rq_tail->sched_next = p;
 		cpu->rq_tail = p;
