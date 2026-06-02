@@ -68,8 +68,13 @@ Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü
 - [x] SRTT/RTO hesaplama (Karn + RFC 6298 + exp backoff)
 - [x] out-of-order segment buffer (reassembly; drop+re-ACK yerine tampon)
 - [x] SO_KEEPALIVE / SO_REUSEPORT / TCP_NODELAY — setsockopt kabul ediyor (Nagle yok zaten)
-- [ ] receive window scaling (RFC 1323) — sadece >64KB pencere için; rcv_wnd 8KB iken gereksiz
+- [x] **receive window scaling (RFC 1323)** — SYN'de MSS+WScale option, 256KB pencere (gigabit)
+- [x] **event-driven RX** (net kernel-thread, paket gelince uyanır) — loopback 0.77→18.5 MB/s (24x)
+- [x] **flow control** (advertised window = buffer-doluluğu, OOM-safe) + window-update ACK
 - [x] KRİTİK: write() >MSS byte'ı sessizce düşürüyordu — düzeltildi (test_tcpbulk korur)
+- [x] KRİTİK: recv kısa-okumada skb kalanını atıyordu (TLS framing) — düzeltildi
+- TCP artık Linux-sınıfı (Reno + window scaling + event-driven). KALAN: SACK, TCP timestamps, IPv6,
+  IP forwarding/NAT (router) — her biri ayrı feature.
 
 ---
 
