@@ -309,6 +309,12 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SCHED_YIELD: ret = sys_sched_yield(); break;
 	case SYS_ARCH_SCHED_SETAFFINITY: ret = sys_sched_setaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
 	case SYS_ARCH_SCHED_GETAFFINITY: ret = sys_sched_getaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
+	case SYS_ARCH_SCHED_SETSCHEDULER: ret = sys_sched_setscheduler((pid_t)arg0, (int)arg1, (const void*)arg2); break;
+	case SYS_ARCH_SCHED_GETSCHEDULER: ret = sys_sched_getscheduler((pid_t)arg0); break;
+	case SYS_ARCH_SCHED_SETPARAM: ret = sys_sched_setparam((pid_t)arg0, (const void*)arg1); break;
+	case SYS_ARCH_SCHED_GETPARAM: ret = sys_sched_getparam((pid_t)arg0, (void*)arg1); break;
+	case SYS_ARCH_SCHED_GET_PRIORITY_MAX: ret = sys_sched_get_priority_max((int)arg0); break;
+	case SYS_ARCH_SCHED_GET_PRIORITY_MIN: ret = sys_sched_get_priority_min((int)arg0); break;
 	case SYS_ARCH_PRCTL:      ret = sys_prctl((int)arg0, (uint64_t)arg1, (uint64_t)arg2, (uint64_t)arg3, (uint64_t)arg4); break;
 	case SYS_ARCH_GETRANDOM:  ret = sys_getrandom((void*)arg0, (size_t)arg1, (unsigned int)arg2); break;
 	case SYS_ARCH_STATX:      ret = sys_statx((int)arg0, (const char*)arg1, (int)arg2, (unsigned int)arg3, (linux_statx_t*)arg4); break;
