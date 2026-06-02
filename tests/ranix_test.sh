@@ -188,6 +188,8 @@ check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 check "proc-partitions"  "1"       "$(cat /proc/partitions | head -1 | grep -c name)"
 check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && echo ok)"
 check "dmesg-works"      "1"       "$(dmesg 2>/dev/null | grep -c 'CPUs online')"
+check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
+check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
