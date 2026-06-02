@@ -104,7 +104,22 @@ static long sys_stat_path(const char *path, linux_stat_t *st)
 	return copy_to_user(st, &ks, sizeof(ks));
 }
 
-#define AT_EMPTY_PATH 0x1000
+/* lstat: same as stat but does not follow a final symlink. */
+static long sys_lstat_path(const char *path, linux_stat_t *st)
+{
+	if (!st) return -14;
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, AT_FDCWD, path);
+	if (r) return r;
+	vfs_stat_t vs = {0};
+	if (vfs_lstat(kp, &vs) != 0) return -2;
+	linux_stat_t ks;
+	fill_linux_stat(&ks, &vs);
+	return copy_to_user(st, &ks, sizeof(ks));
+}
+
+#define AT_EMPTY_PATH        0x1000
+#define AT_SYMLINK_NOFOLLOW  0x0100
 
 static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int flags)
 {
@@ -118,7 +133,8 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
 	vfs_stat_t vs = {0};
-	if (vfs_stat(kp, &vs) != 0) return -2;
+	int sr = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lstat(kp, &vs) : vfs_stat(kp, &vs);
+	if (sr != 0) return -2;
 	linux_stat_t ks;
 	fill_linux_stat(&ks, &vs);
 	return copy_to_user(st, &ks, sizeof(ks));
@@ -309,35 +325,49 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 
 /* ── chdir / getcwd ──────────────────────────────────────── */
 
+/* Lexically collapse "." and ".." in an absolute path (no dentry/mount walk —
+ * the previous tree walk relied on parent linkage that resolved dentries don't
+ * always have, so chdir into a plain dir could leave cwd at "/"). */
+static void path_normalize(char *path)
+{
+	char buf[PROC_NAME_MAX];
+	int n = 0;
+	const char *s = path;
+	while (*s) {
+		while (*s == '/') s++;
+		if (!*s) break;
+		const char *comp = s;
+		while (*s && *s != '/') s++;
+		int len = (int)(s - comp);
+		if (len == 1 && comp[0] == '.') continue;
+		if (len == 2 && comp[0] == '.' && comp[1] == '.') {
+			while (n > 0 && buf[n - 1] != '/') n--;   /* drop last component */
+			if (n > 0) n--;                            /* drop its leading slash */
+			continue;
+		}
+		if (n + 1 + len >= PROC_NAME_MAX) break;
+		buf[n++] = '/';
+		memcpy(buf + n, comp, (size_t)len);
+		n += len;
+	}
+	if (n == 0) buf[n++] = '/';
+	buf[n] = '\0';
+	memcpy(path, buf, (size_t)(n + 1));
+}
+
 static long sys_chdir(const char *path)
 {
 	char kp[PROC_NAME_MAX];
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
 	if (r) return r;
-	/* resolve . and .. via dentry so we get the canonical path */
-	vfs_dentry_t *d = vfs_dentry_resolve(kp);
-	if (!d) return -2;
-	if (!S_ISDIR(d->inode->mode)) return -20;
-	/* rebuild canonical path by walking up the dentry tree */
-	char canon[PROC_NAME_MAX];
-	char tmp[PROC_NAME_MAX];
-	canon[0] = '\0';
-	vfs_dentry_t *cur = d;
-	while (cur && cur->parent) {
-		int tlen = strlen(cur->name);
-		int clen = strlen(canon);
-		if (tlen + 1 + clen >= PROC_NAME_MAX) return -36;
-		memmove(tmp + tlen + 1, canon, (size_t)(clen + 1));
-		tmp[0] = '/';
-		memcpy(tmp + 1, cur->name, (size_t)tlen);
-		memcpy(canon, tmp, (size_t)(tlen + 1 + clen + 1));
-		cur = cur->parent;
-	}
-	if (canon[0] == '\0') { canon[0] = '/'; canon[1] = '\0'; }
+	vfs_stat_t st;
+	if (vfs_stat(kp, &st) != 0) return -2;      /* ENOENT */
+	if (!S_ISDIR(st.mode)) return -20;          /* ENOTDIR */
+	path_normalize(kp);
 	process_t *p = task_current();
-	int n = strlen(canon);
+	int n = strlen(kp);
 	if (n >= 256) return -36;
-	memcpy(p->cwd, canon, (size_t)(n + 1));
+	memcpy(p->cwd, kp, (size_t)(n + 1));
 	return 0;
 }
 
