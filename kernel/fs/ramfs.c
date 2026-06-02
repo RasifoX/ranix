@@ -208,7 +208,10 @@ static int ramfs_unlink(vfs_inode_t *dir, const char *name)
 			ramfs_entry_t *e = *pp;
 			*pp = e->next;
 			rd->count--;
-			dir->nlink--;
+			/* Removing a subdirectory drops the parent's '..' backlink; removing
+			 * a file drops one of that file's hard links. */
+			if (S_ISDIR(e->inode->mode)) dir->nlink--;
+			else if (e->inode->nlink > 0) e->inode->nlink--;
 			kfree(e);
 			return 0;
 		}

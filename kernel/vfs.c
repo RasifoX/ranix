@@ -78,7 +78,9 @@ static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_
 	if (parent) {
 		d->next        = parent->child;
 		parent->child  = d;
-		if (inode) inode->nlink++;
+		/* Caching a dentry is not a hard link: nlink is the directory-entry
+		 * count, managed by the filesystem (create/link/unlink), not bumped on
+		 * every path lookup. */
 	}
 
 	if (inode) inode->cached = 1;
