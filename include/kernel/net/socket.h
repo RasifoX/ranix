@@ -82,6 +82,13 @@ typedef struct socket {
     uint8_t     retx_flags;
     uint64_t    retx_deadline;  /* kernel_ticks deadline */
     int         retx_count;     /* retransmit attempts since last ack */
+    uint64_t    retx_sent_tick; /* when this segment first went out (RTT sample) */
+    uint8_t     retx_resent;    /* set once retransmitted — Karn: skip its RTT */
+
+    /* RTT estimation / adaptive RTO (RFC 6298), all in timer ticks */
+    uint32_t    srtt;           /* smoothed RTT, 0 until first sample */
+    uint32_t    rttvar;         /* RTT variance */
+    uint32_t    rto;            /* current retransmit timeout */
 
     /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
     process_t  *close_waiter;
