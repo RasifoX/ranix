@@ -435,6 +435,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 
 int tcp_connect(socket_t *s)
 {
+    s->dev = net_route_dev(s->remote_ip);
     if (!s->local_port) s->local_port = alloc_port();
     if (!s->local_ip)   s->local_ip   = s->dev->ip;
     s->snd_nxt   = 0xAB000000;
