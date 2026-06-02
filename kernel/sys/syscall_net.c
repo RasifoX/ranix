@@ -230,7 +230,7 @@ static void unix_reg_remove(socket_t *s)
 
 static long sys_socket(int domain, int type, int proto)
 {
-    if (domain != AF_INET && domain != AF_UNIX) return -97;
+    if (domain != AF_INET && domain != AF_INET6 && domain != AF_UNIX) return -97;
     if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
     socket_t *s = sock_alloc(domain, type, proto);
     if (!s) return -12;
@@ -363,6 +363,44 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
     socket_t *s = fd_to_sock(fd);
     if (!s || !s->dev) return -9;
 
+    /* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx */
+    if (s->domain == AF_INET6) {
+        in6_addr_t dst6;
+        if (uaddr) {
+            sockaddr_in6_t sa6;
+            if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+            dst6 = sa6.sin6_addr;
+        } else {
+            dst6 = s->remote_ip6;
+        }
+        if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+        uint8_t *kb = kmalloc(len);
+        if (!kb) return -12;
+        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
+
+        long rr = -38;
+        if (s->type == SOCK_RAW && s->proto == IPPROTO_ICMPV6 &&
+            len >= sizeof(icmp6_hdr_t)) {
+            in6_addr_t src6 = ipv6_src_for(s->dev, &dst6);
+            icmp6_hdr_t *ih = (icmp6_hdr_t *)kb;
+            ih->checksum = 0;
+            ih->checksum = ipv6_pseudo_cksum(&src6, &dst6, IP6_NH_ICMPV6,
+                                             kb, (uint16_t)len);
+            for (int attempt = 0; attempt < 64; attempt++) {
+                skb_t *skb = skb_alloc();
+                if (!skb) { rr = -12; break; }
+                memcpy(skb->data, kb, len);
+                skb->len = (uint16_t)len;
+                int rc = ipv6_tx(s->dev, skb, &dst6, IP6_NH_ICMPV6);
+                if (rc >= 0) { rr = (long)len; break; }
+                if (rc != -1) { rr = rc; break; }
+                net_poll();   /* drain RX — NDP reply may arrive (later phase) */
+            }
+        }
+        kfree(kb);
+        return rr;
+    }
+
     uint32_t dst_ip; uint16_t dst_port;
     if (uaddr) {
         sockaddr_in_t sa;
@@ -442,7 +480,14 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
             spin_unlock_irq(&s->recv_lock, f);
             size_t n = skb->len < len ? skb->len : len;
             copy_to_user(buf, skb->data, n);
-            if (uaddr) {
+            if (uaddr && s->domain == AF_INET6) {
+                sockaddr_in6_t sa6;
+                memset(&sa6, 0, sizeof(sa6));
+                sa6.sin6_family = AF_INET6;
+                sa6.sin6_addr   = skb->src_ip6;
+                sa6.sin6_port   = htons(s->remote_port);
+                copy_to_user(uaddr, &sa6, sizeof(sa6));
+            } else if (uaddr) {
                 sockaddr_in_t sa;
                 memset(&sa, 0, sizeof(sa));
                 sa.sin_family = AF_INET;
