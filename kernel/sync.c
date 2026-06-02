@@ -235,6 +235,15 @@ void atomic_selftest(void)
 	if (atomic_or32(&b, 0x0F) != 0xF0 || b != 0xFF) kpanic("or32");
 	if (atomic_and32(&b, 0xF0) != 0xFF || b != 0xF0) kpanic("and32");
 
+	atomic_t a = ATOMIC_INIT(5);
+	if (atomic_read(&a) != 5) kpanic("atomic_t read");
+	if (atomic_add_return(&a, 3) != 8 || atomic_read(&a) != 8) kpanic("atomic_t add");
+	if (atomic_dec_and_test(&a)) kpanic("atomic_t dec_and_test early");
+	atomic_set(&a, 1);
+	if (!atomic_dec_and_test(&a)) kpanic("atomic_t dec_and_test");
+	atomic64_t a64 = ATOMIC64_INIT(0);
+	if (atomic64_inc_return(&a64) != 1) kpanic("atomic64_t inc");
+
 	kprintf("atomic: selftest ok\n");
 }
 

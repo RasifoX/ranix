@@ -27,6 +27,32 @@ uint32_t atomic_cmpxchg32(volatile uint32_t *p, uint32_t old, uint32_t nw);
 uint64_t atomic_cmpxchg64(volatile uint64_t *p, uint64_t old, uint64_t nw);
 uint32_t atomic_or32(volatile uint32_t *p, uint32_t v);
 uint32_t atomic_and32(volatile uint32_t *p, uint32_t v);
+
+/* Linux-style atomic_t / atomic64_t built on the RMW primitives above. */
+typedef struct { volatile int32_t counter; } atomic_t;
+typedef struct { volatile int64_t counter; } atomic64_t;
+#define ATOMIC_INIT(i)   { (i) }
+#define ATOMIC64_INIT(i) { (i) }
+
+static inline int  atomic_read(const atomic_t *v) { return (int)v->counter; }
+static inline void atomic_set(atomic_t *v, int i)  { v->counter = i; }
+static inline int  atomic_add_return(atomic_t *v, int i)
+{ return (int)atomic_fetch_add32((volatile uint32_t *)&v->counter, (uint32_t)i) + i; }
+static inline int  atomic_sub_return(atomic_t *v, int i)
+{ return (int)atomic_sub_fetch32((volatile uint32_t *)&v->counter, (uint32_t)i); }
+static inline void atomic_inc(atomic_t *v) { atomic_fetch_add32((volatile uint32_t *)&v->counter, 1); }
+static inline void atomic_dec(atomic_t *v) { atomic_sub_fetch32((volatile uint32_t *)&v->counter, 1); }
+static inline int  atomic_inc_return(atomic_t *v) { return atomic_add_return(v, 1); }
+static inline int  atomic_dec_and_test(atomic_t *v)
+{ return (int)atomic_sub_fetch32((volatile uint32_t *)&v->counter, 1) == 0; }
+static inline int  atomic_cmpxchg(atomic_t *v, int old, int nw)
+{ return (int)atomic_cmpxchg32((volatile uint32_t *)&v->counter, (uint32_t)old, (uint32_t)nw); }
+
+static inline int64_t atomic64_read(const atomic64_t *v) { return v->counter; }
+static inline void    atomic64_set(atomic64_t *v, int64_t i) { v->counter = i; }
+static inline int64_t atomic64_add_return(atomic64_t *v, int64_t i)
+{ return (int64_t)atomic_fetch_add64((volatile uint64_t *)&v->counter, (uint64_t)i) + i; }
+static inline int64_t atomic64_inc_return(atomic64_t *v) { return atomic64_add_return(v, 1); }
 /* IRQ-safe variants — use these from interrupt context */
 uint64_t spin_lock_irq(spinlock_t *l);
 void     spin_unlock_irq(spinlock_t *l, uint64_t flags);
