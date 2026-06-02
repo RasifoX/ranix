@@ -4,43 +4,6 @@
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 
-/* arch_spin_trylock: attempt to atomically set locked 0→1.
- * Returns 1 on success, 0 if already locked. */
-static int arch_spin_trylock(volatile uint32_t *p)
-{
-#if defined(__aarch64__)
-	uint32_t tmp, res;
-	__asm__ volatile(
-		"1: ldaxr %w0, [%2]\n"
-		"   cbnz  %w0, 2f\n"
-		"   stxr  %w1, %w3, [%2]\n"
-		"   cbnz  %w1, 1b\n"
-		"   mov   %w0, #1\n"
-		"   b     3f\n"
-		"2: mov   %w0, #0\n"
-		"3:\n"
-		: "=&r"(tmp), "=&r"(res)
-		: "r"(p), "r"(1u)
-		: "memory"
-	);
-	return (int)tmp;
-#elif defined(__x86_64__)
-	uint32_t old = 0, new = 1;
-	__asm__ volatile(
-		"lock cmpxchgl %2, %1"
-		: "=a"(old), "+m"(*p)
-		: "r"(new), "0"(old)
-		: "memory"
-	);
-	return old == 0;
-#else
-	/* fallback for unknown arch — not SMP safe */
-	if (*p) return 0;
-	*p = 1;
-	return 1;
-#endif
-}
-
 /* v8.0-safe atomic RMW (cortex-a72 has no LSE, so we cannot let the compiler
  * emit ldadd/etc via __atomic — it would be an undefined instruction). x86
  * uses LOCK xadd. Used for shared refcounts (vm/fd_table) under SMP. */
@@ -253,19 +216,23 @@ volatile int spin_diag_on = 0;
 
 void spin_lock(spinlock_t *l)
 {
+	uint32_t my = atomic_fetch_add32(&l->tail, 1);   /* take a ticket */
 	if (!spin_diag_on) {
-		while (!arch_spin_trylock(&l->locked))
+		/* Fast path must not touch arch_get_cpu_ctx(): locks are taken very early
+		 * in boot before the per-CPU area (x86 GS-base) is set up, and a deref
+		 * there triple-faults. owner is only needed for the diag path below. */
+		while (l->head != my)
 			;
 		return;
 	}
 	int self = arch_get_cpu_ctx()->cpu_id;
 	uint64_t spins = 0;
-	while (!arch_spin_trylock(&l->locked)) {
+	while (l->head != my) {
 		if (l->owner == self)
 			kpanic("recursive spinlock (self-deadlock)");
 		if (++spins == 0x3000000) {
-			kprintf("spin_lock: cpu%d stuck on lock %p held by cpu%d (where=%s)\n",
-			        self, (void *)l, l->owner,
+			kprintf("spin_lock: cpu%d stuck on lock %p (serving=%u mine=%u) held by cpu%d (where=%s)\n",
+			        self, (void *)l, l->head, my, l->owner,
 			        arch_get_cpu_ctx()->wd_where ? (const char *)arch_get_cpu_ctx()->wd_where : "?");
 			kpanic("spinlock deadlock");
 		}
@@ -275,13 +242,11 @@ void spin_lock(spinlock_t *l)
 
 void spin_unlock(spinlock_t *l)
 {
+	/* Advance now-serving to hand the lock to the next ticket in FIFO order.
+	 * atomic_fetch_add32 carries release ordering (stlxr / lock xadd), so the
+	 * critical section's writes are visible before the next waiter proceeds. */
 	l->owner = -1;
-#if defined(__aarch64__)
-	__asm__ volatile("stlr wzr, [%0]" :: "r"(&l->locked) : "memory");
-#else
-	__asm__ volatile("" ::: "memory");
-	l->locked = 0;
-#endif
+	atomic_fetch_add32(&l->head, 1);
 }
 
 uint64_t spin_lock_irq(spinlock_t *l)
