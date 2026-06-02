@@ -259,7 +259,7 @@ fail:
 	return -1;
 }
 
-pid_t proc_fork(uint64_t clone_flags)
+pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 {
 	process_t *parent = task_current();
 	arch_save_tls(parent);
@@ -342,6 +342,16 @@ pid_t proc_fork(uint64_t clone_flags)
 		arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
 		memcpy(cctx, parent->ctx, sizeof(arch_context_t));
 		CTX_SYSCALL_RET(cctx, 0);
+		/* clone/vfork with an explicit child stack (e.g. glibc posix_spawn passes
+		 * CLONE_VM|CLONE_VFORK + a stack): the child must run on it, not inherit
+		 * the parent's SP, or the two corrupt each other's frames. */
+		if (newsp) {
+#if defined(__aarch64__)
+			cctx->sp = newsp;
+#else
+			cctx->rsp = newsp;
+#endif
+		}
 		child->ctx = cctx;
 	}
 	child->tls_base        = parent->tls_base;

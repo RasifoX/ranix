@@ -1014,16 +1014,17 @@ static long sys_getpid(void)
 
 static long sys_fork(void)
 {
-	return (long)proc_fork(0);
+	return (long)proc_fork(0, 0);
 }
 
-static long sys_vfork(void)
+static long sys_vfork(uint64_t newsp)
 {
 	/* vfork-as-fork: give the child its own address space instead of
 	 * sharing the parent's stack. Sharing is unsafe under SMP — the
 	 * parent and child can run concurrently and corrupt the shared
-	 * user stack. fork semantics are always a valid vfork. */
-	return (long)proc_fork(0);
+	 * user stack. fork semantics are always a valid vfork. The child still
+	 * runs on its own stack when the caller passes one (posix_spawn). */
+	return (long)proc_fork(0, newsp);
 }
 
 static long sys_pipe2(int *pipefd, int flags)
