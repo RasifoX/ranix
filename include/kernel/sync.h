@@ -8,12 +8,16 @@
  * On single-core this degrades to irq disable/enable;
  * the atomic field is ready for SMP (LL/SC on arm, LOCK CMPXCHG on x86).
  */
+/* Ticket spinlock: FIFO-fair. A caller takes a ticket (tail++) and waits until
+ * now-serving (head) reaches it, so waiters acquire in arrival order — no
+ * starvation under contention, unlike a plain test-and-set. */
 typedef struct {
-	volatile uint32_t locked;
+	volatile uint32_t head;    /* now serving */
+	volatile uint32_t tail;    /* next ticket */
 	volatile int      owner;   /* cpu_id of holder while locked; -1 when free */
 } spinlock_t;
 
-#define SPINLOCK_INIT  { 0, -1 }
+#define SPINLOCK_INIT  { 0, 0, -1 }
 
 void spin_lock(spinlock_t *l);
 void spin_unlock(spinlock_t *l);
