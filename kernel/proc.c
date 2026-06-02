@@ -166,7 +166,11 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	p->ctx = ctx;
 	p->fds = fd_table_create();
-	memcpy(p->cwd, current->cwd, 256);
+	/* Inherit the cwd, but guarantee it is absolute: init's parent is the boot
+	 * task, whose cwd was never set — an empty/relative cwd makes getcwd(2) fail
+	 * (musl rejects a non-'/' result), which then propagates to every process. */
+	if (current->cwd[0] == '/') memcpy(p->cwd, current->cwd, 256);
+	else { p->cwd[0] = '/'; p->cwd[1] = '\0'; }
 	p->umask = current->umask;
 
 	{
