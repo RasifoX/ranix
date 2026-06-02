@@ -62,10 +62,10 @@ Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü
 - [x] recv() / send() (MSG_PEEK, MSG_WAITALL); SO_REUSEADDR; blocking connect timeout
 - [x] nc/wget/echo_server testleri geçiyor
 
-### TCP İyileştirmeler (v0.9'a ertelendi)
+### TCP İyileştirmeler (v0.9 — "ağ tam"ın son ayağı, ŞU AN)
 - [ ] TCP congestion control: Reno (slow start, fast retransmit, fast recovery)
 - [ ] receive window scaling (RFC 1323)
-- [ ] SRTT/RTO hesaplama (Karn algoritması)
+- [ ] SRTT/RTO hesaplama (Karn algoritması) ← şu an yapılıyor (RFC 6298 + exp backoff)
 - [ ] out-of-order segment buffer
 - [ ] SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT
 - [ ] SO_REUSEPORT
@@ -519,11 +519,17 @@ Claude CLI için TLS şart.
 - [ ] `curl https://api.anthropic.com` çalışıyor
 - [ ] SNI (Server Name Indication) — modern HTTPS siteler
 
-### DNS çözücü
+### Ağ konfigürasyonu — DHCP ✅ (2026-06-02)
+- [x] DHCP client: DISCOVER/OFFER/REQUEST/ACK, boot'ta NIC'i konfigüre (ip/gw/mask), iki arch
+- [x] /etc/resolv.conf'u DHCP'nin verdiği nameserver'a yazar (yazılabilir dosya, elle de değişir)
 
-- [ ] Gerçek UDP DNS query: /etc/resolv.conf okuma + A/AAAA sorgusu
-- [ ] `getaddrinfo` musl'daki implementasyon çalışıyor mu? — test et
-- [ ] ndots, search domain, timeout/retry
+### DNS çözücü ✅ (2026-06-02, uçtan uca iki arch)
+
+- [x] Gerçek UDP DNS query: /etc/resolv.conf okuma + A sorgusu (musl getaddrinfo, UDP:53)
+- [x] `getaddrinfo` çalışıyor — `DNS OK example.com -> ...` gerçek NIC üzerinden
+  (bunun için 5 UDP/loopback bug'ı düzeltildi: ephemeral port, socket kaydı, recvfrom kaynak
+   adresi, ARP retry, 127/8→lo routing — bkz git log + [[project_ranix_status]])
+- [ ] ndots, search domain, timeout/retry (musl default'ları çalışıyor; ince ayar kaldı)
 - [ ] DNS cache (basit TTL cache, kernel tarafı veya userspace)
 
 ### Debugging & Tracing
@@ -585,6 +591,10 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 - [ ] /tmp yazılabilir ✓; $HOME var; environment variables ✓
 
 ### Sistem olgunluğu
+- [ ] **Kalıcı root (switch_root/pivot_root)** — root şu an initramfs (ramfs, uçucu).
+      ext2/ext4 rw + /mnt auto-mount VAR; eksik: switch_root mekanizması + diske kurulu
+      tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root yapar.)
+      SIRA: ağ tam + SSH/TLS bittikten SONRA (kullanıcı kararı 2026-06-02).
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
 - [ ] timezone: TZ=Europe/Istanbul date → doğru
