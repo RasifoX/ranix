@@ -511,13 +511,16 @@ Bu olmadan "Ranix Debian" hedefi boş laftan ibaret.
 Gerçek donanımda gerçek işler yapabilmek.
 Claude CLI için TLS şart.
 
-### TLS / HTTPS
+### TLS / HTTPS ✅ (2026-06-02, iki arch, gerçek internet)
 
-- [ ] mbedTLS 3.x statik link — kernel değil, userspace
-- [ ] libssl.a + libcrypto.a statik binary'lere link ediliyor
-- [ ] curl statik derleme: curl --ssl-native (mbedTLS backend)
-- [ ] `curl https://api.anthropic.com` çalışıyor
-- [ ] SNI (Server Name Indication) — modern HTTPS siteler
+- [x] mbedTLS 3.6.2 statik cross-build — userspace (Makefile rule, .cache, bash gibi)
+- [x] TLS handshake + HTTPS GET çalışıyor → `HTTP/1.1 200 OK` gerçek sunucudan
+      (aarch64 TLS 1.2, x86 TLS 1.3; ECDHE + ChaCha20-Poly1305). test_tls diagnostic.
+- [x] SNI (mbedtls_ssl_set_hostname) çalışıyor
+- [x] gerçek-internet TCP doğrulandı: HTTP GET (off-link routing→gateway→NAT), test_http
+- [ ] curl statik (mbedTLS backend) — bir sonraki (binary diagnostic var, curl portu kaldı)
+- [ ] cert doğrulama (CA bundle + time) — şimdilik VERIFY_NONE (handshake/crypto kanıtlandı)
+- KRİTİK enabler: TCP short-read bug fix (986a96e) — TLS record framing'i bu açtı
 
 ### Ağ konfigürasyonu — DHCP ✅ (2026-06-02)
 - [x] DHCP client: DISCOVER/OFFER/REQUEST/ACK, boot'ta NIC'i konfigüre (ip/gw/mask), iki arch
