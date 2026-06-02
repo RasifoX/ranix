@@ -123,6 +123,13 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 #define TCP_CWND_MAX   65535u
 #define TCP_RETX_GIVEUP 8
 
+/* Serialises every TCP state-machine mutation — RX processing (tcp_rx, tcp_tick)
+ * and the syscalls (connect/send/close) — so a close() and an incoming FIN can't
+ * clobber tcp_state when RX runs on another CPU. Strict order: tcp_lock →
+ * recv_lock → sched_lock. NEVER held across a sleep; blocking waits use recv_lock
+ * and re-check state (an aligned int read) after each wakeup. */
+static spinlock_t tcp_lock = SPINLOCK_INIT;
+
 /* sequence numbers a segment consumes (SYN and FIN each count as one) */
 static uint32_t seg_span(const tcp_seg_t *g)
 {
@@ -515,6 +522,9 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         skb_free(skb); return;
     }
 
+    /* serialise the per-socket state machine against the syscalls */
+    uint64_t tl = spin_lock_irq(&tcp_lock);
+
     /* RST handling */
     if (flags & TCP_RST) {
         s->tcp_state = TCP_CLOSED;
@@ -525,6 +535,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         spin_unlock_irq(&s->recv_lock, lf);
         if (w) task_wake(w);
         tcp_wake_close(s);
+        spin_unlock_irq(&tcp_lock, tl);
         skb_free(skb); return;
     }
 
@@ -685,6 +696,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     default: break;
     }
 
+    spin_unlock_irq(&tcp_lock, tl);
     skb_free(skb);
 }
 
@@ -693,6 +705,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 int tcp_connect(socket_t *s)
 {
     s->dev = net_route_dev(s->remote_ip);
+    uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();
     if (!s->local_ip)   s->local_ip   = s->dev->ip;
     s->snd_nxt   = 0xAB000000;
@@ -700,42 +713,51 @@ int tcp_connect(socket_t *s)
     s->rcv_nxt   = 0;
     s->snd_wnd   = 1024;
     s->tcp_state = TCP_SYN_SENT;
+    spin_unlock_irq(&tcp_lock, tl);
     sock_register(s);
 
-    /* ARP retry loop: ip_tx returns -1 on ARP miss; poll until resolved */
+    /* ARP retry loop: ip_tx returns -1 on ARP miss; poll until resolved. Must
+     * run WITHOUT tcp_lock — net_poll re-enters tcp_rx which takes it. */
     int rc = -1;
     for (int i = 0; i < 64 && rc == -1; i++) {
         rc = tcp_tx_seg(s, TCP_SYN, s->snd_nxt, 0, NULL, 0);
         if (rc == -1) net_poll();
     }
-    seg_enqueue(s, TCP_SYN, s->snd_nxt, NULL, 0);
-    s->snd_nxt++;
+    tl = spin_lock_irq(&tcp_lock);
+    if (s->tcp_state == TCP_SYN_SENT) {   /* still connecting — SYN-ACK may have raced in */
+        seg_enqueue(s, TCP_SYN, s->snd_nxt, NULL, 0);
+        s->snd_nxt++;
+    }
+    spin_unlock_irq(&tcp_lock, tl);
     return 0;
 }
 
 int tcp_send(socket_t *s, const void *data, uint16_t len)
 {
-    if (s->tcp_state != TCP_ESTABLISHED) return -107; /* ENOTCONN */
+    uint64_t tl = spin_lock_irq(&tcp_lock);
+    if (s->tcp_state != TCP_ESTABLISHED) { spin_unlock_irq(&tcp_lock, tl); return -107; }
 
     /* effective window = min(congestion, peer-advertised); send while it has room */
     uint32_t in_flight = s->snd_nxt - s->snd_una;
     uint32_t wnd = s->cwnd < s->snd_wnd ? s->cwnd : s->snd_wnd;
-    if (in_flight >= wnd) return -11; /* window full — caller blocks and retries */
+    if (in_flight >= wnd) { spin_unlock_irq(&tcp_lock, tl); return -11; }
 
     uint32_t room = wnd - in_flight;
     uint16_t seglen = len > TCP_MSS ? TCP_MSS : len;
     if (seglen > room) seglen = (uint16_t)room;
-    if (seglen == 0) return -11;
+    if (seglen == 0) { spin_unlock_irq(&tcp_lock, tl); return -11; }
 
     int rc = tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, seglen);
-    if (rc < 0) return rc;
+    if (rc < 0) { spin_unlock_irq(&tcp_lock, tl); return rc; }
     seg_enqueue(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, seglen);
     s->snd_nxt += seglen;
+    spin_unlock_irq(&tcp_lock, tl);
     return (int)seglen;
 }
 
 int tcp_close(socket_t *s)
 {
+    uint64_t tl = spin_lock_irq(&tcp_lock);
     if (s->tcp_state == TCP_ESTABLISHED) {
         tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
         seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
@@ -747,6 +769,7 @@ int tcp_close(socket_t *s)
         s->snd_nxt++;
         s->tcp_state = TCP_LAST_ACK;
     }
+    spin_unlock_irq(&tcp_lock, tl);
     return 0;
 }
 
@@ -754,7 +777,9 @@ int tcp_listen(socket_t *s, int backlog)
 {
     (void)backlog;
     if (!s->local_port) return -22;
+    uint64_t tl = spin_lock_irq(&tcp_lock);
     s->tcp_state = TCP_LISTEN;
+    spin_unlock_irq(&tcp_lock, tl);
     sock_register(s);
     return 0;
 }
@@ -768,8 +793,9 @@ void tcp_tick(void)
         if (!s || s->type != SOCK_STREAM) continue;
         if (s->retx_deadline == 0 || kernel_ticks < s->retx_deadline) continue;
 
+        uint64_t tl = spin_lock_irq(&tcp_lock);   /* serialise vs RX + syscalls */
         tcp_seg_t *g = s->unacked_head;
-        if (!g) { s->retx_deadline = 0; continue; }
+        if (!g) { s->retx_deadline = 0; spin_unlock_irq(&tcp_lock, tl); continue; }
 
         s->retx_count++;
         if (s->retx_count > TCP_RETX_GIVEUP) {
@@ -781,6 +807,7 @@ void tcp_tick(void)
             process_t *w = s->recv_waiter; s->recv_waiter = NULL;
             spin_unlock_irq(&s->recv_lock, lf);
             if (w) task_wake(w);
+            spin_unlock_irq(&tcp_lock, tl);
             continue;
         }
 
@@ -796,5 +823,6 @@ void tcp_tick(void)
         s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
         if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;
         s->retx_deadline = kernel_ticks + s->rto;
+        spin_unlock_irq(&tcp_lock, tl);
     }
 }
