@@ -278,6 +278,8 @@ void kernel_main(void)
 	extern void smp_init(void);
 	smp_init();
 	board_drivers_register();
+	extern void net_dhcp_all(void);
+	net_dhcp_all();
 	extern void fbdev_init(void);
 	fbdev_init();
 	extern void input_core_init(void);

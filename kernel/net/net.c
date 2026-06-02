@@ -227,3 +227,19 @@ void net_init(void)
     lo->net_ns  = &init_net_ns;
     net_register(lo);
 }
+
+/* Configure every real NIC over DHCP, falling back to its driver static IP. Run
+ * after the drivers register (NICs present) and the VFS is up. */
+void net_dhcp_all(void)
+{
+    extern int dhcp_configure(netdev_t *dev, uint32_t *out_dns);
+    for (int i = 0; i < ndevs; i++) {
+        netdev_t *d = devs[i];
+        if (!d->poll || (d->ip >> 24) == 127) continue;   /* skip loopback */
+        uint32_t dns = 0;
+        if (dhcp_configure(d, &dns) != 0)
+            kprintf("dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
+                    (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
+                    (d->ip >> 8) & 0xff, d->ip & 0xff);
+    }
+}
