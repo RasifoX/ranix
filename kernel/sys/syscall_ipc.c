@@ -494,8 +494,7 @@ static int mqfd_close(vfs_file_t *file)
     uint64_t f = spin_lock_irq(&mq_lock);
     mq->refs--;
     spin_unlock_irq(&mq_lock, f);
-    kfree(file->inode);
-    kfree(file);
+    file->inode->priv = NULL;   /* mq is refcounted/pool-managed; vfs_close frees inode + file */
     return 0;
 }
 
@@ -551,7 +550,7 @@ static long sys_mq_open(const char *uname, int oflag, mode_t mode, mq_attr_t *at
     if (!vf) { kfree(in); return -12; }
     __builtin_memset(vf, 0, sizeof(*vf));
     vf->inode    = in;
-    vf->refcount = 1;
+    vf->refcount = 0;   /* fd_alloc takes the +1; close() frees */
     vf->flags    = oflag & O_NONBLOCK;
 
     process_t *p = task_current();
