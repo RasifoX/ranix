@@ -1017,6 +1017,54 @@ static long sys_fork(void)
 	return (long)proc_fork(0, 0);
 }
 
+/* process_vm_readv/writev: copy between this task and another process's address
+ * space, walking the local/remote iovecs in lockstep. Same vm-switch + bounce
+ * mechanism as /proc/<pid>/mem (a remote page is read under the target's root,
+ * then copied out under ours). */
+static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
+                           const iovec_t *uriov, unsigned long rcnt,
+                           unsigned long flags, int write)
+{
+	(void)flags;
+	if (lcnt > 16 || rcnt > 16) return -22;        /* EINVAL (we cap at 16 iovecs) */
+	process_t *t = proc_find(pid);
+	if (!t || !t->vm) return -3;                   /* ESRCH */
+	process_t *cur = task_current();
+	if (cur->euid != 0 && cur->euid != t->euid) return -1;   /* EPERM */
+
+	iovec_t liov[16], riov[16];
+	if (copy_from_user(liov, uliov, lcnt * sizeof(iovec_t)) != 0) return -14;
+	if (copy_from_user(riov, uriov, rcnt * sizeof(iovec_t)) != 0) return -14;
+
+	char tmp[256];
+	long total = 0;
+	unsigned long li = 0, ri = 0;
+	size_t lo = 0, ro = 0;
+	while (li < lcnt && ri < rcnt) {
+		if (lo >= liov[li].iov_len) { li++; lo = 0; continue; }
+		if (ro >= riov[ri].iov_len) { ri++; ro = 0; continue; }
+		size_t n = liov[li].iov_len - lo;
+		size_t rrem = riov[ri].iov_len - ro;
+		if (rrem < n) n = rrem;
+		if (n > sizeof(tmp)) n = sizeof(tmp);
+		uint64_t lva = (uint64_t)liov[li].iov_base + lo;
+		uint64_t rva = (uint64_t)riov[ri].iov_base + ro;
+		if (write) {
+			if (copy_from_user(tmp, (void *)lva, n) != 0) break;
+			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			memcpy((void *)rva, tmp, n);
+			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+		} else {
+			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			memcpy(tmp, (void *)rva, n);
+			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+			if (copy_to_user((void *)lva, tmp, n) != 0) break;
+		}
+		lo += n; ro += n; total += (long)n;
+	}
+	return total;
+}
+
 static long sys_vfork(uint64_t newsp)
 {
 	/* vfork-as-fork: give the child its own address space instead of

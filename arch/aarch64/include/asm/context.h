@@ -214,8 +214,11 @@ typedef struct {
 #define SYS_ARCH_MSYNC             227
 #define SYS_ARCH_MLOCK             228
 #define SYS_ARCH_MUNLOCK           229
+#define SYS_ARCH_FADVISE64         223
 #define SYS_ARCH_MADVISE           233
 #define SYS_ARCH_ACCEPT4           242
+#define SYS_ARCH_PROCESS_VM_READV  270
+#define SYS_ARCH_PROCESS_VM_WRITEV 271
 #define SYS_ARCH_WAIT4             260
 #define SYS_ARCH_PRLIMIT64         261
 #define SYS_ARCH_SETNS             268

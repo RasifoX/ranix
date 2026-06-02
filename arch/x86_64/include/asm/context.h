@@ -71,6 +71,9 @@ typedef struct {
 #define SYS_ARCH_MREMAP            25
 #define SYS_ARCH_MSYNC             26
 #define SYS_ARCH_MADVISE           28
+#define SYS_ARCH_FADVISE64         221
+#define SYS_ARCH_PROCESS_VM_READV  310
+#define SYS_ARCH_PROCESS_VM_WRITEV 311
 #define SYS_ARCH_SHMGET            29
 #define SYS_ARCH_SHMAT             30
 #define SYS_ARCH_SHMCTL            31
