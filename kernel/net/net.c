@@ -132,6 +132,8 @@ netdev_t *net_dev_by_ip(uint32_t ip)
 
 /* ── RX queue ────────────────────────────────────────────── */
 
+void net_rx_wake(void);
+
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
 {
     skb->next = NULL;
@@ -140,6 +142,7 @@ void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
     else              dev->rx_head = skb;
     dev->rx_tail = skb;
     spin_unlock_irq(&dev->rx_lock, f);
+    net_rx_wake();   /* event-driven: process now (TCP state machine is lock-serialised) */
 }
 
 skb_t *netdev_rx_dequeue(netdev_t *dev)
@@ -184,6 +187,35 @@ void net_poll(void)
     f = spin_lock_irq(&net_poll_lock);
     net_poll_busy = 0;
     spin_unlock_irq(&net_poll_lock, f);
+}
+
+/* ── event-driven RX softirq thread ──────────────────────────
+ * RX runs in a dedicated kernel thread woken the instant a packet is enqueued,
+ * instead of waiting for the idle loop's 100Hz net_poll — this is what lifts
+ * loopback/LAN throughput. Safe now that the TCP state machine is serialised by
+ * tcp_lock: the thread's tcp_rx can't clobber a concurrent close()/send(). */
+static process_t *net_rx_task;
+static volatile int net_rx_pending;
+static spinlock_t  net_rx_lock = SPINLOCK_INIT;
+
+void net_rx_wake(void)
+{
+    uint64_t f = spin_lock_irq(&net_rx_lock);
+    net_rx_pending = 1;
+    process_t *t = net_rx_task;
+    spin_unlock_irq(&net_rx_lock, f);
+    if (t) task_wake(t);
+}
+
+static void net_rx_thread(void)
+{
+    net_rx_task = task_current();
+    for (;;) {
+        net_poll();
+        uint64_t f = spin_lock_irq(&net_rx_lock);
+        if (net_rx_pending) { net_rx_pending = 0; spin_unlock_irq(&net_rx_lock, f); continue; }
+        task_sleep_unlock(&net_rx_lock, f);
+    }
 }
 
 /* ── checksum ────────────────────────────────────────────── */
@@ -271,6 +303,8 @@ void net_init(void)
         for (const char *p = db; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');
         net_drop_n = n;
     }
+
+    proc_create("net_rx", net_rx_thread);   /* event-driven RX softirq */
 }
 
 /* Point /etc/resolv.conf at the DHCP-supplied nameserver, replacing the static
