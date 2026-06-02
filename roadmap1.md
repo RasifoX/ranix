@@ -62,14 +62,14 @@ Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü
 - [x] recv() / send() (MSG_PEEK, MSG_WAITALL); SO_REUSEADDR; blocking connect timeout
 - [x] nc/wget/echo_server testleri geçiyor
 
-### TCP İyileştirmeler (v0.9 — "ağ tam"ın son ayağı, ŞU AN)
-- [ ] TCP congestion control: Reno (slow start, fast retransmit, fast recovery)
-- [ ] receive window scaling (RFC 1323)
-- [ ] SRTT/RTO hesaplama (Karn algoritması) ← şu an yapılıyor (RFC 6298 + exp backoff)
-- [ ] out-of-order segment buffer
-- [ ] SO_KEEPALIVE + TCP_KEEPIDLE/INTVL/CNT
-- [ ] SO_REUSEPORT
-- [ ] TCP_NODELAY (Nagle disable)
+### TCP İyileştirmeler ✅ (v0.9 "ağ tam" son ayağı, 2026-06-02)
+- [x] TCP congestion control: Reno (slow start, congestion avoidance, fast retransmit/recovery)
+- [x] sliding window — çok-segment in-flight (eski stop-and-wait 1seg/RTT yerine min(cwnd,rwnd))
+- [x] SRTT/RTO hesaplama (Karn + RFC 6298 + exp backoff)
+- [x] out-of-order segment buffer (reassembly; drop+re-ACK yerine tampon)
+- [x] SO_KEEPALIVE / SO_REUSEPORT / TCP_NODELAY — setsockopt kabul ediyor (Nagle yok zaten)
+- [ ] receive window scaling (RFC 1323) — sadece >64KB pencere için; rcv_wnd 8KB iken gereksiz
+- [x] KRİTİK: write() >MSS byte'ı sessizce düşürüyordu — düzeltildi (test_tcpbulk korur)
 
 ---
 
