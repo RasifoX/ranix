@@ -184,8 +184,11 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_t b = {buf, sz};
 	if (!p) { pb_str(&b, "Name:\t(gone)\n"); return (int)(sz - b.rem); }
 	pb_str(&b, "Name:\t"); pb_str(&b, p->name); pb_char(&b, '\n');
-	pb_str(&b, "State:\tR (running)\n");
-	pb_str(&b, "Tgid:\t"); pb_u64(&b, p->pid); pb_char(&b, '\n');
+	const char *st = (p->state == PROC_SLEEPING) ? "S (sleeping)"
+	               : (p->state == PROC_ZOMBIE || p->state == PROC_DEAD) ? "Z (zombie)"
+	               : "R (running)";
+	pb_str(&b, "State:\t"); pb_str(&b, st); pb_char(&b, '\n');
+	pb_str(&b, "Tgid:\t"); pb_u64(&b, p->tgid ? p->tgid : p->pid); pb_char(&b, '\n');
 	pb_str(&b, "Pid:\t");  pb_u64(&b, p->pid); pb_char(&b, '\n');
 	pb_str(&b, "PPid:\t"); pb_u64(&b, p->ppid); pb_char(&b, '\n');
 	pb_str(&b, "Uid:\t");
@@ -204,8 +207,19 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 		pb_u64(&b, p->groups[_i]);
 	}
 	pb_char(&b, '\n');
+	pb_str(&b, "VmSize:\t"); pb_u64(&b, (p->brk ? p->brk : 0) / 1024); pb_str(&b, " kB\n");
 	pb_str(&b, "VmRSS:\t"); pb_u64(&b, 64); pb_str(&b, " kB\n");
 	pb_str(&b, "Threads:\t1\n");
+	uint64_t sigign = 0, sigcgt = 0;
+	for (int _i = 0; _i < NSIG; _i++) {
+		void *h = (void *)p->sig_actions[_i].sa_handler;
+		if ((uintptr_t)h == 1) sigign |= (1UL << _i);
+		else if (h)            sigcgt |= (1UL << _i);
+	}
+	pb_str(&b, "SigPnd:\t"); pb_hex16(&b, p->sig_pending); pb_char(&b, '\n');
+	pb_str(&b, "SigBlk:\t"); pb_hex16(&b, p->sig_mask);    pb_char(&b, '\n');
+	pb_str(&b, "SigIgn:\t"); pb_hex16(&b, sigign);         pb_char(&b, '\n');
+	pb_str(&b, "SigCgt:\t"); pb_hex16(&b, sigcgt);         pb_char(&b, '\n');
 	pb_str(&b, "CapInh:\t"); pb_hex16(&b, p->cap_inheritable); pb_char(&b, '\n');
 	pb_str(&b, "CapPrm:\t"); pb_hex16(&b, p->cap_permitted);   pb_char(&b, '\n');
 	pb_str(&b, "CapEff:\t"); pb_hex16(&b, p->cap_effective);   pb_char(&b, '\n');
