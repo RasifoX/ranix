@@ -178,7 +178,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_siguncatch
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_siguncatch
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
