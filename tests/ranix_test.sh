@@ -338,6 +338,7 @@ check "c-ptysweep"   "OK"  "$(timeout 10 /bin/test_ptysweep 2>/dev/null | tail -
 check "c-envsweep"   "OK"  "$(timeout 10 /bin/test_envsweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
+check "c-tcp-bulk"   "OK"  "$(timeout 30 /bin/test_tcpbulk 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
 check "c-uts-ns"     "uts-ok" "$(timeout 10 /bin/test_uts 2>/dev/null)"
 check "c-setns"      "setns-ok" "$(timeout 10 /bin/test_setns 2>/dev/null)"
