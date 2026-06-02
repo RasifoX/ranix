@@ -531,6 +531,43 @@ static long sys_sysinfo(void *info)
  * ───────────────────────────────────────────────────────────────────────── */
 static long sys_execve(const char *path, char * const argv[], char * const envp[]);
 
+/* ── pidfd (glibc 2.36+) ─────────────────────────────────────────────────────
+ * A file descriptor referring to a process: the pid lives in the inode and
+ * pidfd_send_signal translates into the normal kill path. (poll-on-exit is not
+ * wired yet; the signal-sending use that glibc relies on works.) */
+/* the pid is stored inline in priv (not heap), so clear it before teardown
+ * frees the inode — otherwise fd_table_destroy would kfree a bogus pointer */
+static int pidfd_close_vfs(vfs_file_t *f) { if (f->inode) f->inode->priv = NULL; return 0; }
+static vfs_fops_t pidfd_fops = { .close = pidfd_close_vfs };
+
+static long sys_pidfd_open(pid_t pid, unsigned int flags)
+{
+	(void)flags;
+	if (pid <= 0 || !proc_find(pid)) return -3;   /* ESRCH */
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return -12;
+	memset(in, 0, sizeof(*in));
+	in->fops     = &pidfd_fops;
+	in->priv     = (void *)(uint64_t)pid;
+	in->refcount = 1;
+	vfs_file_t *f = kmalloc(sizeof(*f));
+	if (!f) { kfree(in); return -12; }
+	memset(f, 0, sizeof(*f));
+	f->inode    = in;
+	f->refcount = 0;   /* fd_alloc takes the +1 */
+	int fd = fd_alloc(task_current()->fds, f);
+	if (fd < 0) { kfree(f); kfree(in); return -12; }
+	return fd;
+}
+
+static long sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned int flags)
+{
+	(void)info; (void)flags;
+	vfs_file_t *f = fd_get(task_current()->fds, pidfd);
+	if (!f || !f->inode || f->inode->fops != &pidfd_fops) return -9; /* EBADF */
+	return sys_kill((pid_t)(uint64_t)f->inode->priv, sig);
+}
+
 /* execveat(dirfd, path, argv, envp, flags): resolve the dirfd-relative (or
  * AT_EMPTY_PATH) path to an absolute one, then run the normal execve. */
 static long sys_execveat(int dirfd, const char *path, char * const argv[],
