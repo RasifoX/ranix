@@ -22,6 +22,8 @@
 #include <kernel/net/udp.h>
 #include <kernel/net/icmp.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/ipv6.h>
+#include <kernel/net/icmpv6.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/net.h>
 #include <kernel/config.h>

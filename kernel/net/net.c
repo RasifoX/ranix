@@ -1,5 +1,6 @@
 #include <kernel/net/net.h>
 #include <kernel/net/eth.h>
+#include <kernel/net/ipv6.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
@@ -87,6 +88,7 @@ net_namespace_t *net_ns_create(void)
     memcpy(ns->lo.name, "lo", 3);
     ns->lo.ip      = 0x7f000001;       /* 127.0.0.1, isolated to this ns */
     ns->lo.mask    = 0xff000000;
+    ns->lo.ip6     = in6addr_loopback; /* ::1 */
     ns->lo.tx      = lo_tx;
     ns->lo.rx_lock = (spinlock_t)SPINLOCK_INIT;
     ns->lo.net_ns  = ns;
@@ -96,6 +98,11 @@ net_namespace_t *net_ns_create(void)
 
 void net_register(netdev_t *dev)
 {
+    /* every device gets an EUI-64 link-local (fe80::); a real NIC also picks up
+     * a global address later via SLAAC. Loopback keeps ::1 set by the caller. */
+    if (!in6_is_ll(&dev->ip6_ll))
+        ipv6_linklocal_from_mac(dev->mac, &dev->ip6_ll);
+
     if (ndevs >= devs_cap) {
         int nc = devs_cap ? devs_cap * 2 : NETDEV_INIT_CAP;
         netdev_t **nb = kmalloc((size_t)nc * sizeof(netdev_t *));
@@ -290,6 +297,7 @@ void net_init(void)
     memcpy(lo->name, "lo", 3);
     lo->ip      = 0x7f000001;        /* 127.0.0.1 */
     lo->mask    = 0xff000000;        /* 127/8 */
+    lo->ip6     = in6addr_loopback;  /* ::1 */
     lo->tx      = lo_tx;
     lo->rx_lock = (spinlock_t)SPINLOCK_INIT;
     lo->net_ns  = &init_net_ns;
