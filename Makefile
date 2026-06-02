@@ -179,7 +179,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls userspace/test_tcpperf
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -310,7 +310,7 @@ $(MBEDTLS_A):
 	@echo "[OK] mbedTLS built ($(ARCH))"
 
 # HTTPS client diagnostic — statically links mbedTLS
-userspace/test_tls: userspace/test_tls.c $(MBEDTLS_A)
+userspace/test_tls: userspace/test_tls userspace/test_tcpperf.c $(MBEDTLS_A)
 	$(MUSL_CC) -static -O2 -I$(MBEDTLS_DIR)/include -o $@ $< \
 	    $(MBEDTLS_DIR)/library/libmbedtls.a \
 	    $(MBEDTLS_DIR)/library/libmbedx509.a \
