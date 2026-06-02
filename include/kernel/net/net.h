@@ -19,7 +19,10 @@ static inline uint32_t bswap32(uint32_t v) {
 
 /* ── socket buffer ───────────────────────────────────────── */
 
-#define SKB_HEADROOM  64
+/* Room to prepend the full header stack without underflowing buf[]: Ethernet
+ * (14) + IP (20) + TCP with the largest option set we emit (20 + 40 = 60) = 94.
+ * 128 leaves margin and keeps the buffer nicely aligned. */
+#define SKB_HEADROOM  128
 #define SKB_DATA_MAX  1536
 
 typedef struct skb {
