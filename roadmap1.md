@@ -239,7 +239,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [x] IPI: smp_ipi_resched → remote CPU uyandırma (GICv2 SGI / x86 IPI)
 - [x] load balancing: pick_cpu — en boş CPU'ya push
 - [x] sched_setaffinity / sched_getaffinity (byte-count fix)
-- [ ] SCHED_FIFO / SCHED_RR — real-time scheduling class
+- [x] SCHED_FIFO / SCHED_RR — real-time scheduling class ✅ (sched_setscheduler ailesi, RT runqueue-önce)
 
 ### SMP kararlılık düzeltmeleri (bu oturum — 2026-05-29)
 - [x] **CLONE_PARENT_SETTID**: clone artık ptid (arg2) yazıyor. Eksikken worker
@@ -317,7 +317,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 - [ ] TLB shootdown IPI (fork/mmap sonrası remote flush) — şu an her vm_switch'te
       tam `tlbi vmalle1is` (ağır ama doğru)
 - [ ] per-CPU variables (this_cpu_read/write)
-- [ ] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR)
+- [x] atomic_t + atomic64_t gerçek implementasyon (LOCK prefix / LDXR-STXR) ✅ (kernel/sync.c)
 
 ### x86_64 RAM genişletme (→ Linux seviyesi, bkz Kapasite hedefleri)
 - [x] boot.S direct map: 4 entry → **512 entry (512 GB)** ✅; **1G huge page** ✅ (kullanıcı MAP_HUGE_1GB + direct-map). ≥128TB/5-level kaldı.
@@ -414,8 +414,8 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [ ] /sys/bus/pci/devices — PCI device listing
 
 ### Seccomp
-- [ ] prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT)
-- [ ] seccomp(SECCOMP_SET_MODE_FILTER, ...) — BPF filtre
+- [x] prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) ✅
+- [x] seccomp(SECCOMP_SET_MODE_FILTER, ...) — BPF filtre ✅ (cBPF interpreter)
 
 ### Test hedefleri
 - [ ] unshare --pid --fork --mount-proc /bin/sh çalışıyor
@@ -445,24 +445,24 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [x] ld-musl-<arch>.so.1 initramfs /lib/'de (toolchain libc.so kopyalanıyor)
 - [x] R_*_RELATIVE / GLOB_DAT / JUMP_SLOT — **ld.so yapıyor** (kernel'de değil)
 - [x] TLS: x86_64 FS, aarch64 TPIDR_EL0 (zaten var; dinamik binary'lerde ld.so kuruyor)
-- [ ] execveat — dirfd + relative path ile exec
-- [ ] R_*_IRELATIVE — IFUNC (musl kullanmaz; glibc gelince ld.so tarafında gerekli)
+- [x] execveat — dirfd + relative path ile exec ✅
+- [x] R_*_IRELATIVE — IFUNC (musl kullanmaz; glibc gelince ld.so tarafında gerekli) ✅ (dynamic glibc çalışıyor)
 - [ ] PT_GNU_RELRO mprotect(PROT_READ) — ld.so yapar; bizde mprotect var, doğrula
 - [x] **dinamik bash** — bash dinamik + shared libc, tüm 221-test suite'ini dinamik bash yürütüyor (init `/bin/bash /test.sh`). + mprotect VMA-split fix (RELRO write-strip bug'ı)
 - [x] **dlopen / dlsym / dlclose** + load-time multi-DSO — libfoo.so (test_sharedlib + test_dlopen), iki arch ✅
 
 ### mmap & memory tamamlama
-- [ ] MAP_FIXED güvenilir (şu an temel var)
-- [ ] mremap temel destek
+- [x] MAP_FIXED güvenilir (şu an temel var) ✅ (2026-06-03 vma_clip overlap-replace)
+- [x] mremap temel destek ✅
 - [ ] MAP_POPULATE — prefault pages
-- [ ] msync — MAP_SHARED dirty page flush
+- [x] msync — MAP_SHARED dirty page flush ✅
 - [ ] MAP_GROWSDOWN thread stack — SIGSEGV yerine otomatik büyüme
 
 ### auxv tamamlama
 - [ ] AT_HWCAP doğru değer: x86_64'te CPUID'den SSE2/AVX bitlerini oku; aarch64'te ID_AA64ISAR0_EL1 oku
 - [ ] AT_HWCAP2 — x86_64 AVX512 ve aarch64 ek feature'ları
 - [ ] AT_SYSINFO_EHDR — VDSO load adresi (VDSO v0.9'da; şimdilik 0)
-- [ ] AT_BASE — interpreter load adresi (dinamik linker yüklenince düzeltilmeli)
+- [x] AT_BASE — interpreter load adresi (dinamik linker yüklenince düzeltilmeli) ✅ (proc_exec+execve veriyor)
 
 ### glibc için gerekli /proc eksikleri
 - [x] /proc/self/exe → readlink (+ /proc/<pid>/{cwd,root,comm,ns/*}) (2026-06-01)
@@ -471,12 +471,12 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [ ] /proc/self/status: Tgid var; Threads, SigBlk, SigIgn satırları ekle
 
 ### glibc için gerekli yeni syscall'lar
-- [ ] clone3 — glibc 2.36+ thread creation (clone'a graceful fallback var ama olsun)
+- [x] clone3 — glibc 2.36+ thread creation (clone'a graceful fallback var ama olsun) ✅ (+CLONE_VFORK posix_spawn)
 - [ ] rseq — glibc 2.35+ restartable sequences (register etmezse çalışmaya devam eder)
-- [ ] pidfd_open / pidfd_send_signal — glibc 2.36+ thread sync
-- [ ] fadvise64 / posix_fadvise — memory hint (stub yeterli)
-- [ ] process_vm_readv / process_vm_writev — cross-process memory (stub)
-- [ ] prlimit64 — setrlimit64 + getrlimit64 kombinasyonu
+- [x] pidfd_open / pidfd_send_signal — glibc 2.36+ thread sync ✅
+- [x] fadvise64 / posix_fadvise — memory hint (stub yeterli) ✅ (2026-06-03, no-op hint)
+- [x] process_vm_readv / process_vm_writev — cross-process memory (stub) ✅ (2026-06-03, gerçek impl — iovec+vm-switch)
+- [x] prlimit64 — setrlimit64 + getrlimit64 kombinasyonu ✅
 
 ### VDSO (temel)
 - [ ] clock_gettime(CLOCK_REALTIME/MONOTONIC) VDSO'dan — syscall overhead yok
@@ -568,7 +568,7 @@ Claude CLI için TLS şart.
 - [ ] strace çalışıyor — ptrace tabanlı, statik derlenmiş
 - [ ] gdb temel breakpoint + step (dinamik linker ile birlikte)
 - [ ] core dump: SIGSEGV'de core file (/proc/sys/kernel/core_pattern)
-- [ ] /proc/[pid]/mem — cross-process memory R/W (gdb için)
+- [x] /proc/[pid]/mem — cross-process memory R/W (gdb için) ✅ (procfs_mem_rw)
 
 ### ACPI (x86_64)
 - [x] RSDP/RSDT/XSDT parse — ACPI table discovery ✅ (arch/x86_64/acpi.c)
