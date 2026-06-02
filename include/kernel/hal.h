@@ -83,6 +83,7 @@ void arch_user_access_end(void);
 
 /* Safe user memory access */
 int  access_ok(const void *addr, size_t n);
+int  user_pages_mapped(const void *addr, size_t n);
 long copy_from_user(void *dst, const void *src, size_t n);
 long copy_to_user(void *dst, const void *src, size_t n);
 long strncpy_from_user(char *dst, const char *src, size_t n);

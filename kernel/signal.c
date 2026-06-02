@@ -143,6 +143,13 @@ void signal_dispatch(arch_context_t *tf)
 	 * the interrupted op with garbage SIMD state and corrupt memory silently.
 	 */
 	uint64_t usp = (tf->sp - 736) & ~15UL;
+	/* If the user stack can't hold the frame (bad/overflowed sp), writing it
+	 * would fault in EL1 and panic. Linux force_sigsegv's the task instead. */
+	if (!access_ok((void *)usp, 736) || !user_pages_mapped((void *)usp, 736)) {
+		p->exit_code = 11; p->killed_by_sig = 1;
+		arch_get_cpu_ctx()->wd_where = "sig:badframe";
+		task_exit();
+	}
 	*(uint64_t *)(usp +   0) = tf->elr;
 	*(uint64_t *)(usp +   8) = tf->regs[30];
 	*(uint64_t *)(usp +  16) = old_mask;
@@ -188,6 +195,13 @@ void signal_dispatch(arch_context_t *tf)
 	 * The FP/SSE state must round-trip or a handler's xmm use corrupts the
 	 * interrupted code's vector registers (same class as the aarch64 bug). */
 	uint64_t usp = (tf->rsp & ~15UL) - 680; /* 8-mod-16 entry; usp+168 is 16-aligned */
+	/* Bad/overflowed user sp: writing the frame would fault in the kernel and
+	 * panic. Force-kill with SIGSEGV like Linux instead. */
+	if (!access_ok((void *)usp, 680) || !user_pages_mapped((void *)usp, 680)) {
+		p->exit_code = 11; p->killed_by_sig = 1;
+		arch_get_cpu_ctx()->wd_where = "sig:badframe";
+		task_exit();
+	}
 	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
 	*(uint64_t *)(usp +   8) = old_mask;
 	*(uint64_t *)(usp +  16) = tf->rip;
