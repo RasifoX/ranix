@@ -400,7 +400,7 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 ### cgroups v2
 - [x] **cgroupfs (cgroup2)** — hierarchy, mkdir subgroups, cgroup.procs; kernel/cgroup.c (512d53a)
 - [x] **PID controller: pids.max / pids.current** — subtree sayımı + fork'ta EAGAIN (fork-bomb koruması) ✅
-- [ ] /sys/fs/cgroup kanonik path (şu an /cgroup; sysfs'in fs/cgroup mountpoint sunması gerek)
+- [x] /sys/fs/cgroup kanonik path (şu an /cgroup; sysfs'in fs/cgroup mountpoint sunması gerek) ✅ (sysfs /sys/fs/cgroup sunuyor)
 - [x] **memory controller: memory.max / memory.current** ✅ — user-page charge (mmap + fault stack/COW), limit aşımı kill (4da2eb0). Not: munmap uncharge exit-granular.
 - [x] **CPU controller: cpu.weight** ✅ — scheduler quantum'una ölçek (ec6baa5); cpu.max (bandwidth throttle) ileride
 - [x] **freezer: cgroup.freeze** ✅ — frozen subtree scheduler'da requeue-skip ile parklanır (a94d1b2)
@@ -409,9 +409,9 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [x] /sys pseudo-fs (vfs_register_fs); /sys/kernel/{ostype,osrelease,hostname}
 - [x] /sys/class/net/<dev>/{address,mtu,operstate}; /sys/block/<dev>/size
 - [x] /sys/devices/system/cpu/{online,possible}
-- [ ] /sys/fs/cgroup (cgroups ile birlikte)
-- [ ] /sys/kernel/mm/transparent_hugepage stub
-- [ ] /sys/bus/pci/devices — PCI device listing
+- [x] /sys/fs/cgroup (cgroups ile birlikte) ✅ (2026-06-03: cgroup.controllers/procs)
+- [x] /sys/kernel/mm/transparent_hugepage stub ✅ (2026-06-03: enabled = always [madvise] never)
+- [x] /sys/bus/pci/devices — PCI device listing ✅ (2026-06-03: ls + vendor/device, x86 6 device)
 
 ### Seccomp
 - [x] prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT) ✅
