@@ -1,5 +1,6 @@
 #include <kernel/net/tcp.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/ipv6.h>
 #include <kernel/net/net.h>
 #include <kernel/net/socket.h>
 #include <kernel/lib/string.h>
@@ -125,6 +126,11 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     if (optlen) memcpy(base + sizeof(tcp_hdr_t), opts, optlen);
 
     th->checksum = 0;
+    if (s->domain == AF_INET6) {
+        in6_addr_t src = ipv6_src_for(s->dev, &s->remote_ip6);
+        th->checksum = ipv6_pseudo_cksum(&src, &s->remote_ip6, IP6_NH_TCP, th, skb->len);
+        return ipv6_tx(s->dev, skb, &s->remote_ip6, IP6_NH_TCP);
+    }
     th->checksum = tcp_cksum(s->local_ip ? s->local_ip : s->dev->ip,
                              s->remote_ip, th, skb->len);
 
@@ -342,13 +348,31 @@ socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t lo
     return NULL;
 }
 
-socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port)
+socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
+                         const in6_addr_t *remote_ip6, uint16_t remote_port)
 {
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->net_ns != ns) continue;
         if (s->type != SOCK_STREAM) continue;
+        if (s->domain != AF_INET6) continue;
+        if (s->local_port  != local_port)  continue;
+        if (s->remote_port != remote_port) continue;
+        if (!in6_eq(&s->remote_ip6, remote_ip6)) continue;
+        return s;
+    }
+    return NULL;
+}
+
+socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int domain)
+{
+    for (int i = 0; i < gsock_cap; i++) {
+        socket_t *s = gsock[i];
+        if (!s) continue;
+        if (s->net_ns != ns) continue;
+        if (s->type != SOCK_STREAM) continue;
+        if (s->domain != domain) continue;
         if (s->tcp_state != TCP_LISTEN) continue;
         if (s->local_port != local_port) continue;
         return s;
@@ -382,7 +406,8 @@ void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len)
 
 /* ── RST sender ──────────────────────────────────────────── */
 
-static void send_rst(netdev_t *dev, ip_hdr_t *iph, tcp_hdr_t *th, uint16_t seglen)
+static void send_rst_v4(netdev_t *dev, uint32_t peer_ip, uint32_t our_ip,
+                        tcp_hdr_t *th, uint16_t seglen)
 {
     skb_t *skb = skb_alloc();
     if (!skb) return;
@@ -402,19 +427,43 @@ static void send_rst(netdev_t *dev, ip_hdr_t *iph, tcp_hdr_t *th, uint16_t segle
     }
     r->data_off = (sizeof(tcp_hdr_t) / 4) << 4;
     r->window   = 0;
-    uint32_t src = ntohl(iph->dst);
-    uint32_t dst = ntohl(iph->src);
-    r->checksum = tcp_cksum(src, dst, r, skb->len);
-    /* fabricate a temporary socket for ip_tx */
-    socket_t tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.dev        = dev;
-    tmp.local_ip   = src;
-    tmp.remote_ip  = dst;
-    tmp.local_port = ntohs(th->dst_port);
-    tmp.remote_port= ntohs(th->src_port);
-    ip_tx(dev, skb, dst, IP_PROTO_TCP);
+    r->checksum = tcp_cksum(our_ip, peer_ip, r, skb->len);
+    ip_tx(dev, skb, peer_ip, IP_PROTO_TCP);
 }
+
+/* IPv6 RST for an unexpected segment. src6/dst6 are the received packet's
+ * addresses; the RST is sent back to src6 with us (dst6) as the source. */
+static void send_rst6(netdev_t *dev, const in6_addr_t *src6, const in6_addr_t *dst6,
+                      tcp_hdr_t *th, uint16_t seglen)
+{
+    skb_t *skb = skb_alloc();
+    if (!skb) return;
+    skb->len = 0;
+
+    tcp_hdr_t *r = (tcp_hdr_t *)skb_push(skb, sizeof(tcp_hdr_t));
+    memset(r, 0, sizeof(tcp_hdr_t));
+    r->src_port = th->dst_port;
+    r->dst_port = th->src_port;
+    if (th->flags & TCP_ACK) {
+        r->seq   = th->ack;
+        r->flags = TCP_RST;
+    } else {
+        r->seq   = 0;
+        r->ack   = htonl(ntohl(th->seq) + seglen);
+        r->flags = TCP_RST | TCP_ACK;
+    }
+    r->data_off = (sizeof(tcp_hdr_t) / 4) << 4;
+    r->window   = 0;
+    r->checksum = ipv6_pseudo_cksum(dst6, src6, IP6_NH_TCP, r, skb->len);
+    ipv6_tx(dev, skb, src6, IP6_NH_TCP);
+}
+
+/* RX addressing, family-tagged so the state machine is shared by v4 and v6. */
+typedef struct {
+    uint8_t    family;
+    uint32_t   src4, dst4;   /* AF_INET, host byte order */
+    in6_addr_t src6, dst6;   /* AF_INET6 */
+} tcp_rxkey_t;
 
 /* ── main RX path ────────────────────────────────────────── */
 
@@ -495,7 +544,7 @@ static void tcp_process_sack(socket_t *s, const tcp_hdr_t *th, uint8_t hlen)
     }
 }
 
-void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
+static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 {
     if (skb->len < (uint16_t)sizeof(tcp_hdr_t)) { skb_free(skb); return; }
 
@@ -505,7 +554,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 
     uint16_t src_port = ntohs(th->src_port);
     uint16_t dst_port = ntohs(th->dst_port);
-    uint32_t src_ip   = ntohl(iph->src);
+    uint32_t src_ip   = key->src4;
     uint32_t seq      = ntohl(th->seq);
     uint32_t ack      = ntohl(th->ack);
     uint8_t  flags    = th->flags;
@@ -514,24 +563,27 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     uint8_t  rx_hlen  = hlen;   /* keep for SACK-block parsing after skb_pull */
     uint32_t rx_tsval = 0, rx_tsecr = 0;
     int      rx_has_ts = tcp_opt_ts(th, hlen, &rx_tsval, &rx_tsecr);
+    int      v6        = (key->family == AF_INET6);
 
     skb_pull(skb, hlen);
     uint16_t dlen = skb->len;
 
     /* find socket */
-    socket_t *s = tcp_sock_find(dev->net_ns, ntohl(iph->dst), dst_port, src_ip, src_port);
+    socket_t *s = v6
+        ? tcp_sock_find6(dev->net_ns, dst_port, &key->src6, src_port)
+        : tcp_sock_find(dev->net_ns, key->dst4, dst_port, src_ip, src_port);
 
     if (!s) {
         /* check for listen socket */
-        socket_t *ls = tcp_listen_find(dev->net_ns, dst_port);
+        socket_t *ls = tcp_listen_find(dev->net_ns, dst_port, key->family);
         if (ls && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
             /* incoming SYN → create new socket, send SYN-ACK */
-            socket_t *ns = sock_alloc(AF_INET, SOCK_STREAM, IP_PROTO_TCP);
+            socket_t *ns = sock_alloc(key->family, SOCK_STREAM, IP_PROTO_TCP);
             if (!ns) { skb_free(skb); return; }
             ns->dev         = dev;
-            ns->local_ip    = ntohl(iph->dst);
+            if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
+            else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
             ns->local_port  = dst_port;
-            ns->remote_ip   = src_ip;
             ns->remote_port = src_port;
             ns->rcv_nxt     = seq + 1;
             ns->snd_nxt     = 0x12340000;
@@ -553,7 +605,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         /* unexpected segment → RST */
         if (!(flags & TCP_RST)) {
             uint16_t seglen = dlen + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
-            send_rst(dev, iph, th, seglen);
+            if (v6) send_rst6(dev, &key->src6, &key->dst6, th, seglen);
+            else    send_rst_v4(dev, key->src4, key->dst4, th, seglen);
         }
         skb_free(skb); return;
     }
@@ -603,7 +656,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
             /* move to listen socket's accept queue */
-            socket_t *ls = tcp_listen_find(s->net_ns, s->local_port);
+            socket_t *ls = tcp_listen_find(s->net_ns, s->local_port, s->domain);
             if (ls) {
                 /* enqueue on the listener's accept list and wake the acceptor —
                  * all under ls->recv_lock so it can't race accept()'s dequeue */
@@ -740,14 +793,29 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     skb_free(skb);
 }
 
+void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
+{
+    tcp_rxkey_t key = { .family = AF_INET,
+                        .src4 = ntohl(iph->src), .dst4 = ntohl(iph->dst) };
+    tcp_input(dev, skb, &key);
+}
+
+void tcp6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
+{
+    tcp_rxkey_t key = { .family = AF_INET6, .src6 = ip6->src, .dst6 = ip6->dst };
+    tcp_input(dev, skb, &key);
+}
+
 /* ── public API ──────────────────────────────────────────── */
 
 int tcp_connect(socket_t *s)
 {
-    s->dev = net_route_dev(s->remote_ip);
+    s->dev = (s->domain == AF_INET6) ? net_route_dev6(&s->remote_ip6)
+                                     : net_route_dev(s->remote_ip);
     uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();
-    if (!s->local_ip)   s->local_ip   = s->dev->ip;
+    if (s->domain == AF_INET6) s->local_ip6 = ipv6_src_for(s->dev, &s->remote_ip6);
+    else if (!s->local_ip)     s->local_ip  = s->dev->ip;
     s->snd_una   = 0xAB000000;
     s->snd_nxt   = s->snd_una + 1;   /* SYN consumes one seq — advance now so a
                                       * SYN-ACK racing in (fast net thread) matches */

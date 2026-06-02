@@ -335,10 +335,17 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
         return 0;
     }
 
-    sockaddr_in_t sa;
-    if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
-    s->remote_ip   = ntohl(sa.sin_addr);
-    s->remote_port = ntohs(sa.sin_port);
+    if (family == AF_INET6) {
+        sockaddr_in6_t sa6;
+        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+        s->remote_ip6  = sa6.sin6_addr;
+        s->remote_port = ntohs(sa6.sin6_port);
+    } else {
+        sockaddr_in_t sa;
+        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+        s->remote_ip   = ntohl(sa.sin_addr);
+        s->remote_port = ntohs(sa.sin_port);
+    }
     if (s->type == SOCK_DGRAM) return 0;
     if (s->type != SOCK_STREAM) return -38;
     if (!s->dev) return -101; /* ENETUNREACH — no network device to reach the peer */
