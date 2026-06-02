@@ -192,6 +192,61 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig);
 #include "sys/syscall_mm.c"
 #include "sys/syscall_sig.c"
 
+/* ── seccomp BPF (cBPF subset) ───────────────────────────────────────────────
+ * Runs the installed classic-BPF program over a seccomp_data record and maps
+ * the SECCOMP_RET action onto our dispatch decision: <0 ALLOW, 0 KILL, >0 errno. */
+struct sock_filter { uint16_t code; uint8_t jt, jf; uint32_t k; };
+struct seccomp_data { uint32_t nr; uint32_t arch; uint64_t instruction_pointer; uint64_t args[6]; };
+
+#if defined(__aarch64__)
+#define SECCOMP_AUDIT_ARCH 0xc00000b7u   /* AUDIT_ARCH_AARCH64 */
+#else
+#define SECCOMP_AUDIT_ARCH 0xc000003eu   /* AUDIT_ARCH_X86_64 */
+#endif
+
+static long seccomp_action(uint32_t r)
+{
+	switch (r & 0xffff0000u) {
+	case 0x7fff0000u: return -1;                       /* ALLOW */
+	case 0x00050000u: { uint32_t e = r & 0xffff; return e ? (long)e : 1; } /* ERRNO */
+	default:          return 0;                        /* KILL/TRAP/TRACE → kill */
+	}
+}
+
+static long seccomp_run_filter(process_t *p, long nr,
+                               long a0, long a1, long a2, long a3, long a4, long a5)
+{
+	struct seccomp_data d;
+	d.nr = (uint32_t)nr; d.arch = SECCOMP_AUDIT_ARCH; d.instruction_pointer = 0;
+	d.args[0]=(uint64_t)a0; d.args[1]=(uint64_t)a1; d.args[2]=(uint64_t)a2;
+	d.args[3]=(uint64_t)a3; d.args[4]=(uint64_t)a4; d.args[5]=(uint64_t)a5;
+
+	const struct sock_filter *f = (const struct sock_filter *)p->seccomp_filter;
+	uint32_t A = 0, X = 0;
+	for (unsigned pc = 0; pc < p->seccomp_flen; pc++) {
+		const struct sock_filter *i = &f[pc];
+		switch (i->code) {
+		case 0x20: /* BPF_LD|BPF_W|BPF_ABS */
+			if (i->k + 4 > sizeof(d)) return 0;
+			A = *(const uint32_t *)((const uint8_t *)&d + i->k); break;
+		case 0x80: A = (uint32_t)sizeof(d); break;            /* BPF_LD|BPF_W|BPF_LEN */
+		case 0x00: A = i->k; break;                           /* BPF_LD|BPF_IMM */
+		case 0x21: if (i->k + 4 > sizeof(d)) return 0;        /* BPF_LDX|BPF_W|BPF_ABS */
+			X = *(const uint32_t *)((const uint8_t *)&d + i->k); break;
+		case 0x05: pc += i->k; break;                         /* BPF_JMP|BPF_JA */
+		case 0x15: pc += (A == i->k) ? i->jt : i->jf; break;  /* JEQ|K */
+		case 0x25: pc += (A >  i->k) ? i->jt : i->jf; break;  /* JGT|K */
+		case 0x35: pc += (A >= i->k) ? i->jt : i->jf; break;  /* JGE|K */
+		case 0x45: pc += (A &  i->k) ? i->jt : i->jf; break;  /* JSET|K */
+		case 0x54: A &= i->k; break;                          /* ALU|AND|K */
+		case 0x06: return seccomp_action(i->k);               /* RET|K */
+		case 0x16: return seccomp_action(A);                  /* RET|A */
+		default:   return 0;                                  /* unknown → kill (safe) */
+		}
+	}
+	return 0;   /* fell off the end without RET → kill */
+}
+
 void syscall_handle(arch_context_t *ctx)
 {
 	arch_get_cpu_ctx()->wd_where = "syscall";
@@ -209,8 +264,30 @@ void syscall_handle(arch_context_t *ctx)
 	task_current()->ctx = ctx;
 	ptrace_stop_check(ctx, 0);
 
+	/* seccomp: filter the syscall before dispatch. STRICT allows only
+	 * read/write/exit/sigreturn; FILTER runs the installed BPF program. */
+	int sec_skip = 0;
+	{
+		process_t *sc = task_current();
+		if (sc->seccomp_mode == 1) {
+			if (n != SYS_ARCH_READ && n != SYS_ARCH_WRITE && n != SYS_ARCH_EXIT &&
+			    n != SYS_ARCH_EXIT_GROUP && n != SYS_ARCH_RT_SIGRETURN) {
+				sys_kill(sc->pid, 9 /*SIGKILL*/);
+				sec_skip = 1;
+			}
+		} else if (sc->seccomp_mode == 2) {
+			long act = seccomp_run_filter(sc, n, arg0, arg1, arg2, arg3, arg4, arg5);
+			if (act == 0) {              /* SECCOMP_RET_KILL_* */
+				sys_kill(sc->pid, 9);
+				sec_skip = 1;
+			} else if (act > 0) {        /* SECCOMP_RET_ERRNO: return -errno, skip */
+				ret = -act;
+				sec_skip = 1;
+			}                            /* act < 0 → ALLOW */
+		}
+	}
 
-	switch (n) {
+	if (!sec_skip) switch (n) {
 	/* ── I/O ─────────────────────────────────────────────── */
 	case SYS_ARCH_READ:     ret = sys_read((int)arg0, (void*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_WRITE:    ret = sys_write((int)arg0, (void*)arg1, (size_t)arg2); break;
@@ -370,6 +447,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EXECVEAT: ret = sys_execveat((int)arg0, (const char*)arg1, (char * const *)arg2, (char * const *)arg3, (int)arg4); break;
 	case SYS_ARCH_PIDFD_OPEN: ret = sys_pidfd_open((pid_t)arg0, (unsigned int)arg1); break;
 	case SYS_ARCH_PIDFD_SEND_SIGNAL: ret = sys_pidfd_send_signal((int)arg0, (int)arg1, (void*)arg2, (unsigned int)arg3); break;
+	case SYS_ARCH_SECCOMP: ret = sys_seccomp((unsigned int)arg0, (unsigned int)arg1, (uint64_t)arg2); break;
 	case SYS_ARCH_CLONE3: {
 		/* glibc 2.34+ thread creation. struct clone_args prefix we use: flags,
 		 * pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls. */
