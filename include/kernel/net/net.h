@@ -96,6 +96,7 @@ netdev_t *net_dev(int idx);          /* idx-th device in the current namespace *
 netdev_t *net_dev_by_ip(uint32_t ip);
 netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
 netdev_t *net_route_dev(uint32_t dst_ip);  /* egress device for a destination */
+netdev_t *net_route_dev6(const in6_addr_t *dst);
 
 /* Called from scheduler tick / idle loop — drains RX queues */
 void net_poll(void);
