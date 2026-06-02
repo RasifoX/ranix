@@ -186,6 +186,8 @@ check "proc-swaps-hdr"   "1"       "$(cat /proc/swaps | head -1 | grep -c Filena
 check "proc-vmstat-free" "1"       "$(grep -c nr_free_pages /proc/vmstat)"
 check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 check "proc-partitions"  "1"       "$(cat /proc/partitions | head -1 | grep -c name)"
+check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && echo ok)"
+check "dmesg-works"      "1"       "$(dmesg 2>/dev/null | grep -c 'CPUs online')"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
