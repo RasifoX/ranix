@@ -322,6 +322,7 @@ typedef struct {
 #define PROC_F_SWAPS     15
 #define PROC_F_VMSTAT    16
 #define PROC_F_PARTITIONS 17
+#define PROC_F_DISKSTATS 18
 #define PROC_F_P_STATUS  10
 #define PROC_F_P_STAT    11
 #define PROC_F_P_CMDLINE 12
@@ -377,6 +378,22 @@ static int fill_partitions(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* /proc/diskstats — one line per block device (iostat/df probe it). We don't
+ * track per-device I/O counters yet, so the 11 stat fields are zero. */
+static int fill_diskstats(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	int n = block_device_count();
+	for (int i = 0; i < n; i++) {
+		block_device_t *d = block_device_get(i);
+		if (!d) continue;
+		pb_str(&b, "   8 "); pb_u64(&b, (uint64_t)i); pb_str(&b, " ");
+		pb_str(&b, d->name);
+		pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 0\n");
+	}
+	return (int)(sz - b.rem);
+}
+
 /* /proc/vmstat — a few real counters tools may read. */
 static int fill_vmstat(char *buf, size_t sz)
 {
@@ -411,6 +428,7 @@ static const struct {
 	{ "swaps",    PROC_F_SWAPS    },
 	{ "vmstat",   PROC_F_VMSTAT   },
 	{ "partitions", PROC_F_PARTITIONS },
+	{ "diskstats", PROC_F_DISKSTATS },
 };
 #define ROOT_FILES_N ((int)(sizeof(root_files) / sizeof(root_files[0])))
 
@@ -455,6 +473,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SWAPS:    n = fill_swaps(tmp,    PROCFS_BUF_SIZE); break;
 	case PROC_F_VMSTAT:   n = fill_vmstat(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_PARTITIONS: n = fill_partitions(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_DISKSTATS: n = fill_diskstats(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
