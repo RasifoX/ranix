@@ -11,9 +11,12 @@ typedef struct process process_t;
 /* AF / type / proto */
 #define AF_UNIX     1
 #define AF_INET     2
+#define AF_INET6    10
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3
+
+#define IPPROTO_ICMPV6 58
 
 /* TCP states */
 #define TCP_CLOSED      0
@@ -36,6 +39,15 @@ typedef struct {
     uint8_t  sin_zero[8];
 } __attribute__((packed)) sockaddr_in_t;
 
+/* sockaddr_in6 */
+typedef struct {
+    uint16_t   sin6_family;
+    uint16_t   sin6_port;     /* big-endian */
+    uint32_t   sin6_flowinfo;
+    in6_addr_t sin6_addr;
+    uint32_t   sin6_scope_id;
+} __attribute__((packed)) sockaddr_in6_t;
+
 /* sockaddr_un */
 typedef struct {
     uint16_t sun_family;
@@ -51,6 +63,8 @@ typedef struct socket {
     uint16_t  local_port;
     uint32_t  remote_ip;
     uint16_t  remote_port;
+    in6_addr_t local_ip6;       /* AF_INET6: local/remote address */
+    in6_addr_t remote_ip6;
 
     netdev_t *dev;
 
@@ -123,6 +137,7 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
 
 /* ICMP echo-reply delivery to RAW sockets */
 void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len);
+void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src, const void *data, uint16_t len);
 
 /* Global socket table */
 void      sock_register(socket_t *s);

@@ -17,6 +17,9 @@ static inline uint32_t bswap32(uint32_t v) {
 #define htonl(x)  bswap32((uint32_t)(x))
 #define ntohl(x)  bswap32((uint32_t)(x))
 
+/* 128-bit IPv6 address in network byte order (see ipv6.h for helpers) */
+typedef struct { uint8_t s6[16]; } in6_addr_t;
+
 /* ── socket buffer ───────────────────────────────────────── */
 
 /* Room to prepend the full header stack without underflowing buf[]: Ethernet
@@ -30,6 +33,7 @@ typedef struct skb {
     uint8_t    *data;   /* current start of packet data */
     uint16_t    len;    /* bytes from data */
     uint32_t    src_ip;     /* datagram source — for recvfrom on a UDP socket */
+    in6_addr_t  src_ip6;    /* IPv6 datagram source */
     uint16_t    src_port;
     struct skb *next;
 } skb_t;
@@ -53,6 +57,8 @@ typedef struct netdev {
     uint32_t    ip;     /* host byte order, e.g. 10<<24|0<<16|2<<8|15 */
     uint32_t    gw;
     uint32_t    mask;
+    in6_addr_t  ip6_ll;   /* link-local address (fe80::, EUI-64 from MAC) */
+    in6_addr_t  ip6;      /* global/ULA address (SLAAC or static), :: if unset */
 
     int       (*tx)(struct netdev *, skb_t *);
     void      (*poll)(struct netdev *);   /* hardware poll, set by driver */

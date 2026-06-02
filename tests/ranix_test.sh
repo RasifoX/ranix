@@ -340,6 +340,7 @@ check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail 
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-tcp-bulk"   "OK"  "$(timeout 30 /bin/test_tcpbulk 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
+check "c-ping6"      "OK"  "$(timeout 10 /bin/test_ping6 2>/dev/null)"
 check "c-uts-ns"     "uts-ok" "$(timeout 10 /bin/test_uts 2>/dev/null)"
 check "c-setns"      "setns-ok" "$(timeout 10 /bin/test_setns 2>/dev/null)"
 check "c-clone-ns"   "clonens-ok" "$(timeout 10 /bin/test_clonens 2>/dev/null)"

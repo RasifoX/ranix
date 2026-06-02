@@ -137,6 +137,43 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
     poll_notify();
 }
 
+void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
+                        const void *data, uint16_t len)
+{
+    uint64_t f = spin_lock_irq(&gsock_lock);
+    socket_t *found = NULL;
+    for (int i = 0; i < gsock_cap; i++) {
+        socket_t *s = gsock[i];
+        if (!s) continue;
+        if (s->net_ns != ns) continue;
+        if (s->domain != AF_INET6 || s->type != SOCK_RAW) continue;
+        if (s->proto != IPPROTO_ICMPV6) continue;
+        found = s;
+        break;
+    }
+    spin_unlock_irq(&gsock_lock, f);
+    if (!found) return;
+
+    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    skb_t *skb = skb_alloc();
+    if (!skb) return;
+    memcpy(skb->data, data, len);   /* raw ICMPv6 message, no IPv6 header */
+    skb->len    = len;
+    skb->src_ip6 = *src;
+
+    uint64_t sf = spin_lock_irq(&found->recv_lock);
+    skb->next = NULL;
+    if (found->recv_tail) found->recv_tail->next = skb;
+    else                  found->recv_head = skb;
+    found->recv_tail = skb;
+    process_t *waiter = found->recv_waiter;
+    found->recv_waiter = NULL;
+    spin_unlock_irq(&found->recv_lock, sf);
+
+    if (waiter) task_wake(waiter);
+    poll_notify();
+}
+
 /* ── UDP delivery ────────────────────────────────────────── */
 
 void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_port,
