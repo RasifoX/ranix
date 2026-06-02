@@ -70,17 +70,38 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     return ip_tx(s->dev, skb, s->remote_ip, IP_PROTO_TCP);
 }
 
-/* ── retransmit queue (single segment) ──────────────────── */
+/* ── send window: queue of unacked segments ──────────────── */
 
-/* Fold a fresh round-trip sample into srtt/rttvar and recompute rto (RFC 6298).
- * Skipped for retransmitted segments (Karn): their RTT is ambiguous. */
-static void tcp_rtt_sample(socket_t *s)
+#define TCP_MSS        (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14)
+#define TCP_CWND_INIT  (4u * TCP_MSS)   /* initial congestion window */
+#define TCP_CWND_MAX   65535u
+#define TCP_RETX_GIVEUP 8
+
+typedef struct tcp_seg {
+    struct tcp_seg *next;
+    uint32_t  seq;
+    uint16_t  len;        /* payload bytes */
+    uint8_t   flags;
+    uint8_t   resent;     /* retransmitted at least once — Karn: skip its RTT */
+    uint64_t  sent_tick;
+    uint8_t   data[];
+} tcp_seg_t;
+
+/* sequence numbers a segment consumes (SYN and FIN each count as one) */
+static uint32_t seg_span(const tcp_seg_t *g)
 {
-    if (s->retx_resent || s->retx_deadline == 0) return;
-    uint32_t r = (uint32_t)(kernel_ticks - s->retx_sent_tick);
+    return (uint32_t)g->len + ((g->flags & (TCP_SYN | TCP_FIN)) ? 1u : 0u);
+}
+
+/* serial comparison: is a <= b in 32-bit sequence space (RFC 1982) */
+static int seq_le(uint32_t a, uint32_t b) { return (int32_t)(b - a) >= 0; }
+
+/* Fold a round-trip sample (sent at sent_tick) into srtt/rttvar/rto (RFC 6298). */
+static void tcp_rtt_update(socket_t *s, uint64_t sent_tick)
+{
+    uint32_t r = (uint32_t)(kernel_ticks - sent_tick);
     if (s->srtt == 0) {
-        s->srtt   = r;
-        s->rttvar = r / 2;
+        s->srtt = r; s->rttvar = r / 2;
     } else {
         uint32_t d = (s->srtt > r) ? (s->srtt - r) : (r - s->srtt);
         s->rttvar = (3 * s->rttvar + d) / 4;
@@ -92,29 +113,107 @@ static void tcp_rtt_sample(socket_t *s)
     s->rto = rto;
 }
 
-static void retx_arm(socket_t *s, uint8_t flags,
-                     uint32_t seq, const void *data, uint16_t dlen)
+/* Record a just-transmitted segment so it can be retransmitted until acked. */
+static void seg_enqueue(socket_t *s, uint8_t flags, uint32_t seq,
+                        const void *data, uint16_t len)
 {
-    if (s->retx_data) { kfree(s->retx_data); s->retx_data = NULL; }
-    if (dlen) {
-        s->retx_data = kmalloc(dlen);
-        if (s->retx_data) memcpy(s->retx_data, data, dlen);
-    }
+    tcp_seg_t *g = kmalloc(sizeof(*g) + len);
+    if (!g) return;   /* untracked: simply won't be retransmitted */
+    g->next = NULL; g->seq = seq; g->len = len; g->flags = flags;
+    g->resent = 0; g->sent_tick = kernel_ticks;
+    if (len) memcpy(g->data, data, len);
     if (s->rto == 0) s->rto = TCP_RTO_INIT;
-    s->retx_len      = dlen;
-    s->retx_seq      = seq;
-    s->retx_flags    = flags;
-    s->retx_sent_tick = kernel_ticks;
-    s->retx_resent   = 0;
-    s->retx_deadline = kernel_ticks + s->rto;
+    if (s->unacked_tail) s->unacked_tail->next = g;
+    else { s->unacked_head = g; s->retx_deadline = kernel_ticks + s->rto; }
+    s->unacked_tail = g;
 }
 
-static void retx_clear(socket_t *s)
+/* Drop every queued segment (connection reset / teardown). */
+static void seg_clear(socket_t *s)
 {
-    if (s->retx_data) { kfree(s->retx_data); s->retx_data = NULL; }
-    s->retx_len      = 0;
+    tcp_seg_t *g = s->unacked_head;
+    while (g) { tcp_seg_t *n = g->next; kfree(g); g = n; }
+    s->unacked_head = s->unacked_tail = NULL;
     s->retx_deadline = 0;
     s->retx_count    = 0;
+    s->dup_acks      = 0;
+}
+
+/* Remove fully-acked segments, take an RTT sample, and grow the window. */
+static void seg_ack(socket_t *s, uint32_t ack, uint32_t bytes_acked)
+{
+    int sampled = 0;
+    while (s->unacked_head) {
+        tcp_seg_t *g = s->unacked_head;
+        if (!seq_le(g->seq + seg_span(g), ack)) break;   /* not fully acked */
+        if (!g->resent && !sampled) { tcp_rtt_update(s, g->sent_tick); sampled = 1; }
+        s->unacked_head = g->next;
+        if (!s->unacked_head) s->unacked_tail = NULL;
+        kfree(g);
+    }
+    s->retx_deadline = s->unacked_head ? (kernel_ticks + s->rto) : 0;
+    s->retx_count = 0;
+    if (bytes_acked) {
+        if (s->cwnd < s->ssthresh) s->cwnd += bytes_acked;                 /* slow start */
+        else s->cwnd += (TCP_MSS * TCP_MSS) / (s->cwnd ? s->cwnd : TCP_MSS); /* avoidance */
+        if (s->cwnd > TCP_CWND_MAX) s->cwnd = TCP_CWND_MAX;
+    }
+}
+
+/* Initialise the congestion state when a connection is set up. */
+static void tcp_cc_init(socket_t *s)
+{
+    s->cwnd     = TCP_CWND_INIT;
+    s->ssthresh = TCP_CWND_MAX;
+    s->dup_acks = 0;
+    if (!s->snd_wnd) s->snd_wnd = TCP_RCV_WND;
+}
+
+/* ── out-of-order receive buffer ─────────────────────────── */
+
+#define TCP_OOO_MAX  32   /* segments buffered ahead of rcv_nxt */
+
+static void tcp_ooo_insert(socket_t *s, uint32_t seq, const void *data, uint16_t len)
+{
+    tcp_seg_t **pp = &s->ooo_head;
+    int count = 0;
+    while (*pp && seq_le((*pp)->seq, seq)) {
+        if ((*pp)->seq == seq) return;   /* already buffered */
+        pp = &(*pp)->next; count++;
+    }
+    for (tcp_seg_t *q = *pp; q; q = q->next) count++;
+    if (count >= TCP_OOO_MAX) return;    /* bound the buffer */
+
+    tcp_seg_t *g = kmalloc(sizeof(*g) + len);
+    if (!g) return;
+    g->seq = seq; g->len = len; g->flags = 0; g->resent = 0; g->sent_tick = 0;
+    if (len) memcpy(g->data, data, len);
+    g->next = *pp; *pp = g;
+}
+
+/* Deliver buffered segments that have become contiguous with rcv_nxt. */
+static void tcp_ooo_drain(socket_t *s)
+{
+    while (s->ooo_head) {
+        tcp_seg_t *g = s->ooo_head;
+        if (seq_le(g->seq + g->len, s->rcv_nxt)) {   /* stale: already delivered */
+            s->ooo_head = g->next; kfree(g); continue;
+        }
+        if (g->seq != s->rcv_nxt) break;             /* still a gap */
+        s->ooo_head = g->next;
+        s->rcv_nxt += g->len;
+        sock_tcp_deliver(s, g->data, g->len);
+        kfree(g);
+    }
+}
+
+/* Release all TCP queues (called from sock_free). */
+void tcp_sock_free(socket_t *s)
+{
+    seg_clear(s);
+    tcp_seg_t *g = s->ooo_head;
+    while (g) { tcp_seg_t *n = g->next; kfree(g); g = n; }
+    s->ooo_head = NULL;
 }
 
 /* Wake the connect()/accept()/close() sleeper. The caller has already updated
@@ -294,11 +393,13 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             ns->snd_nxt     = 0x12340000;
             ns->snd_una     = ns->snd_nxt;
             ns->tcp_state   = TCP_SYN_RECV;
+            ns->snd_wnd     = ntohs(th->window);
+            tcp_cc_init(ns);
             sock_register(ns);
 
             tcp_tx_seg(ns, TCP_SYN | TCP_ACK,
                        ns->snd_nxt, ns->rcv_nxt, NULL, 0);
-            retx_arm(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0);
+            seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0);
             ns->snd_nxt++;
 
             skb_free(skb); return;
@@ -314,7 +415,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     /* RST handling */
     if (flags & TCP_RST) {
         s->tcp_state = TCP_CLOSED;
-        retx_clear(s);
+        seg_clear(s);
         tcp_wake_connect(s);
         uint64_t lf = spin_lock_irq(&s->recv_lock);
         process_t *w = s->recv_waiter; s->recv_waiter = NULL;
@@ -333,8 +434,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->snd_una    = ack;
             s->snd_wnd    = ntohs(th->window);
             s->tcp_state  = TCP_ESTABLISHED;
-            tcp_rtt_sample(s);
-            retx_clear(s);
+            tcp_cc_init(s);
+            seg_ack(s, ack, 0);
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
             tcp_wake_connect(s);
         }
@@ -344,9 +445,10 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         /* expecting ACK of SYN-ACK */
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->snd_una   = ack;
+            s->snd_wnd   = ntohs(th->window);
             s->tcp_state = TCP_ESTABLISHED;
-            tcp_rtt_sample(s);
-            retx_clear(s);
+            tcp_cc_init(s);
+            seg_ack(s, ack, 0);
             /* move to listen socket's accept queue */
             socket_t *ls = tcp_listen_find(s->net_ns, s->local_port);
             if (ls) {
@@ -361,24 +463,37 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         break;
 
     case TCP_ESTABLISHED:
-        /* ACK advances snd_una */
+        /* ACK advances snd_una; duplicate ACKs trigger fast retransmit */
         if (flags & TCP_ACK) {
-            if (ack > s->snd_una) {
+            if (!seq_le(ack, s->snd_una)) {           /* ack > snd_una: new data acked */
+                uint32_t acked = ack - s->snd_una;
                 s->snd_una = ack;
-                if (s->snd_una == s->snd_nxt) { tcp_rtt_sample(s); retx_clear(s); }
+                s->dup_acks = 0;
+                seg_ack(s, ack, acked);
+            } else if (ack == s->snd_una && dlen == 0 && s->unacked_head &&
+                       !(flags & (TCP_SYN | TCP_FIN))) {
+                if (++s->dup_acks == 3) {             /* three dup ACKs → resend oldest */
+                    tcp_seg_t *g = s->unacked_head;
+                    tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt,
+                               g->len ? g->data : NULL, g->len);
+                    g->resent = 1;
+                    uint32_t inf = s->snd_nxt - s->snd_una;
+                    s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
+                    s->cwnd     = s->ssthresh + 3u * TCP_MSS;
+                }
             }
             s->snd_wnd = ntohs(th->window);
-            /* wake a blocked send() on any ACK (window or snd_una advance) */
             tcp_wake_connect(s);
         }
-        /* deliver data */
-        if (dlen > 0 && seq == s->rcv_nxt) {
-            s->rcv_nxt += dlen;
-            sock_tcp_deliver(s, skb->data, dlen);
-            /* send ACK */
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        } else if (dlen > 0) {
-            /* out-of-order: just re-ACK what we have */
+        /* deliver data, reassembling out-of-order arrivals */
+        if (dlen > 0) {
+            if (seq == s->rcv_nxt) {
+                s->rcv_nxt += dlen;
+                sock_tcp_deliver(s, skb->data, dlen);
+                tcp_ooo_drain(s);
+            } else if (!seq_le(seq, s->rcv_nxt)) {   /* seq > rcv_nxt: future, buffer it */
+                tcp_ooo_insert(s, seq, skb->data, dlen);
+            }
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
         }
         /* FIN from remote */
@@ -396,9 +511,10 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         break;
 
     case TCP_CLOSE_WAIT:
-        if ((flags & TCP_ACK) && ack > s->snd_una) {
+        if ((flags & TCP_ACK) && !seq_le(ack, s->snd_una)) {
+            uint32_t acked = ack - s->snd_una;
             s->snd_una = ack;
-            if (s->snd_una == s->snd_nxt) { tcp_rtt_sample(s); retx_clear(s); }
+            seg_ack(s, ack, acked);
             s->snd_wnd = ntohs(th->window);
             tcp_wake_connect(s);
         }
@@ -407,7 +523,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     case TCP_LAST_ACK:
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->tcp_state = TCP_CLOSED;
-            retx_clear(s);
+            seg_clear(s);
             tcp_wake_close(s);
         }
         break;
@@ -415,7 +531,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     case TCP_FIN_WAIT1:
         if (flags & TCP_ACK) {
             if (ack == s->snd_nxt) {
-                retx_clear(s);
+                seg_clear(s);
                 s->tcp_state = TCP_FIN_WAIT2;
             }
         }
@@ -439,7 +555,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 
     case TCP_CLOSING:
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
-            retx_clear(s);
+            seg_clear(s);
             s->tcp_state = TCP_TIME_WAIT;
             tcp_wake_close(s);
         }
@@ -478,7 +594,7 @@ int tcp_connect(socket_t *s)
         rc = tcp_tx_seg(s, TCP_SYN, s->snd_nxt, 0, NULL, 0);
         if (rc == -1) net_poll();
     }
-    retx_arm(s, TCP_SYN, s->snd_nxt, NULL, 0);
+    seg_enqueue(s, TCP_SYN, s->snd_nxt, NULL, 0);
     s->snd_nxt++;
     return 0;
 }
@@ -487,32 +603,33 @@ int tcp_send(socket_t *s, const void *data, uint16_t len)
 {
     if (s->tcp_state != TCP_ESTABLISHED) return -107; /* ENOTCONN */
 
-    /* clamp to MSS */
-    uint16_t mss = (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14);
-    if (len > mss) len = mss;
-
-    /* flow control: block caller if previous segment unACKed or window exhausted */
+    /* effective window = min(congestion, peer-advertised); send while it has room */
     uint32_t in_flight = s->snd_nxt - s->snd_una;
-    if (s->retx_data || in_flight >= (uint32_t)s->snd_wnd)
-        return -11; /* EAGAIN — caller must block and retry */
+    uint32_t wnd = s->cwnd < s->snd_wnd ? s->cwnd : s->snd_wnd;
+    if (in_flight >= wnd) return -11; /* window full — caller blocks and retries */
 
-    int rc = tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, len);
+    uint32_t room = wnd - in_flight;
+    uint16_t seglen = len > TCP_MSS ? TCP_MSS : len;
+    if (seglen > room) seglen = (uint16_t)room;
+    if (seglen == 0) return -11;
+
+    int rc = tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, seglen);
     if (rc < 0) return rc;
-    retx_arm(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, len);
-    s->snd_nxt += len;
-    return (int)len;
+    seg_enqueue(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, seglen);
+    s->snd_nxt += seglen;
+    return (int)seglen;
 }
 
 int tcp_close(socket_t *s)
 {
     if (s->tcp_state == TCP_ESTABLISHED) {
         tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        retx_arm(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
+        seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
         s->snd_nxt++;
         s->tcp_state = TCP_FIN_WAIT1;
     } else if (s->tcp_state == TCP_CLOSE_WAIT) {
         tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        retx_arm(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
+        seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
         s->snd_nxt++;
         s->tcp_state = TCP_LAST_ACK;
     }
@@ -532,18 +649,19 @@ int tcp_listen(socket_t *s, int backlog)
 
 void tcp_tick(void)
 {
-    
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s || s->type != SOCK_STREAM) continue;
-        if (s->retx_deadline == 0) continue;         /* no pending retransmit */
-        if (kernel_ticks < s->retx_deadline) continue;
+        if (s->retx_deadline == 0 || kernel_ticks < s->retx_deadline) continue;
+
+        tcp_seg_t *g = s->unacked_head;
+        if (!g) { s->retx_deadline = 0; continue; }
 
         s->retx_count++;
-        if (s->retx_count > 5) {
+        if (s->retx_count > TCP_RETX_GIVEUP) {
             /* give up — force close and wake anyone waiting */
             s->tcp_state = TCP_CLOSED;
-            retx_clear(s);
+            seg_clear(s);
             tcp_wake_close(s);
             uint64_t lf = spin_lock_irq(&s->recv_lock);
             process_t *w = s->recv_waiter; s->recv_waiter = NULL;
@@ -551,10 +669,15 @@ void tcp_tick(void)
             if (w) task_wake(w);
             continue;
         }
-        /* retransmit, then back off the timeout (RFC 6298 §5.5) */
-        tcp_tx_seg(s, s->retx_flags, s->retx_seq, s->rcv_nxt,
-                   s->retx_data, s->retx_len);
-        s->retx_resent = 1;
+
+        /* timeout: collapse to slow start, retransmit the oldest segment, and
+         * back off the timer (RFC 6298 §5.5). */
+        uint32_t inf = s->snd_nxt - s->snd_una;
+        s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
+        s->cwnd     = TCP_MSS;
+        s->dup_acks = 0;
+        tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt, g->len ? g->data : NULL, g->len);
+        g->resent = 1;
         s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
         if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;
         s->retx_deadline = kernel_ticks + s->rto;
