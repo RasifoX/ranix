@@ -78,7 +78,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_add(p, va, len, vf);
+			vma_clip(p, va, len); vma_add(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -115,7 +115,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_add(p, va, len, vf);
+			vma_clip(p, va, len); vma_add(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -147,7 +147,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_add(p, va, len, vf);
+			vma_clip(p, va, len); vma_add(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -174,7 +174,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_READ)  vf |= VMA_READ;
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-			vma_add(p, va, len, vf);
+			vma_clip(p, va, len); vma_add(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -211,7 +211,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		if (prot & PROT_READ)  vf |= VMA_READ;
 		if (prot & PROT_WRITE) vf |= VMA_WRITE;
 		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-		vma_add(p, va, len, vf);
+		vma_clip(p, va, len); vma_add(p, va, len, vf);
 	}
 	return (long)va;
 }

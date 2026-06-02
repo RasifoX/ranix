@@ -122,6 +122,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	 * which it reads from AT_ENTRY. Same contract execve(2) honours. */
 	uint64_t jump_entry = ei.entry;
 	uint64_t at_base    = 0;
+	uint64_t interp_lo = 0, interp_hi = 0;
 	if (ei.interp[0]) {
 		vfs_stat_t ist = {0};
 		if (vfs_stat(ei.interp, &ist) == 0 && ist.size > 0) {
@@ -135,6 +136,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 					if (elf_load(p->vm, ibuf, (size_t)ist.size, p->mmap_next, &ii) == 0) {
 						jump_entry   = ii.entry;
 						at_base      = p->mmap_next;
+						interp_lo    = ii.load_bias;
+						interp_hi    = ii.load_end;
 						p->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 					}
 				}
@@ -201,6 +204,18 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	else arch_vm_switch((uint64_t)kernel_vm_space->root, 0);
 
 	p->ctx = ctx;
+	/* Record the initial VMAs (stack, image, interpreter) like execve does. The
+	 * COW fault handler consults the VMA for write permission; without them a
+	 * fork()ed child (or this process) faulting on a shared page is killed
+	 * instead of getting its private copy. */
+	vma_add(p, ARCH_USER_STACK_TOP - (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE,
+	        (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE, VMA_USER | VMA_READ | VMA_WRITE);
+	vma_add(p, ei.load_bias, ei.load_end - ei.load_bias,
+	        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
+	if (interp_hi > interp_lo)
+		vma_add(p, interp_lo, interp_hi - interp_lo,
+		        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
+
 	p->fds = fd_table_create();
 	/* pid 1 is handed fd 0/1/2 = /dev/console by the kernel, as Linux does — a
 	 * freestanding C runtime (glibc) assumes the standard descriptors already
