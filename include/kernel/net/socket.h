@@ -71,6 +71,8 @@ typedef struct socket {
     uint8_t     rcv_wscale;     /* window scale we advertise (RFC 1323) */
     uint8_t     snd_wscale;     /* window scale the peer advertised */
     uint8_t     sack_ok;        /* both ends negotiated SACK (RFC 2018) */
+    uint8_t     ts_ok;          /* both ends negotiated timestamps (RFC 7323) */
+    uint32_t    ts_recent;      /* peer's latest TSval, echoed back as TSecr */
     process_t  *connect_waiter; /* blocking connect() / send() */
 
     /* TCP listen: incoming connection queue */
