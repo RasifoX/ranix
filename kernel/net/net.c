@@ -132,8 +132,6 @@ netdev_t *net_dev_by_ip(uint32_t ip)
 
 /* ── RX queue ────────────────────────────────────────────── */
 
-void net_rx_wake(void);
-
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
 {
     skb->next = NULL;
@@ -142,7 +140,6 @@ void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
     else              dev->rx_head = skb;
     dev->rx_tail = skb;
     spin_unlock_irq(&dev->rx_lock, f);
-    net_rx_wake();   /* event-driven: process now, don't wait for the timer tick */
 }
 
 skb_t *netdev_rx_dequeue(netdev_t *dev)
@@ -187,42 +184,6 @@ void net_poll(void)
     f = spin_lock_irq(&net_poll_lock);
     net_poll_busy = 0;
     spin_unlock_irq(&net_poll_lock, f);
-}
-
-/* ── event-driven RX softirq thread ──────────────────────────
- * RX processing runs in a dedicated kernel thread woken the moment a packet is
- * enqueued (loopback tx, NIC poll), instead of waiting for the idle loop's
- * timer-paced net_poll. This is what makes loopback/LAN throughput track the
- * window rather than the 100Hz tick. net_poll runs in this thread's own context
- * — never nested inside a socket syscall — so it can't deadlock against the
- * locks a sender/receiver holds. The idle loop still calls net_poll as a
- * backstop. */
-static process_t *net_rx_task;
-static volatile int net_rx_pending;
-static spinlock_t  net_rx_lock = SPINLOCK_INIT;
-
-void net_rx_wake(void)
-{
-    uint64_t f = spin_lock_irq(&net_rx_lock);
-    net_rx_pending = 1;
-    process_t *t = net_rx_task;
-    spin_unlock_irq(&net_rx_lock, f);
-    if (t) task_wake(t);
-}
-
-static void net_rx_thread(void)
-{
-    net_rx_task = task_current();
-    for (;;) {
-        net_poll();
-        uint64_t f = spin_lock_irq(&net_rx_lock);
-        if (net_rx_pending) {            /* work arrived during the poll — go again */
-            net_rx_pending = 0;
-            spin_unlock_irq(&net_rx_lock, f);
-            continue;
-        }
-        task_sleep_unlock(&net_rx_lock, f);   /* sleep until net_rx_wake() */
-    }
 }
 
 /* ── checksum ────────────────────────────────────────────── */
@@ -310,8 +271,6 @@ void net_init(void)
         for (const char *p = db; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');
         net_drop_n = n;
     }
-
-    proc_create("net_rx", net_rx_thread);   /* event-driven RX softirq */
 }
 
 /* Point /etc/resolv.conf at the DHCP-supplied nameserver, replacing the static
