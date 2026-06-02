@@ -570,6 +570,19 @@ process_t *proc_find(pid_t pid)
 	return p;
 }
 
+/* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
+int proc_thread_count(pid_t tgid)
+{
+	int n = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	for (int i = 0; i < proc_cnt; i++) {
+		process_t *p = proctab[i];
+		if (p && p->tgid == tgid && p->state != PROC_DEAD && p->state != PROC_ZOMBIE) n++;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return n ? n : 1;
+}
+
 void proc_wait(pid_t pid)
 {
 	while (1) {
