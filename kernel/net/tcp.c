@@ -16,6 +16,18 @@ void task_wake(process_t *p);
 #define TCP_RTO_MIN     20    /* 200ms floor */
 #define TCP_RTO_MAX     6000  /* 60s ceiling */
 #define TCP_MSS        (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14)
+
+/* unacked send-queue segment; defined early so tcp_tx_seg can read the OOO list */
+typedef struct tcp_seg {
+    struct tcp_seg *next;
+    uint32_t  seq;
+    uint16_t  len;        /* payload bytes */
+    uint8_t   flags;
+    uint8_t   resent;     /* retransmitted at least once — Karn: skip its RTT */
+    uint8_t   sacked;     /* peer SACKed this segment — don't retransmit it */
+    uint64_t  sent_tick;
+    uint8_t   data[];
+} tcp_seg_t;
 #define TCP_RCV_WND     (256u * 1024u)  /* receive buffer / max window (needs scaling) */
 #define TCP_WSCALE      2               /* we advertise window >> 2 (×4 → up to 256KB) */
 
@@ -56,8 +68,31 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     if (dlen) { memcpy(skb->data, data, dlen); skb->len = dlen; }
     else        skb->len = 0;
 
-    /* SYN segments carry MSS + window-scale options (RFC 1323) */
-    int optlen = (flags & TCP_SYN) ? 8 : 0;
+    /* Build TCP options: MSS/WScale/SACK-permitted on the SYN, SACK blocks on an
+     * ACK when we have out-of-order data buffered (RFC 2018). */
+    uint8_t opts[40];
+    int optlen = 0;
+    if (flags & TCP_SYN) {
+        opts[optlen++] = 2; opts[optlen++] = 4;
+        opts[optlen++] = (uint8_t)(TCP_MSS >> 8); opts[optlen++] = (uint8_t)TCP_MSS;
+        opts[optlen++] = 3; opts[optlen++] = 3; opts[optlen++] = TCP_WSCALE;
+        opts[optlen++] = 4; opts[optlen++] = 2;   /* SACK-permitted */
+    } else if ((flags & TCP_ACK) && s->sack_ok && s->ooo_head) {
+        opts[optlen++] = 1; opts[optlen++] = 1;   /* NOP, NOP — align the SACK option */
+        int li = optlen; opts[optlen++] = 5; opts[optlen++] = 0;   /* kind, len (filled below) */
+        int nb = 0;
+        for (tcp_seg_t *g = s->ooo_head; g && nb < 3 && optlen + 8 <= (int)sizeof(opts); ) {
+            uint32_t l = g->seq, r = g->seq + g->len;
+            while (g->next && g->next->seq == r) { g = g->next; r = g->seq + g->len; }
+            uint32_t nl = htonl(l), nr = htonl(r);
+            memcpy(opts + optlen, &nl, 4); optlen += 4;
+            memcpy(opts + optlen, &nr, 4); optlen += 4;
+            nb++; g = g->next;
+        }
+        opts[li + 1] = (uint8_t)(2 + 8 * nb);
+    }
+    while (optlen & 3) opts[optlen++] = 1;   /* NOP-pad to a 4-byte boundary */
+
     uint8_t *base = (uint8_t *)skb_push(skb, sizeof(tcp_hdr_t) + optlen);
     tcp_hdr_t *th = (tcp_hdr_t *)base;
     memset(th, 0, sizeof(tcp_hdr_t));
@@ -73,12 +108,7 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     if (!(flags & TCP_SYN)) rwnd >>= s->rcv_wscale;
     th->window   = htons((uint16_t)(rwnd > 65535 ? 65535 : rwnd));
 
-    if (optlen) {
-        uint8_t *o = base + sizeof(tcp_hdr_t);
-        o[0] = 2; o[1] = 4; o[2] = (uint8_t)(TCP_MSS >> 8); o[3] = (uint8_t)TCP_MSS; /* MSS */
-        o[4] = 3; o[5] = 3; o[6] = TCP_WSCALE;                                       /* WScale */
-        o[7] = 1;                                                                    /* NOP pad */
-    }
+    if (optlen) memcpy(base + sizeof(tcp_hdr_t), opts, optlen);
 
     th->checksum = 0;
     th->checksum = tcp_cksum(s->local_ip ? s->local_ip : s->dev->ip,
@@ -92,16 +122,6 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 #define TCP_CWND_INIT  (4u * TCP_MSS)   /* initial congestion window */
 #define TCP_CWND_MAX   65535u
 #define TCP_RETX_GIVEUP 8
-
-typedef struct tcp_seg {
-    struct tcp_seg *next;
-    uint32_t  seq;
-    uint16_t  len;        /* payload bytes */
-    uint8_t   flags;
-    uint8_t   resent;     /* retransmitted at least once — Karn: skip its RTT */
-    uint64_t  sent_tick;
-    uint8_t   data[];
-} tcp_seg_t;
 
 /* sequence numbers a segment consumes (SYN and FIN each count as one) */
 static uint32_t seg_span(const tcp_seg_t *g)
@@ -393,6 +413,47 @@ static int tcp_opt_wscale(const tcp_hdr_t *th, uint8_t hlen)
     return -1;
 }
 
+/* Did this SYN carry the SACK-permitted option (RFC 2018)? */
+static int tcp_opt_sack_perm(const tcp_hdr_t *th, uint8_t hlen)
+{
+    const uint8_t *o   = (const uint8_t *)th + sizeof(tcp_hdr_t);
+    const uint8_t *end = (const uint8_t *)th + hlen;
+    while (o < end) {
+        if (o[0] == 0) break;
+        if (o[0] == 1) { o++; continue; }
+        if (o + 1 >= end || o[1] < 2 || o + o[1] > end) break;
+        if (o[0] == 4 && o[1] == 2) return 1;
+        o += o[1];
+    }
+    return 0;
+}
+
+/* Mark unacked segments the peer reported as received via SACK blocks, so the
+ * retransmit path skips them and resends only the real gaps. */
+static void tcp_process_sack(socket_t *s, const tcp_hdr_t *th, uint8_t hlen)
+{
+    const uint8_t *o   = (const uint8_t *)th + sizeof(tcp_hdr_t);
+    const uint8_t *end = (const uint8_t *)th + hlen;
+    while (o < end) {
+        if (o[0] == 0) break;
+        if (o[0] == 1) { o++; continue; }
+        if (o + 1 >= end || o[1] < 2 || o + o[1] > end) break;
+        if (o[0] == 5 && o[1] >= 10 && ((o[1] - 2) % 8) == 0) {
+            int nb = (o[1] - 2) / 8;
+            for (int i = 0; i < nb; i++) {
+                uint32_t l, r;
+                memcpy(&l, o + 2 + i * 8, 4);
+                memcpy(&r, o + 2 + i * 8 + 4, 4);
+                l = ntohl(l); r = ntohl(r);
+                for (tcp_seg_t *g = s->unacked_head; g; g = g->next)
+                    if (seq_le(l, g->seq) && seq_le(g->seq + seg_span(g), r))
+                        g->sacked = 1;
+            }
+        }
+        o += o[1];
+    }
+}
+
 void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 {
     if (skb->len < (uint16_t)sizeof(tcp_hdr_t)) { skb_free(skb); return; }
@@ -408,6 +469,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     uint32_t ack      = ntohl(th->ack);
     uint8_t  flags    = th->flags;
     int      syn_ws   = (flags & TCP_SYN) ? tcp_opt_wscale(th, hlen) : -1;
+    int      syn_sack = (flags & TCP_SYN) ? tcp_opt_sack_perm(th, hlen) : 0;
+    uint8_t  rx_hlen  = hlen;   /* keep for SACK-block parsing after skb_pull */
 
     skb_pull(skb, hlen);
     uint16_t dlen = skb->len;
@@ -433,6 +496,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             ns->tcp_state   = TCP_SYN_RECV;
             ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
             if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
+            if (syn_sack) ns->sack_ok = 1;
             tcp_cc_init(ns);
             sock_register(ns);
 
@@ -473,6 +537,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->snd_una    = ack;
             s->snd_wnd    = ntohs(th->window);   /* SYN-ACK window is unscaled */
             if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
+            if (syn_sack) s->sack_ok = 1;
             s->tcp_state  = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
@@ -510,6 +575,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     case TCP_ESTABLISHED:
         /* ACK advances snd_una; duplicate ACKs trigger fast retransmit */
         if (flags & TCP_ACK) {
+            if (s->sack_ok && rx_hlen > sizeof(tcp_hdr_t)) tcp_process_sack(s, th, rx_hlen);
             if (!seq_le(ack, s->snd_una)) {           /* ack > snd_una: new data acked */
                 uint32_t acked = ack - s->snd_una;
                 s->snd_una = ack;
@@ -517,11 +583,14 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
                 seg_ack(s, ack, acked);
             } else if (ack == s->snd_una && dlen == 0 && s->unacked_head &&
                        !(flags & (TCP_SYN | TCP_FIN))) {
-                if (++s->dup_acks == 3) {             /* three dup ACKs → resend oldest */
+                if (++s->dup_acks == 3) {             /* three dup ACKs → resend first real gap */
                     tcp_seg_t *g = s->unacked_head;
-                    tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt,
-                               g->len ? g->data : NULL, g->len);
-                    g->resent = 1;
+                    while (g && g->sacked) g = g->next;   /* skip what the peer already has */
+                    if (g) {
+                        tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt,
+                                   g->len ? g->data : NULL, g->len);
+                        g->resent = 1;
+                    }
                     uint32_t inf = s->snd_nxt - s->snd_una;
                     s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
                     s->cwnd     = s->ssthresh + 3u * TCP_MSS;
@@ -715,12 +784,13 @@ void tcp_tick(void)
             continue;
         }
 
-        /* timeout: collapse to slow start, retransmit the oldest segment, and
-         * back off the timer (RFC 6298 §5.5). */
+        /* timeout: collapse to slow start, retransmit the oldest segment the peer
+         * has NOT SACKed, and back off the timer (RFC 6298 §5.5). */
         uint32_t inf = s->snd_nxt - s->snd_una;
         s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
         s->cwnd     = TCP_MSS;
         s->dup_acks = 0;
+        while (g->next && g->sacked) g = g->next;   /* skip SACKed segments */
         tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt, g->len ? g->data : NULL, g->len);
         g->resent = 1;
         s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
