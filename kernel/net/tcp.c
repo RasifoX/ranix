@@ -15,7 +15,9 @@ void task_wake(process_t *p);
 #define TCP_RTO_INIT    100   /* 1s before the first RTT sample (RFC 6298 §2.1) */
 #define TCP_RTO_MIN     20    /* 200ms floor */
 #define TCP_RTO_MAX     6000  /* 60s ceiling */
-#define TCP_RCV_WND     65535
+#define TCP_MSS        (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14)
+#define TCP_RCV_WND     (256u * 1024u)  /* receive buffer / max window (needs scaling) */
+#define TCP_WSCALE      2               /* we advertise window >> 2 (×4 → up to 256KB) */
 
 /* ── checksum ────────────────────────────────────────────── */
 
@@ -54,16 +56,30 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     if (dlen) { memcpy(skb->data, data, dlen); skb->len = dlen; }
     else        skb->len = 0;
 
-    tcp_hdr_t *th = (tcp_hdr_t *)skb_push(skb, sizeof(tcp_hdr_t));
+    /* SYN segments carry MSS + window-scale options (RFC 1323) */
+    int optlen = (flags & TCP_SYN) ? 8 : 0;
+    uint8_t *base = (uint8_t *)skb_push(skb, sizeof(tcp_hdr_t) + optlen);
+    tcp_hdr_t *th = (tcp_hdr_t *)base;
     memset(th, 0, sizeof(tcp_hdr_t));
     th->src_port = htons(s->local_port);
     th->dst_port = htons(s->remote_port);
     th->seq      = htonl(seq);
     th->ack      = (flags & TCP_ACK) ? htonl(ack) : 0;
-    th->data_off = (sizeof(tcp_hdr_t) / 4) << 4;
+    th->data_off = (uint8_t)(((sizeof(tcp_hdr_t) + optlen) / 4) << 4);
     th->flags    = flags;
+
+    /* advertised window: raw on the SYN, scaled afterwards */
     uint32_t rwnd = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+    if (!(flags & TCP_SYN)) rwnd >>= s->rcv_wscale;
     th->window   = htons((uint16_t)(rwnd > 65535 ? 65535 : rwnd));
+
+    if (optlen) {
+        uint8_t *o = base + sizeof(tcp_hdr_t);
+        o[0] = 2; o[1] = 4; o[2] = (uint8_t)(TCP_MSS >> 8); o[3] = (uint8_t)TCP_MSS; /* MSS */
+        o[4] = 3; o[5] = 3; o[6] = TCP_WSCALE;                                       /* WScale */
+        o[7] = 1;                                                                    /* NOP pad */
+    }
+
     th->checksum = 0;
     th->checksum = tcp_cksum(s->local_ip ? s->local_ip : s->dev->ip,
                              s->remote_ip, th, skb->len);
@@ -73,7 +89,6 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 
 /* ── send window: queue of unacked segments ──────────────── */
 
-#define TCP_MSS        (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14)
 #define TCP_CWND_INIT  (4u * TCP_MSS)   /* initial congestion window */
 #define TCP_CWND_MAX   65535u
 #define TCP_RETX_GIVEUP 8
@@ -371,6 +386,22 @@ static void send_rst(netdev_t *dev, ip_hdr_t *iph, tcp_hdr_t *th, uint16_t segle
 
 /* ── main RX path ────────────────────────────────────────── */
 
+/* Scan a SYN segment's options for the window-scale shift (RFC 1323).
+ * Returns the shift, or -1 if the peer offered no window scaling. */
+static int tcp_opt_wscale(const tcp_hdr_t *th, uint8_t hlen)
+{
+    const uint8_t *o   = (const uint8_t *)th + sizeof(tcp_hdr_t);
+    const uint8_t *end = (const uint8_t *)th + hlen;
+    while (o < end) {
+        if (o[0] == 0) break;                 /* end of options */
+        if (o[0] == 1) { o++; continue; }      /* NOP */
+        if (o + 1 >= end || o[1] < 2 || o + o[1] > end) break;
+        if (o[0] == 3 && o[1] == 3) return o[2];   /* window scale */
+        o += o[1];
+    }
+    return -1;
+}
+
 void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 {
     if (skb->len < (uint16_t)sizeof(tcp_hdr_t)) { skb_free(skb); return; }
@@ -385,6 +416,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     uint32_t seq      = ntohl(th->seq);
     uint32_t ack      = ntohl(th->ack);
     uint8_t  flags    = th->flags;
+    int      syn_ws   = (flags & TCP_SYN) ? tcp_opt_wscale(th, hlen) : -1;
 
     skb_pull(skb, hlen);
     uint16_t dlen = skb->len;
@@ -408,7 +440,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             ns->snd_nxt     = 0x12340000;
             ns->snd_una     = ns->snd_nxt;
             ns->tcp_state   = TCP_SYN_RECV;
-            ns->snd_wnd     = ntohs(th->window);
+            ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
+            if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
             tcp_cc_init(ns);
             sock_register(ns);
 
@@ -447,7 +480,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             if (ack != s->snd_nxt) { skb_free(skb); return; }
             s->rcv_nxt    = seq + 1;
             s->snd_una    = ack;
-            s->snd_wnd    = ntohs(th->window);
+            s->snd_wnd    = ntohs(th->window);   /* SYN-ACK window is unscaled */
+            if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
             s->tcp_state  = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
@@ -460,7 +494,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         /* expecting ACK of SYN-ACK */
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->snd_una   = ack;
-            s->snd_wnd   = ntohs(th->window);
+            s->snd_wnd   = (uint32_t)ntohs(th->window) << s->snd_wscale;
             s->tcp_state = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
@@ -497,7 +531,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
                     s->cwnd     = s->ssthresh + 3u * TCP_MSS;
                 }
             }
-            s->snd_wnd = ntohs(th->window);
+            s->snd_wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
             tcp_wake_connect(s);
         }
         /* deliver data, reassembling out-of-order arrivals */
@@ -530,7 +564,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             uint32_t acked = ack - s->snd_una;
             s->snd_una = ack;
             seg_ack(s, ack, acked);
-            s->snd_wnd = ntohs(th->window);
+            s->snd_wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
             tcp_wake_connect(s);
         }
         break;

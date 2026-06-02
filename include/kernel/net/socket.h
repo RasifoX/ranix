@@ -67,7 +67,9 @@ typedef struct socket {
     uint32_t    rcv_nxt;
     uint32_t    snd_una;
     uint16_t    rcv_wnd;        /* advertised receive window */
-    uint16_t    snd_wnd;        /* remote receive window (flow control) */
+    uint32_t    snd_wnd;        /* remote receive window (flow control), descaled */
+    uint8_t     rcv_wscale;     /* window scale we advertise (RFC 1323) */
+    uint8_t     snd_wscale;     /* window scale the peer advertised */
     process_t  *connect_waiter; /* blocking connect() / send() */
 
     /* TCP listen: incoming connection queue */
