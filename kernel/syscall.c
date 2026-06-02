@@ -502,6 +502,13 @@ void syscall_handle(arch_context_t *ctx)
 		break;
 	}
 	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
+	case SYS_ARCH_PROCESS_VM_READV:
+		ret = sys_process_vm((pid_t)arg0, (const iovec_t*)arg1, (unsigned long)arg2,
+		                     (const iovec_t*)arg3, (unsigned long)arg4, (unsigned long)arg5, 0); break;
+	case SYS_ARCH_PROCESS_VM_WRITEV:
+		ret = sys_process_vm((pid_t)arg0, (const iovec_t*)arg1, (unsigned long)arg2,
+		                     (const iovec_t*)arg3, (unsigned long)arg4, (unsigned long)arg5, 1); break;
+	case SYS_ARCH_FADVISE64: ret = 0; break;   /* hint only — safe to ignore */
 	/* ── time ────────────────────────────────────────────── */
 	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
 	case SYS_ARCH_GETTIMEOFDAY:  ret = sys_gettimeofday((linux_timeval_t*)arg0, (void*)arg1); break;
