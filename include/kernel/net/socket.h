@@ -75,15 +75,18 @@ typedef struct socket {
     struct socket *accept_tail;
     process_t  *accept_waiter;  /* blocking accept() */
 
-    /* TCP retransmit: single unacked segment */
-    uint8_t    *retx_data;      /* kmalloc'd copy, NULL if nothing pending */
-    uint16_t    retx_len;
-    uint32_t    retx_seq;
-    uint8_t     retx_flags;
-    uint64_t    retx_deadline;  /* kernel_ticks deadline */
-    int         retx_count;     /* retransmit attempts since last ack */
-    uint64_t    retx_sent_tick; /* when this segment first went out (RTT sample) */
-    uint8_t     retx_resent;    /* set once retransmitted — Karn: skip its RTT */
+    /* TCP send window: queue of unacked segments (sliding window + retransmit) */
+    struct tcp_seg *unacked_head;
+    struct tcp_seg *unacked_tail;
+    uint64_t    retx_deadline;  /* RTO deadline for the oldest unacked segment */
+    int         retx_count;     /* consecutive RTO firings (give up after a few) */
+    uint64_t    retx_sent_tick; /* sent time of the segment being RTT-sampled */
+    uint32_t    cwnd;           /* congestion window (bytes) */
+    uint32_t    ssthresh;       /* slow-start threshold */
+    uint32_t    dup_acks;       /* duplicate-ACK run, for fast retransmit */
+
+    /* OOO reassembly: segments received ahead of rcv_nxt, ordered by seq */
+    struct tcp_seg *ooo_head;
 
     /* RTT estimation / adaptive RTO (RFC 6298), all in timer ticks */
     uint32_t    srtt;           /* smoothed RTT, 0 until first sample */

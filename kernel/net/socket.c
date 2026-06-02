@@ -75,7 +75,7 @@ void sock_free(socket_t *s)
     sock_unregister(s);
     skb_t *skb = s->recv_head;
     while (skb) { skb_t *n = skb->next; skb_free(skb); skb = n; }
-    if (s->retx_data) kfree(s->retx_data);
+    if (s->type == SOCK_STREAM) { extern void tcp_sock_free(socket_t *); tcp_sock_free(s); }
     kfree(s);
 }
 
