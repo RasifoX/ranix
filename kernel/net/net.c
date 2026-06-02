@@ -214,6 +214,16 @@ netdev_t *net_default_dev(void)
     return &ns->lo;   /* a namespace always has its own loopback */
 }
 
+/* Egress device for a destination. 127/8 must go out the loopback device so the
+ * source address is 127.0.0.1 too — sending it from a NIC's address produces an
+ * asymmetric tuple the in-stack loopback then mishandles. Our own NIC address is
+ * already looped by ip_tx (dst == dev->ip), so only 127/8 needs redirecting. */
+netdev_t *net_route_dev(uint32_t dst_ip)
+{
+    if ((dst_ip >> 24) == 127) return &current_net_ns()->lo;
+    return net_default_dev();
+}
+
 /* ── init ────────────────────────────────────────────────── */
 
 void net_init(void)

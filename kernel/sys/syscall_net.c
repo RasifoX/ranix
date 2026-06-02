@@ -374,7 +374,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         }
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_DGRAM) {
-        int rc = udp_tx(s->dev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
+        int rc = udp_tx(net_route_dev(dst_ip), dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_RAW && s->proto == 1 /* IPPROTO_ICMP */) {
         if (len >= sizeof(icmp_hdr_t)) {
