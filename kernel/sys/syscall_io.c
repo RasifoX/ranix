@@ -208,9 +208,8 @@ typedef struct {
 static int epoll_close(vfs_file_t *file)
 {
 	epoll_t     *ep = (epoll_t *)file->inode->priv;
-	vfs_inode_t *in = file->inode;
 	kfree(ep);
-	kfree(in);
+	file->inode->priv = NULL;   /* vfs_close frees the inode (avoid double free) */
 	return 0;
 }
 
@@ -244,7 +243,7 @@ static long sys_epoll_create1(int flags)
 	if (!f) { kfree(ep); kfree(in); return -12; }
 	memset(f, 0, sizeof(*f));
 	f->inode    = in;
-	f->refcount = 1;
+	f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
 
 	process_t *p = task_current();
 	int fd = fd_alloc(p->fds, f);

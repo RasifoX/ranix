@@ -230,10 +230,9 @@ static int timerfd_poll_vfs(vfs_file_t *file)
 static int timerfd_close_vfs(vfs_file_t *file)
 {
     timerfd_t   *t  = (timerfd_t *)file->inode->priv;
-    vfs_inode_t *in = file->inode;
     timerfd_unregister(t);
     kfree(t);
-    kfree(in);
+    file->inode->priv = NULL;   /* vfs_close frees the inode (avoid double free) */
     return 0;
 }
 
@@ -268,7 +267,7 @@ static long sys_timerfd_create(int clockid, int flags)
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->flags    = (flags & O_NONBLOCK) ? O_NONBLOCK : 0;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
@@ -675,10 +674,8 @@ static int signalfd_poll_vfs(vfs_file_t *file)
 static int signalfd_close_vfs(vfs_file_t *file)
 {
     signalfd_t  *sfd = (signalfd_t *)file->inode->priv;
-    vfs_inode_t *in  = file->inode;
     kfree(sfd);
-    kfree(in);
-    kfree(file);
+    file->inode->priv = NULL;   /* vfs_close frees the inode and the file (avoid double free) */
     return 0;
 }
 
@@ -722,7 +719,7 @@ static long sys_signalfd4(int fd, const uint64_t *umask, size_t sigsetsize, int 
     if (!f) { kfree(sfd); kfree(in); return -12; }
     __builtin_memset(f, 0, sizeof(*f));
     f->inode    = in;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
     if (flags & O_NONBLOCK) f->flags = O_NONBLOCK;
 
     int newfd = fd_alloc(p->fds, f);
