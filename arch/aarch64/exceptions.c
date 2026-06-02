@@ -72,6 +72,10 @@
             /* Walk frame pointer chain to get call stack */
             uint64_t fp = tf->regs[29];
             for (int _i = 0; _i < 6 && fp && fp < 0xFFFF000000000000UL && (fp & 7) == 0; _i++) {
+                /* The faulting fp may itself be the bad pointer — never deref it
+                 * blind, or the stack walk faults in EL1 and turns a survivable
+                 * user segfault into a kernel panic. */
+                if (!access_ok((void *)fp, 16) || !user_pages_mapped((void *)fp, 16)) break;
                 uint64_t saved_fp  = *(uint64_t *)fp;
                 uint64_t saved_lr  = *(uint64_t *)(fp + 8);
                 kprintf("  frame[%d]: fp=%lx lr=%lx\n", _i, saved_fp, saved_lr);

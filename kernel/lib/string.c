@@ -6,7 +6,7 @@
 
 extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 
-static int user_pages_mapped(const void *addr, size_t n)
+int user_pages_mapped(const void *addr, size_t n)
 {
 	if (n == 0) return 1;
 	process_t *p = task_current();
