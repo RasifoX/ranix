@@ -79,9 +79,8 @@ static int eventfd_poll_vfs(vfs_file_t *file)
 static int eventfd_close_vfs(vfs_file_t *file)
 {
     eventfd_t   *efd = (eventfd_t *)file->inode->priv;
-    vfs_inode_t *in  = file->inode;
     kfree(efd);
-    kfree(in);
+    file->inode->priv = NULL;   /* vfs_close frees the inode (avoid double free) */
     return 0;
 }
 
@@ -114,7 +113,7 @@ static long sys_eventfd2(unsigned int initval, int flags)
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->flags    = (flags & EFD_NONBLOCK) ? O_NONBLOCK : 0;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
