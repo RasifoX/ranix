@@ -229,6 +229,7 @@ typedef struct {
 #define SYS_ARCH_RSEQ              293
 #define SYS_ARCH_FACCESSAT2        439
 #define SYS_ARCH_EXECVEAT          281
+#define SYS_ARCH_SECCOMP           277
 #define SYS_ARCH_PIDFD_SEND_SIGNAL 424
 #define SYS_ARCH_PIDFD_OPEN        434
 #define SYS_ARCH_CLONE3            435

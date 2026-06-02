@@ -595,6 +595,34 @@ static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 #define PR_GET_DUMPABLE 3
 #define PR_SET_PDEATHSIG 1
 #define PR_SET_CHILD_SUBREAPER 36
+#define PR_GET_SECCOMP 21
+#define PR_SET_SECCOMP 22
+
+/* Install a SECCOMP_MODE_FILTER program from a user sock_fprog {len, filter}. */
+static long seccomp_install(process_t *p, uint64_t fprog_uptr)
+{
+	struct { uint16_t len; uint64_t filter; } fp;
+	if (copy_from_user(&fp, (void *)(uintptr_t)fprog_uptr, sizeof(fp)) != 0) return -14;
+	if (fp.len == 0 || fp.len > 4096) return -22;
+	size_t sz = (size_t)fp.len * 8;   /* sizeof(struct sock_filter) */
+	void *prog = kmalloc(sz);
+	if (!prog) return -12;
+	if (copy_from_user(prog, (void *)(uintptr_t)fp.filter, sz) != 0) { kfree(prog); return -14; }
+	if (p->seccomp_filter) kfree(p->seccomp_filter);
+	p->seccomp_filter = prog;
+	p->seccomp_flen   = fp.len;
+	p->seccomp_mode   = 2;
+	return 0;
+}
+
+static long sys_seccomp(unsigned int op, unsigned int flags, uint64_t args)
+{
+	(void)flags;
+	process_t *p = task_current();
+	if (op == 0) { p->seccomp_mode = 1; return 0; }   /* SECCOMP_SET_MODE_STRICT */
+	if (op == 1) return seccomp_install(p, args);     /* SECCOMP_SET_MODE_FILTER */
+	return -22;
+}
 
 static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5)
 {
@@ -625,6 +653,12 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return 0;
 	case PR_GET_DUMPABLE:
 		return p->dumpable;
+	case PR_SET_SECCOMP:
+		if (arg2 == 1) { p->seccomp_mode = 1; return 0; }   /* STRICT */
+		if (arg2 == 2) return seccomp_install(p, arg3);     /* FILTER, arg3=sock_fprog */
+		return -22;
+	case PR_GET_SECCOMP:
+		return p->seccomp_mode;
 	default: return 0;
 	}
 }
