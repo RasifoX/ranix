@@ -112,7 +112,7 @@ static long sys_close(int fd);
 static long sys_lseek(int fd, off_t off, int whence);
 static long sys_fstat(int fd, linux_stat_t *st);
 
-static void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
+void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
 {
 	vma_t *v = kmalloc(sizeof(*v));
 	if (!v) return;
@@ -121,6 +121,34 @@ static void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
 	v->flags = flags;
 	v->next  = p->vmas;
 	p->vmas  = v;
+}
+
+/* Remove [va, va+len) from the VMA set, trimming or splitting any overlapping
+ * VMAs and re-adding the non-overlapping remainders. A fresh mmap (especially
+ * MAP_FIXED, which ld.so uses to lay a library's segments over its initial
+ * reservation) must replace whatever was there, not leave a stale VMA whose
+ * permissions then win the fault lookup. */
+void vma_clip(process_t *p, uint64_t va, uint64_t len)
+{
+	uint64_t end = va + len;
+	int changed = 1;
+	while (changed) {
+		changed = 0;
+		vma_t **pp = &p->vmas;
+		for (vma_t *v = *pp; v; pp = &v->next, v = v->next) {
+			uint64_t vend = v->vaddr + v->size;
+			if (v->vaddr >= end || vend <= va) continue;   /* disjoint */
+			uint64_t lv = v->vaddr, ls = (va > v->vaddr) ? va - v->vaddr : 0;
+			uint64_t rv = end,      rs = (vend > end)    ? vend - end    : 0;
+			uint32_t fl = v->flags;
+			*pp = v->next;
+			kfree(v);
+			if (ls) vma_add(p, lv, ls, fl);
+			if (rs) vma_add(p, rv, rs, fl);
+			changed = 1;   /* list mutated — restart the scan */
+			break;
+		}
+	}
 }
 
 static void vma_free_all(process_t *p)

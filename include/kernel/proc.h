@@ -200,6 +200,8 @@ process_t *task_get(int index);
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
+void       vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags);
+void       vma_clip(process_t *p, uint64_t va, uint64_t len);
 pid_t      proc_fork(uint64_t clone_flags);
 pid_t      proc_vfork(void);
 void       proc_vfork_exec_notify(void);
