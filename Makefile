@@ -101,6 +101,7 @@ SRCS_NET = \
     kernel/net/icmp.c \
     kernel/net/udp.c \
     kernel/net/tcp.c \
+    kernel/net/dhcp.c \
     kernel/net/socket.c
 
 SRCS_KERNEL = \
