@@ -313,7 +313,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
       tertemiz. Suite'e bağlandı (smp-cow-race, 192/192).
 
 ### Locking
-- [ ] ticket spinlock → daha fair
+- [x] ticket spinlock → daha fair ✅ (2026-06-03: FIFO head/tail, atomic_fetch_add; iki arch SMP suite)
 - [ ] TLB shootdown IPI (fork/mmap sonrası remote flush) — şu an her vm_switch'te
       tam `tlbi vmalle1is` (ağır ama doğru)
 - [ ] per-CPU variables (this_cpu_read/write)
