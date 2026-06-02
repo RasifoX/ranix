@@ -196,7 +196,9 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 #define FUTEX_WAKE         1
 #define FUTEX_WAKE_OP      5
 #define FUTEX_REQUEUE      3
-#define FUTEX_PRIVATE_FLAG 128
+#define FUTEX_PRIVATE_FLAG    128
+#define FUTEX_CLOCK_REALTIME  256
+#define FUTEX_CMD_MASK        (~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
 
 extern spinlock_t sched_lock;
 
@@ -266,7 +268,7 @@ static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
-	int cmd = op & ~FUTEX_PRIVATE_FLAG;
+	int cmd = op & FUTEX_CMD_MASK;
 	process_t *self = task_current();
 	void *mm = self->vm;
 
