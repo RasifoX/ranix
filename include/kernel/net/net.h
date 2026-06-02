@@ -26,6 +26,8 @@ typedef struct skb {
     uint8_t     buf[SKB_HEADROOM + SKB_DATA_MAX];
     uint8_t    *data;   /* current start of packet data */
     uint16_t    len;    /* bytes from data */
+    uint32_t    src_ip;     /* datagram source — for recvfrom on a UDP socket */
+    uint16_t    src_port;
     struct skb *next;
 } skb_t;
 

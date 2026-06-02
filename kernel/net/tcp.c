@@ -129,7 +129,7 @@ static void tcp_wake_accept(socket_t *ls)
 static uint16_t   next_ephemeral  = 49152;
 static spinlock_t ephemeral_lock  = SPINLOCK_INIT;
 
-static uint16_t alloc_port(void)
+uint16_t alloc_port(void)
 {
     spin_lock(&ephemeral_lock);
     uint16_t p = next_ephemeral++;

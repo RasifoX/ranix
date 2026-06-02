@@ -374,7 +374,18 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         }
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_DGRAM) {
-        int rc = udp_tx(net_route_dev(dst_ip), dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
+        /* an unbound socket needs a source port and a delivery registration, or
+         * the peer's reply lands on port 0 and matches nothing */
+        if (!s->local_port) { extern uint16_t alloc_port(void); s->local_port = alloc_port(); }
+        sock_register(s);
+        /* first send to an unresolved peer triggers ARP and is dropped; poll RX
+         * for the reply and retry so the datagram actually goes out */
+        netdev_t *txdev = net_route_dev(dst_ip);
+        int rc = -1;
+        for (int attempt = 0; attempt < 64 && rc == -1; attempt++) {
+            rc = udp_tx(txdev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
+            if (rc == -1) net_poll();
+        }
         r = rc < 0 ? rc : (long)len;
     } else if (s->type == SOCK_RAW && s->proto == 1 /* IPPROTO_ICMP */) {
         if (len >= sizeof(icmp_hdr_t)) {
@@ -420,14 +431,17 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
                 sockaddr_in_t sa;
                 memset(&sa, 0, sizeof(sa));
                 sa.sin_family = AF_INET;
-                sa.sin_port   = htons(s->remote_port);
                 if (s->type == SOCK_RAW && skb->len >= 20) {
                     /* extract src IP from the prepended IP header (network byte order) */
                     uint32_t src_net;
                     memcpy(&src_net, skb->data + 12, 4);
                     sa.sin_addr = src_net;
+                    sa.sin_port = htons(s->remote_port);
                 } else {
-                    sa.sin_addr = htonl(s->remote_ip);
+                    /* the datagram's real origin, not the socket's remote — an
+                     * unconnected socket has none, and senders verify the source */
+                    sa.sin_addr = htonl(skb->src_ip);
+                    sa.sin_port = htons(skb->src_port);
                 }
                 copy_to_user(uaddr, &sa, sizeof(sa));
             }
