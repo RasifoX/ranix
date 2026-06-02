@@ -68,28 +68,42 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     if (dlen) { memcpy(skb->data, data, dlen); skb->len = dlen; }
     else        skb->len = 0;
 
-    /* Build TCP options: MSS/WScale/SACK-permitted on the SYN, SACK blocks on an
-     * ACK when we have out-of-order data buffered (RFC 2018). */
+    /* Build TCP options. SYN: MSS, SACK-permitted, timestamp, window-scale.
+     * Other segments: timestamp (if negotiated) + SACK blocks for buffered OOO
+     * data (RFC 1323/2018/7323). */
     uint8_t opts[40];
     int optlen = 0;
+    uint32_t tsval = htonl((uint32_t)kernel_ticks);
+    uint32_t tsecr = htonl(s->ts_recent);
     if (flags & TCP_SYN) {
         opts[optlen++] = 2; opts[optlen++] = 4;
         opts[optlen++] = (uint8_t)(TCP_MSS >> 8); opts[optlen++] = (uint8_t)TCP_MSS;
-        opts[optlen++] = 3; opts[optlen++] = 3; opts[optlen++] = TCP_WSCALE;
         opts[optlen++] = 4; opts[optlen++] = 2;   /* SACK-permitted */
-    } else if ((flags & TCP_ACK) && s->sack_ok && s->ooo_head) {
-        opts[optlen++] = 1; opts[optlen++] = 1;   /* NOP, NOP — align the SACK option */
-        int li = optlen; opts[optlen++] = 5; opts[optlen++] = 0;   /* kind, len (filled below) */
-        int nb = 0;
-        for (tcp_seg_t *g = s->ooo_head; g && nb < 3 && optlen + 8 <= (int)sizeof(opts); ) {
-            uint32_t l = g->seq, r = g->seq + g->len;
-            while (g->next && g->next->seq == r) { g = g->next; r = g->seq + g->len; }
-            uint32_t nl = htonl(l), nr = htonl(r);
-            memcpy(opts + optlen, &nl, 4); optlen += 4;
-            memcpy(opts + optlen, &nr, 4); optlen += 4;
-            nb++; g = g->next;
+        opts[optlen++] = 8; opts[optlen++] = 10;  /* timestamp */
+        memcpy(opts + optlen, &tsval, 4); optlen += 4;
+        memcpy(opts + optlen, &tsecr, 4); optlen += 4;
+        opts[optlen++] = 3; opts[optlen++] = 3; opts[optlen++] = TCP_WSCALE;
+    } else {
+        if (s->ts_ok) {
+            opts[optlen++] = 1; opts[optlen++] = 1;   /* NOP, NOP — align TS */
+            opts[optlen++] = 8; opts[optlen++] = 10;
+            memcpy(opts + optlen, &tsval, 4); optlen += 4;
+            memcpy(opts + optlen, &tsecr, 4); optlen += 4;
         }
-        opts[li + 1] = (uint8_t)(2 + 8 * nb);
+        if ((flags & TCP_ACK) && s->sack_ok && s->ooo_head) {
+            opts[optlen++] = 1; opts[optlen++] = 1;   /* NOP, NOP — align SACK */
+            int li = optlen; opts[optlen++] = 5; opts[optlen++] = 0;
+            int nb = 0;
+            for (tcp_seg_t *g = s->ooo_head; g && nb < 3 && optlen + 8 <= (int)sizeof(opts); ) {
+                uint32_t l = g->seq, r = g->seq + g->len;
+                while (g->next && g->next->seq == r) { g = g->next; r = g->seq + g->len; }
+                uint32_t nl = htonl(l), nr = htonl(r);
+                memcpy(opts + optlen, &nl, 4); optlen += 4;
+                memcpy(opts + optlen, &nr, 4); optlen += 4;
+                nb++; g = g->next;
+            }
+            opts[li + 1] = (uint8_t)(2 + 8 * nb);
+        }
     }
     while (optlen & 3) opts[optlen++] = 1;   /* NOP-pad to a 4-byte boundary */
 
@@ -189,7 +203,7 @@ static void seg_ack(socket_t *s, uint32_t ack, uint32_t bytes_acked)
     while (s->unacked_head) {
         tcp_seg_t *g = s->unacked_head;
         if (!seq_le(g->seq + seg_span(g), ack)) break;   /* not fully acked */
-        if (!g->resent && !sampled) { tcp_rtt_update(s, g->sent_tick); sampled = 1; }
+        if (!g->resent && !sampled && !s->ts_ok) { tcp_rtt_update(s, g->sent_tick); sampled = 1; }
         s->unacked_head = g->next;
         if (!s->unacked_head) s->unacked_tail = NULL;
         kfree(g);
@@ -435,6 +449,26 @@ static int tcp_opt_sack_perm(const tcp_hdr_t *th, uint8_t hlen)
     return 0;
 }
 
+/* Extract the timestamp option's TSval/TSecr (RFC 7323); 1 if present. */
+static int tcp_opt_ts(const tcp_hdr_t *th, uint8_t hlen, uint32_t *tsval, uint32_t *tsecr)
+{
+    const uint8_t *o   = (const uint8_t *)th + sizeof(tcp_hdr_t);
+    const uint8_t *end = (const uint8_t *)th + hlen;
+    while (o < end) {
+        if (o[0] == 0) break;
+        if (o[0] == 1) { o++; continue; }
+        if (o + 1 >= end || o[1] < 2 || o + o[1] > end) break;
+        if (o[0] == 8 && o[1] == 10) {
+            uint32_t v, e;
+            memcpy(&v, o + 2, 4); memcpy(&e, o + 6, 4);
+            *tsval = ntohl(v); *tsecr = ntohl(e);
+            return 1;
+        }
+        o += o[1];
+    }
+    return 0;
+}
+
 /* Mark unacked segments the peer reported as received via SACK blocks, so the
  * retransmit path skips them and resends only the real gaps. */
 static void tcp_process_sack(socket_t *s, const tcp_hdr_t *th, uint8_t hlen)
@@ -478,6 +512,8 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     int      syn_ws   = (flags & TCP_SYN) ? tcp_opt_wscale(th, hlen) : -1;
     int      syn_sack = (flags & TCP_SYN) ? tcp_opt_sack_perm(th, hlen) : 0;
     uint8_t  rx_hlen  = hlen;   /* keep for SACK-block parsing after skb_pull */
+    uint32_t rx_tsval = 0, rx_tsecr = 0;
+    int      rx_has_ts = tcp_opt_ts(th, hlen, &rx_tsval, &rx_tsecr);
 
     skb_pull(skb, hlen);
     uint16_t dlen = skb->len;
@@ -504,11 +540,11 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
             if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
             if (syn_sack) ns->sack_ok = 1;
+            if (rx_has_ts) { ns->ts_ok = 1; ns->ts_recent = rx_tsval; }
             tcp_cc_init(ns);
             sock_register(ns);
 
-            tcp_tx_seg(ns, TCP_SYN | TCP_ACK,
-                       ns->snd_nxt, ns->rcv_nxt, NULL, 0);
+            tcp_tx_seg(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, ns->rcv_nxt, NULL, 0);
             seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0);
             ns->snd_nxt++;
 
@@ -543,12 +579,13 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 
     case TCP_SYN_SENT:
         if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
-            if (ack != s->snd_nxt) { skb_free(skb); return; }
+            if (ack != s->snd_nxt) break;   /* stale/duplicate SYN-ACK — unlock+free below */
             s->rcv_nxt    = seq + 1;
             s->snd_una    = ack;
             s->snd_wnd    = ntohs(th->window);   /* SYN-ACK window is unscaled */
             if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
             if (syn_sack) s->sack_ok = 1;
+            if (rx_has_ts) { s->ts_ok = 1; s->ts_recent = rx_tsval; }
             s->tcp_state  = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
@@ -584,9 +621,12 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         break;
 
     case TCP_ESTABLISHED:
+        if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
         /* ACK advances snd_una; duplicate ACKs trigger fast retransmit */
         if (flags & TCP_ACK) {
             if (s->sack_ok && rx_hlen > sizeof(tcp_hdr_t)) tcp_process_sack(s, th, rx_hlen);
+            if (s->ts_ok && rx_has_ts && rx_tsecr)        /* RTT from echoed timestamp (no Karn) */
+                tcp_rtt_update(s, rx_tsecr);
             if (!seq_le(ack, s->snd_una)) {           /* ack > snd_una: new data acked */
                 uint32_t acked = ack - s->snd_una;
                 s->snd_una = ack;
@@ -708,8 +748,9 @@ int tcp_connect(socket_t *s)
     uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();
     if (!s->local_ip)   s->local_ip   = s->dev->ip;
-    s->snd_nxt   = 0xAB000000;
-    s->snd_una   = s->snd_nxt;
+    s->snd_una   = 0xAB000000;
+    s->snd_nxt   = s->snd_una + 1;   /* SYN consumes one seq — advance now so a
+                                      * SYN-ACK racing in (fast net thread) matches */
     s->rcv_nxt   = 0;
     s->snd_wnd   = 1024;
     s->tcp_state = TCP_SYN_SENT;
@@ -720,14 +761,12 @@ int tcp_connect(socket_t *s)
      * run WITHOUT tcp_lock — net_poll re-enters tcp_rx which takes it. */
     int rc = -1;
     for (int i = 0; i < 64 && rc == -1; i++) {
-        rc = tcp_tx_seg(s, TCP_SYN, s->snd_nxt, 0, NULL, 0);
+        rc = tcp_tx_seg(s, TCP_SYN, s->snd_una, 0, NULL, 0);
         if (rc == -1) net_poll();
     }
     tl = spin_lock_irq(&tcp_lock);
-    if (s->tcp_state == TCP_SYN_SENT) {   /* still connecting — SYN-ACK may have raced in */
-        seg_enqueue(s, TCP_SYN, s->snd_nxt, NULL, 0);
-        s->snd_nxt++;
-    }
+    if (s->tcp_state == TCP_SYN_SENT)   /* still connecting — SYN-ACK may have raced in */
+        seg_enqueue(s, TCP_SYN, s->snd_una, NULL, 0);
     spin_unlock_irq(&tcp_lock, tl);
     return 0;
 }
