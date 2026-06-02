@@ -88,10 +88,19 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		p->cap_inheritable = ~0ULL;
 	}
 
+	/* name is the image's full path: comm is its basename, exe_path the whole
+	 * path (glibc readlinks /proc/self/exe and asserts it is absolute). */
+	const char *base = name;
+	for (const char *s = name; *s; s++) if (*s == '/') base = s + 1;
 	int nlen = 0;
-	while (name[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
-	memcpy(p->name, name, nlen);
+	while (base[nlen] && nlen < PROC_NAME_MAX - 1) nlen++;
+	memcpy(p->name, base, nlen);
 	p->name[nlen] = '\0';
+	if (name[0] == '/') {
+		int el = 0;
+		while (name[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = name[el]; el++; }
+		p->exe_path[el] = '\0';
+	}
 
 	p->vm = vm_create();
 	if (!p->vm) goto fail;
@@ -166,6 +175,14 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	p->ctx = ctx;
 	p->fds = fd_table_create();
+	/* pid 1 is handed fd 0/1/2 = /dev/console by the kernel, as Linux does — a
+	 * freestanding C runtime (glibc) assumes the standard descriptors already
+	 * exist and aborts otherwise. */
+	if (p->fds) {
+		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_RDONLY, 0);
+		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_WRONLY, 0);
+		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_WRONLY, 0);
+	}
 	/* Inherit the cwd, but guarantee it is absolute: init's parent is the boot
 	 * task, whose cwd was never set — an empty/relative cwd makes getcwd(2) fail
 	 * (musl rejects a non-'/' result), which then propagates to every process. */
