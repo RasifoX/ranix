@@ -325,6 +325,7 @@ check "c-pipestress" "OK" "$(timeout 60 /bin/test_pipestress 2>/dev/null | tail 
 check "c-execstress" "OK" "$(timeout 60 /bin/test_execstress 2>/dev/null | tail -1)"
 check "c-posix"      "OK"  "$(timeout 10 /bin/test_posix 2>/dev/null | tail -1)"
 check "c-sigsweep"   "OK"  "$(timeout 10 /bin/test_sigsweep 2>/dev/null | tail -1)"
+check "c-timesweep"  "OK"  "$(timeout 10 /bin/test_timesweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
