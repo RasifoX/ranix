@@ -238,6 +238,27 @@ void net_init(void)
     net_register(lo);
 }
 
+/* Point /etc/resolv.conf at the DHCP-supplied nameserver, replacing the static
+ * default so name resolution follows the network we actually joined. */
+static void write_resolv_conf(uint32_t dns)
+{
+    extern int vfs_unlink(const char *path);
+    extern int vfs_kernel_install(const char *path, const void *data, size_t len);
+
+    char buf[40];
+    int n = 0;
+    for (const char *p = "nameserver "; *p; p++) buf[n++] = *p;
+    for (int i = 0; i < 4; i++) {
+        uint8_t v = (uint8_t)(dns >> (24 - i * 8));
+        if (v >= 100) buf[n++] = '0' + v / 100;
+        if (v >= 10)  buf[n++] = '0' + (v / 10) % 10;
+        buf[n++] = '0' + v % 10;
+        buf[n++] = (i < 3) ? '.' : '\n';
+    }
+    vfs_unlink("/etc/resolv.conf");
+    vfs_kernel_install("/etc/resolv.conf", buf, n);
+}
+
 /* Configure every real NIC over DHCP, falling back to its driver static IP. Run
  * after the drivers register (NICs present) and the VFS is up. */
 void net_dhcp_all(void)
@@ -247,9 +268,12 @@ void net_dhcp_all(void)
         netdev_t *d = devs[i];
         if (!d->poll || (d->ip >> 24) == 127) continue;   /* skip loopback */
         uint32_t dns = 0;
-        if (dhcp_configure(d, &dns) != 0)
+        if (dhcp_configure(d, &dns) == 0) {
+            if (dns) write_resolv_conf(dns);
+        } else {
             kprintf("dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
                     (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
                     (d->ip >> 8) & 0xff, d->ip & 0xff);
+        }
     }
 }
