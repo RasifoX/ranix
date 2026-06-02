@@ -69,11 +69,14 @@ Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü
 - [x] out-of-order segment buffer (reassembly; drop+re-ACK yerine tampon)
 - [x] SO_KEEPALIVE / SO_REUSEPORT / TCP_NODELAY — setsockopt kabul ediyor (Nagle yok zaten)
 - [x] **receive window scaling (RFC 1323)** — SYN'de MSS+WScale option, 256KB pencere (gigabit)
-- [x] **event-driven RX** (net kernel-thread, paket gelince uyanır) — loopback 0.77→18.5 MB/s (24x)
 - [x] **flow control** (advertised window = buffer-doluluğu, OOM-safe) + window-update ACK
+- [x] **SACK (RFC 2018)** — negotiate + receiver blocks + sender skip-on-retransmit (loss injector'la test'li)
 - [x] KRİTİK: write() >MSS byte'ı sessizce düşürüyordu — düzeltildi (test_tcpbulk korur)
 - [x] KRİTİK: recv kısa-okumada skb kalanını atıyordu (TLS framing) — düzeltildi
-- TCP artık Linux-sınıfı (Reno + window scaling + event-driven). KALAN: SACK, TCP timestamps, IPv6,
+- [~] **event-driven RX** (24x) DENENDİ ama GERİ ALINDI: kilitsiz tcp_state race'i (close↔RX FIN) →
+      ~1/3 hang. Stabilite için timer-paced'e dönüldü (8x). Sıradaki: per-socket TCP state lock,
+      sonra event-driven'ı geri aç. Test harness hazır (netdrop loss injector + loop-repro).
+- TCP Linux-sınıfı (Reno + window scaling + SACK + flow control), STABİL. KALAN: TCP timestamps, IPv6,
   IP forwarding/NAT (router) — her biri ayrı feature.
 
 ---
