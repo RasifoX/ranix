@@ -25,7 +25,7 @@ static int sock_close_vfs(vfs_file_t *file)
             if (sw) task_wake(sw);
         }
         sock_free(s);
-        kfree(in);
+        in->priv = NULL;   /* socket freed; vfs_close frees the inode (avoid double free) */
         return 0;
     }
 
@@ -42,7 +42,7 @@ static int sock_close_vfs(vfs_file_t *file)
         spin_unlock_irq(&s->recv_lock, cf);
     }
     sock_free(s);
-    kfree(in);
+    in->priv = NULL;   /* socket freed; vfs_close frees the inode (avoid double free) */
     return 0;
 }
 
@@ -150,7 +150,7 @@ static int sock_to_fd(socket_t *s)
     if (!f) { kfree(in); return -12; }
     memset(f, 0, sizeof(*f));
     f->inode    = in;
-    f->refcount = 1;
+    f->refcount = 0;   /* fd_alloc takes the +1, like vfs_open; a single close() then frees */
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
