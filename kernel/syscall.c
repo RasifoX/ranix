@@ -361,6 +361,27 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_UNSHARE: ret = sys_unshare((unsigned long)arg0); break;
 	case SYS_ARCH_SETNS:   ret = sys_setns((int)arg0, (int)arg1); break;
 	case SYS_ARCH_EXECVE: ret = sys_execve((const char*)arg0, (char * const *)arg1, (char * const *)arg2); break;
+	case SYS_ARCH_EXECVEAT: ret = sys_execveat((int)arg0, (const char*)arg1, (char * const *)arg2, (char * const *)arg3, (int)arg4); break;
+	case SYS_ARCH_CLONE3: {
+		/* glibc 2.34+ thread creation. struct clone_args prefix we use: flags,
+		 * pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls. */
+		struct { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls; } ca;
+		memset(&ca, 0, sizeof(ca));
+		size_t csz = (size_t)arg1 < sizeof(ca) ? (size_t)arg1 : sizeof(ca);
+		if (copy_from_user(&ca, (void*)arg0, csz) != 0) { ret = -14; break; }
+		uint64_t flags = ca.flags;
+		if (flags & CLONE_VM) {
+			uint64_t newsp = ca.stack + ca.stack_size;   /* clone3 gives stack base+size */
+			uint32_t *ptid = (flags & CLONE_PTID) ? (uint32_t*)ca.parent_tid : NULL;
+			uint64_t tls   = (flags & CLONE_SETTLS) ? ca.tls : 0;
+			uint32_t *clear_tid = (flags & CLONE_CTID)    ? (uint32_t*)ca.child_tid : NULL;
+			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? (uint32_t*)ca.child_tid : NULL;
+			ret = (long)proc_clone_thread(newsp, tls, clear_tid, ptid, set_tid);
+		} else {
+			ret = (long)proc_fork(flags);
+		}
+		break;
+	}
 	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
 	/* ── time ────────────────────────────────────────────── */
 	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
