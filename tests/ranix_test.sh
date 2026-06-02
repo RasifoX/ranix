@@ -329,6 +329,7 @@ check "c-timesweep"  "OK"  "$(timeout 10 /bin/test_timesweep 2>/dev/null | tail 
 check "c-dirsweep"   "OK"  "$(timeout 10 /bin/test_dirsweep 2>/dev/null | tail -1)"
 check "c-mmsweep"    "OK"  "$(timeout 10 /bin/test_mmsweep 2>/dev/null | tail -1)"
 check "c-procsweep"  "OK"  "$(timeout 15 /bin/test_procsweep 2>/dev/null | tail -1)"
+check "c-fssweep"    "OK"  "$(timeout 10 /bin/test_fssweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
