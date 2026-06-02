@@ -265,6 +265,19 @@ static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
 	return woken;
 }
 
+static void mono_time(int64_t *sec, int64_t *nsec);
+
+/* Tick value for the deadline sweep to wake a timed futex waiter at the ns
+ * deadline. Recomputed each time the waiter sleeps so a fast kernel_ticks under
+ * TCG cannot leave it spinning — the loop re-checks the real deadline anyway. */
+static uint64_t futex_deadline_ticks(int64_t end_ns)
+{
+	int64_t s, n; mono_time(&s, &n);
+	int64_t rem = end_ns - (s * 1000000000LL + n);
+	if (rem < 0) rem = 0;
+	return kernel_ticks + (uint64_t)rem / (1000000000 / TIMER_HZ) + 1;
+}
+
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
@@ -274,13 +287,20 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 
 	if (cmd == FUTEX_WAIT || cmd == 9 /* FUTEX_WAIT_BITSET */) {
 		int timed = 0;
-		uint64_t end = 0;
+		int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
 		if (timeout) {
 			linux_timespec_t kts;
 			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
-				end = kernel_ticks + (uint64_t)kts.tv_sec * TIMER_HZ +
-				      (uint64_t)kts.tv_nsec / (1000000000 / TIMER_HZ);
-				timed = 1;
+				/* FUTEX_WAIT's timeout is a relative span, FUTEX_WAIT_BITSET's an
+				 * absolute deadline on the same boot-relative clock mono_time
+				 * reports. Track the deadline in ns and decide the timeout against
+				 * mono_time — kernel_ticks does not track wall time under TCG, so
+				 * it serves only as the deadline-sweep wake-up hint below. */
+				int64_t ns, nn; mono_time(&ns, &nn);
+				int64_t now_ns = ns * 1000000000LL + nn;
+				int64_t want   = kts.tv_sec * 1000000000LL + kts.tv_nsec;
+				end_ns = (cmd == 9) ? want : now_ns + want;
+				timed  = 1;
 			}
 		}
 		futex_q_t q = { self, uaddr, mm, 0, NULL };
@@ -293,10 +313,10 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		uint64_t fs = spin_lock_irq(&sched_lock);
 		self->state = PROC_SLEEPING;
 		/* event-driven: woken by futex_do_wake or task_signal. timed waits also
-		 * arm wake_deadline so the sched_tick deadline sweep fires the timeout —
-		 * no per-tick blanket poll either way. */
+		 * arm wake_deadline so the sched_tick deadline sweep fires a wake-up — no
+		 * per-tick blanket poll either way. */
 		self->sleeping_on_queue = 1;
-		if (timed) self->wake_deadline = end;
+		if (timed) self->wake_deadline = futex_deadline_ticks(end_ns);
 		spin_unlock_irq(&sched_lock, fs);
 		spin_unlock_irq(&futex_lock, f);
 
@@ -307,7 +327,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 			int sig = (self->sig_pending & ~self->sig_mask) != 0;
 			uint32_t c2;
 			int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
-			int tmo  = timed && kernel_ticks >= end;
+			int tmo  = 0;
+			if (timed) { int64_t s, n; mono_time(&s, &n); tmo = (s * 1000000000LL + n) >= end_ns; }
 			if (sig || vchg || tmo) {
 				self->wake_deadline = 0;
 				futex_unlink(&q);
@@ -317,7 +338,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 			fs = spin_lock_irq(&sched_lock);
 			self->state = PROC_SLEEPING;
 			self->sleeping_on_queue = 1;
-			if (timed) self->wake_deadline = end;
+			if (timed) self->wake_deadline = futex_deadline_ticks(end_ns);
 			spin_unlock_irq(&sched_lock, fs);
 			spin_unlock_irq(&futex_lock, f);
 		}
