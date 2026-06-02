@@ -195,6 +195,7 @@ pid_t      proc_vfork(void);
 void       proc_vfork_exec_notify(void);
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);
 process_t *proc_find(pid_t pid);
+int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);
 void       proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive);
