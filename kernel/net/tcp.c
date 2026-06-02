@@ -12,7 +12,9 @@ extern volatile uint64_t kernel_ticks;
 extern uint32_t TIMER_HZ;
 void task_wake(process_t *p);
 
-#define TCP_RETX_TICKS  200   /* ~2s at 100Hz */
+#define TCP_RTO_INIT    100   /* 1s before the first RTT sample (RFC 6298 §2.1) */
+#define TCP_RTO_MIN     20    /* 200ms floor */
+#define TCP_RTO_MAX     6000  /* 60s ceiling */
 #define TCP_RCV_WND     8192
 
 /* ── checksum ────────────────────────────────────────────── */
@@ -70,6 +72,26 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 
 /* ── retransmit queue (single segment) ──────────────────── */
 
+/* Fold a fresh round-trip sample into srtt/rttvar and recompute rto (RFC 6298).
+ * Skipped for retransmitted segments (Karn): their RTT is ambiguous. */
+static void tcp_rtt_sample(socket_t *s)
+{
+    if (s->retx_resent || s->retx_deadline == 0) return;
+    uint32_t r = (uint32_t)(kernel_ticks - s->retx_sent_tick);
+    if (s->srtt == 0) {
+        s->srtt   = r;
+        s->rttvar = r / 2;
+    } else {
+        uint32_t d = (s->srtt > r) ? (s->srtt - r) : (r - s->srtt);
+        s->rttvar = (3 * s->rttvar + d) / 4;
+        s->srtt   = (7 * s->srtt + r) / 8;
+    }
+    uint32_t rto = s->srtt + 4 * s->rttvar;
+    if (rto < TCP_RTO_MIN) rto = TCP_RTO_MIN;
+    if (rto > TCP_RTO_MAX) rto = TCP_RTO_MAX;
+    s->rto = rto;
+}
+
 static void retx_arm(socket_t *s, uint8_t flags,
                      uint32_t seq, const void *data, uint16_t dlen)
 {
@@ -78,10 +100,13 @@ static void retx_arm(socket_t *s, uint8_t flags,
         s->retx_data = kmalloc(dlen);
         if (s->retx_data) memcpy(s->retx_data, data, dlen);
     }
+    if (s->rto == 0) s->rto = TCP_RTO_INIT;
     s->retx_len      = dlen;
     s->retx_seq      = seq;
     s->retx_flags    = flags;
-    s->retx_deadline = kernel_ticks + TCP_RETX_TICKS;
+    s->retx_sent_tick = kernel_ticks;
+    s->retx_resent   = 0;
+    s->retx_deadline = kernel_ticks + s->rto;
 }
 
 static void retx_clear(socket_t *s)
@@ -308,6 +333,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
             s->snd_una    = ack;
             s->snd_wnd    = ntohs(th->window);
             s->tcp_state  = TCP_ESTABLISHED;
+            tcp_rtt_sample(s);
             retx_clear(s);
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
             tcp_wake_connect(s);
@@ -319,6 +345,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->snd_una   = ack;
             s->tcp_state = TCP_ESTABLISHED;
+            tcp_rtt_sample(s);
             retx_clear(s);
             /* move to listen socket's accept queue */
             socket_t *ls = tcp_listen_find(s->net_ns, s->local_port);
@@ -338,7 +365,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
         if (flags & TCP_ACK) {
             if (ack > s->snd_una) {
                 s->snd_una = ack;
-                if (s->snd_una == s->snd_nxt) retx_clear(s);
+                if (s->snd_una == s->snd_nxt) { tcp_rtt_sample(s); retx_clear(s); }
             }
             s->snd_wnd = ntohs(th->window);
             /* wake a blocked send() on any ACK (window or snd_una advance) */
@@ -371,7 +398,7 @@ void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     case TCP_CLOSE_WAIT:
         if ((flags & TCP_ACK) && ack > s->snd_una) {
             s->snd_una = ack;
-            if (s->snd_una == s->snd_nxt) retx_clear(s);
+            if (s->snd_una == s->snd_nxt) { tcp_rtt_sample(s); retx_clear(s); }
             s->snd_wnd = ntohs(th->window);
             tcp_wake_connect(s);
         }
@@ -524,9 +551,12 @@ void tcp_tick(void)
             if (w) task_wake(w);
             continue;
         }
-        /* retransmit */
+        /* retransmit, then back off the timeout (RFC 6298 §5.5) */
         tcp_tx_seg(s, s->retx_flags, s->retx_seq, s->rcv_nxt,
                    s->retx_data, s->retx_len);
-        s->retx_deadline = kernel_ticks + TCP_RETX_TICKS;
+        s->retx_resent = 1;
+        s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
+        if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;
+        s->retx_deadline = kernel_ticks + s->rto;
     }
 }
