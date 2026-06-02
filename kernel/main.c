@@ -351,7 +351,7 @@ void kernel_main(void)
 				vfs_close(fd);
 				if (!cmdline_has("quiet"))
 					kprintf("Starting %s...\n", init_path);
-				proc_exec("init", buf, st.size);
+				proc_exec(init_path, buf, st.size);
 			} else {
 				kprintf("init: vfs_open %s failed\n", init_path);
 			}
