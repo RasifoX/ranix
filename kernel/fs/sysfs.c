@@ -14,12 +14,16 @@
 #include <kernel/lib/string.h>
 #include <kernel/net/net.h>
 #include <kernel/block.h>
+#include <kernel/pci.h>
+#include <kernel/kprintf.h>
 
 #include <kernel/nsproxy.h>
 extern int  smp_ncpus;
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
-       SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE };
+       SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
+       SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
+       SF_PCI_VENDOR, SF_PCI_DEVICE };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -38,7 +42,9 @@ static uint64_t sys_ino_alloc(void) { return sys_ino_next++; }
 static vfs_iops_t sysfs_root_iops, sysfs_kernel_iops, sysfs_class_iops,
                   sysfs_net_iops, sysfs_netdev_iops, sysfs_block_iops,
                   sysfs_blockdev_iops, sysfs_devices_iops, sysfs_system_iops,
-                  sysfs_cpu_iops;
+                  sysfs_cpu_iops, sysfs_fs_iops, sysfs_cgroup_iops, sysfs_bus_iops,
+                  sysfs_pci_iops, sysfs_pcidev_iops, sysfs_pcidev_entry_iops,
+                  sysfs_mm_iops, sysfs_thp_iops;
 static vfs_fops_t sysfs_file_fops;
 static vfs_fops_t sysfs_dir_fops = { 0 };
 
@@ -124,6 +130,21 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		if (smp_ncpus <= 1) { n = put_str(tmp, "0\n"); }
 		else { n = put_str(tmp, "0-"); n += put_u64(tmp + n, (uint64_t)(smp_ncpus - 1)); tmp[n++] = '\n'; }
 		break;
+	case SF_CGROUP_CTRL:  n = put_str(tmp, "cpu memory pids freezer\n"); break;
+	case SF_CGROUP_PROCS: n = put_str(tmp, "1\n"); break;
+	case SF_THP_ENABLED:  n = put_str(tmp, "always [madvise] never\n"); break;
+	case SF_PCI_VENDOR:
+	case SF_PCI_DEVICE: {
+		int bdf = pr->dev;
+		uint16_t v = pci_read16((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
+		                        (uint8_t)(bdf & 7), pr->type == SF_PCI_VENDOR ? PCI_VENDOR_ID : PCI_DEVICE_ID);
+		const char *h = "0123456789abcdef";
+		tmp[n++] = '0'; tmp[n++] = 'x';
+		tmp[n++] = h[(v >> 12) & 15]; tmp[n++] = h[(v >> 8) & 15];
+		tmp[n++] = h[(v >> 4) & 15];  tmp[n++] = h[v & 15];
+		tmp[n++] = '\n';
+		break;
+	}
 	default:           n = 0; break;
 	}
 
@@ -149,13 +170,15 @@ static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "class")   == 0) return sysfs_dir(&sysfs_class_iops, -1);
 	if (strcmp(name, "block")   == 0) return sysfs_dir(&sysfs_block_iops, -1);
 	if (strcmp(name, "devices") == 0) return sysfs_dir(&sysfs_devices_iops, -1);
+	if (strcmp(name, "fs")      == 0) return sysfs_dir(&sysfs_fs_iops, -1);
+	if (strcmp(name, "bus")     == 0) return sysfs_dir(&sysfs_bus_iops, -1);
 	return NULL;
 }
 static int sysfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "kernel", "class", "block", "devices" };
-	if (idx >= 4) return -1;
+	const char *names[] = { "kernel", "class", "block", "devices", "fs", "bus" };
+	if (idx >= 6) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
@@ -168,6 +191,7 @@ static const struct { const char *name; int type; } kernel_files[] = {
 static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
+	if (strcmp(name, "mm") == 0) return sysfs_dir(&sysfs_mm_iops, -1);
 	for (unsigned i = 0; i < 3; i++)
 		if (strcmp(kernel_files[i].name, name) == 0)
 			return sysfs_file(kernel_files[i].type, -1);
@@ -176,10 +200,175 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 static int sysfs_kernel_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx >= 3) return -1;
-	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	if (idx > 3) return -1;
+	out->ino = sys_ino_alloc(); out->next_off = idx + 1;
+	if (idx == 3) { out->mode = S_IFDIR | 0555; put_str(out->name, "mm"); out->name[2] = '\0'; return 0; }
+	out->mode = S_IFREG | 0444;
 	put_str(out->name, kernel_files[idx].name);
 	out->name[strlen(kernel_files[idx].name)] = '\0';
+	return 0;
+}
+
+/* ── /sys/kernel/mm/transparent_hugepage/enabled ─────────────── */
+static vfs_inode_t *sysfs_mm_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "transparent_hugepage") == 0) return sysfs_dir(&sysfs_thp_iops, -1);
+	return NULL;
+}
+static int sysfs_mm_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "transparent_hugepage"); out->name[20] = '\0';
+	return 0;
+}
+static vfs_inode_t *sysfs_thp_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "enabled") == 0) return sysfs_file(SF_THP_ENABLED, -1);
+	return NULL;
+}
+static int sysfs_thp_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0644; out->next_off = 1;
+	put_str(out->name, "enabled"); out->name[7] = '\0';
+	return 0;
+}
+
+/* ── /sys/fs/cgroup ──────────────────────────────────────────── */
+static vfs_inode_t *sysfs_fs_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "cgroup") == 0) return sysfs_dir(&sysfs_cgroup_iops, -1);
+	return NULL;
+}
+static int sysfs_fs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "cgroup"); out->name[6] = '\0';
+	return 0;
+}
+static const struct { const char *name; int type; } cgroup_files[] = {
+	{ "cgroup.controllers", SF_CGROUP_CTRL }, { "cgroup.procs", SF_CGROUP_PROCS },
+};
+static vfs_inode_t *sysfs_cgroup_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (unsigned i = 0; i < 2; i++)
+		if (strcmp(cgroup_files[i].name, name) == 0)
+			return sysfs_file(cgroup_files[i].type, -1);
+	return NULL;
+}
+static int sysfs_cgroup_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	put_str(out->name, cgroup_files[idx].name);
+	out->name[strlen(cgroup_files[idx].name)] = '\0';
+	return 0;
+}
+
+/* ── /sys/bus/pci/devices ────────────────────────────────────── */
+static int pci_nth_device(uint32_t idx, uint8_t *bus, uint8_t *dev, uint8_t *fn)
+{
+	uint32_t seen = 0;
+	for (uint16_t b = 0; b < 4; b++)        /* QEMU/most boards: a few buses */
+		for (uint8_t d = 0; d < 32; d++)
+			for (uint8_t f = 0; f < 8; f++)
+				if (pci_read16((uint8_t)b, d, f, PCI_VENDOR_ID) != 0xffff) {
+					if (seen++ == idx) { *bus = (uint8_t)b; *dev = d; *fn = f; return 0; }
+					if (f == 0 && !(pci_read16((uint8_t)b, d, 0, 0x0e) & 0x80)) break; /* not multifunction */
+				}
+	return -1;
+}
+static vfs_inode_t *sysfs_bus_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "pci") == 0) return sysfs_dir(&sysfs_pci_iops, -1);
+	return NULL;
+}
+static int sysfs_bus_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "pci"); out->name[3] = '\0';
+	return 0;
+}
+static vfs_inode_t *sysfs_pci_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "devices") == 0) return sysfs_dir(&sysfs_pcidev_iops, -1);
+	return NULL;
+}
+static int sysfs_pci_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx != 0) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
+	put_str(out->name, "devices"); out->name[7] = '\0';
+	return 0;
+}
+/* one entry per present PCI function, named 0000:BB:DD.F (Linux convention) */
+static int sysfs_pcidev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	uint8_t b, d, f;
+	if (pci_nth_device(idx, &b, &d, &f) != 0) return -1;
+	const char *hx = "0123456789abcdef";
+	char *p = out->name;
+	*p++='0';*p++='0';*p++='0';*p++='0';*p++=':';
+	*p++=hx[b>>4];*p++=hx[b&15];*p++=':';
+	*p++=hx[d>>4];*p++=hx[d&15];*p++='.';
+	*p++=hx[f&7];*p='\0';
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	return 0;
+}
+/* /sys/bus/pci/devices/<addr>: vendor, device id files */
+static int sysfs_hexv(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+static vfs_inode_t *sysfs_pcidev_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strlen(name) < 12) return NULL;                 /* 0000:bb:dd.f */
+	int bb = (sysfs_hexv(name[5]) << 4) | sysfs_hexv(name[6]);
+	int dd = (sysfs_hexv(name[8]) << 4) | sysfs_hexv(name[9]);
+	int f  = sysfs_hexv(name[11]);
+	if (bb < 0 || dd < 0 || f < 0) return NULL;
+	if (pci_read16((uint8_t)bb, (uint8_t)dd, (uint8_t)f, PCI_VENDOR_ID) == 0xffff) return NULL;
+	return sysfs_dir(&sysfs_pcidev_entry_iops, (bb << 8) | (dd << 3) | f);
+}
+static const struct { const char *name; int type; } pcidev_files[] = {
+	{ "vendor", SF_PCI_VENDOR }, { "device", SF_PCI_DEVICE },
+};
+static vfs_inode_t *sysfs_pcidev_entry_lookup(vfs_inode_t *dir, const char *name)
+{
+	sysfs_priv_t *pr = dir->priv;
+	int bdf = pr ? pr->dev : 0;
+	for (unsigned i = 0; i < 2; i++)
+		if (strcmp(pcidev_files[i].name, name) == 0)
+			return sysfs_file(pcidev_files[i].type, bdf);
+	return NULL;
+}
+static int sysfs_pcidev_entry_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	put_str(out->name, pcidev_files[idx].name);
+	out->name[strlen(pcidev_files[idx].name)] = '\0';
 	return 0;
 }
 
@@ -336,6 +525,14 @@ static vfs_iops_t sysfs_blockdev_iops = { .lookup = sysfs_blockdev_lookup, .read
 static vfs_iops_t sysfs_devices_iops  = { .lookup = sysfs_devices_lookup,  .readdir = sysfs_devices_readdir  };
 static vfs_iops_t sysfs_system_iops   = { .lookup = sysfs_system_lookup,   .readdir = sysfs_system_readdir   };
 static vfs_iops_t sysfs_cpu_iops      = { .lookup = sysfs_cpu_lookup,      .readdir = sysfs_cpu_readdir      };
+static vfs_iops_t sysfs_fs_iops       = { .lookup = sysfs_fs_lookup,       .readdir = sysfs_fs_readdir       };
+static vfs_iops_t sysfs_cgroup_iops   = { .lookup = sysfs_cgroup_lookup,   .readdir = sysfs_cgroup_readdir   };
+static vfs_iops_t sysfs_bus_iops      = { .lookup = sysfs_bus_lookup,      .readdir = sysfs_bus_readdir      };
+static vfs_iops_t sysfs_pci_iops      = { .lookup = sysfs_pci_lookup,      .readdir = sysfs_pci_readdir      };
+static vfs_iops_t sysfs_pcidev_iops   = { .lookup = sysfs_pcidev_lookup,   .readdir = sysfs_pcidev_readdir   };
+static vfs_iops_t sysfs_pcidev_entry_iops = { .lookup = sysfs_pcidev_entry_lookup, .readdir = sysfs_pcidev_entry_readdir };
+static vfs_iops_t sysfs_mm_iops       = { .lookup = sysfs_mm_lookup,       .readdir = sysfs_mm_readdir       };
+static vfs_iops_t sysfs_thp_iops      = { .lookup = sysfs_thp_lookup,      .readdir = sysfs_thp_readdir      };
 
 int sysfs_mount(vfs_mount_t *mnt, void *data)
 {
