@@ -73,6 +73,9 @@ typedef struct process {
 	int             nice;          /* -20..19, default 0 */
 	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
 	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
+	int             seccomp_mode;  /* 0 off, 1 strict, 2 filter */
+	void           *seccomp_filter;  /* SECCOMP_MODE_FILTER program (sock_filter[]) */
+	unsigned        seccomp_flen;    /* filter instruction count */
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;
