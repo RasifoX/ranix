@@ -571,6 +571,63 @@ static uint64_t proc_ino_alloc(void)
 	return n;
 }
 
+/* ── /proc/<pid>/mem — cross-process memory R/W (gdb) ────────────────────────
+ * The file offset is the virtual address in the target's address space. We
+ * briefly switch to the target's page tables to copy, like ptrace PEEKDATA. */
+extern void arch_vm_switch(uint64_t root, unsigned asid);
+
+static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
+{
+	procfs_inode_priv_t *pr = (procfs_inode_priv_t *)f->inode->priv;
+	process_t *t = proc_find(pr->pid);
+	if (!t || !t->vm) return -3;   /* ESRCH */
+	process_t *cur = task_current();
+	uint64_t vaddr = (uint64_t)f->pos;
+	char tmp[256];
+	size_t done = 0;
+	while (done < len) {
+		size_t n = len - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+		if (write) {
+			if (copy_from_user(tmp, (char *)ubuf + done, n) != 0) break;
+			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			memcpy((void *)(vaddr + done), tmp, n);
+			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+		} else {
+			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			memcpy(tmp, (void *)(vaddr + done), n);
+			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+			if (copy_to_user((char *)ubuf + done, tmp, n) != 0) break;
+		}
+		done += n;
+	}
+	f->pos += (long)done;
+	return (ssize_t)done;
+}
+
+static ssize_t procfs_mem_read(vfs_file_t *f, void *buf, size_t len)
+{ return procfs_mem_rw(f, buf, len, 0); }
+static ssize_t procfs_mem_write(vfs_file_t *f, const void *buf, size_t len)
+{ return procfs_mem_rw(f, (void *)buf, len, 1); }
+
+static vfs_fops_t procfs_mem_fops = { .read = procfs_mem_read, .write = procfs_mem_write };
+
+static vfs_inode_t *procfs_mem_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino = proc_ino_alloc();
+	in->mode = S_IFREG | 0600;
+	in->nlink = 1; in->refcount = 1;
+	in->fops = &procfs_mem_fops;
+	procfs_inode_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	memset(pr, 0, sizeof(*pr));
+	pr->pid = pid;
+	in->priv = pr;
+	return in;
+}
+
 static vfs_inode_t *procfs_inode_file(int pid, int type)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -1324,6 +1381,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_uidmap_inode(pid, 1);
 	if (strcmp(name, "cgroup") == 0)
 		return procfs_cgroup_inode(pid);
+	if (strcmp(name, "mem") == 0)
+		return procfs_mem_inode(pid);
 	for (int i = 0; i < PID_LINKS_N; i++) {
 		if (strcmp(pid_links[i], name) == 0)
 			return procfs_pidlink_inode(pid, i);
