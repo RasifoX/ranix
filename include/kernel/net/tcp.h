@@ -3,6 +3,7 @@
 
 #include <kernel/net/net.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/ipv6.h>
 #include <kernel/net/socket.h>
 
 /* TCP flags */
@@ -35,6 +36,7 @@ typedef struct {
 } __attribute__((packed)) tcp_pseudo_t;
 
 void tcp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph);
+void tcp6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6);
 
 /* Called by connect() — send SYN, move to SYN_SENT */
 int tcp_connect(socket_t *s);
@@ -57,8 +59,10 @@ void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
 /* Find a SOCK_STREAM socket by 4-tuple */
 socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t local_port,
                         uint32_t remote_ip, uint16_t remote_port);
+socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
+                         const in6_addr_t *remote_ip6, uint16_t remote_port);
 
-/* Find a LISTEN socket by local port */
-socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port);
+/* Find a LISTEN socket by local port + family */
+socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int domain);
 
 #endif
