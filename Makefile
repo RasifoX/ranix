@@ -101,6 +101,7 @@ SRCS_NET = \
     kernel/net/icmp.c \
     kernel/net/ipv6.c \
     kernel/net/icmpv6.c \
+    kernel/net/ndp.c \
     kernel/net/udp.c \
     kernel/net/tcp.c \
     kernel/net/dhcp.c \
@@ -176,7 +177,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
                  userspace/test_fpsig userspace/test_cowrace userspace/bench userspace/test_clock \
                  userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd \
-                 userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_ping6 userspace/test_udp6 userspace/test_tcp6 userspace/test_pipestress \
+                 userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_ping6 userspace/test_udp6 userspace/test_tcp6 userspace/test_execveat userspace/test_pipestress \
                  userspace/test_uts userspace/test_setns userspace/test_clonens \
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \

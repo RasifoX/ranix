@@ -529,6 +529,25 @@ static long sys_sysinfo(void *info)
  * Relies on syscall.c helpers (vma_add, vma_free_all, rng_next) and the
  * USER_STACK_/USER_MMAP_ macros, all in scope via the textual include.
  * ───────────────────────────────────────────────────────────────────────── */
+static long sys_execve(const char *path, char * const argv[], char * const envp[]);
+
+/* execveat(dirfd, path, argv, envp, flags): resolve the dirfd-relative (or
+ * AT_EMPTY_PATH) path to an absolute one, then run the normal execve. */
+static long sys_execveat(int dirfd, const char *path, char * const argv[],
+                         char * const envp[], int flags)
+{
+	char kp[256];
+	if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
+		vfs_file_t *f = fd_get(task_current()->fds, dirfd);
+		if (!f || !f->path[0]) return -9;
+		return sys_execve(f->path, argv, envp);
+	}
+	if (!path) return -14;
+	int r = resolve_path(kp, dirfd, path);
+	if (r != 0) return r;
+	return sys_execve(kp, argv, envp);
+}
+
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
 	if (!path) return -14;
