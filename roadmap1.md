@@ -10,9 +10,19 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 ---
 
-## Neredeyiz (v0.9 — ağ Linux-sınıfı + güvenlik/ABI olgun — iki arch, x86 277 / aarch64 275 test)
+## Neredeyiz (v0.8.5 — glibc TEMEL ÇALIŞIYOR + ağ Linux-sınıfı + güvenlik/ABI olgun — iki arch)
 
-**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11+ ; dinamik binary + **8/8 namespace** + cgroups v2 + container + **seccomp (STRICT+BPF)** var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces ✅ (8/8), TLS/DNS/DHCP ✅, IPv6 loopback dual-stack ✅; **kalan büyük blok: glibc** (Claude CLI'nin anahtarı).
+**Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11+ ; dinamik binary + **8/8 namespace** + cgroups v2 + container + **seccomp (STRICT+BPF)** + **gerçek glibc (static+dynamic)** var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces ✅ (8/8), TLS/DNS/DHCP ✅, IPv6 loopback dual-stack ✅, **glibc temel ✅**; **kalan büyük blok: gerçek dağıtım runtime'ı (Python/Node → Claude CLI)**.
+
+**2026-06-03 — glibc port temel oturumu (bu oturum, 8 commit, iki arch yeşil):** glibc'ye TEK SATIR dokunmadan, her fatal'i Ranix'in eksik bir Linux davranışına işaret olarak okuyup çekirdeği standarda çektik.
+- **glibc static + dynamic ÇALIŞIYOR** (ld-linux + libc.so.6 + reloc), hem execve hem init= yoluyla.
+- **glibc NPTL pthread** create/join/mutex/cond/**cond_timedwait** (doğru timeout), malloc arena, libm, **dlopen/dlsym/dlclose**, stdio file I/O.
+- **fork + COW + exec + popen/system** çalışıyor (gfork/gposix testleri).
+- Düzeltmeler: (1) pid 1'e fd 0/1/2=/dev/console + mutlak /proc/self/exe; (2) proc_exec INTERP (dynamic init); (3) futex FUTEX_CMD_MASK + WAIT_BITSET absolute timeout; (4) userspace segfault'ta kernel panic→force_sigsegv (fp-walk + signal-frame guard); (5) mmap MAP_FIXED VMA-replace (vma_clip) + proc_exec VMA → fork-COW; (6) clone3 CLONE_VFORK + child stack → posix_spawn.
+- **panic ekranı** Linux oops'u solladı: decode/region/reason teşhis satırları (ekran-fit kademeleri korundu).
+- DERS: Ranix incremental build GÜVENİLMEZ (WSL2 mtime skew) → her değişiklikte `make clean`.
+
+**2026-06-02 — büyük ağ + ABI + güvenlik oturumu (~11 commit, iki arch yeşil):**
 
 **2026-06-02 — büyük ağ + ABI + güvenlik oturumu (bu oturum, ~11 commit, iki arch yeşil):**
 - **Ağ:** TCP timestamps (RFC 7323); SACK; **skb headroom kök-bug** (64→128, latent buffer-underflow); **IPv6 loopback dual-stack** — IPv6 başlık + ICMPv6 + UDP + TCP over ::1 (pseudo-header cksum, family-aware tcp.c, c-ping6/udp6/tcp6). NDP (komşu keşfi) + SLAAC + virtio-net multicast RX yazıldı (working-tree) — gerçek-ağ doğrulaması Pi4+modem bekliyor (WSL2 IPv6 kapalı, slirp ipv6=on bozuk).
@@ -477,8 +487,8 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [x] musl dinamik linked "hello world" çalışıyor (test_dynamic, iki arch) ✅
 - [x] **dinamik bash çalışıyor** — tüm suite'i dinamik bash yürütüyor ✅
 - [x] dlopen / çoklu shared .so senaryosu (libfoo.so) ✅
-- [ ] glibc 2.38 dinamik linked "hello world" (v0.8.5 — glibc portu)
-- [ ] dynamically linked pthread test geçiyor
+- [x] glibc dinamik linked "hello world" ✅ (2026-06-03, iki arch — GLIBC-DYN-OK)
+- [x] dynamically linked pthread test geçiyor ✅ (gstress: create/join/mutex/cond + libm)
 
 ---
 
@@ -498,11 +508,11 @@ Bu olmadan "Ranix Debian" hedefi boş laftan ibaret.
 - [ ] libc.so.6, ld-linux-x86-64.so.2, libpthread.so.0, libm.so.6 üretiliyor
 
 **Runtime doğrulama**
-- [ ] IFUNC resolver chain — glibc memcpy/strlen/memset CPU-optimized variant seçiyor
+- [x] IFUNC resolver chain — dynamic glibc çalışıyor (her string fn IFUNC; reloc + resolver OK) ✅
 - [ ] locale: glibc locale/charset altyapısı çalışıyor (en_US.UTF-8 yeterli)
 - [ ] timezone: /etc/localtime okuma (tzdata paketi kurulabilmeli)
 - [ ] NSS (Name Service Switch): /etc/passwd, /etc/hosts — getpwnam, gethostbyname
-- [ ] math: libm.so.6 temel fonksiyonlar çalışıyor
+- [x] math: libm.so.6 temel fonksiyonlar çalışıyor ✅ (gstress sqrt, gdl dlopen libm cos)
 
 **Paket sistemi temeli**
 - [ ] dpkg statik derleme — Ranix'te dpkg komutu çalışıyor
