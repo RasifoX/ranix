@@ -568,6 +568,71 @@ static long sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned int f
 	return sys_kill((pid_t)(uint64_t)f->inode->priv, sig);
 }
 
+/* ── real-time scheduling policy (SCHED_FIFO/RR) ─────────────────────────────
+ * Policy + priority stored per process; cpu_rq_add runs real-time tasks ahead
+ * of SCHED_NORMAL ones. */
+struct ranix_sched_param { int sched_priority; };
+
+static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
+{
+	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
+	process_t *p = pid ? proc_find(pid) : task_current();
+	if (!p) return -3;
+	int prio = 0;
+	if (uparam) {
+		struct ranix_sched_param sp;
+		if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) return -14;
+		prio = sp.sched_priority;
+	}
+	if (policy == SCHED_NORMAL) { if (prio != 0) return -22; }
+	else if (prio < 1 || prio > 99) return -22;
+	p->sched_policy = policy;
+	p->rt_priority  = prio;
+	return 0;
+}
+
+static long sys_sched_setparam(pid_t pid, const void *uparam)
+{
+	process_t *p = pid ? proc_find(pid) : task_current();
+	if (!p) return -3;
+	if (!uparam) return -14;
+	struct ranix_sched_param sp;
+	if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) return -14;
+	if (p->sched_policy == SCHED_NORMAL) { if (sp.sched_priority != 0) return -22; }
+	else if (sp.sched_priority < 1 || sp.sched_priority > 99) return -22;
+	p->rt_priority = sp.sched_priority;
+	return 0;
+}
+
+static long sys_sched_getscheduler(pid_t pid)
+{
+	process_t *p = pid ? proc_find(pid) : task_current();
+	return p ? p->sched_policy : -3;
+}
+
+static long sys_sched_getparam(pid_t pid, void *uparam)
+{
+	process_t *p = pid ? proc_find(pid) : task_current();
+	if (!p) return -3;
+	struct ranix_sched_param sp = { p->rt_priority };
+	if (copy_to_user(uparam, &sp, sizeof(sp)) != 0) return -14;
+	return 0;
+}
+
+static long sys_sched_get_priority_max(int policy)
+{
+	if (policy == SCHED_FIFO || policy == SCHED_RR) return 99;
+	if (policy == SCHED_NORMAL) return 0;
+	return -22;
+}
+
+static long sys_sched_get_priority_min(int policy)
+{
+	if (policy == SCHED_FIFO || policy == SCHED_RR) return 1;
+	if (policy == SCHED_NORMAL) return 0;
+	return -22;
+}
+
 /* execveat(dirfd, path, argv, envp, flags): resolve the dirfd-relative (or
  * AT_EMPTY_PATH) path to an absolute one, then run the normal execve. */
 static long sys_execveat(int dirfd, const char *path, char * const argv[],

@@ -12,6 +12,11 @@
 #define PROC_NAME_MAX  256
 #define PROC_MAGIC     0x52414e58u   /* "RANX" — set at PCB alloc, checked at teardown */
 
+/* scheduling policies (sched_setscheduler) */
+#define SCHED_NORMAL  0
+#define SCHED_FIFO    1
+#define SCHED_RR      2
+
 #define NSIG           64
 #define SIGKILL        9
 #define SIGSTOP        19    /* uncatchable + unblockable, like SIGKILL */
@@ -66,6 +71,8 @@ typedef struct process {
 	int             ticks_remaining;
 	uint64_t        ticks;
 	int             nice;          /* -20..19, default 0 */
+	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
+	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;
