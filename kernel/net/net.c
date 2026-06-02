@@ -160,8 +160,21 @@ skb_t *netdev_rx_dequeue(netdev_t *dev)
 
 /* ── poll ────────────────────────────────────────────────── */
 
+/* Single-runner guard: net_poll is called from the RX thread, the idle loop,
+ * and a few syscall retry loops. Letting two CPUs run the receive path at once
+ * races on per-socket TCP state (snd_una/rcv_nxt/queues). Serialise it — a
+ * second caller returns immediately and the running drain, which loops until
+ * the queues are empty, picks up whatever it enqueued. */
+static spinlock_t net_poll_lock = SPINLOCK_INIT;
+static volatile int net_poll_busy;
+
 void net_poll(void)
 {
+    uint64_t f = spin_lock_irq(&net_poll_lock);
+    if (net_poll_busy) { spin_unlock_irq(&net_poll_lock, f); return; }
+    net_poll_busy = 1;
+    spin_unlock_irq(&net_poll_lock, f);
+
     for (int i = 0; i < ndevs; i++) {
         netdev_t *dev = devs[i];
         if (dev->poll) dev->poll(dev);
@@ -170,6 +183,10 @@ void net_poll(void)
         while ((skb = netdev_rx_dequeue(dev)) != NULL)
             eth_rx(dev, skb);
     }
+
+    f = spin_lock_irq(&net_poll_lock);
+    net_poll_busy = 0;
+    spin_unlock_irq(&net_poll_lock, f);
 }
 
 /* ── event-driven RX softirq thread ──────────────────────────
@@ -237,8 +254,17 @@ uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len)
  * back into the receive path, so lo's tx just enqueues. Having lo guarantees
  * there is always at least one device — a socket never ends up with a NULL
  * dev — and lets 127.0.0.1 work even with no NIC. */
+/* Test-only packet loss injector: with `netdrop=N` on the cmdline, drop 1 in N
+ * loopback frames so retransmit / reassembly / SACK can be exercised in QEMU,
+ * which otherwise never loses or reorders. Zero (default) = off. */
+int net_drop_n = 0;
+
 static int lo_tx(netdev_t *dev, skb_t *skb)
 {
+    if (net_drop_n) {
+        static uint32_t c;
+        if (++c % (uint32_t)net_drop_n == 0) { skb_free(skb); return 0; }  /* "lost" */
+    }
     netdev_rx_enqueue(dev, skb);
     return 0;
 }
@@ -275,6 +301,15 @@ void net_init(void)
     lo->rx_lock = (spinlock_t)SPINLOCK_INIT;
     lo->net_ns  = &init_net_ns;
     net_register(lo);
+
+    extern int net_drop_n;
+    extern const char *cmdline_get(const char *, char *, size_t);
+    char db[16];
+    if (cmdline_get("netdrop", db, sizeof(db))) {
+        int n = 0;
+        for (const char *p = db; *p >= '0' && *p <= '9'; p++) n = n * 10 + (*p - '0');
+        net_drop_n = n;
+    }
 
     proc_create("net_rx", net_rx_thread);   /* event-driven RX softirq */
 }
