@@ -179,7 +179,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_dns userspace/test_tcpbulk userspace/test_http
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -187,6 +187,14 @@ CACHE_DIR          = .cache
 BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
 BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
 BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
+
+# mbedTLS — userspace TLS/HTTPS, cross-built static like bash/busybox
+MBEDTLS_VER    = 3.6.2
+MBEDTLS_URL    = https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VER)/mbedtls-$(MBEDTLS_VER).tar.bz2
+MBEDTLS_TAR    = $(CACHE_DIR)/mbedtls-$(MBEDTLS_VER).tar.bz2
+MBEDTLS_DIR    = $(CACHE_DIR)/mbedtls-$(ARCH)
+MBEDTLS_A      = $(MBEDTLS_DIR)/library/libmbedtls.a
+MUSL_AR        = $(MUSL_CC:gcc=ar)
 
 bash-static: $(BASH_CACHED)
 
@@ -286,6 +294,27 @@ userspace/test_sharedlib: userspace/test_sharedlib.c userspace/libfoo.so
 	$(MUSL_CC) -O2 -o $@ $< -Luserspace -lfoo
 userspace/test_dlopen: userspace/test_dlopen.c
 	$(MUSL_CC) -O2 -o $@ $<
+
+# mbedTLS static libs (downloaded + cross-built once per arch, cached)
+$(MBEDTLS_A):
+	@mkdir -p $(CACHE_DIR)
+	@if [ ! -f "$(MBEDTLS_TAR)" ]; then \
+		echo "Downloading mbedTLS $(MBEDTLS_VER)..."; \
+		wget -q "$(MBEDTLS_URL)" -O "$(MBEDTLS_TAR)" || \
+		  { rm -f "$(MBEDTLS_TAR)"; echo "ERROR: mbedTLS download failed"; exit 1; }; \
+	fi
+	@rm -rf $(MBEDTLS_DIR)
+	@tar xjf "$(MBEDTLS_TAR)" -C $(CACHE_DIR)
+	@mv $(CACHE_DIR)/mbedtls-$(MBEDTLS_VER) $(MBEDTLS_DIR)
+	@$(MAKE) -C $(MBEDTLS_DIR) lib CC=$(MUSL_CC) AR=$(MUSL_AR) >/dev/null 2>&1
+	@echo "[OK] mbedTLS built ($(ARCH))"
+
+# HTTPS client diagnostic — statically links mbedTLS
+userspace/test_tls: userspace/test_tls.c $(MBEDTLS_A)
+	$(MUSL_CC) -static -O2 -I$(MBEDTLS_DIR)/include -o $@ $< \
+	    $(MBEDTLS_DIR)/library/libmbedtls.a \
+	    $(MBEDTLS_DIR)/library/libmbedx509.a \
+	    $(MBEDTLS_DIR)/library/libmbedcrypto.a
 
 # Two-pass link for in-kernel panic symbolization: stage1 fixes .text addresses,
 # gen_ksyms emits the symbol table + build identity into .rodata (after .text,
