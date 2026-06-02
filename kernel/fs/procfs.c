@@ -317,6 +317,9 @@ typedef struct {
 #define PROC_F_LOADAVG   6
 #define PROC_F_CMDLINE   7
 #define PROC_F_FILESYSTEMS 8
+#define PROC_F_MODULES   9
+#define PROC_F_SWAPS     15
+#define PROC_F_VMSTAT    16
 #define PROC_F_P_STATUS  10
 #define PROC_F_P_STAT    11
 #define PROC_F_P_CMDLINE 12
@@ -344,6 +347,27 @@ typedef struct {
 #define PROC_F_SYS_NFILE         42
 #define PROC_F_SYS_RANDOMIZE_VA  43
 
+/* /proc/modules — monolithic kernel: no loadable modules (lsmod shows nothing). */
+static int fill_modules(char *buf, size_t sz) { (void)buf; (void)sz; return 0; }
+
+/* /proc/swaps — no swap areas configured; header only (swapon -s). */
+static int fill_swaps(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	pb_str(&b, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+	return (int)(sz - b.rem);
+}
+
+/* /proc/vmstat — a few real counters tools may read. */
+static int fill_vmstat(char *buf, size_t sz)
+{
+	extern uint64_t buddy_free_pages(void);
+	pb_t b = {buf, sz};
+	pb_str(&b, "nr_free_pages "); pb_u64(&b, buddy_free_pages()); pb_char(&b, '\n');
+	pb_str(&b, "nr_anon_pages 0\nnr_mapped 0\npgfault 0\npgmajfault 0\n");
+	return (int)(sz - b.rem);
+}
+
 static int fill_net_dev(char *buf, size_t sz);
 static int fill_net_tcp(char *buf, size_t sz);
 static int fill_net_udp(char *buf, size_t sz);
@@ -364,6 +388,9 @@ static const struct {
 	{ "loadavg",  PROC_F_LOADAVG  },
 	{ "cmdline",  PROC_F_CMDLINE  },
 	{ "filesystems", PROC_F_FILESYSTEMS },
+	{ "modules",  PROC_F_MODULES  },
+	{ "swaps",    PROC_F_SWAPS    },
+	{ "vmstat",   PROC_F_VMSTAT   },
 };
 #define ROOT_FILES_N ((int)(sizeof(root_files) / sizeof(root_files[0])))
 
@@ -404,6 +431,9 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_LOADAVG:  n = fill_loadavg(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_CMDLINE:  n = fill_cmdline(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_FILESYSTEMS: n = fill_proc_filesystems(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_MODULES:  n = fill_modules(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_SWAPS:    n = fill_swaps(tmp,    PROCFS_BUF_SIZE); break;
+	case PROC_F_VMSTAT:   n = fill_vmstat(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;

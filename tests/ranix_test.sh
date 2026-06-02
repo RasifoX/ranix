@@ -182,6 +182,9 @@ check "sys-hostname"     "ranix"   "$(cat /proc/sys/kernel/hostname)"
 check "sys-pid-max"      "32768"   "$(cat /proc/sys/kernel/pid_max)"
 check "sys-somaxconn"    "128"     "$(cat /proc/sys/net/core/somaxconn)"
 check "sys-file-max"     "65536"   "$(cat /proc/sys/fs/file-max)"
+check "proc-swaps-hdr"   "1"       "$(cat /proc/swaps | head -1 | grep -c Filename)"
+check "proc-vmstat-free" "1"       "$(grep -c nr_free_pages /proc/vmstat)"
+check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
