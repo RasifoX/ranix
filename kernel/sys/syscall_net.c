@@ -69,6 +69,36 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
     if (!s) return -9;
     /* blocking read: wait for data in recv queue */
     while (1) {
+        /* SOCK_STREAM: coalesce queued bytes up to len (no message boundaries). */
+        if (s->type == SOCK_STREAM) {
+            size_t total = 0;
+            while (total < len) {
+                uint64_t f = spin_lock_irq(&s->recv_lock);
+                skb_t *skb = s->recv_head;
+                if (!skb) { spin_unlock_irq(&s->recv_lock, f); break; }
+                s->recv_head = skb->next;
+                if (!s->recv_head) s->recv_tail = NULL;
+                spin_unlock_irq(&s->recv_lock, f);
+                size_t n = skb->len < (len - total) ? skb->len : (len - total);
+                if (n) copy_to_user((char *)buf + total, skb->data, n);
+                total += n;
+                if (n < skb->len) {
+                    skb->data += n; skb->len -= (uint16_t)n;
+                    uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                    skb->next = s->recv_head; s->recv_head = skb;
+                    if (!s->recv_tail) s->recv_tail = skb;
+                    spin_unlock_irq(&s->recv_lock, f2);
+                    break;
+                }
+                skb_free(skb);
+            }
+            if (total > 0) {
+                extern void tcp_rx_consumed(socket_t *, uint32_t);
+                tcp_rx_consumed(s, (uint32_t)total);
+                return (ssize_t)total;
+            }
+            goto wait_or_eof;   /* nothing queued */
+        }
         uint64_t f = spin_lock_irq(&s->recv_lock);
         skb_t *skb = s->recv_head;
         if (skb) {
@@ -77,20 +107,13 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             spin_unlock_irq(&s->recv_lock, f);
             size_t n = skb->len < len ? skb->len : len;
             if (n) copy_to_user(buf, skb->data, n);
-            /* stream: a short read consumes only n bytes; keep the rest queued */
-            if (s->type == SOCK_STREAM && n < skb->len) {
-                skb->data += n; skb->len -= (uint16_t)n;
-                uint64_t f2 = spin_lock_irq(&s->recv_lock);
-                skb->next = s->recv_head;
-                s->recv_head = skb;
-                if (!s->recv_tail) s->recv_tail = skb;
-                spin_unlock_irq(&s->recv_lock, f2);
-            } else {
-                skb_free(skb);
-            }
-            if (n) { extern void tcp_rx_consumed(socket_t *, uint32_t); tcp_rx_consumed(s, (uint32_t)n); }
-            return (ssize_t)(n ? n : 0);  /* 0 = EOF (FIN) */
+            skb_free(skb);
+            return (ssize_t)(n ? n : 0);
         }
+        spin_unlock_irq(&s->recv_lock, f);
+    wait_or_eof:;
+        f = spin_lock_irq(&s->recv_lock);
+        if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f); continue; }
         /* EOF: TCP half-closed or AF_UNIX peer disconnected */
         int eof = (s->domain == AF_UNIX)
             ? (s->unix_peer == NULL)
@@ -501,6 +524,63 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
     int nonblock = (flags & MSG_DONTWAIT);
     socket_t *s = fd_to_sock(fd);
     if (!s) return -9;
+
+    /* SOCK_STREAM has no message boundaries: one recv drains as many queued
+     * bytes as fit in buf, coalescing across writes (Linux semantics). Applies
+     * to TCP and unix stream alike. DGRAM/RAW preserve per-datagram boundaries
+     * (handled below). */
+    if (s->type == SOCK_STREAM) {
+        while (1) {
+            size_t total = 0;
+            int got_addr = 0;
+            while (total < len) {
+                uint64_t f = spin_lock_irq(&s->recv_lock);
+                skb_t *skb = s->recv_head;
+                if (!skb) { spin_unlock_irq(&s->recv_lock, f); break; }
+                s->recv_head = skb->next;
+                if (!s->recv_head) s->recv_tail = NULL;
+                spin_unlock_irq(&s->recv_lock, f);
+
+                size_t n = skb->len < (len - total) ? skb->len : (len - total);
+                copy_to_user((char *)buf + total, skb->data, n);
+                if (uaddr && !got_addr) {
+                    if (s->domain == AF_INET6) {
+                        sockaddr_in6_t sa6; memset(&sa6, 0, sizeof(sa6));
+                        sa6.sin6_family = AF_INET6; sa6.sin6_addr = skb->src_ip6;
+                        sa6.sin6_port = htons(s->remote_port);
+                        copy_to_user(uaddr, &sa6, sizeof(sa6));
+                    } else {
+                        sockaddr_in_t sa; memset(&sa, 0, sizeof(sa));
+                        sa.sin_family = AF_INET; sa.sin_addr = htonl(skb->src_ip);
+                        sa.sin_port = htons(skb->src_port);
+                        copy_to_user(uaddr, &sa, sizeof(sa));
+                    }
+                    got_addr = 1;
+                }
+                total += n;
+                if (n < skb->len) {                     /* buf full: requeue remainder */
+                    skb->data += n; skb->len -= (uint16_t)n;
+                    uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                    skb->next = s->recv_head; s->recv_head = skb;
+                    if (!s->recv_tail) s->recv_tail = skb;
+                    spin_unlock_irq(&s->recv_lock, f2);
+                    break;
+                }
+                skb_free(skb);
+            }
+            if (total > 0) {
+                extern void tcp_rx_consumed(socket_t *, uint32_t);
+                tcp_rx_consumed(s, (uint32_t)total);
+                return (long)total;
+            }
+            if (nonblock) return -11; /* EAGAIN */
+            uint64_t f = spin_lock_irq(&s->recv_lock);
+            if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f); continue; }
+            s->recv_waiter = task_current();
+            task_sleep_unlock(&s->recv_lock, f);
+            if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+        }
+    }
 
     while (1) {
         uint64_t f = spin_lock_irq(&s->recv_lock);
