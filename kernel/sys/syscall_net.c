@@ -558,6 +558,72 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
     }
 }
 
+/* sendmsg/recvmsg — vectored send/receive. Delegates to sendto/recvfrom (the
+ * tested paths): single iovec is exact; multi-iovec stream concatenates
+ * correctly. Ancillary data (SCM_RIGHTS fd-passing) is NOT yet handled —
+ * msg_controllen is reported 0; tracked separately (Wayland/D-Bus dependency). */
+typedef struct { void *base; uint64_t len; } k_iovec;
+typedef struct {
+    void     *msg_name;
+    uint32_t  msg_namelen;
+    uint32_t  _pad;
+    k_iovec  *msg_iov;
+    uint64_t  msg_iovlen;
+    void     *msg_control;
+    uint64_t  msg_controllen;
+    int       msg_flags;
+} k_msghdr;
+
+static long sys_sendmsg(int fd, const void *umsg, int flags)
+{
+    k_msghdr m;
+    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -14;
+    if (m.msg_iovlen == 0) return 0;
+    if (m.msg_iovlen > 64) return -22;
+    k_iovec iov[64];
+    if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
+    long total = 0;
+    for (uint64_t i = 0; i < m.msg_iovlen; i++) {
+        if (iov[i].len == 0) continue;
+        /* a destination address → datagram/IP send; otherwise it's a connected
+         * socket (unix/TCP) and the fd's write path handles it (sendto rejects
+         * the dev-less unix sockets). */
+        long r = m.msg_name
+               ? sys_sendto(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, m.msg_namelen)
+               : vfs_write(fd, iov[i].base, (size_t)iov[i].len);
+        if (r < 0) return total ? total : r;
+        total += r;
+        if ((uint64_t)r < iov[i].len) break;   /* short write: stop */
+    }
+    return total;
+}
+
+static long sys_recvmsg(int fd, void *umsg, int flags)
+{
+    k_msghdr m;
+    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -14;
+    /* clear returned ancillary length + flags up front */
+    uint64_t zero64 = 0; int zero32 = 0;
+    copy_to_user((char *)umsg + 40, &zero64, sizeof(zero64)); /* msg_controllen */
+    copy_to_user((char *)umsg + 48, &zero32, sizeof(zero32)); /* msg_flags */
+    if (m.msg_iovlen == 0) return 0;
+    if (m.msg_iovlen > 64) return -22;
+    k_iovec iov[64];
+    if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
+    /* one datagram / stream chunk into the first non-empty buffer */
+    for (uint64_t i = 0; i < m.msg_iovlen; i++) {
+        if (iov[i].len == 0) continue;
+        if (!m.msg_name)
+            return vfs_read(fd, iov[i].base, (size_t)iov[i].len);
+        uint32_t nl = m.msg_namelen;
+        long r = sys_recvfrom(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, &nl);
+        if (r >= 0)
+            copy_to_user((char *)umsg + 8, &nl, sizeof(nl)); /* msg_namelen */
+        return r;
+    }
+    return 0;
+}
+
 static long sys_getsockname(int fd, void *uaddr, uint32_t *uaddrlen)
 {
     socket_t *s = fd_to_sock(fd);
