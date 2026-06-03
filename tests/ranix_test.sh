@@ -244,6 +244,10 @@ check "proc-self-ns-user" "user" "$(readlink /proc/self/ns/user | cut -d: -f1)"
 check "proc-self-ns-net"  "net" "$(readlink /proc/self/ns/net | cut -d: -f1)"
 check "proc-self-ns-cgroup" "cgroup" "$(readlink /proc/self/ns/cgroup | cut -d: -f1)"
 check "proc-filesystems"  "1"  "$(grep -c ext2 /proc/filesystems)"
+# /proc/mounts reflects the real mount table (was a hardcoded 3-line stub):
+# /sys sysfs only shows up if it's iterating the live mount list.
+check "proc-mounts-sys"   "1"  "$(grep -c ' /sys sysfs ' /proc/mounts)"
+check "proc-mounts-dev"   "1"  "$(grep -c ' /dev devfs ' /proc/mounts)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
 check "proc-version"      "1"  "$([ -f /proc/version ] && echo 1)"
