@@ -18,9 +18,129 @@ static spinlock_t vfs_lock = SPINLOCK_INIT;
 static int dentry_count = 0;
 static int dentry_max_val = DENTRY_MAX;
 
+/* ── extended attributes (generic per-inode key/value list) ── */
+
+typedef struct vfs_xattr {
+	struct vfs_xattr *next;
+	char             *name;
+	void             *value;
+	size_t            len;
+} vfs_xattr_t;
+
+static spinlock_t xattr_lock = SPINLOCK_INIT;
+
+void vfs_inode_free_xattrs(vfs_inode_t *in)
+{
+	if (!in) return;
+	vfs_xattr_t *x = in->xattrs;
+	in->xattrs = NULL;
+	while (x) {
+		vfs_xattr_t *n = x->next;
+		kfree(x->name);
+		if (x->value) kfree(x->value);
+		kfree(x);
+		x = n;
+	}
+}
+
+int vfs_inode_setxattr(vfs_inode_t *in, const char *name, const void *val, size_t len, int flags)
+{
+	if (!in || !name || !name[0]) return -22;
+	uint64_t f = spin_lock_irq(&xattr_lock);
+	vfs_xattr_t *x = in->xattrs, *prev = NULL;
+	while (x) { if (strcmp(x->name, name) == 0) break; prev = x; x = x->next; }
+	(void)prev;
+	if (x) {
+		if (flags & XATTR_CREATE) { spin_unlock_irq(&xattr_lock, f); return -17; /* EEXIST */ }
+		void *nv = len ? kmalloc(len) : NULL;
+		if (len && !nv) { spin_unlock_irq(&xattr_lock, f); return -12; }
+		if (len) memcpy(nv, val, len);
+		if (x->value) kfree(x->value);
+		x->value = nv; x->len = len;
+		spin_unlock_irq(&xattr_lock, f);
+		return 0;
+	}
+	if (flags & XATTR_REPLACE) { spin_unlock_irq(&xattr_lock, f); return -61; /* ENODATA */ }
+	vfs_xattr_t *nx = kmalloc(sizeof(*nx));
+	if (!nx) { spin_unlock_irq(&xattr_lock, f); return -12; }
+	size_t nlen = strlen(name);
+	nx->name = kmalloc(nlen + 1);
+	nx->value = len ? kmalloc(len) : NULL;
+	if (!nx->name || (len && !nx->value)) {
+		if (nx->name) kfree(nx->name);
+		if (nx->value) kfree(nx->value);
+		kfree(nx);
+		spin_unlock_irq(&xattr_lock, f);
+		return -12;
+	}
+	memcpy(nx->name, name, nlen + 1);
+	if (len) memcpy(nx->value, val, len);
+	nx->len = len;
+	nx->next = in->xattrs;
+	in->xattrs = nx;
+	spin_unlock_irq(&xattr_lock, f);
+	return 0;
+}
+
+ssize_t vfs_inode_getxattr(vfs_inode_t *in, const char *name, void *val, size_t size)
+{
+	if (!in || !name) return -22;
+	uint64_t f = spin_lock_irq(&xattr_lock);
+	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) {
+		if (strcmp(x->name, name) != 0) continue;
+		ssize_t r = (ssize_t)x->len;
+		if (size == 0) { spin_unlock_irq(&xattr_lock, f); return r; }
+		if (size < x->len) { spin_unlock_irq(&xattr_lock, f); return -34; /* ERANGE */ }
+		if (x->len) memcpy(val, x->value, x->len);
+		spin_unlock_irq(&xattr_lock, f);
+		return r;
+	}
+	spin_unlock_irq(&xattr_lock, f);
+	return -61; /* ENODATA */
+}
+
+ssize_t vfs_inode_listxattr(vfs_inode_t *in, char *list, size_t size)
+{
+	if (!in) return -22;
+	uint64_t f = spin_lock_irq(&xattr_lock);
+	size_t total = 0;
+	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) total += strlen(x->name) + 1;
+	if (size == 0) { spin_unlock_irq(&xattr_lock, f); return (ssize_t)total; }
+	if (size < total) { spin_unlock_irq(&xattr_lock, f); return -34; /* ERANGE */ }
+	size_t off = 0;
+	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) {
+		size_t l = strlen(x->name) + 1;
+		memcpy(list + off, x->name, l);
+		off += l;
+	}
+	spin_unlock_irq(&xattr_lock, f);
+	return (ssize_t)total;
+}
+
+int vfs_inode_removexattr(vfs_inode_t *in, const char *name)
+{
+	if (!in || !name) return -22;
+	uint64_t f = spin_lock_irq(&xattr_lock);
+	vfs_xattr_t *x = in->xattrs, *prev = NULL;
+	while (x) {
+		if (strcmp(x->name, name) == 0) {
+			if (prev) prev->next = x->next; else in->xattrs = x->next;
+			kfree(x->name);
+			if (x->value) kfree(x->value);
+			kfree(x);
+			spin_unlock_irq(&xattr_lock, f);
+			return 0;
+		}
+		prev = x; x = x->next;
+	}
+	spin_unlock_irq(&xattr_lock, f);
+	return -61; /* ENODATA */
+}
+
 static void vfs_inode_free(vfs_inode_t *in)
 {
 	if (!in || in->cached) return; /* cached=1: owned by dentry tree, pipe, or static */
+	vfs_inode_free_xattrs(in);
 	if (in->priv) kfree(in->priv);
 	kfree(in);
 }
