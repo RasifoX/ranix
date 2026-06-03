@@ -539,7 +539,6 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	if (strcmp(kfstype, "sysfs") == 0)   return 0;
 	if (strcmp(kfstype, "cgroup") == 0)  return 0;
 	if (strcmp(kfstype, "cgroup2") == 0) return 0;
-	if (strcmp(kfstype, "devtmpfs") == 0) fsname = "devfs";
 	if (strcmp(kfstype, "mqueue") == 0)  return 0;
 	if (strcmp(kfstype, "hugetlbfs") == 0) return 0;
 	if (strcmp(kfstype, "binfmt_misc") == 0) return 0;

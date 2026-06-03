@@ -243,6 +243,19 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	return (int)(sz - b.rem);
 }
 
+/* /proc/PID/statm — size resident shared text lib data dt, all in pages. */
+static int fill_proc_statm(char *buf, size_t sz, int pid)
+{
+	process_t *p = find_proc(pid);
+	pb_t b = {buf, sz};
+	uint64_t size = (p && p->brk) ? (p->brk / 4096) : 64;
+	uint64_t res  = 64;   /* RSS estimate (matches VmRSS in status) */
+	pb_u64(&b, size);                  pb_char(&b, ' ');   /* size     */
+	pb_u64(&b, res);                   pb_str(&b, " 0 1 0 ");/* resident shared text lib */
+	pb_u64(&b, size > 1 ? size - 1 : 0); pb_str(&b, " 0\n"); /* data dt */
+	return (int)(sz - b.rem);
+}
+
 static int fill_cmdline(char *buf, size_t sz)
 {
 	const char *cl = cmdline_str();
@@ -341,6 +354,7 @@ typedef struct {
 #define PROC_F_P_CMDLINE 12
 #define PROC_F_P_MAPS    13
 #define PROC_F_P_COMM    14
+#define PROC_F_P_STATM   19
 #define PROC_F_NET_DEV   20
 #define PROC_F_NET_TCP   21
 #define PROC_F_NET_UDP   22
@@ -456,6 +470,7 @@ static const struct {
 	{ "cmdline", PROC_F_P_CMDLINE },
 	{ "maps",    PROC_F_P_MAPS    },
 	{ "comm",    PROC_F_P_COMM    },
+	{ "statm",   PROC_F_P_STATM   },
 };
 #define PID_FILES_N ((int)(sizeof(pid_files) / sizeof(pid_files[0])))
 
@@ -490,6 +505,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_DISKSTATS: n = fill_diskstats(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
+	case PROC_F_P_STATM:  n = fill_proc_statm(tmp,  PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_MAPS:   n = fill_proc_maps(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_COMM:   n = fill_proc_comm(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
