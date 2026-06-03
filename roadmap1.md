@@ -488,6 +488,16 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [x] prlimit64 — setrlimit64 + getrlimit64 kombinasyonu ✅
 
 ### VDSO (temel)
+- [~] **Altyapı TAM, advertising ERTELENDİ** (2026-06-03, commit 02f7bed + 1814ac3): vDSO shared object
+      (freestanding PIC, version'lı semboller x86 `__vdso_*`@LINUX_2.6 / aarch64 `__kernel_*`@LINUX_2.6.39,
+      sıfır reloc, tek PT_LOAD layout) + kernel wiring (exec'te map + tick'te vvar updater + settime'da anlık
+      refresh) + VM_NOFREE (shared sayfa teardown UAF fix, iki arch) + REALTIME/gettimeofday→vvar,
+      MONOTONIC→syscall (timens-doğru). `vdso_advertise=1` yapıldığında AT_SYSINFO_EHDR push edilir ve libc
+      kullanır; clock_gettime DOĞRU değer döner (c-vdso geçer) AMA ITIMER_VIRTUAL ile ince bir etkileşim
+      c-itimer'ı bozuyor (advertise açıkken process busy-loop'ta beklenenden az user-tick alıyor; mekanizma
+      otonom hızlı-iterasyonda — build güvenilmezliği — kesin teşhis edilemedi). Bu yüzden `vdso_advertise=0`
+      (gated-off) ship ediliyor: altyapı hazır, zararsız. KALAN: ITIMER charging etkileşimini odaklı/temiz-build
+      debug ile çöz → advertise aç. (clock_gettime/gettimeofday/AT_SYSINFO_EHDR hepsi kodda mevcut.)
 - [ ] clock_gettime(CLOCK_REALTIME/MONOTONIC) VDSO'dan — syscall overhead yok
 - [ ] gettimeofday VDSO'dan
 - [ ] AT_SYSINFO_EHDR auxv entry
