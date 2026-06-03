@@ -125,7 +125,9 @@ typedef struct {
 #define SYS_ARCH_SETITIMER         103
 #define SYS_ARCH_CLOCK_SETTIME     112
 #define SYS_ARCH_CLOCK_GETTIME     113
+#define SYS_ARCH_CLOCK_GETRES      114
 #define SYS_ARCH_CLOCK_NANOSLEEP   115
+#define SYS_ARCH_ADJTIMEX          171
 #define SYS_ARCH_SYSLOG            116
 #define SYS_ARCH_PTRACE            117
 #define SYS_ARCH_SCHED_SETAFFINITY 122

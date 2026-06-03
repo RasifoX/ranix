@@ -522,6 +522,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
 	case SYS_ARCH_CLOCK_SETTIME: ret = sys_clock_settime((int)arg0, (const linux_timespec_t*)arg1); break;
 	case SYS_ARCH_GETTIMEOFDAY:  ret = sys_gettimeofday((linux_timeval_t*)arg0, (void*)arg1); break;
+	case SYS_ARCH_CLOCK_GETRES:  ret = sys_clock_getres((int)arg0, (linux_timespec_t*)arg1); break;
+	case SYS_ARCH_ADJTIMEX:      ret = sys_adjtimex((k_timex_t*)arg0); break;
 #ifdef SYS_ARCH_SETTIMEOFDAY
 	case SYS_ARCH_SETTIMEOFDAY:  ret = sys_settimeofday((const linux_timeval_t*)arg0, (const void*)arg1); break;
 #endif

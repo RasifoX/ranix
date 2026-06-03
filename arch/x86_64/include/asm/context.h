@@ -215,6 +215,8 @@ typedef struct {
 #define SYS_ARCH_SET_TID_ADDR      218
 #define SYS_ARCH_CLOCK_SETTIME     227
 #define SYS_ARCH_CLOCK_GETTIME     228
+#define SYS_ARCH_CLOCK_GETRES      229
+#define SYS_ARCH_ADJTIMEX          159
 #define SYS_ARCH_CLOCK_NANOSLEEP   230
 #define SYS_ARCH_EXIT_GROUP        231
 #define SYS_ARCH_EPOLL_WAIT        232

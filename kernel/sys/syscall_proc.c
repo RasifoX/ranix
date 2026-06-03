@@ -467,25 +467,80 @@ void rtc_init(void)
 /* filesystem timestamps: real wall-clock once the RTC set it, else uptime. */
 void ranix_walltime(int64_t *sec, int64_t *nsec) { real_time(sec, nsec); }
 
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_REALTIME_COARSE    5
+#define CLOCK_MONOTONIC_COARSE   6
+#define CLOCK_TAI                11
+
+/* CPU time consumed by the current task: process_t.ticks counts timer ticks
+ * the task was running on-CPU (sched.c). */
+static void cpu_time(int64_t *sec, int64_t *nsec)
+{
+	process_t *p = task_current();
+	uint64_t t = p ? p->ticks : 0;
+	*sec  = (int64_t)(t / TIMER_HZ);
+	*nsec = (int64_t)((t % TIMER_HZ) * (1000000000ULL / TIMER_HZ));
+}
+
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
 	if (!tp) return -14;
 	linux_timespec_t k;
-	if (clkid == CLOCK_REALTIME) {
+	switch (clkid) {
+	case CLOCK_REALTIME:
+	case CLOCK_REALTIME_COARSE:
+	case CLOCK_TAI:                /* no leap-second table → TAI == UTC for now */
 		real_time(&k.tv_sec, &k.tv_nsec);
-		return copy_to_user(tp, &k, sizeof(k));
-	}
-	mono_time(&k.tv_sec, &k.tv_nsec);
-	if (clkid == CLOCK_MONOTONIC || clkid == CLOCK_BOOTTIME) {
+		break;
+	case CLOCK_PROCESS_CPUTIME_ID:
+	case CLOCK_THREAD_CPUTIME_ID:
+		cpu_time(&k.tv_sec, &k.tv_nsec);
+		break;
+	case CLOCK_MONOTONIC:
+	case CLOCK_BOOTTIME: {
+		mono_time(&k.tv_sec, &k.tv_nsec);
 		time_namespace_t *ns = current_time_ns();
 		long osec  = (clkid == CLOCK_BOOTTIME) ? ns->boot_sec  : ns->mono_sec;
 		long onsec = (clkid == CLOCK_BOOTTIME) ? ns->boot_nsec : ns->mono_nsec;
-		k.tv_sec  += osec;
-		k.tv_nsec += onsec;
+		k.tv_sec  += osec; k.tv_nsec += onsec;
 		if (k.tv_nsec >= 1000000000L) { k.tv_sec++; k.tv_nsec -= 1000000000L; }
+		break;
+	}
+	case CLOCK_MONOTONIC_RAW:      /* raw: no NTP adjust, no namespace offset */
+	case CLOCK_MONOTONIC_COARSE:
+		mono_time(&k.tv_sec, &k.tv_nsec);
+		break;
+	default:
+		return -22; /* EINVAL: unknown clock */
 	}
 	return copy_to_user(tp, &k, sizeof(k));
 }
+
+static long sys_clock_getres(int clkid, linux_timespec_t *res)
+{
+	switch (clkid) {
+	case CLOCK_REALTIME: case CLOCK_MONOTONIC: case CLOCK_BOOTTIME:
+	case CLOCK_MONOTONIC_RAW: case CLOCK_TAI:
+	case CLOCK_PROCESS_CPUTIME_ID: case CLOCK_THREAD_CPUTIME_ID:
+	case CLOCK_REALTIME_COARSE: case CLOCK_MONOTONIC_COARSE:
+		break;
+	default: return -22;
+	}
+	if (res) {
+		linux_timespec_t r;
+		/* coarse clocks tick at the timer; the rest are ~nanosecond (HPET/cntvct) */
+		if (clkid == CLOCK_REALTIME_COARSE || clkid == CLOCK_MONOTONIC_COARSE) {
+			r.tv_sec = 0; r.tv_nsec = 1000000000L / TIMER_HZ;
+		} else {
+			r.tv_sec = 0; r.tv_nsec = 1;
+		}
+		return copy_to_user(res, &r, sizeof(r));
+	}
+	return 0;
+}
+
 
 static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 {
@@ -510,6 +565,14 @@ static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 	return 0;
 }
 
+/* persist the current wall-clock to the hardware RTC (hwclock --systohc). */
+static void rtc_sync_to_hw(void)
+{
+	extern void arch_rtc_write(int64_t epoch_sec);
+	int64_t s, n; real_time(&s, &n);
+	arch_rtc_write(s);
+}
+
 static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 {
 	(void)tz;
@@ -519,7 +582,51 @@ static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec - ms;
 	g_rt_off_nsec = (int64_t)k.tv_usec * 1000 - mn;
+	rtc_sync_to_hw();   /* persist to hardware clock — survives reboot */
 	return 0;
+}
+
+/* struct timex — kernel/musl layout (64-bit). adjtimex is the NTP discipline
+ * interface: ntpd uses it to step (ADJ_SETOFFSET) and steer (ADJ_FREQUENCY)
+ * the clock. */
+typedef struct {
+	int32_t modes; int32_t _p0;
+	int64_t offset, freq, maxerror, esterror;
+	int32_t status; int32_t _p1;
+	int64_t constant, precision, tolerance;
+	int64_t time_sec, time_usec;       /* struct timeval */
+	int64_t tick, ppsfreq, jitter;
+	int32_t shift; int32_t _p2;
+	int64_t stabil, jitcnt, calcnt, errcnt, stbcnt;
+	int32_t tai; int32_t _p3[11];
+} k_timex_t;
+
+static int64_t g_tx_freq = 0;   /* steered frequency (scaled ppm, freq/65536 = ppm) */
+
+static long sys_adjtimex(k_timex_t *utx)
+{
+	if (!utx) return -14;
+	k_timex_t tx;
+	if (copy_from_user(&tx, utx, sizeof(tx)) != 0) return -14;
+
+	if (tx.modes & 0x0100) {           /* ADJ_SETOFFSET: step the clock by .time */
+		int64_t add_s = tx.time_sec;
+		int64_t add_n = (tx.modes & 0x2000) ? tx.time_usec   /* ADJ_NANO */
+		                                     : tx.time_usec * 1000;
+		int64_t ms, mn, cs, cn; mono_time(&ms, &mn); real_time(&cs, &cn);
+		int64_t ns = cs + add_s, nn = cn + add_n;
+		while (nn >= 1000000000LL) { nn -= 1000000000LL; ns++; }
+		while (nn < 0)             { nn += 1000000000LL; ns--; }
+		g_rt_off_sec = ns - ms; g_rt_off_nsec = nn - mn;
+		rtc_sync_to_hw();
+	}
+	if (tx.modes & 0x0002) g_tx_freq = tx.freq;   /* ADJ_FREQUENCY: store steer */
+
+	/* report current discipline state */
+	tx.offset = 0; tx.freq = g_tx_freq; tx.maxerror = 0; tx.esterror = 0;
+	tx.status = 0; tx.tick = 10000; tx.tai = 0;
+	copy_to_user(utx, &tx, sizeof(tx));
+	return 0;   /* TIME_OK */
 }
 
 static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)

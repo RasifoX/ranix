@@ -799,7 +799,7 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 
 ### Saat / zaman
 - [x] dosya zaman damgaları (atime/mtime/ctime + utimensat/futimens) ✅ (2026-06-03)
-- [x] **RTC sürücüsü** ✅ (2026-06-03: x86 CMOS 0x70/0x71 + aarch64 PL031 @0x9010000; boot'ta realtime offset; CLOCK_REALTIME/gettimeofday/dosya-mtime gerçek tarih; clock_settime+settimeofday; test_rtc >2020. RTC write-back + NTP kaldı)
+- [x] **Zaman subsystem'i KOMPLE** ✅ (2026-06-03): RTC oku (x86 CMOS / aarch64 PL031) + write-back (hwclock systohc); tüm POSIX clock'lar (REALTIME/MONOTONIC/BOOTTIME/MONOTONIC_RAW/COARSE/TAI/PROCESS+THREAD_CPUTIME); clock_getres; clock_settime/settimeofday; adjtimex (NTP arayüzü: ADJ_SETOFFSET step + freq + state); time()=gerçek tarih; dosya mtime gerçek. KALAN: NTP daemon (userspace, busybox ntpd) + tam PLL freq-slewing (sub-ppm disiplin, Linux ntp.c sınıfı).
       boot'tan-beri-saniye (ordering doğru ama mutlak tarih 1970+uptime); RTC ile gettimeofday
       gerçek tarih + dosya mtime'ları gerçek tarih. NTP istemci (userspace) ayrı.
 

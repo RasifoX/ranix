@@ -6,7 +6,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <sys/timex.h>
 
 #define Y2020 1577836800L
 
@@ -35,6 +37,14 @@ int main(void)
 		clock_settime(CLOCK_REALTIME, &back);       /* restore */
 		if (d < 0 || d > 5) { printf("rtc-fail settime d=%ld\n", d); return 0; }
 	}
+
+	/* clock completeness: getres + CPU-time + raw-monotonic + adjtimex query */
+	struct timespec r, cpu, raw;
+	if (clock_getres(CLOCK_REALTIME, &r) != 0) { printf("rtc-fail getres\n"); return 0; }
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu) != 0) { printf("rtc-fail cputime\n"); return 0; }
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &raw) != 0) { printf("rtc-fail rawmono\n"); return 0; }
+	struct timex tx; memset(&tx, 0, sizeof(tx)); tx.modes = 0;
+	if (adjtimex(&tx) < 0) { printf("rtc-fail adjtimex\n"); return 0; }
 
 	printf("OK\n");
 	return 0;
