@@ -89,6 +89,33 @@ int unix_send(socket_t *s, const void *data, uint16_t len)
     return (int)len;
 }
 
+/* SCM_RIGHTS: deliver data plus in-flight passed files to the peer in one skb.
+ * On failure the caller drops the held file references. */
+int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int nfiles)
+{
+    socket_t *peer = s->unix_peer;
+    if (!peer) return -32; /* EPIPE */
+    skb_t *skb = skb_alloc();
+    if (!skb) return -12;  /* ENOMEM */
+    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    if (len) memcpy(skb->data, data, len);
+    skb->len = len;
+    if (nfiles > SKB_SCM_MAX) nfiles = SKB_SCM_MAX;
+    for (int i = 0; i < nfiles; i++) skb->scm_files[i] = files[i];
+    skb->scm_nfiles = (uint8_t)nfiles;
+
+    uint64_t f = spin_lock_irq(&peer->recv_lock);
+    skb->next = NULL;
+    if (peer->recv_tail) peer->recv_tail->next = skb;
+    else                 peer->recv_head = skb;
+    peer->recv_tail = skb;
+    process_t *w = peer->recv_waiter;
+    peer->recv_waiter = NULL;
+    spin_unlock_irq(&peer->recv_lock, f);
+    if (w) task_wake(w);
+    return (int)len;
+}
+
 /* ── ICMP delivery to RAW sockets ───────────────────────── */
 
 void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len)

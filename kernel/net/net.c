@@ -1,6 +1,7 @@
 #include <kernel/net/net.h>
 #include <kernel/net/eth.h>
 #include <kernel/net/ipv6.h>
+#include <kernel/net/ndp.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
@@ -17,6 +18,7 @@ skb_t *skb_alloc(void)
     s->data = s->buf + SKB_HEADROOM;
     s->len  = 0;
     s->next = NULL;
+    s->scm_nfiles = 0;
     return s;
 }
 
@@ -358,5 +360,14 @@ void net_dhcp_all(void)
                     (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
                     (d->ip >> 8) & 0xff, d->ip & 0xff);
         }
+
+        /* IPv6 stateless autoconfig: solicit a router advertisement, then poll
+         * briefly for the reply so a SLAAC global address is ready. */
+        extern volatile uint64_t kernel_ticks;
+        ndp_send_rs(d);
+        uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
+        while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) net_poll();
+        if (!in6_is_unspec(&d->ip6))
+            kprintf("slaac: %s configured a global IPv6 address\n", d->name);
     }
 }

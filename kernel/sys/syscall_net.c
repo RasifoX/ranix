@@ -638,10 +638,8 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
     }
 }
 
-/* sendmsg/recvmsg — vectored send/receive. Delegates to sendto/recvfrom (the
- * tested paths): single iovec is exact; multi-iovec stream concatenates
- * correctly. Ancillary data (SCM_RIGHTS fd-passing) is NOT yet handled —
- * msg_controllen is reported 0; tracked separately (Wayland/D-Bus dependency). */
+/* sendmsg/recvmsg — vectored send/receive + SCM_RIGHTS fd-passing over AF_UNIX.
+ * Plain data delegates to the tested sendto/recvfrom/read/write paths. */
 typedef struct { void *base; uint64_t len; } k_iovec;
 typedef struct {
     void     *msg_name;
@@ -654,6 +652,11 @@ typedef struct {
     int       msg_flags;
 } k_msghdr;
 
+typedef struct { uint64_t cmsg_len; int cmsg_level; int cmsg_type; } k_cmsghdr;
+#define SOL_SOCKET_  1
+#define SCM_RIGHTS_  1
+#define MSG_CTRUNC_  8
+
 static long sys_sendmsg(int fd, const void *umsg, int flags)
 {
     k_msghdr m;
@@ -662,12 +665,47 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
     if (m.msg_iovlen > 64) return -22;
     k_iovec iov[64];
     if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
+
+    /* SCM_RIGHTS fd-passing — AF_UNIX only: collect the sender's files, hold an
+     * in-flight reference on each, and deliver them with the data in one skb. */
+    if (m.msg_control && m.msg_controllen >= sizeof(k_cmsghdr)) {
+        socket_t *s = fd_to_sock(fd);
+        if (s && s->domain == AF_UNIX) {
+            uint8_t cb[sizeof(k_cmsghdr) + SKB_SCM_MAX * sizeof(int)];
+            size_t clen = m.msg_controllen < sizeof(cb) ? m.msg_controllen : sizeof(cb);
+            if (copy_from_user(cb, m.msg_control, clen) != 0) return -14;
+            k_cmsghdr *ch = (k_cmsghdr *)cb;
+            if (ch->cmsg_level == SOL_SOCKET_ && ch->cmsg_type == SCM_RIGHTS_ &&
+                ch->cmsg_len >= sizeof(k_cmsghdr) && ch->cmsg_len <= clen) {
+                int nfd = (int)((ch->cmsg_len - sizeof(k_cmsghdr)) / sizeof(int));
+                if (nfd > SKB_SCM_MAX) nfd = SKB_SCM_MAX;
+                int *cfds = (int *)(cb + sizeof(k_cmsghdr));
+                process_t *p = task_current();
+                void *files[SKB_SCM_MAX]; int nf = 0;
+                for (int i = 0; i < nfd; i++) {
+                    vfs_file_t *vf = fd_get(p->fds, cfds[i]);
+                    if (!vf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -9; }
+                    vf->refcount++;             /* in-flight reference */
+                    files[nf++] = vf;
+                }
+                uint8_t dbuf[SKB_DATA_MAX]; size_t dl = 0;
+                for (uint64_t i = 0; i < m.msg_iovlen && dl < sizeof(dbuf); i++) {
+                    size_t c = iov[i].len; if (c > sizeof(dbuf) - dl) c = sizeof(dbuf) - dl;
+                    if (c && copy_from_user(dbuf + dl, iov[i].base, c) != 0) {
+                        for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -14;
+                    }
+                    dl += c;
+                }
+                int r = unix_send_scm(s, dbuf, (uint16_t)dl, files, nf);
+                if (r < 0) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return r; }
+                return r;
+            }
+        }
+    }
+
     long total = 0;
     for (uint64_t i = 0; i < m.msg_iovlen; i++) {
         if (iov[i].len == 0) continue;
-        /* a destination address → datagram/IP send; otherwise it's a connected
-         * socket (unix/TCP) and the fd's write path handles it (sendto rejects
-         * the dev-less unix sockets). */
         long r = m.msg_name
                ? sys_sendto(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, m.msg_namelen)
                : vfs_write(fd, iov[i].base, (size_t)iov[i].len);
@@ -682,7 +720,6 @@ static long sys_recvmsg(int fd, void *umsg, int flags)
 {
     k_msghdr m;
     if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -14;
-    /* clear returned ancillary length + flags up front */
     uint64_t zero64 = 0; int zero32 = 0;
     copy_to_user((char *)umsg + 40, &zero64, sizeof(zero64)); /* msg_controllen */
     copy_to_user((char *)umsg + 48, &zero32, sizeof(zero32)); /* msg_flags */
@@ -690,15 +727,93 @@ static long sys_recvmsg(int fd, void *umsg, int flags)
     if (m.msg_iovlen > 64) return -22;
     k_iovec iov[64];
     if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
-    /* one datagram / stream chunk into the first non-empty buffer */
+
+    /* AF_UNIX: dequeue ourselves so we can coalesce stream data AND pick up any
+     * passed files (SCM_RIGHTS) the consumed skbs carry. */
+    socket_t *s = fd_to_sock(fd);
+    if (s && s->domain == AF_UNIX) {
+        int nonblock = flags & 0x40 /*MSG_DONTWAIT*/;
+        size_t cap = 0;
+        for (uint64_t i = 0; i < m.msg_iovlen; i++) cap += (size_t)iov[i].len;
+        size_t total = 0; uint64_t iidx = 0; size_t ioff = 0;
+        void *cfiles[SKB_SCM_MAX]; int ncf = 0, truncated = 0;
+
+        while (total < cap) {
+            uint64_t f = spin_lock_irq(&s->recv_lock);
+            skb_t *skb = s->recv_head;
+            if (!skb) {
+                spin_unlock_irq(&s->recv_lock, f);
+                if (total > 0) break;                       /* return what we have */
+                if (s->unix_peer == NULL) return 0;         /* EOF */
+                if (nonblock) return -11;
+                uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f2); continue; }
+                if (s->unix_peer == NULL) { spin_unlock_irq(&s->recv_lock, f2); return 0; }
+                s->recv_waiter = task_current();
+                task_sleep_unlock(&s->recv_lock, f2);
+                if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+                continue;
+            }
+            s->recv_head = skb->next;
+            if (!s->recv_head) s->recv_tail = NULL;
+            spin_unlock_irq(&s->recv_lock, f);
+
+            size_t off = 0;                                  /* scatter into iovecs */
+            while (off < skb->len && total < cap) {
+                while (iidx < m.msg_iovlen && iov[iidx].len == 0) iidx++;
+                if (iidx >= m.msg_iovlen) break;
+                size_t room = (size_t)iov[iidx].len - ioff;
+                size_t c = (skb->len - off < room) ? (size_t)(skb->len - off) : room;
+                copy_to_user((char *)iov[iidx].base + ioff, skb->data + off, c);
+                off += c; total += c; ioff += c;
+                if (ioff == iov[iidx].len) { iidx++; ioff = 0; }
+            }
+            for (int j = 0; j < skb->scm_nfiles; j++) {      /* collect fds once */
+                if (ncf < SKB_SCM_MAX) cfiles[ncf++] = skb->scm_files[j];
+                else { vfs_file_put((vfs_file_t *)skb->scm_files[j]); truncated = 1; }
+            }
+            skb->scm_nfiles = 0;
+            if (off < skb->len) {                            /* iov full mid-skb: requeue */
+                skb->data += off; skb->len -= (uint16_t)off;
+                uint64_t f2 = spin_lock_irq(&s->recv_lock);
+                skb->next = s->recv_head; s->recv_head = skb;
+                if (!s->recv_tail) s->recv_tail = skb;
+                spin_unlock_irq(&s->recv_lock, f2);
+                break;
+            }
+            skb_free(skb);
+        }
+
+        if (ncf > 0) {                                       /* install fds + build cmsg */
+            process_t *p = task_current();
+            int maxfds = (m.msg_control && m.msg_controllen >= sizeof(k_cmsghdr))
+                       ? (int)((m.msg_controllen - sizeof(k_cmsghdr)) / sizeof(int)) : 0;
+            int newfds[SKB_SCM_MAX]; int nf = 0;
+            for (int i = 0; i < ncf; i++) {
+                vfs_file_t *vf = (vfs_file_t *)cfiles[i];
+                if (nf < maxfds) { int nfd = fd_alloc(p->fds, vf); if (nfd >= 0) newfds[nf++] = nfd; vfs_file_put(vf); }
+                else { vfs_file_put(vf); truncated = 1; }
+            }
+            if (nf > 0) {
+                uint8_t cb[sizeof(k_cmsghdr) + SKB_SCM_MAX * sizeof(int)];
+                k_cmsghdr *ch = (k_cmsghdr *)cb;
+                ch->cmsg_len = sizeof(k_cmsghdr) + (uint64_t)nf * sizeof(int);
+                ch->cmsg_level = SOL_SOCKET_; ch->cmsg_type = SCM_RIGHTS_;
+                memcpy(cb + sizeof(k_cmsghdr), newfds, (size_t)nf * sizeof(int));
+                copy_to_user(m.msg_control, cb, ch->cmsg_len);
+                copy_to_user((char *)umsg + 40, &ch->cmsg_len, sizeof(ch->cmsg_len));
+            }
+        }
+        if (truncated) { int fl = MSG_CTRUNC_; copy_to_user((char *)umsg + 48, &fl, sizeof(fl)); }
+        return (long)total;
+    }
+
+    /* non-unix: plain data path */
     for (uint64_t i = 0; i < m.msg_iovlen; i++) {
         if (iov[i].len == 0) continue;
-        if (!m.msg_name)
-            return vfs_read(fd, iov[i].base, (size_t)iov[i].len);
         uint32_t nl = m.msg_namelen;
-        long r = sys_recvfrom(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, &nl);
-        if (r >= 0)
-            copy_to_user((char *)umsg + 8, &nl, sizeof(nl)); /* msg_namelen */
+        long r = sys_recvfrom(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, m.msg_name ? &nl : (uint32_t *)0);
+        if (r >= 0 && m.msg_name) copy_to_user((char *)umsg + 8, &nl, sizeof(nl));
         return r;
     }
     return 0;

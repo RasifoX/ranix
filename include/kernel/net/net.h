@@ -36,6 +36,10 @@ typedef struct skb {
     in6_addr_t  src_ip6;    /* IPv6 datagram source */
     uint16_t    src_port;
     struct skb *next;
+    /* SCM_RIGHTS: in-flight passed files (AF_UNIX fd-passing) */
+#define SKB_SCM_MAX 8
+    void       *scm_files[SKB_SCM_MAX];
+    uint8_t     scm_nfiles;
 } skb_t;
 
 skb_t  *skb_alloc(void);
@@ -57,8 +61,10 @@ typedef struct netdev {
     uint32_t    ip;     /* host byte order, e.g. 10<<24|0<<16|2<<8|15 */
     uint32_t    gw;
     uint32_t    mask;
-    in6_addr_t  ip6_ll;   /* link-local address (fe80::, EUI-64 from MAC) */
-    in6_addr_t  ip6;      /* global/ULA address (SLAAC or static), :: if unset */
+    in6_addr_t  ip6_ll;     /* link-local address (fe80::, EUI-64 from MAC) */
+    in6_addr_t  ip6;        /* global/ULA address (SLAAC or static), :: if unset */
+    in6_addr_t  ip6_router; /* default router (from a Router Advertisement) */
+    int         ip6_has_router;
 
     int       (*tx)(struct netdev *, skb_t *);
     void      (*poll)(struct netdev *);   /* hardware poll, set by driver */

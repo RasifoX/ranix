@@ -190,6 +190,7 @@ int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
                         const char *path, int flags, mode_t mode);
 int        vfs_close(int fd);
+void       vfs_file_put(vfs_file_t *f);
 ssize_t    vfs_read(int fd, void *buf, size_t len);
 ssize_t    vfs_write(int fd, const void *buf, size_t len);
 off_t      vfs_seek(int fd, off_t off, int whence);

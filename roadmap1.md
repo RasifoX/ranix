@@ -692,7 +692,7 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 - [ ] udev (veya eudev) çalışıyor — hotplug + device node
 
 **Pencere sistemi (userspace, kernel'e bağımlılıkları test et)**
-- [~] Wayland: Unix socket ✅ + sendmsg/recvmsg ✅ (temel, single-iovec; 2026-06-03) + memfd/shm ✅ + epoll ✅; **SCM_RIGHTS fd-passing KALDI** (ZORUNLU — AF_UNIX skb fd-taşıma + in-flight refcount) + multi-iovec gather/scatter coalescing
+- [x] Wayland: Unix socket ✅ + sendmsg/recvmsg ✅ + **SCM_RIGHTS fd-passing ✅** (2026-06-03: AF_UNIX skb fd-taşıma, in-flight refcount, recv'de fd_alloc+install, cmsg/MSG_CTRUNC; stream coalescing korunur; test_scmrights) + memfd/shm ✅ + epoll ✅. KALAN: teslim-edilmeden-kapanma fd-leak GC'si (Linux'taki cyclic-passing GC; nadir).
 - [ ] Weston (referans compositor) açılıyor → sonra wlroots/Hyprland
 - [ ] X11 (Xorg veya Xwayland) — KDE/XFCE X11 yolu + eski uygulamalar
 - [ ] Ses: ALSA `/dev/snd` (en azından stub + bir HDA/virtio-snd sürücü)

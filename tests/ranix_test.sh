@@ -311,6 +311,7 @@ check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
 # ── 38. C test: AF_UNIX path socket ──────────────────────────
 check "c-unix-sock"  "OK"  "$(timeout 5 /bin/test_unix 2>/dev/null)"
 check "c-sendmsg"    "OK"            "$(timeout 8 /bin/test_sendmsg 2>/dev/null)"
+check "c-scmrights"  "OK"            "$(timeout 8 /bin/test_scmrights 2>/dev/null)"
 check "c-mqueue"     "OK"  "$(timeout 5 /bin/test_mqueue 2>/dev/null)"
 check "c-sysvmsg"    "OK"  "$(timeout 8 /bin/test_sysvmsg 2>/dev/null)"
 check "c-realpath"   "OK"  "$(timeout 8 /bin/test_realpath 2>/dev/null)"
