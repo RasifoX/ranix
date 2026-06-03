@@ -112,6 +112,8 @@ void signal_dispatch(arch_context_t *tf)
 		if (sig_default_kill(sig)) {
 			p->exit_code      = sig;
 			p->killed_by_sig  = 1;
+			extern void coredump(process_t *, int, arch_context_t *);
+			coredump(p, sig, tf);
 			arch_get_cpu_ctx()->wd_where = "sig:kill";
 			task_exit();
 		}

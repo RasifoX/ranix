@@ -82,6 +82,8 @@
                 if (!saved_fp || saved_fp == fp) break;
                 fp = saved_fp;
             }
+            extern void coredump(process_t *, int, arch_context_t *);
+            coredump(p, SIGSEGV, tf);
             p->killed_by_sig = 1;
             p->exit_code     = SIGSEGV;
             task_exit();
