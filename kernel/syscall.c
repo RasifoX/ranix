@@ -625,6 +625,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_CREAT:       ret = sys_creat((const char*)arg0, (mode_t)arg1); break;
 	case SYS_ARCH_LCHOWN:      ret = sys_lchown((const char*)arg0, (uid_t)arg1, (gid_t)arg2); break;
 	case SYS_ARCH_MKNOD:       ret = sys_mknod((const char*)arg0, (mode_t)arg1, (uint64_t)arg2); break;
+	case SYS_ARCH_MKNODAT:     ret = sys_mknodat((int)arg0, (const char*)arg1, (mode_t)arg2, (uint64_t)arg3); break;
 	case SYS_ARCH_TIME_SYSCALL: ret = sys_time_syscall((long*)arg0); break;
 	case SYS_ARCH_RENAMEAT2:   ret = sys_renameat2((int)arg0, (const char*)arg1, (int)arg2, (const char*)arg3, (unsigned int)arg4); break;
 #else
