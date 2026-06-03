@@ -23,8 +23,15 @@ _start_code:
 	add  x1, x1, :lo12:_dtb_ptr
 	str  x0, [x1]
 
+	/* Park every CPU but the primary. The primary is the one whose full MPIDR
+	 * affinity (Aff3.Aff2.Aff1.Aff0) is zero — masking only Aff0 (the old
+	 * `& 3`) would also pass cluster1-core0 et al. on a multi-cluster part and
+	 * boot two "primaries". MPIDR_HWID_BITMASK = 0xff00ffffff (Linux). */
 	mrs  x1, mpidr_el1
-	and  x1, x1, #3
+	movz x2, #0xffff
+	movk x2, #0x00ff, lsl #16
+	movk x2, #0x00ff, lsl #32
+	and  x1, x1, x2
 	cbz  x1, 2f
 1:	wfe
 	b    1b
