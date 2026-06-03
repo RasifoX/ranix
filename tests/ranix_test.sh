@@ -249,7 +249,7 @@ check "proc-filesystems"  "1"  "$(grep -c ext2 /proc/filesystems)"
 check "proc-mounts-sys"   "1"  "$(grep -c ' /sys sysfs ' /proc/mounts)"
 check "proc-mounts-dev"   "1"  "$(grep -c ' /dev devfs ' /proc/mounts)"
 # init ran `mount -a` from /etc/fstab → the tmpfs entry is mounted at boot
-check "fstab-mount"       "1"  "$(grep -c ' /fstabtmp ' /proc/mounts)"
+check "fstab-mount"       "1"  "$(grep -c ' /fstabtmp tmpfs ' /proc/mounts)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
 # busybox top in batch mode walks /proc/[pid]/stat + /proc/meminfo — exercises

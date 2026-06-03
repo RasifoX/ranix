@@ -458,6 +458,7 @@ mnt_namespace_t *mnt_ns_clone(mnt_namespace_t *old)
 		vfs_mount_t *nm = kmalloc(sizeof(*nm));
 		if (!nm) continue;
 		*nm = *m;
+		nm->fstype = nm->fstype_name;   /* re-point to this copy's own buffer */
 		nm->next   = ns->mounts;
 		ns->mounts = nm;
 	}
@@ -507,7 +508,11 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 
 	vfs_mount_t *mnt = kmalloc(sizeof(*mnt));
 	if (!mnt) return -1;
-	mnt->fstype     = fstype;
+	/* Own the fstype string: callers may pass a stack buffer (userspace mount(2)
+	 * via syscall) as well as static literals (kernel mounts). */
+	int _fl = 0; while (fstype && fstype[_fl] && _fl < 31) { mnt->fstype_name[_fl] = fstype[_fl]; _fl++; }
+	mnt->fstype_name[_fl] = '\0';
+	mnt->fstype     = mnt->fstype_name;
 	mnt->priv       = data;
 	mnt->mountpoint = NULL;
 	mnt->root       = NULL;

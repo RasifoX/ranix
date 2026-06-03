@@ -134,7 +134,8 @@ typedef struct vfs_dentry {
 typedef struct vfs_mount {
     vfs_dentry_t      *mountpoint;
     vfs_dentry_t      *root;
-    const char        *fstype;
+    const char        *fstype;        /* points at fstype_name (self-owned copy) */
+    char               fstype_name[32];
     void              *priv;
     vfs_inode_t       *orig_inode;
     struct vfs_mount  *next;
