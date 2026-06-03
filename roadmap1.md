@@ -606,10 +606,10 @@ Claude CLI için TLS şart.
 Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden son headless taş.
 
 ### Zorunlular
-- [ ] glibc 2.38 dinamik linked programlar çalışıyor ✓ (v0.8.5'ten)
+- [x] glibc 2.38 dinamik linked programlar çalışıyor ✓ (v0.8.5'ten) ✅ (bu oturum: static+dynamic+pthread+fork+popen, iki arch)
 - [ ] SSH server: dropbear statik + glibc dinamik (birini seç)
 - [ ] SSH client: `ssh user@host` çalışıyor
-- [ ] HTTPS: `curl https://...` çalışıyor ✓ (v0.9'dan)
+- [x] HTTPS: `curl https://...` çalışıyor ✓ (v0.9'dan) — TLS/HTTPS handshake✓ (curl portu kaldı)
 - [ ] Python 3.11+ statik veya dinamik linked çalışıyor
 - [ ] Node.js 20 LTS çalışıyor (Claude CLI için)
 - [ ] Claude CLI: `npm install -g @anthropic-ai/claude-code` veya statik binary
@@ -617,9 +617,9 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 
 ### Claude CLI önkoşulları (özetle)
 - [ ] Node.js 20 dinamik linked → glibc + libstdc++ + libz gerekiyor
-- [ ] DNS çalışıyor (api.anthropic.com çözülüyor) ✓ (v0.9)
-- [ ] TLS çalışıyor ✓ (v0.9)
-- [ ] /tmp yazılabilir ✓; $HOME var; environment variables ✓
+- [x] DNS çalışıyor (api.anthropic.com çözülüyor) ✓ (v0.9) ✅ (getaddrinfo, gerçek NIC)
+- [x] TLS çalışıyor ✓ (v0.9) ✅ (mbedTLS, gerçek internet)
+- [x] /tmp yazılabilir ✓; $HOME var; environment variables ✓ ✅
 
 ### Sistem olgunluğu
 - [ ] **Kalıcı root (switch_root/pivot_root)** — root şu an initramfs (ramfs, uçucu).
