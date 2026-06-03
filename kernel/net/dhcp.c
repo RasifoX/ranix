@@ -143,13 +143,18 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	uint32_t xid = htonl((uint32_t)(0x52414e00u ^ (kernel_ticks * 2654435761u)));
 	uint32_t yiaddr = 0, mask = 0, gw = 0, dns = 0, serverid = 0;
 
-	/* DISCOVER → OFFER, retransmitting up to 4× (a real server may be slow or
-	 * the first DISCOVER may be lost); ~1.5s per attempt. */
+	/* RFC 2131 §4.1 retransmission: exponential backoff (1,2,4,8s …) randomized
+	 * by ±0.5s, listening continuously the whole time — never assume the reply
+	 * lands in a fixed window. We don't permanently give up here: this is a
+	 * bounded best-effort for boot, and the net_link watcher re-runs the whole
+	 * exchange for an unconfigured interface until a lease arrives (a server that
+	 * answers at 3.1s, or appears minutes later, is still picked up). */
 	skb_t *off = NULL;
 	for (int attempt = 0; attempt < 4 && !off; attempt++) {
 		dhcp_send(dev, xid, DHCP_DISCOVER, 0, 0);
+		uint64_t to = (100u << attempt) + (kernel_ticks % 50); /* 1,2,4,8s + jitter */
 		off = dhcp_poll_reply(dev, xid, DHCP_OFFER, &yiaddr, &mask, &gw, &dns,
-		                      &serverid, kernel_ticks + 150);
+		                      &serverid, kernel_ticks + to);
 	}
 	if (!off) return -1;
 	skb_free(off);
@@ -158,8 +163,9 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	skb_t *ack = NULL;
 	for (int attempt = 0; attempt < 4 && !ack; attempt++) {
 		dhcp_send(dev, xid, DHCP_REQUEST, yiaddr, serverid);
+		uint64_t to = (100u << attempt) + (kernel_ticks % 50);
 		ack = dhcp_poll_reply(dev, xid, DHCP_ACK, &yiaddr, &mask, &gw, &dns,
-		                      &serverid, kernel_ticks + 150);
+		                      &serverid, kernel_ticks + to);
 	}
 	if (!ack) return -1;
 	skb_free(ack);
