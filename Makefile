@@ -410,6 +410,22 @@ $(BUILD_DIR)/gpt-test.img:
 	dd if=$(BUILD_DIR)/part.img of=$@ bs=512 seek=2048 conv=notrunc 2>/dev/null
 	@echo "[OK] gpt-test.img"
 
+# A full disk rootfs (a copy of the initramfs tree) for the switch_root /
+# disk-root path: init pivots into this and runs it as the real /. The marker
+# script replaces the suite's test.sh. tests/diskroot.sh boots twice against it.
+$(BUILD_DIR)/diskroot.img: $(BUILD_DIR)/initramfs.cpio tests/diskroot_init.sh
+	@rm -rf $(BUILD_DIR)/diskroot-seed
+	@cp -a $(BUILD_DIR)/initramfs $(BUILD_DIR)/diskroot-seed
+	@mkdir -p $(BUILD_DIR)/diskroot-seed/oldroot $(BUILD_DIR)/diskroot-seed/dev \
+	          $(BUILD_DIR)/diskroot-seed/proc $(BUILD_DIR)/diskroot-seed/sys \
+	          $(BUILD_DIR)/diskroot-seed/var $(BUILD_DIR)/diskroot-seed/root
+	@cp tests/diskroot_init.sh $(BUILD_DIR)/diskroot-seed/test.sh
+	@printf 'RANIX_DISK_ROOT\n' > $(BUILD_DIR)/diskroot-seed/etc/diskroot-id
+	@rm -f $@
+	dd if=/dev/zero of=$@ bs=1M count=64 2>/dev/null
+	mkfs.ext2 -F -q -b 1024 -d $(BUILD_DIR)/diskroot-seed $@ >/dev/null 2>&1
+	@echo "[OK] diskroot.img"
+
 # Boot with virtio-blk disk attached (x86_64 only)
 qemu-disk: iso disk-image
 	$(QEMU_CMD) -nographic -cdrom ranix.iso \

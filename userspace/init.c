@@ -3,8 +3,33 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <sys/reboot.h>
+#include <sys/mount.h>
+#include <sys/syscall.h>
+#include <string.h>
 
 #define TIOCSPGRP 0x5410
+
+/* switch_root: if the auto-mounted disk at /mnt carries a full rootfs and we
+ * have not pivoted yet, make the disk the real root (pivot_root) and re-exec
+ * init from it. The kernel mounts /dev /proc /sys on the old (ramfs) root, so
+ * re-mount the ones the system needs onto the new root after pivoting.
+ * Guard: after pivot the old root is at /oldroot, so /oldroot/bin/init exists —
+ * that stops the re-exec'd init from pivoting again. */
+static void maybe_switch_root(void)
+{
+	if (access("/oldroot/bin/init", F_OK) == 0) return;   /* already pivoted */
+	if (access("/mnt/bin/init", F_OK) != 0)     return;   /* no disk rootfs */
+
+	if (syscall(SYS_pivot_root, "/mnt", "/mnt/oldroot") != 0) return;
+	chdir("/");
+	mount("none", "/dev",  "devtmpfs", 0, NULL);
+	mount("none", "/proc", "proc",     0, NULL);
+
+	char *av[] = { "/bin/init", NULL };
+	char *ev[] = { "PATH=/bin", "HOME=/root", "PWD=/", "TERM=vt100", NULL };
+	execve("/bin/init", av, ev);
+	/* exec failed: we are already on the disk root — fall through and run it */
+}
 
 static void do_poweroff(void)
 {
@@ -15,6 +40,8 @@ static void do_poweroff(void)
 
 int main(void)
 {
+    maybe_switch_root();   /* may not return (re-execs from the disk root) */
+
     close(0); close(1); close(2);
     int tfd = open("/dev/console", O_RDWR);
     if (tfd != 0) { dup2(tfd, 0); close(tfd); }
