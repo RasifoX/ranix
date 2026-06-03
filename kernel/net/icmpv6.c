@@ -1,5 +1,6 @@
 #include <kernel/net/icmpv6.h>
 #include <kernel/net/ipv6.h>
+#include <kernel/net/ndp.h>
 #include <kernel/net/socket.h>
 #include <kernel/lib/string.h>
 
@@ -24,6 +25,11 @@ void icmpv6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
         return;
     }
 
-    /* NS/NA/RS/RA arrive here once neighbour discovery lands; drop for now */
+    switch (h->type) {
+    case ICMP6_NEIGH_SOL: ndp_rx_ns(dev, ip6, skb->data, skb->len); break;
+    case ICMP6_NEIGH_ADV: ndp_rx_na(dev, skb->data, skb->len);      break;
+    case ICMP6_ROUTER_ADV: ndp_rx_ra(dev, ip6, skb->data, skb->len); break;
+    default: break;   /* router solicitation etc. — we are a host, ignore */
+    }
     skb_free(skb);
 }

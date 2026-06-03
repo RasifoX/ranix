@@ -1,5 +1,6 @@
 #include <kernel/net/ipv6.h>
 #include <kernel/net/icmpv6.h>
+#include <kernel/net/ndp.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/eth.h>
@@ -43,9 +44,17 @@ uint16_t ipv6_pseudo_cksum(const in6_addr_t *src, const in6_addr_t *dst,
 
 in6_addr_t ipv6_src_for(netdev_t *dev, const in6_addr_t *dst)
 {
-    if (in6_eq(dst, &in6addr_loopback)) return in6addr_loopback;
-    if (in6_is_ll(dst))                 return dev->ip6_ll;
-    return dev->ip6;
+    if (in6_eq(dst, &in6addr_loopback))      return in6addr_loopback;
+    if (in6_is_ll(dst) || in6_is_mcast(dst)) return dev->ip6_ll;
+    if (!in6_is_unspec(&dev->ip6))           return dev->ip6;   /* SLAAC global */
+    return dev->ip6_ll;
+}
+
+/* dst shares our on-link /64 prefix (we have a configured global address)? */
+static int ipv6_on_link(netdev_t *dev, const in6_addr_t *dst)
+{
+    if (in6_is_unspec(&dev->ip6)) return 0;
+    return memcmp(dst->s6, dev->ip6.s6, 8) == 0;
 }
 
 static int ipv6_for_us(netdev_t *dev, const in6_addr_t *dst)
@@ -90,8 +99,9 @@ int ipv6_tx(netdev_t *dev, skb_t *skb, const in6_addr_t *dst, uint8_t next_hdr)
     ip6->src = ipv6_src_for(dev, dst);
     ip6->dst = *dst;
 
-    /* loopback: a frame addressed to ourselves goes back up the receive path */
-    if (ipv6_for_us(dev, dst)) {
+    /* loopback: a unicast frame addressed to ourselves goes back up the RX path */
+    if (in6_eq(dst, &in6addr_loopback) || in6_eq(dst, &dev->ip6_ll) ||
+        (!in6_is_unspec(&dev->ip6) && in6_eq(dst, &dev->ip6))) {
         eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
         memcpy(eh->dst, dev->mac, 6);
         memcpy(eh->src, dev->mac, 6);
@@ -100,8 +110,22 @@ int ipv6_tx(netdev_t *dev, skb_t *skb, const in6_addr_t *dst, uint8_t next_hdr)
         return 0;
     }
 
-    /* off-link / on-link neighbours need NDP resolution — added in a later
-     * phase; until then only loopback IPv6 is reachable. */
-    skb_free(skb);
-    return -1;
+    /* resolve the next-hop link-layer address */
+    uint8_t dmac[6];
+    if (in6_is_mcast(dst)) {
+        dmac[0] = 0x33; dmac[1] = 0x33;
+        memcpy(dmac + 2, dst->s6 + 12, 4);   /* 33:33 + low 32 bits of the group */
+    } else {
+        /* on-link → resolve the destination; off-link → resolve the router */
+        const in6_addr_t *nh = dst;
+        if (!in6_is_ll(dst) && !ipv6_on_link(dev, dst) && dev->ip6_has_router)
+            nh = &dev->ip6_router;
+        if (ndp_lookup(dev, nh, dmac) != 0) { skb_free(skb); return -1; } /* NS sent */
+    }
+
+    eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
+    memcpy(eh->dst, dmac, 6);
+    memcpy(eh->src, dev->mac, 6);
+    eh->type = htons(ETH_P_IPV6);
+    return dev->tx(dev, skb);
 }

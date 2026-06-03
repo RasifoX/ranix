@@ -153,7 +153,7 @@ static devfs_symlink_t devfs_symlinks[] = {
 #define DEVFS_NSYMLINKS 2
 
 static devfs_entry_t devfs_builtins[] = {
-	{ "null",    S_IFCHR | 0666, &null_fops,    0x0101, &devfs_builtins[1] },
+	{ "null",    S_IFCHR | 0666, &null_fops,    0x0103, &devfs_builtins[1] },
 	{ "zero",    S_IFCHR | 0666, &zero_fops,    0x0105, &devfs_builtins[2] },
 	{ "full",    S_IFCHR | 0666, &full_fops,    0x0107, &devfs_builtins[3] },
 	{ "urandom", S_IFCHR | 0444, &urandom_fops, 0x0109, &devfs_builtins[4] },
@@ -180,6 +180,18 @@ void devfs_register_device_priv(const char *name, mode_t mode, dev_t rdev,
 void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
 {
 	devfs_register_device_priv(name, mode, rdev, fops, NULL);
+}
+
+/* map a device number (major:minor) to its driver fops + priv — lets a node
+ * created by mknod(2) in a regular fs route to the same device as /dev/<name>. */
+vfs_fops_t *devfs_fops_for_rdev(dev_t rdev, void **priv_out)
+{
+	for (devfs_entry_t *e = devfs_list; e; e = e->next)
+		if (e->rdev == rdev && (S_ISCHR(e->mode) || S_ISBLK(e->mode))) {
+			if (priv_out) *priv_out = e->priv;
+			return e->fops;
+		}
+	return NULL;
 }
 
 /* ── iops ────────────────────────────────────────────────────── */

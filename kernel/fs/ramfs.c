@@ -173,17 +173,26 @@ static int ramfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	return 0;
 }
 
-static int ramfs_mknod(vfs_inode_t *dir, const char *name, mode_t mode)
+static int ramfs_mknod(vfs_inode_t *dir, const char *name, mode_t mode, dev_t dev)
 {
 	ramfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
-	if ((mode & 0xF000) != S_IFIFO) return -1;   /* only named pipes for now */
+	int type = mode & 0xF000;
+	if (type != S_IFIFO && type != S_IFCHR && type != S_IFBLK) return -1; /* unsupported node type */
 	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
 		if (strcmp(e->name, name) == 0) return -17; /* EEXIST */
 	vfs_inode_t *in = ramfs_inode_alloc(mode);
 	if (!in) return -1;
 	in->iops = &ramfs_iops;
-	fifo_init_inode(in);                         /* fops + lazy pipe */
+	if (type == S_IFIFO) {
+		fifo_init_inode(in);                     /* fops + lazy pipe */
+	} else {                                     /* char/block: route by major:minor */
+		extern vfs_fops_t *devfs_fops_for_rdev(dev_t, void **);
+		void *dpriv = NULL;
+		in->rdev = dev;
+		in->fops = devfs_fops_for_rdev(dev, &dpriv);  /* NULL → open fails (no driver) */
+		in->priv = dpriv;
+	}
 	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
 	if (!ent) { kfree(in); return -1; }
 	int nlen = 0; while (name[nlen] && nlen < 255) nlen++;
@@ -303,6 +312,7 @@ static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 	out->uid   = inode->uid;
 	out->gid   = inode->gid;
 	out->size  = inode->size;
+	out->rdev  = inode->rdev;
 	out->atime = inode->atime; out->atime_nsec = inode->atime_nsec;
 	out->mtime = inode->mtime; out->mtime_nsec = inode->mtime_nsec;
 	out->ctime = inode->ctime; out->ctime_nsec = inode->ctime_nsec;

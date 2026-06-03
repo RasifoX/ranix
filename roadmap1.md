@@ -801,6 +801,7 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - [x] **Zaman subsystem'i KOMPLE** ✅ (2026-06-03): RTC oku (x86 CMOS / aarch64 PL031) + write-back (hwclock systohc); tüm POSIX clock'lar (REALTIME/MONOTONIC/BOOTTIME/MONOTONIC_RAW/COARSE/TAI/PROCESS+THREAD_CPUTIME); clock_getres; clock_settime/settimeofday; adjtimex (NTP arayüzü: ADJ_SETOFFSET step + freq + state); time()=gerçek tarih; dosya mtime gerçek. KALAN: NTP daemon (userspace, busybox ntpd) + tam PLL freq-slewing (sub-ppm disiplin, Linux ntp.c sınıfı).
       boot'tan-beri-saniye (ordering doğru ama mutlak tarih 1970+uptime); RTC ile gettimeofday
       gerçek tarih + dosya mtime'ları gerçek tarih. NTP istemci (userspace) ayrı.
+- [x] **mknod(2) aygıt düğümleri** ✅ (2026-06-03): mkfifo (S_IFIFO, rendezvous open) + char/block düğümleri (S_IFCHR/S_IFBLK) major:minor ile devfs sürücü kaydına yönlenir → elle yapılmış /dev/null gerçeği gibi davranır (debootstrap-tarzı rootfs kurulumu için); root yetki kontrolü + ramfs rdev. test_mknoddev/test_fifo. KALAN: udev/mdev hotplug (v0.9 sürücü ekosistemi).
 
 ### Güç yönetimi
 - [ ] **suspend/resume** (S3 / S0ix) — cpufreq zaten v0.9/Uzun Vade'de
