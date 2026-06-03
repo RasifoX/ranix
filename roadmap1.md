@@ -563,8 +563,9 @@ Claude CLI için TLS şart.
 - [x] gerçek-internet TCP doğrulandı: HTTP GET (off-link routing→gateway→NAT), test_http
 - [ ] curl statik (mbedTLS backend) — bir sonraki (binary diagnostic var, curl portu kaldı)
 - [x] statfs(2) path-aware f_type ✅ (2026-06-03): path/fd'nin gerçekten üstünde olduğu fs'in magic'i (proc/sysfs/ext2/vfat/iso9660/tmpfs/cgroup2/ramfs) — en uzun mountpoint-prefix eşleşmesi (vfs_path_fstype). Önce hardcoded RAMFS dönüyordu. test_statfs. KALAN: gerçek blok sayıları (per-fs statfs op).
-- [ ] cert doğrulama (CA bundle + time) — şimdilik VERIFY_NONE (handshake/crypto kanıtlandı)
+- [x] **cert doğrulama tam** ✅ (2026-06-03): sistem CA bundle (/etc/ssl/certs/ca-certificates.crt, host'tan ship) + MBEDTLS_SSL_VERIFY_REQUIRED + mbedtls_ssl_conf_ca_chain. Gerçek internete karşı kanıtlandı: sha256.badssl.com → `cert verify PASSED` + HTTP/1.1 200; expired.badssl.com → reddedildi (`validity has expired` = RTC saat doğrulaması); self-signed.badssl.com → reddedildi (`not signed by trusted CA` = zincir doğrulaması). BUG fix: Makefile test_tls kuralı circular dep ile test_tcpperf.c derliyordu — test_tls.c'ye düzeltildi.
 - KRİTİK enabler: TCP short-read bug fix (986a96e) — TLS record framing'i bu açtı
+- [ ] mbedtls_net_connect AF_UNSPEC → AAAA dönen host'larda (example.com/cloudflare) IPv6 connect SLIRP'te takılıyor; IPv4 fallback / fast-fail kaldı (getaddrinfo/IPv6 outbound konusu, TLS değil)
 
 ### SSH ✅ (2026-06-03, iki arch, uçtan uca loopback)
 
