@@ -329,5 +329,12 @@ void tty_core_init(void)
     devfs_register_device("tty",     S_IFCHR | 0666, 0x0500, &tty_fops);
     devfs_register_device("console", S_IFCHR | 0600, 0x0501, &tty_fops);
     devfs_register_device("tty0",    S_IFCHR | 0666, 0x0400, &tty_fops);
+    /* /dev/tty1..tty6 — the virtual-console nodes Linux exposes (getty/login,
+     * `openvt`, container consoles expect them). We have a single physical
+     * console, so they share its line discipline; the nodes exist for ABI
+     * compatibility rather than independent VTs. */
+    static const char *vtn[] = { "tty1","tty2","tty3","tty4","tty5","tty6" };
+    for (int i = 0; i < 6; i++)
+        devfs_register_device(vtn[i], S_IFCHR | 0620, 0x0400 | (i + 1), &tty_fops);
     tick_register(tty_poll_uart);
 }
