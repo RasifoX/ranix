@@ -45,6 +45,7 @@ typedef struct {
     uint8_t  c_cc[NCCS];
 
     pid_t    fg_pgrp;
+    uint16_t ws_row, ws_col;   /* TIOCSWINSZ override; 0 = use the framebuffer size */
     spinlock_t lock;
 } tty_t;
 
@@ -128,7 +129,17 @@ void tty_input_char(char c)
         return;
     }
 
-    if (c == 127 || c == '\b') {
+    if (t->c_cc[VKILL] && c == t->c_cc[VKILL]) {
+        /* line kill (Ctrl-U): erase the whole pending line, char by char so the
+         * echo (and any multibyte run) unwinds exactly like repeated erase. */
+        while (t->line_pos > 0) {
+            int n = 1;
+            while (n < t->line_pos && (t->line_buf[t->line_pos - n] & 0xC0) == 0x80)
+                n++;
+            t->line_pos -= n;
+            if (t->c_lflag & ECHO) tty_echo_str(t, "\b \b", 3);
+        }
+    } else if (c == 127 || c == '\b' || (t->c_cc[VERASE] && c == t->c_cc[VERASE])) {
         if (t->line_pos > 0) {
             int n = 1;
             while (n < t->line_pos && (t->line_buf[t->line_pos - n] & 0xC0) == 0x80)
@@ -242,6 +253,7 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
 #define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
 #define TIOCGPGRP  0x540f
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
@@ -278,8 +290,20 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     if (cmd == TIOCGWINSZ) {
         int cols = 80, rows = 24;
         fb_tty_get_size(&cols, &rows);
+        /* An explicit TIOCSWINSZ override wins over the framebuffer geometry. */
+        if (t->ws_row && t->ws_col) { rows = t->ws_row; cols = t->ws_col; }
         uint16_t ws[4] = { (uint16_t)rows, (uint16_t)cols, 0, 0 };
         return copy_to_user((void *)(uintptr_t)arg, ws, sizeof(ws)) ? -14 : 0;
+    }
+    if (cmd == TIOCSWINSZ) {
+        uint16_t ws[4];
+        if (copy_from_user(ws, (const void *)(uintptr_t)arg, sizeof(ws))) return -14;
+        uint64_t flags = spin_lock_irq(&t->lock);
+        t->ws_row = ws[0]; t->ws_col = ws[1];
+        pid_t pg = t->fg_pgrp;
+        spin_unlock_irq(&t->lock, flags);
+        if (pg > 0) task_signal_pgrp(pg, 28);   /* SIGWINCH */
+        return 0;
     }
     if (cmd == TIOCGPGRP)
         return copy_to_user((void *)(uintptr_t)arg, &t->fg_pgrp, sizeof(t->fg_pgrp)) ? -14 : 0;
