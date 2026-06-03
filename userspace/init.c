@@ -31,6 +31,21 @@ static void maybe_switch_root(void)
 	/* exec failed: we are already on the disk root — fall through and run it */
 }
 
+/* Mount everything in /etc/fstab, as a Linux init/rc would. busybox mount -a
+ * parses fstab and skips noauto / already-mounted entries. */
+static void mount_all(void)
+{
+	if (access("/etc/fstab", F_OK) != 0) return;
+	pid_t pid = fork();
+	if (pid == 0) {
+		char *av[] = { "/bin/mount", "-a", NULL };
+		char *ev[] = { "PATH=/bin", NULL };
+		execve("/bin/mount", av, ev);
+		_exit(127);
+	}
+	if (pid > 0) { int st; waitpid(pid, &st, 0); }
+}
+
 static void do_poweroff(void)
 {
     sync();
@@ -47,6 +62,8 @@ int main(void)
     if (tfd != 0) { dup2(tfd, 0); close(tfd); }
     dup2(0, 1);
     dup2(0, 2);
+
+    mount_all();   /* process /etc/fstab */
 
     /* start echo_server in background */
     {
