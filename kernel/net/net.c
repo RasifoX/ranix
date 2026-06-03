@@ -365,7 +365,7 @@ static void net_dhcp_one(netdev_t *d)
     }
 
     ndp_send_rs(d);
-    uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
+    uint64_t deadline = kernel_ticks + 300;   /* ~3s — a real router's RA can lag */
     while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) net_poll();
     if (!in6_is_unspec(&d->ip6))
         kprintf("slaac: %s configured a global IPv6 address\n", d->name);
@@ -403,6 +403,11 @@ static void net_link_thread(void)
             } else if (!up && d->link_up) {
                 kprintf("%s: link down (carrier lost)\n", d->name);
                 d->link_up = 0;
+            } else if (up && d->link_up && d->ip == 0 && in6_is_unspec(&d->ip6)) {
+                /* link up but still unconfigured — boot config raced a slow first
+                 * reply, or the DHCP server/router came up later. Keep retrying
+                 * like a client daemon until we get an address. */
+                net_dhcp_one(d);
             }
         }
     }
