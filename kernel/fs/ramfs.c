@@ -452,6 +452,7 @@ void ramfs_register(void)
 {
 	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("ramfs", ramfs_mount);
+	vfs_register_fs("tmpfs", ramfs_mount);   /* tmpfs is ramfs-backed; keep the name for /proc/mounts + statfs */
 }
 
 /* ── anonymous file for memfd_create ─────────────────────── */
