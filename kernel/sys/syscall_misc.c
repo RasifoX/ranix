@@ -450,19 +450,34 @@ static long sys_rt_sigsuspend(const uint64_t *unewmask, size_t sigsetsize)
 	return -4; /* EINTR */
 }
 
+/* kp is a resolved kernel-absolute path */
+static long do_mknod(const char *kp, mode_t mode)
+{
+	int type = mode & 0xF000;
+	if (type == 0x1000 /* S_IFIFO */) return vfs_mkfifo(kp, mode);
+	if (type == 0 || type == 0x8000 /* S_IFREG */) {
+		int fd = vfs_open(kp, 0x41 /*O_CREAT|O_WRONLY*/, mode & 0777);
+		if (fd < 0) return fd;
+		vfs_close(fd);
+		return 0;
+	}
+	return -1; /* device/socket nodes: EPERM for now */
+}
+
 static long sys_mknod(const char *path, mode_t mode, uint64_t dev)
 {
 	(void)dev;
-	if ((mode & 0xF000) == 0x8000 /* S_IFREG */)
-		return sys_open(path, 0101 | 01000, mode & 0777);
-	return -1; /* EPERM for device nodes */
+	char kp[PROC_NAME_MAX];
+	if (resolve_path(kp, -100 /*AT_FDCWD*/, path) != 0) return -14;
+	return do_mknod(kp, mode);
 }
 
 static long sys_mknodat(int dirfd, const char *path, mode_t mode, uint64_t dev)
 {
-	char kpath[256];
-	if (resolve_path(kpath, dirfd, path) != 0) return -2;
-	return sys_mknod(kpath, mode, dev);
+	(void)dev;
+	char kp[PROC_NAME_MAX];
+	if (resolve_path(kp, dirfd, path) != 0) return -14;
+	return do_mknod(kp, mode);
 }
 
 static long sys_mlock(uint64_t addr, size_t len)   { (void)addr; (void)len; return 0; }
