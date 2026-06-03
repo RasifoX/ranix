@@ -173,6 +173,25 @@ static int ramfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	return 0;
 }
 
+static int ramfs_mknod(vfs_inode_t *dir, const char *name, mode_t mode)
+{
+	ramfs_dir_t *rd = dir->priv;
+	if (!rd) return -1;
+	if ((mode & 0xF000) != S_IFIFO) return -1;   /* only named pipes for now */
+	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
+		if (strcmp(e->name, name) == 0) return -17; /* EEXIST */
+	vfs_inode_t *in = ramfs_inode_alloc(mode);
+	if (!in) return -1;
+	in->iops = &ramfs_iops;
+	fifo_init_inode(in);                         /* fops + lazy pipe */
+	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
+	if (!ent) { kfree(in); return -1; }
+	int nlen = 0; while (name[nlen] && nlen < 255) nlen++;
+	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
+	ent->inode = in; ent->next = rd->entries; rd->entries = ent; rd->count++;
+	return 0;
+}
+
 static int ramfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 {
 	ramfs_dir_t *rd = dir->priv;
@@ -385,6 +404,7 @@ static vfs_iops_t ramfs_iops = {
 	.lookup   = ramfs_lookup,
 	.create   = ramfs_create,
 	.mkdir    = ramfs_mkdir,
+	.mknod    = ramfs_mknod,
 	.unlink   = ramfs_unlink,
 	.readdir  = ramfs_readdir,
 	.rename   = ramfs_rename,
