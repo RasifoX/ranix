@@ -443,7 +443,7 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 static int64_t g_rt_off_sec  = 0;
 static int64_t g_rt_off_nsec = 0;
 extern void vdso_time_changed(void);   /* refresh the vDSO vvar after a clock step */
-static int vdso_advertise = 0;         /* AT_SYSINFO_EHDR on/off (see execve) */
+static int vdso_advertise = 1;         /* AT_SYSINFO_EHDR on/off (see execve) */
 
 static void real_time(int64_t *sec, int64_t *nsec)
 {

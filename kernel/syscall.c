@@ -439,7 +439,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GET_ROBUST_LIST: ret = -38; break;
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
-	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); return; /* returns directly, no ret value */
+	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); task_current()->in_syscall = 0; return; /* returns directly (no ret value), but must still clear in_syscall or CPU-time accounting stays stuck in "kernel" */
 	case SYS_ARCH_VFORK:  ret = sys_vfork(0); break;
 #ifdef SYS_ARCH_FORK
 	case SYS_ARCH_FORK:   ret = sys_fork(); break;
