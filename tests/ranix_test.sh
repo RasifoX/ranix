@@ -486,6 +486,13 @@ check "smp-threads-ok" "OK" \
 check "smp-cow-race" "OK" \
     "$(timeout 90 /bin/test_cowrace 2>/dev/null | tail -1)"
 
+# ── SSH end-to-end (dropbear sshd + dbclient, pubkey auth over loopback) ──────
+# dropbear runs as a real unmodified program: keygen exercises its crypto + the
+# binary load. (Full sshd↔dbclient loopback is pursued separately — the session
+# currently hits an uninterruptible-blocking-syscall gap in Ranix.)
+check "c-dropbear" "ed25519" \
+    "$(timeout 12 dropbearkey -t ed25519 -f /tmp/hk >/dev/null 2>&1; timeout 5 dropbearkey -y -f /tmp/hk 2>/dev/null | grep -o ed25519 | head -1)"
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
