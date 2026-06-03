@@ -517,19 +517,30 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         /* first send to an unresolved peer triggers ARP and is dropped; poll RX
          * for the reply and retry so the datagram actually goes out */
         netdev_t *txdev = net_route_dev(dst_ip);
+        /* the first send to an unresolved next-hop triggers ARP and is dropped;
+         * wait (time-based, not a microsecond-fast count) for the ARP reply so
+         * the datagram actually goes out — a real round-trip takes real ms */
+        extern volatile uint64_t kernel_ticks;
+        uint64_t deadline = kernel_ticks + 100;   /* ~1s */
         int rc = -1;
-        for (int attempt = 0; attempt < 64 && rc == -1; attempt++) {
+        do {
             rc = udp_tx(txdev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
-            if (rc == -1) net_poll();
-        }
+            if (rc != -1) break;
+            net_poll();
+        } while (kernel_ticks < deadline);
         r = rc < 0 ? rc : (long)len;
     } else if ((s->type == SOCK_RAW || s->type == SOCK_DGRAM) && s->proto == 1 /* IPPROTO_ICMP */) {
         if (len >= sizeof(icmp_hdr_t)) {
             icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
             ih->checksum = 0;
             ih->checksum = inet_cksum(kbuf, len);
-            /* retry loop: first attempt sends ARP request; subsequent ones hit cached MAC */
-            for (int attempt = 0; attempt < 64; attempt++) {
+            /* time-based ARP resolve (first attempt sends the ARP request; a real
+             * reply takes real ms — a 64-spin count finishes in microseconds and
+             * gives a spurious ENOSYS before the next-hop is ever resolved) */
+            extern volatile uint64_t kernel_ticks;
+            uint64_t deadline = kernel_ticks + 100;   /* ~1s */
+            r = -113;   /* EHOSTUNREACH if the next hop never resolves */
+            do {
                 skb_t *skb = skb_alloc();
                 if (!skb) { r = -12; break; }
                 memcpy(skb->data, kbuf, len);
@@ -538,7 +549,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 if (rc >= 0) { r = (long)len; break; }
                 if (rc != -1) { r = rc; break; }
                 net_poll();  /* drain RX — ARP reply may arrive */
-            }
+            } while (kernel_ticks < deadline);
         }
     }
     kfree(kbuf);
