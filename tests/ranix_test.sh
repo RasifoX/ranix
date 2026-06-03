@@ -322,6 +322,7 @@ check "c-mknoddev"    "OK"            "$(timeout 8 /bin/test_mknoddev 2>/dev/nul
 check "c-tgkill"      "OK"            "$(timeout 10 /bin/test_tgkill 2>/dev/null)"
 check "c-killgroup"   "OK"            "$(timeout 10 /bin/test_killgroup 2>/dev/null)"
 check "c-itimer"      "OK"            "$(timeout 18 /bin/test_itimer 2>/dev/null)"
+check "c-times"       "OK"            "$(timeout 15 /bin/test_times 2>/dev/null)"
 check "c-mqueue"     "OK"  "$(timeout 5 /bin/test_mqueue 2>/dev/null)"
 check "c-sysvmsg"    "OK"  "$(timeout 8 /bin/test_sysvmsg 2>/dev/null)"
 check "c-realpath"   "OK"  "$(timeout 8 /bin/test_realpath 2>/dev/null)"

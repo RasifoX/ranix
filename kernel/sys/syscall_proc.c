@@ -687,8 +687,13 @@ static long sys_getitimer(int which, itimerval_t *val)
 static long sys_times(void *buf)
 {
 	if (buf) {
-		int64_t zeros[4] = {0};
-		copy_to_user(buf, zeros, sizeof(zeros));
+		process_t *p = task_current();
+		int64_t tms[4];   /* tms_utime, tms_stime, tms_cutime, tms_cstime — in ticks (CLK_TCK==TIMER_HZ) */
+		tms[0] = (int64_t)(p ? p->utime_ticks  : 0);
+		tms[1] = (int64_t)(p ? p->stime_ticks  : 0);
+		tms[2] = (int64_t)(p ? p->cutime_ticks : 0);
+		tms[3] = (int64_t)(p ? p->cstime_ticks : 0);
+		if (copy_to_user(buf, tms, sizeof(tms)) != 0) return -14;
 	}
 	return (long)kernel_ticks;
 }

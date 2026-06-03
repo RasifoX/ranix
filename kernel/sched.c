@@ -411,8 +411,12 @@ void sched_init(void)
  * Caller holds no lock; runs in timer-IRQ context with the process current. */
 static void itimer_charge_cpu(process_t *p)
 {
-	if (!p || p->pid == 0 || (!p->vtimer_value && !p->ptimer_value)) return;
+	if (!p || p->pid == 0) return;
 	int in_user = !p->in_syscall;
+	/* user/system CPU-time split for times(2) and cputime clocks. Lock-free:
+	 * a process is current on at most one CPU, so only this CPU writes these. */
+	if (in_user) p->utime_ticks++; else p->stime_ticks++;
+	if (!p->vtimer_value && !p->ptimer_value) return;
 	uint64_t f = spin_lock_irq(&sched_lock);   /* set under the lock task_signal uses */
 	if (in_user && p->vtimer_value && --p->vtimer_value == 0) {
 		p->vtimer_value = p->vtimer_interval;
