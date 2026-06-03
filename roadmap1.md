@@ -565,7 +565,21 @@ Claude CLI için TLS şart.
 - [x] statfs(2) path-aware f_type ✅ (2026-06-03): path/fd'nin gerçekten üstünde olduğu fs'in magic'i (proc/sysfs/ext2/vfat/iso9660/tmpfs/cgroup2/ramfs) — en uzun mountpoint-prefix eşleşmesi (vfs_path_fstype). Önce hardcoded RAMFS dönüyordu. test_statfs. KALAN: gerçek blok sayıları (per-fs statfs op).
 - [x] **cert doğrulama tam** ✅ (2026-06-03): sistem CA bundle (/etc/ssl/certs/ca-certificates.crt, host'tan ship) + MBEDTLS_SSL_VERIFY_REQUIRED + mbedtls_ssl_conf_ca_chain. Gerçek internete karşı kanıtlandı: sha256.badssl.com → `cert verify PASSED` + HTTP/1.1 200; expired.badssl.com → reddedildi (`validity has expired` = RTC saat doğrulaması); self-signed.badssl.com → reddedildi (`not signed by trusted CA` = zincir doğrulaması). BUG fix: Makefile test_tls kuralı circular dep ile test_tcpperf.c derliyordu — test_tls.c'ye düzeltildi.
 - KRİTİK enabler: TCP short-read bug fix (986a96e) — TLS record framing'i bu açtı
-- [ ] mbedtls_net_connect AF_UNSPEC → AAAA dönen host'larda (example.com/cloudflare) IPv6 connect SLIRP'te takılıyor; IPv4 fallback / fast-fail kaldı (getaddrinfo/IPv6 outbound konusu, TLS değil)
+- [x] AF_UNSPEC IPv6→IPv4 fallback ✅ (2026-06-03): example.com (AAAA+A) artık IPv4'e düşüp TLS1.3 + cert PASSED + HTTP200 yapıyor (bkz IPv6 bölümü, ipv6_reachable fast-fail).
+
+### IPv6 — gerçek tel doğrulandı ✅ (2026-06-03, iki arch x86 324 / aarch64 318)
+
+Doğrulama: iki Ranix guest `-netdev socket` ile L2'de → `ping6` A→B **3/3 %0 kayıp** (NDP NS/NA komşu çözümü + ICMPv6 echo + raw/ping socket gerçek telde).
+- [x] **/proc/net/if_inet6** gerçek (stub'dı): lo ::1 + her NIC link-local + SLAAC global, Linux formatı. test: proc-if-inet6
+- [x] **ipv6_reachable + connect/sendto fast-fail** (EHOSTUNREACH): ulaşılamaz IPv6'da bloke yerine hızlı hata → AF_UNSPEC IPv4 fallback (example.com çalışır)
+- [x] **ICMP ping socket'leri** (Linux unprivileged ping): SOCK_DGRAM+IPPROTO_ICMP(V6) → ICMP olarak send + delivery (v4/v6). busybox ping/ping6 bunu kullanıyor; eskiden UDP'ye gidiyordu.
+- [x] **NDP/ARP zaman-tabanlı çözüm**: 64-spin mikrosaniyede bitiyordu (gerçek NS/NA roundtrip'inden önce) → ilk paket hep fail. Wall-clock deadline (~1s). GERÇEK donanım bug'ıydı (Pi→modem latency).
+- [x] IPv6 **extension header** skip (hop-by-hop/routing/dstopts) ipv6_rx'te
+- [x] NDP (NS/NA/RS/RA) + SLAAC (RA prefix → EUI-64) + neighbour cache + on/off-link routing (önceki working-tree, devralındı)
+- [~] **SLAAC**: kod doğru ama QEMU 8.2.2 SLIRP bu WSL2 ortamında RA göndermiyor → QEMU'da test edilemedi; gerçek modem RA'sı ile (Pi) doğrulanacak
+- [ ] **Fragmentation/reassembly** — MİMARİ KISIT: skb sabit 1536B (tek frame), reassembly >1536 paketi sığmıyor; skb-boyut reworku gerekiyor (v4 de fragment'lemiyor). Büyük UDP6/DNSSEC için lazım.
+- [ ] DAD (duplicate address detection, RFC 4862), MLD (multicast listener — MLD-snooping switch'lerde NDP için), DHCPv6, privacy addr (RFC 4941)
+- [ ] recvfrom IPV6_HOPLIMIT cmsg (ping `ttl=-1` gösteriyor — kozmetik)
 
 ### SSH ✅ (2026-06-03, iki arch, uçtan uca loopback)
 
@@ -618,7 +632,7 @@ Claude CLI için TLS şart.
 ### Depolama
 - [ ] NVMe (PCIe SSD) — MSI-X gerektirir
 - [x] AHCI (SATA) ✅ (drivers/block/ahci.c — polling, IDENTIFY+RW DMA EXT, block_device sata0; ext4 r/w test'li) — eski PC
-- [ ] bcmgenet RPi4 ethernet
+- [ ] **bcmgenet RPi4 ethernet** ← Pi gerçek-modem IPv6 testinin ön-koşulu (2026-06-03). IPv6 stack QEMU'da wire-doğrulandı; Pi dahili ethernet'i bu sürücüsüz çalışmaz. Plan (kullanıcı): dokümandan oku (Pi4 BCM2711 GENET v5 + UniMAC + MDIO PHY BCM54213PE + DMA ring), kör yaz, gerçek Pi'de test+iterasyon. STRATEJİK ALTERNATİF (kullanıcı çok istiyor): aşağıdaki LinuxKPI kaynak-şim — bir kez yaparsak Linux/BSD'nin TÜM açık sürücüleri (bcmgenet dahil) gelir = dev ekosistem. Tek sürücü mü, şim mi — şim daha büyük ama çarpan etkisi muazzam.
 
 ### Test hedefleri
 - [ ] `curl https://api.anthropic.com` → 401 (bağlandı, auth yok — doğru)
