@@ -3,6 +3,41 @@
 #include <kernel/lib/string.h>
 #include <kernel/smp.h>
 #include <asm/mmu.h>
+#include <asm/io.h>
+
+/* ── CMOS / RTC ("BIOS clock") → Unix epoch seconds ───────────── */
+static uint8_t cmos_read(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
+static uint8_t bcd2bin(uint8_t v) { return (uint8_t)((v & 0x0F) + (v >> 4) * 10); }
+
+static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
+{
+	y -= m <= 2;
+	int64_t era = (y >= 0 ? y : y - 399) / 400;
+	unsigned yoe = (unsigned)(y - era * 400);
+	unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+	unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + (int64_t)doe - 719468;
+}
+
+int64_t arch_rtc_read(void)
+{
+	for (int i = 0; i < 1000000; i++) { outb(0x70, 0x0A); if (!(inb(0x71) & 0x80)) break; }
+	uint8_t s = cmos_read(0x00), mi = cmos_read(0x02), h = cmos_read(0x04);
+	uint8_t d = cmos_read(0x07), mo = cmos_read(0x08), y = cmos_read(0x09);
+	uint8_t cent = cmos_read(0x32);
+	uint8_t regb = cmos_read(0x0B);
+	if (!(regb & 0x04)) { /* BCD → binary */
+		s = bcd2bin(s); mi = bcd2bin(mi);
+		h = (uint8_t)(((h & 0x0F) + ((h & 0x70) >> 4) * 10) | (h & 0x80));
+		d = bcd2bin(d); mo = bcd2bin(mo); y = bcd2bin(y); cent = bcd2bin(cent);
+	}
+	if (!(regb & 0x02) && (h & 0x80)) h = (uint8_t)(((h & 0x7F) % 12) + 12); /* 12h PM */
+	else if (!(regb & 0x02))          h = (uint8_t)(h % 12);
+	int64_t year = (cent >= 19 && cent <= 21) ? (int64_t)cent * 100 + y : 2000 + y;
+	if (mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+	int64_t days = days_from_civil(year, mo, d);
+	return days * 86400 + (int64_t)h * 3600 + (int64_t)mi * 60 + s;
+}
 
 struct rsdp {
 	char     signature[8];      /* "RSD PTR " */

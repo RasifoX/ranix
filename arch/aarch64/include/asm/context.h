@@ -123,6 +123,7 @@ typedef struct {
 #define SYS_ARCH_NANOSLEEP         101
 #define SYS_ARCH_GETITIMER         102
 #define SYS_ARCH_SETITIMER         103
+#define SYS_ARCH_CLOCK_SETTIME     112
 #define SYS_ARCH_CLOCK_GETTIME     113
 #define SYS_ARCH_CLOCK_NANOSLEEP   115
 #define SYS_ARCH_SYSLOG            116

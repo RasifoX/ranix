@@ -434,20 +434,48 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
 }
 
-/* wall time for filesystem timestamps (no RTC epoch yet → seconds since boot,
- * but monotonic + per-event distinct, so mtime ordering works for make et al.) */
-void ranix_walltime(int64_t *sec, int64_t *nsec) { mono_time(sec, nsec); }
-
+#define CLOCK_REALTIME   0
 #define CLOCK_MONOTONIC  1
 #define CLOCK_BOOTTIME   7
+
+/* realtime = mono_time + g_rt_off (set from the RTC at boot, or settimeofday/
+ * clock_settime / NTP later). 0 offset until rtc_init → falls back to uptime. */
+static int64_t g_rt_off_sec  = 0;
+static int64_t g_rt_off_nsec = 0;
+
+static void real_time(int64_t *sec, int64_t *nsec)
+{
+	int64_t ms, mn; mono_time(&ms, &mn);
+	int64_t s = ms + g_rt_off_sec, n = mn + g_rt_off_nsec;
+	if (n >= 1000000000LL) { s++; n -= 1000000000LL; }
+	if (n < 0)             { s--; n += 1000000000LL; }
+	*sec = s; *nsec = n;
+}
+
+/* read the hardware clock (CMOS / PL031) once at boot → real wall-clock epoch */
+void rtc_init(void)
+{
+	extern int64_t arch_rtc_read(void);
+	int64_t e = arch_rtc_read();
+	if (e > 1000000000LL) {           /* sane epoch (after 2001) */
+		int64_t ms, mn; mono_time(&ms, &mn);
+		g_rt_off_sec  = e - ms;
+		g_rt_off_nsec = -mn;
+	}
+}
+
+/* filesystem timestamps: real wall-clock once the RTC set it, else uptime. */
+void ranix_walltime(int64_t *sec, int64_t *nsec) { real_time(sec, nsec); }
 
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
 	if (!tp) return -14;
 	linux_timespec_t k;
+	if (clkid == CLOCK_REALTIME) {
+		real_time(&k.tv_sec, &k.tv_nsec);
+		return copy_to_user(tp, &k, sizeof(k));
+	}
 	mono_time(&k.tv_sec, &k.tv_nsec);
-
-	/* time namespace offsets apply to the monotonic clocks, not realtime */
 	if (clkid == CLOCK_MONOTONIC || clkid == CLOCK_BOOTTIME) {
 		time_namespace_t *ns = current_time_ns();
 		long osec  = (clkid == CLOCK_BOOTTIME) ? ns->boot_sec  : ns->mono_sec;
@@ -465,10 +493,33 @@ static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 	if (!tv) return 0;
 	linux_timeval_t k;
 	int64_t s, ns;
-	mono_time(&s, &ns);
+	real_time(&s, &ns);
 	k.tv_sec  = s;
 	k.tv_usec = ns / 1000;
 	return copy_to_user(tv, &k, sizeof(k));
+}
+
+static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
+{
+	if (clkid != CLOCK_REALTIME || !tp) return -22;
+	linux_timespec_t k;
+	if (copy_from_user(&k, tp, sizeof(k)) != 0) return -14;
+	int64_t ms, mn; mono_time(&ms, &mn);
+	g_rt_off_sec  = (int64_t)k.tv_sec  - ms;
+	g_rt_off_nsec = (int64_t)k.tv_nsec - mn;
+	return 0;
+}
+
+static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
+{
+	(void)tz;
+	if (!tv) return -14;
+	linux_timeval_t k;
+	if (copy_from_user(&k, tv, sizeof(k)) != 0) return -14;
+	int64_t ms, mn; mono_time(&ms, &mn);
+	g_rt_off_sec  = (int64_t)k.tv_sec - ms;
+	g_rt_off_nsec = (int64_t)k.tv_usec * 1000 - mn;
+	return 0;
 }
 
 static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)

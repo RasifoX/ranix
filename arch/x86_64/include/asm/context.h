@@ -143,6 +143,7 @@ typedef struct {
 #define SYS_ARCH_LCHOWN            94
 #define SYS_ARCH_UMASK             95
 #define SYS_ARCH_GETTIMEOFDAY      96
+#define SYS_ARCH_SETTIMEOFDAY      164
 #define SYS_ARCH_GETRLIMIT         97
 #define SYS_ARCH_GETRUSAGE         98
 #define SYS_ARCH_SYSINFO           99
@@ -212,6 +213,7 @@ typedef struct {
 #define SYS_ARCH_EPOLL_CREATE      213
 #define SYS_ARCH_GETDENTS64        217
 #define SYS_ARCH_SET_TID_ADDR      218
+#define SYS_ARCH_CLOCK_SETTIME     227
 #define SYS_ARCH_CLOCK_GETTIME     228
 #define SYS_ARCH_CLOCK_NANOSLEEP   230
 #define SYS_ARCH_EXIT_GROUP        231

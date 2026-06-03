@@ -520,7 +520,11 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_FADVISE64: ret = 0; break;   /* hint only — safe to ignore */
 	/* ── time ────────────────────────────────────────────── */
 	case SYS_ARCH_CLOCK_GETTIME: ret = sys_clock_gettime((int)arg0, (linux_timespec_t*)arg1); break;
+	case SYS_ARCH_CLOCK_SETTIME: ret = sys_clock_settime((int)arg0, (const linux_timespec_t*)arg1); break;
 	case SYS_ARCH_GETTIMEOFDAY:  ret = sys_gettimeofday((linux_timeval_t*)arg0, (void*)arg1); break;
+#ifdef SYS_ARCH_SETTIMEOFDAY
+	case SYS_ARCH_SETTIMEOFDAY:  ret = sys_settimeofday((const linux_timeval_t*)arg0, (const void*)arg1); break;
+#endif
 	case SYS_ARCH_NANOSLEEP:     ret = sys_nanosleep((linux_timespec_t*)arg0, (linux_timespec_t*)arg1); break;
 	case SYS_ARCH_GETITIMER:     ret = sys_getitimer((int)arg0, (itimerval_t*)arg1); break;
 	case SYS_ARCH_SETITIMER:     ret = sys_setitimer((int)arg0, (const itimerval_t*)arg1, (itimerval_t*)arg2); break;
