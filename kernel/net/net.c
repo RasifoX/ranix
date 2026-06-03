@@ -220,12 +220,21 @@ static void net_link_thread(void);   /* carrier hotplug watcher, defined below *
 
 static void net_rx_thread(void)
 {
+    extern volatile uint64_t kernel_ticks;
     net_rx_task = task_current();
     for (;;) {
         net_poll();
         uint64_t f = spin_lock_irq(&net_rx_lock);
         if (net_rx_pending) { net_rx_pending = 0; spin_unlock_irq(&net_rx_lock, f); continue; }
-        task_sleep_unlock(&net_rx_lock, f);
+        spin_unlock_irq(&net_rx_lock, f);
+        /* Poll again in ~10ms even without an RX interrupt. virtio-net and the
+         * Pi's genet are poll-driven, and once the scheduler takes over the boot
+         * CPU stops running the net_poll idle loop — so userspace sitting at a
+         * shell prompt would never drain the RX ring and it fills with the
+         * network's background broadcast traffic, stalling RX. A timed wake keeps
+         * the ring drained; net_rx_wake still wakes us early when wired. */
+        task_sleep_until(kernel_ticks + 1);
+        continue;
     }
 }
 
