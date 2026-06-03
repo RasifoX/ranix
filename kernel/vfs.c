@@ -1200,6 +1200,38 @@ int vfs_chmod(const char *path, mode_t mode)
 	return 0;
 }
 
+/* change owner/group of an inode (uid/gid == (uid_t)-1 leaves it unchanged).
+ * Only root may change the uid; clears set-user/group-ID bits like Linux. */
+int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
+{
+	if (!in) return -2;
+	process_t *p = task_current();
+	uid_t euid = p ? p->euid : 0;
+	if (euid != 0) {
+		/* non-root: only the owner, only the group, only to a group they're in */
+		if (in->uid != euid) return -1;            /* EPERM */
+		if (uid != (uid_t)-1 && uid != in->uid) return -1;
+		if (gid != (gid_t)-1) {
+			int ok = (p && gid == p->egid);
+			for (int i = 0; p && !ok && i < p->ngroups; i++) ok = (p->groups[i] == gid);
+			if (!ok) return -1;
+		}
+	}
+	if (uid != (uid_t)-1) in->uid = uid;
+	if (gid != (gid_t)-1) in->gid = gid;
+	in->mode &= ~(mode_t)06000;                    /* drop setuid/setgid on chown */
+	int64_t s, n; ranix_walltime(&s, &n);
+	in->ctime = s; in->ctime_nsec = (uint32_t)n;
+	return 0;
+}
+
+int vfs_chown(const char *path, uid_t uid, gid_t gid)
+{
+	vfs_dentry_t *d = vfs_dentry_resolve(path);
+	if (!d || !d->inode) return -2;
+	return vfs_chown_inode(d->inode, uid, gid);
+}
+
 int vfs_link(const char *oldpath, const char *newpath)
 {
 	vfs_dentry_t *od = vfs_dentry_resolve(oldpath);

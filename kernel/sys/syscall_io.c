@@ -404,10 +404,31 @@ static long sys_fchmodat(int d, const char *p, mode_t m, int f)
 	if (strncpy_from_user(kp, p, PROC_NAME_MAX) < 0) return -14;
 	return vfs_chmod(kp, m);
 }
-static long sys_chown(const char *p, uid_t u, gid_t g)  { (void)p; (void)u; (void)g; return 0; }
-static long sys_fchown(int fd, uid_t u, gid_t g)         { (void)fd; (void)u; (void)g; return 0; }
-static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int f)
-{ (void)d; (void)p; (void)u; (void)g; (void)f; return 0; }
+static long sys_chown(const char *p, uid_t u, gid_t g)
+{
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, -100 /*AT_FDCWD*/, p);
+	if (r) return r;
+	return vfs_chown(kp, u, g);
+}
+static long sys_fchown(int fd, uid_t u, gid_t g)
+{
+	process_t *proc = task_current();
+	vfs_file_t *f = (proc && proc->fds) ? fd_get(proc->fds, fd) : NULL;
+	if (!f || !f->inode) return -9;
+	return vfs_chown_inode(f->inode, u, g);
+}
+static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int flags)
+{
+	if (flags & 0x1000 /*AT_EMPTY_PATH*/) {
+		char t[2];
+		if (strncpy_from_user(t, p, 2) >= 0 && t[0] == '\0') return sys_fchown(d, u, g);
+	}
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, d, p);
+	if (r) return r;
+	return vfs_chown(kp, u, g);
+}
 
 /* ── read / write / open / stat ──────────────────────────────────────────────
  * Thin wrappers over the VFS: validate the user pointer, then call vfs_*.
