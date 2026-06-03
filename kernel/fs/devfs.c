@@ -483,4 +483,5 @@ void devfs_register(void)
 {
 	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("devfs", devfs_mount);
+	vfs_register_fs("devtmpfs", devfs_mount);   /* keep the name for /proc/mounts + statfs */
 }
