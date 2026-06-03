@@ -176,6 +176,7 @@ typedef struct {
 #define SYS_ARCH_RT_SIGSUSPEND     130
 #define SYS_ARCH_SIGALTSTACK       131
 #define SYS_ARCH_MKNOD             133
+#define SYS_ARCH_MKNODAT           259
 #define SYS_ARCH_STATFS            137
 #define SYS_ARCH_FSTATFS           138
 #define SYS_ARCH_GETPRIORITY       140
