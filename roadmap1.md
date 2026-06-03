@@ -664,7 +664,7 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 - [x] /etc/fstab okuma, boot'ta otomatik mount ✅ (2026-06-03): init `mount -a` (busybox, fstab parse + noauto/zaten-mounted atla — gerçek /proc/mounts sayesinde); örnek fstab tmpfs entry boot'ta mount, suite `fstab-mount` doğruluyor. + /proc/mounts gerçek mount-tablosu (procfs stub'ı kaldırıldı).
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
 - [ ] HTTP server: nginx veya lighttpd çalışıyor
-- [ ] top / htop çalışıyor — CPU + memory canlı görünüm
+- [x] top çalışıyor ✅ (2026-06-03): busybox top batch (top -bn1) /proc/PID/stat + meminfo okur; bu oturumdaki procfs alan-hizalama düzeltmesi sayesinde. suite top-batch. (htop ayrı port)
 - [ ] Raspberry Pi 4'te SD karttan boot, ethernet çalışıyor
 - [ ] x86_64 PC'de USB boot, NVMe/SATA disk, ethernet
 
