@@ -415,7 +415,21 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
 {
     (void)flags; (void)addrlen;
     socket_t *s = fd_to_sock(fd);
-    if (!s || !s->dev) return -9;
+    if (!s) return -9;
+    /* AF_UNIX send()/sendto() delivers through the peer's queue, not the IP
+     * stack. Without this an AF_UNIX datagram socket (s->dev is set like any
+     * socket) falls into the udp_tx path below and is shipped as a bogus UDP
+     * frame — exactly what a libc syslog write to /dev/log does. */
+    if (s->domain == AF_UNIX) {
+        if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+        uint8_t *kb = kmalloc(len);
+        if (!kb) return -12;
+        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
+        int rc = unix_send(s, kb, (uint16_t)len);
+        kfree(kb);
+        return rc < 0 ? rc : (long)len;
+    }
+    if (!s->dev) return -9;
 
     /* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx */
     if (s->domain == AF_INET6) {
