@@ -165,6 +165,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 **SysV IPC**
 - [x] `shmget` / `shmat` / `shmdt` / `shmctl` — shared memory (buddy-backed, vm_map per page)
 - [x] `semget` / `semop` / `semctl` — semaphore dizileri, blocking semop
+- [x] `msgget` / `msgsnd` / `msgrcv` / `msgctl` — mesaj kuyruğu (tip-seçimli msgrcv, blocking, IPC_RMID; ipc-ns izole; test_sysvmsg)
 - [x] Python multiprocessing, PostgreSQL, Redis bunları kullanıyor
 
 **POSIX IPC**

@@ -380,6 +380,172 @@ static long sys_semctl(int semid, int semnum, int cmd, uint64_t arg)
     return ret;
 }
 
+/* ── SysV Message Queues ──────────────────────────────────── */
+
+#define MSGQ_MAX     16     /* queues per ipc namespace */
+#define MSGQ_NMSG    64     /* messages per queue */
+#define MSGQ_MSGSZ   1024   /* max mtext bytes per message */
+#define MSG_NOERROR  010000
+#define MSG_EXCEPT   020000
+
+typedef struct {
+    int      used;
+    uint64_t seq;          /* FIFO order within the queue */
+    long     mtype;
+    size_t   len;          /* mtext length */
+    char     data[MSGQ_MSGSZ];
+} sysv_msg_t;
+
+typedef struct {
+    key_t      key;
+    int        valid;
+    int        count;
+    uint64_t   seq_next;
+    sysv_msg_t msgs[MSGQ_NMSG];
+    process_t *send_waiter;
+    process_t *recv_waiter;
+    ipc_namespace_t *ipc_ns;
+} msgq_t;
+
+static msgq_t     msg_queues[MSGQ_MAX];
+static spinlock_t msgq_lock = SPINLOCK_INIT;
+
+static int msgq_key_to_id(key_t key)
+{
+    ipc_namespace_t *cur = current_ipc();
+    for (int i = 0; i < MSGQ_MAX; i++)
+        if (msg_queues[i].valid && msg_queues[i].key == key && msg_queues[i].ipc_ns == cur)
+            return i;
+    return -1;
+}
+
+static long sys_msgget(key_t key, int msgflg)
+{
+    uint64_t f = spin_lock_irq(&msgq_lock);
+    if (key != IPC_PRIVATE) {
+        int id = msgq_key_to_id(key);
+        if (id >= 0) {
+            if ((msgflg & IPC_CREAT) && (msgflg & IPC_EXCL)) {
+                spin_unlock_irq(&msgq_lock, f); return -17; /* EEXIST */
+            }
+            spin_unlock_irq(&msgq_lock, f); return id;
+        }
+        if (!(msgflg & IPC_CREAT)) { spin_unlock_irq(&msgq_lock, f); return -2; /* ENOENT */ }
+    }
+    int slot = -1;
+    for (int i = 0; i < MSGQ_MAX; i++) if (!msg_queues[i].valid) { slot = i; break; }
+    if (slot < 0) { spin_unlock_irq(&msgq_lock, f); return -28; /* ENOSPC */ }
+    msgq_t *q = &msg_queues[slot];
+    q->key = key; q->valid = 1; q->count = 0; q->seq_next = 1;
+    q->send_waiter = q->recv_waiter = NULL;
+    q->ipc_ns = current_ipc();
+    for (int i = 0; i < MSGQ_NMSG; i++) q->msgs[i].used = 0;
+    spin_unlock_irq(&msgq_lock, f);
+    return slot;
+}
+
+static long sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
+{
+    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -22;
+    long mtype;
+    if (copy_from_user(&mtype, msgp, sizeof(long)) != 0) return -14;
+    if (mtype < 1) return -22;
+    char tmp[MSGQ_MSGSZ];
+    if (msgsz && copy_from_user(tmp, (const char *)msgp + sizeof(long), msgsz) != 0) return -14;
+
+    while (1) {
+        uint64_t f = spin_lock_irq(&msgq_lock);
+        if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
+            spin_unlock_irq(&msgq_lock, f); return -43; /* EIDRM */
+        }
+        msgq_t *q = &msg_queues[msqid];
+        if (q->count < MSGQ_NMSG) {
+            int slot = -1;
+            for (int i = 0; i < MSGQ_NMSG; i++) if (!q->msgs[i].used) { slot = i; break; }
+            sysv_msg_t *m = &q->msgs[slot];
+            m->used = 1; m->seq = q->seq_next++; m->mtype = mtype; m->len = msgsz;
+            if (msgsz) memcpy(m->data, tmp, msgsz);
+            q->count++;
+            if (q->recv_waiter) { task_wake_no_resched(q->recv_waiter); q->recv_waiter = NULL; }
+            spin_unlock_irq(&msgq_lock, f);
+            return 0;
+        }
+        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -11; /* EAGAIN */ }
+        q->send_waiter = task_current();
+        task_sleep_unlock(&msgq_lock, f);
+    }
+}
+
+static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg)
+{
+    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -22;
+
+    while (1) {
+        uint64_t f = spin_lock_irq(&msgq_lock);
+        if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
+            spin_unlock_irq(&msgq_lock, f); return -43; /* EIDRM */
+        }
+        msgq_t *q = &msg_queues[msqid];
+
+        int best = -1;
+        for (int i = 0; i < MSGQ_NMSG; i++) {
+            if (!q->msgs[i].used) continue;
+            long mt = q->msgs[i].mtype;
+            int match;
+            if (msgtyp == 0)      match = 1;
+            else if (msgtyp > 0)  match = (msgflg & MSG_EXCEPT) ? (mt != msgtyp) : (mt == msgtyp);
+            else                  match = (mt <= -msgtyp);
+            if (!match) continue;
+            if (best < 0)
+                best = i;
+            else if (msgtyp < 0 && q->msgs[i].mtype != q->msgs[best].mtype)
+                best = (q->msgs[i].mtype < q->msgs[best].mtype) ? i : best; /* lowest type */
+            else if (q->msgs[i].seq < q->msgs[best].seq)
+                best = i;                                                   /* oldest */
+        }
+        if (best >= 0) {
+            sysv_msg_t *m = &q->msgs[best];
+            if (m->len > msgsz && !(msgflg & MSG_NOERROR)) {
+                spin_unlock_irq(&msgq_lock, f); return -7; /* E2BIG */
+            }
+            size_t copy = m->len > msgsz ? msgsz : m->len;
+            long mtype = m->mtype;
+            char tmp[MSGQ_MSGSZ];
+            if (copy) memcpy(tmp, m->data, copy);
+            m->used = 0; q->count--;
+            if (q->send_waiter) { task_wake_no_resched(q->send_waiter); q->send_waiter = NULL; }
+            spin_unlock_irq(&msgq_lock, f);
+            if (copy_to_user(msgp, &mtype, sizeof(long)) != 0) return -14;
+            if (copy && copy_to_user((char *)msgp + sizeof(long), tmp, copy) != 0) return -14;
+            return (long)copy;
+        }
+        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -42; /* ENOMSG */ }
+        q->recv_waiter = task_current();
+        task_sleep_unlock(&msgq_lock, f);
+    }
+}
+
+static long sys_msgctl(int msqid, int cmd, void *buf)
+{
+    (void)buf;
+    if (msqid < 0 || msqid >= MSGQ_MAX) return -22;
+    uint64_t f = spin_lock_irq(&msgq_lock);
+    if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
+        spin_unlock_irq(&msgq_lock, f); return -22;
+    }
+    msgq_t *q = &msg_queues[msqid];
+    long ret = 0;
+    if (cmd == IPC_RMID) {
+        q->valid = 0;
+        if (q->send_waiter) { task_wake_no_resched(q->send_waiter); q->send_waiter = NULL; }
+        if (q->recv_waiter) { task_wake_no_resched(q->recv_waiter); q->recv_waiter = NULL; }
+    } else {
+        ret = -22; /* IPC_STAT/IPC_SET not modelled */
+    }
+    spin_unlock_irq(&msgq_lock, f);
+    return ret;
+}
+
 /* ── POSIX Message Queues ─────────────────────────────────── */
 
 #define MQ_MAX      16
@@ -677,6 +843,11 @@ static void ipc_ns_destroy(ipc_namespace_t *ns)
     for (int i = 0; i < MQ_MAX; i++)
         if (mq_table[i].valid && mq_table[i].ipc_ns == ns) mq_table[i].valid = 0;
     spin_unlock_irq(&mq_lock, f);
+
+    f = spin_lock_irq(&msgq_lock);
+    for (int i = 0; i < MSGQ_MAX; i++)
+        if (msg_queues[i].valid && msg_queues[i].ipc_ns == ns) msg_queues[i].valid = 0;
+    spin_unlock_irq(&msgq_lock, f);
 
     kfree(ns);
 }

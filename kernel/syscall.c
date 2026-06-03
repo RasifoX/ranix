@@ -643,6 +643,10 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_SEMGET:   ret = sys_semget((key_t)arg0, (int)arg1, (int)arg2); break;
 	case SYS_ARCH_SEMOP:    ret = sys_semop((int)arg0, (const sembuf_t*)arg1, (size_t)arg2); break;
 	case SYS_ARCH_SEMCTL:   ret = sys_semctl((int)arg0, (int)arg1, (int)arg2, (uint64_t)arg3); break;
+	case SYS_ARCH_MSGGET:   ret = sys_msgget((key_t)arg0, (int)arg1); break;
+	case SYS_ARCH_MSGSND:   ret = sys_msgsnd((int)arg0, (const void*)arg1, (size_t)arg2, (int)arg3); break;
+	case SYS_ARCH_MSGRCV:   ret = sys_msgrcv((int)arg0, (void*)arg1, (size_t)arg2, (long)arg3, (int)arg4); break;
+	case SYS_ARCH_MSGCTL:   ret = sys_msgctl((int)arg0, (int)arg1, (void*)arg2); break;
 	/* POSIX IPC */
 	case SYS_ARCH_MQ_OPEN:         ret = sys_mq_open((const char*)arg0,(int)arg1,(mode_t)arg2,(mq_attr_t*)arg3); break;
 	case SYS_ARCH_MQ_UNLINK:       ret = sys_mq_unlink((const char*)arg0); break;

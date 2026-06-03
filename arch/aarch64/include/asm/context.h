@@ -183,6 +183,10 @@ typedef struct {
 #define SYS_ARCH_MQ_TIMEDSEND      182
 #define SYS_ARCH_MQ_TIMEDRECEIVE   183
 #define SYS_ARCH_MQ_GETSETATTR     185
+#define SYS_ARCH_MSGGET            186
+#define SYS_ARCH_MSGCTL            187
+#define SYS_ARCH_MSGRCV            188
+#define SYS_ARCH_MSGSND            189
 #define SYS_ARCH_SEMGET            190
 #define SYS_ARCH_SEMCTL            191
 #define SYS_ARCH_SEMOP             193
