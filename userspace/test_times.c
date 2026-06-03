@@ -57,7 +57,10 @@ int main(void)
 
 	pid_t c = fork();
 	if (c == 0) { burn(20); _exit(0); }
-	waitpid(c, 0, 0);
+	int wst;
+	struct rusage wru;
+	wait4(c, &wst, 0, &wru);
+	if (wru.ru_utime.tv_sec == 0 && wru.ru_utime.tv_usec == 0) { printf("times-fail wait4 rusage\n"); return 0; }
 
 	struct tms d;
 	times(&d);

@@ -510,7 +510,7 @@ void syscall_handle(arch_context_t *ctx)
 		}
 		break;
 	}
-	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2); break;
+	case SYS_ARCH_WAIT4:  ret = sys_waitpid((pid_t)arg0, (int*)arg1, (int)arg2, (void*)arg3); break;
 	case SYS_ARCH_PROCESS_VM_READV:
 		ret = sys_process_vm((pid_t)arg0, (const iovec_t*)arg1, (unsigned long)arg2,
 		                     (const iovec_t*)arg3, (unsigned long)arg4, (unsigned long)arg5, 0); break;

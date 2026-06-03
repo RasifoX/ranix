@@ -1287,7 +1287,23 @@ extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sl
                                       process_t **out_child, int *out_any_alive);
 extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep);
 
-static long sys_waitpid(pid_t pid, int *status, int flags)
+/* wait4 rusage: the reaped child's CPU time, including descendants it waited
+ * for (Linux folds those into the child's own ru_*). Must run before proc_reap
+ * frees the struct. */
+static void fill_wait_rusage(void *urusage, process_t *child)
+{
+	if (!urusage || (uint64_t)urusage <= 0x1000) return;
+	int64_t r[18];
+	memset(r, 0, sizeof(r));
+	uint64_t hz = TIMER_HZ;
+	uint64_t ut = child->utime_ticks + child->cutime_ticks;
+	uint64_t st = child->stime_ticks + child->cstime_ticks;
+	r[0] = (int64_t)(ut / hz); r[1] = (int64_t)((ut % hz) * (1000000 / hz));
+	r[2] = (int64_t)(st / hz); r[3] = (int64_t)((st % hz) * (1000000 / hz));
+	copy_to_user(urusage, r, sizeof(r));
+}
+
+static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 {
 	process_t *p = task_current();
 	int wnohang  = (flags & WNOHANG) != 0;
@@ -1303,6 +1319,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 				       : (child->exit_code & 0xFF) << 8;
 				int v = task_pid_nr_ns(child, current_pid_ns());
 				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
+				fill_wait_rusage(rusage, child);
 				proc_reap(child);
 				if (status && (uint64_t)status > 0x1000)
 					*status = st;
@@ -1333,6 +1350,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags)
 	int st = child->killed_by_sig
 	       ? (child->exit_code & 0x7F)
 	       : (child->exit_code & 0xFF) << 8;
+	fill_wait_rusage(rusage, child);
 	proc_reap(child);
 	if (status && (uint64_t)status > 0x1000)
 		*status = st;
