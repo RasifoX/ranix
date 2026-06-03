@@ -672,6 +672,9 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
 - [ ] HTTP server: nginx veya lighttpd çalışıyor
 - [x] top çalışıyor ✅ (2026-06-03): busybox top batch (top -bn1) /proc/PID/stat + meminfo okur; bu oturumdaki procfs alan-hizalama düzeltmesi sayesinde. suite top-batch. (htop ayrı port)
+- [x] **standart monitoring/fs araçları çalışıyor** ✅ (2026-06-03): df, free, uptime, mount(argümansız), ps — hepsi gerçek /proc + statfs okuyarak çalışır; suite'te doğrulandı. Bunu mümkün kılan procfs/fs işleri: gerçek /proc/mounts (stub değil), /proc/PID/statm, /proc/PID/mountinfo (libmount/findmnt formatı), /proc/stat intr/ctxt/btime, /proc/PID/stat utime/stime + alan-hizalama fix'i; statfs(2) path-aware f_type; mount fstype string'i self-owned (userspace mount dangling-pointer kök-fix'i); tmpfs/devtmpfs isim sadakati; /etc/resolv.conf (ndots/timeout/attempts).
+- [x] **CPU-zaman muhasebesi tam** ✅ (2026-06-03): times(2)/getrusage(2)/wait4 rusage gerçek utime/stime; ITIMER_VIRTUAL/PROF (SIGVTALRM/SIGPROF); clock_gettime CPUTIME. KÖK BUG: rt_sigreturn in_syscall'i temizlemiyordu (sinyal sonrası tüm muhasebe bozuk) → düzeltildi (vDSO açığa çıkardı).
+- [x] **sinyal alt sistemi POSIX-tam** ✅ (2026-06-03): thread-grubu paylaşımlı sighand (CLONE_SIGHAND); process-directed kill (uygun thread); tgkill tgid/tid doğrulama; (pthread sinyal kilitlenmesi kök-bug fix'i).
 - [ ] Raspberry Pi 4'te SD karttan boot, ethernet çalışıyor
 - [ ] x86_64 PC'de USB boot, NVMe/SATA disk, ethernet
 
