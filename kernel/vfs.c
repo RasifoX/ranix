@@ -836,6 +836,20 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	return fd;
 }
 
+/* drop one reference to an open file; close + free it when the last goes.
+ * Used by SCM_RIGHTS fd-passing to manage in-flight file references. */
+void vfs_file_put(vfs_file_t *f)
+{
+	if (!f) return;
+	if (--f->refcount == 0) {
+		if (f->inode && f->inode->fops && f->inode->fops->close)
+			f->inode->fops->close(f);
+		if (f->inode && !f->inode->cached)
+			vfs_inode_free(f->inode);
+		kfree(f);
+	}
+}
+
 int vfs_close(int fd)
 {
 	process_t  *p = task_current();
