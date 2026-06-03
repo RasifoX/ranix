@@ -236,9 +236,12 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	/* fields 3-52 matching the /proc/PID/stat layout */
 	pb_str(&b, " R ");
 	pb_u64(&b, p->ppid);                   /* 4: ppid */
-	pb_str(&b, " 0 0 0 0 0 0 0 0 0 0 ");  /* 5-13: pgrp..cmajflt */
-	pb_u64(&b, p->ticks);                  /* 14: utime (CPU ticks) */
-	pb_str(&b, " 0 0 0 0 0 0 1 0 0 0"     /* 15-24: stime..itrealvalue */
+	pb_str(&b, " 0 0 0 0 0 0 0 0 0 ");  /* 5-13: pgrp..cmajflt (9 fields) */
+	pb_u64(&b, p->utime_ticks);  pb_char(&b, ' ');  /* 14: utime  */
+	pb_u64(&b, p->stime_ticks);  pb_char(&b, ' ');  /* 15: stime  */
+	pb_u64(&b, p->cutime_ticks); pb_char(&b, ' ');  /* 16: cutime */
+	pb_u64(&b, p->cstime_ticks); pb_char(&b, ' ');  /* 17: cstime */
+	pb_str(&b, "0 0 0 1 0 0 0"             /* 18-24: priority..itrealvalue */
 	           " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"  /* 25-44 */
 	           " 0 0 0 0 0 0 0 0\n");                       /* 45-52 */
 	return (int)(sz - b.rem);
