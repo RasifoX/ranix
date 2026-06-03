@@ -50,6 +50,15 @@ static int sock_poll_vfs(vfs_file_t *file)
 {
     socket_t *s = (socket_t *)file->inode->priv;
     if (!s) return 0;
+    /* a listening socket is readable when a completed connection is queued for
+     * accept() — select()/poll()-driven servers (dropbear) wait on exactly this,
+     * never on recv_head, so without it the listen fd never signals POLLIN. */
+    if (s->tcp_state == TCP_LISTEN) {
+        uint64_t lf = spin_lock_irq(&s->recv_lock);
+        int ready = (s->accept_head != NULL);
+        spin_unlock_irq(&s->recv_lock, lf);
+        return ready ? 0x0001 : 0;
+    }
     uint64_t f = spin_lock_irq(&s->recv_lock);
     int has_data = (s->recv_head != NULL);
     spin_unlock_irq(&s->recv_lock, f);
