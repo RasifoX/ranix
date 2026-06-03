@@ -117,7 +117,12 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 	while (wi < 511 && path[wi]) { work[wi] = path[wi]; wi++; }
 	work[wi] = '\0';
 
-	vfs_dentry_t *d = follow_mounts(root_dentry);
+	/* chroot: an absolute path is relative to the process's own root, not the
+	 * global one. NULL ->root means it sees "/" as the global root. */
+	process_t *_cur = task_current();
+	vfs_dentry_t *proc_root = (_cur && _cur->root) ? (vfs_dentry_t *)_cur->root : root_dentry;
+
+	vfs_dentry_t *d = follow_mounts(proc_root);
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
 	int d_is_volatile = 0;          /* d points to volatile_dentry (not in dentry tree) */
@@ -248,7 +253,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 				work[tlen] = '\0';
 			}
 			if (target[0] == '/') {
-				d = root_dentry;
+				d = proc_root;
 				p = work + 1;
 				d_is_volatile = 0;
 				/* Absolute symlink restart — free any volatile context */
