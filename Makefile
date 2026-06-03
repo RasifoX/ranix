@@ -309,6 +309,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@printf 'root:x:0:\ntest:x:1000:\n' > $(BUILD_DIR)/initramfs/etc/group
 	@mkdir -p $(BUILD_DIR)/initramfs/fstabtmp
 	@printf 'tmpfs /fstabtmp tmpfs defaults 0 0\nproc /proc proc defaults 0 0\n' > $(BUILD_DIR)/initramfs/etc/fstab
+	@printf 'nameserver 10.0.2.3\nsearch localdomain\noptions ndots:1 timeout:2 attempts:2\n' > $(BUILD_DIR)/initramfs/etc/resolv.conf
 	@mkdir -p $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Etc
 	@if [ -f /usr/share/zoneinfo/Europe/Istanbul ]; then \
 		cp /usr/share/zoneinfo/Europe/Istanbul $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe/Istanbul; \
