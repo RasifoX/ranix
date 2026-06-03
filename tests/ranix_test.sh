@@ -487,11 +487,21 @@ check "smp-cow-race" "OK" \
     "$(timeout 90 /bin/test_cowrace 2>/dev/null | tail -1)"
 
 # ── SSH end-to-end (dropbear sshd + dbclient, pubkey auth over loopback) ──────
-# dropbear runs as a real unmodified program: keygen exercises its crypto + the
-# binary load. (Full sshd↔dbclient loopback is pursued separately — the session
-# currently hits an uninterruptible-blocking-syscall gap in Ranix.)
+# dropbear runs as a real unmodified program: full sshd↔dbclient loopback —
+# host + client keygen, pubkey auth, exec a command, read its output back.
 check "c-dropbear" "ed25519" \
     "$(timeout 12 dropbearkey -t ed25519 -f /tmp/hk >/dev/null 2>&1; timeout 5 dropbearkey -y -f /tmp/hk 2>/dev/null | grep -o ed25519 | head -1)"
+
+timeout 15 dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
+timeout 15 dropbearkey -t ed25519 -f /tmp/id >/dev/null 2>&1
+timeout 5  dropbearkey -y -f /tmp/id 2>/dev/null | grep '^ssh-' > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+dropbear -F -s -g -r /etc/dropbear/dropbear_ed25519_host_key -p 2222 2>/dev/null &
+DBPID=$!
+sleep 2
+timeout -s KILL 25 dbclient -y -y -i /tmp/id -p 2222 root@127.0.0.1 'echo SSHWORKS' >/tmp/d2 2>/dev/null
+kill -9 $DBPID 2>/dev/null
+check "c-ssh-session" "SSHWORKS" "$(grep -c SSHWORKS /tmp/d2 >/dev/null && echo SSHWORKS)"
 
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
