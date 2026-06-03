@@ -582,8 +582,8 @@ Claude CLI için TLS şart.
 
 ### Terminal (pseudo-terminal)
 - [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN; raw mode)
-- [ ] proper TTY line discipline (canonical mod, erase, kill, intr)
-- [ ] TIOCSWINSZ window resize
+- [x] proper TTY line discipline (canonical mod, erase, kill, intr) ✅ (canonical/erase/intr vardı; VKILL satır-silme + VERASE eklendi)
+- [x] TIOCSWINSZ window resize ✅ (2026-06-03: tty_core stored winsize + SIGWINCH; pty'de zaten vardı)
 - [ ] openpty / forkpty
 
 ### Depolama

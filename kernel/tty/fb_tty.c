@@ -160,7 +160,12 @@ static void put_codepoint(u32 cp)
     } else if (cp == '\r') {
         _cur_col = 0;
     } else if (cp == '\b') {
-        if (_cur_col > 0) { _cur_col--; draw_glyph(_cur_col, _cur_row, ' '); }
+        /* Backspace is cursor-left only, exactly like a serial terminal — it must
+         * NOT blank the cell. The line discipline erases by sending "\b \b" (left,
+         * space, left); if \b also blanked, the middle space would print and, at
+         * column 0 where \b is a no-op, leave a stray blank glyph on the fb while
+         * the serial side stayed correct. */
+        if (_cur_col > 0) _cur_col--;
     } else if (cp == '\t') {
         _cur_col = (_cur_col + 8) & ~7u;
         if (_cur_col >= _cols) { _cur_col = 0; _cur_row++; }
