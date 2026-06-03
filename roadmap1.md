@@ -703,6 +703,66 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 
 ---
 
+## Yapılandırılabilirlik & Hedef Profiller (kullanıcı vizyonu, 2026-06-03)
+
+**Hedef:** Ranix tek kaynaktan çok farklı hedeflere yapılandırılabilmeli — anonim
+RAM-only dağıtım, 5-10MB tiny-core, 20MB low-RAM, 128 çekirdek/512GB sunucu,
+uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofis/tasarım).
+
+**İKİ AYRI EKSEN (karıştırma — bu ayrım kritik):**
+1. **Çalışma-zamanı ölçekleme** (mevcut karar, büyük ölçüde ✅): aynı binary 1 çekirdek/
+   128MB ↔ 128 çekirdek/512GB; runtime-growable yapılar, çalışma-zamanı tespit.
+2. **Derleme-zamanı özellik seçimi** (EKSİK — Linux Kconfig'in yaptığı): hangi alt-sistem
+   derlemeye GİRSİN. 5MB tiny-core için ağ/GPU/USB/çoğu-FS derlemeden ÇIKARILABİLMELİ.
+   Bu olmadan "tiny-core" matematiksel olarak İMKANSIZ. **DİKKAT:** eski "compile-time
+   config YASAK" kararı YALNIZ eksen-1 (mevcut alt-sistemin boyutlandırması) içindi;
+   eksen-2 (alt-sistemin var/yok'u) ayrı ve GEREKLİ — Linux ikisini de yapar.
+
+### Derleme-zamanı yapılandırma (eksen-2)
+- [ ] Kconfig-benzeri sistem: CONFIG_NET / CONFIG_GPU / CONFIG_USB / CONFIG_SMP /
+      CONFIG_IPV6 / CONFIG_<fs> ... — alt-sistemi derlemeden çıkar (kaynakta `#if`/Makefile guard)
+- [ ] defconfig profilleri: tiny / ram-only / low-ram / server / desktop / embedded-rt
+- [ ] her profil için footprint ölçümü + çalışma testi (çıkarılan kod SIFIR iz bırakmalı)
+
+### Hedef profiller (her biri kabul ölçütü)
+- [ ] **tiny-core (5-10MB)**: net/GPU/USB/çoğu-FS çıkık; ramfs + çekirdek syscall seti
+- [ ] **ram-only / anonim**: tmpfs+overlayfs root, disksiz; **dm-crypt/LUKS** + güvenli RAM-wipe
+- [ ] **low-ram (20MB)**: **zram/zswap** (sıkıştırılmış RAM swap) + minimal profil
+- [ ] **server (128c/512GB)**: NUMA + per-CPU rq-lock + disk-swap + io_uring; ölçek ölçütü
+- [ ] **embedded-rt (uzay/kontrol)**: **PREEMPT_RT-benzeri** tam-preemption + watchdog +
+      thermal; deterministik en-kötü-durum latency ölçütü
+- [ ] **desktop**: GPU + ses + USB + **WiFi** + video-decode (v1.0 masaüstü sütunu)
+
+### Use-case-kritik eksik alt-sistemler (yukarıdaki profilleri besler)
+**Depolama / FS (dağıtım çeşitliliği)**
+- [ ] **overlayfs** — RO taban + RW katman (live/RAM/konteyner dağıtımların temeli)
+- [ ] **squashfs** — sıkıştırılmış RO kök (tiny/live medya; xz/zstd/lz4 decompress)
+- [ ] **f2fs** (flash/SD/eMMC — gömülü), **btrfs veya xfs** (sunucu snapshot/ölçek)
+- [ ] **NFS / SMB(CIFS)** istemci — ağ dosya sistemi
+**Bellek (low-ram / server)**
+- [ ] **zram / zswap** — sıkıştırılmış RAM swap (düşük-RAM cihaz can simidi)
+- [ ] memory hotplug (sunucu) [swap/KSM zaten Uzun Vade'de]
+**Ağ (masaüstü/mobil)**
+- [ ] **WiFi**: cfg80211 + mac80211 + en az bir sürücü (laptop/masaüstü zorunlu) — büyük
+- [ ] köprüleme (bridge) + VLAN + routing tablosu (sunucu/gateway) [netfilter Uzun Vade'de]
+**Gerçek-zamanlı / scheduler (gömülü/uzay)**
+- [ ] PREEMPT_RT-benzeri preemptible kernel + öncelik-devralma + SCHED_DEADLINE
+**Güç / termal (laptop/eski-PC/gömülü)**
+- [ ] thermal yönetimi + battery/laptop ACPI + runtime PM [cpufreq/suspend zaten planda]
+**Masaüstü medya**
+- [ ] ses tam (ALSA + HDA/virtio-snd) [v1.0 stub], donanım video-decode (VAAPI sınıfı), UVC webcam, yazıcı (CUPS userspace)
+**Güvenlik (anonim/kurumsal)**
+- [ ] **dm-crypt/LUKS** disk şifreleme + **fscrypt** + güvenli-wipe (anonim dağıtım için)
+**Mimari KARAR (eski-PC profili)**
+- [ ] 32-bit hedef (i686/armv7) eski donanım için — KARAR: NON-GOAL mı, profil mi? netleşsin
+
+> Not: Bunların çoğu v1.x-v2.0 bandında; buraya **profil-odaklı** toplandı ki "hangi hedef
+> için ne eksik" tek bakışta görülsün. v0.9.5 (headless+Claude CLI) bunların HİÇBİRİNİ
+> gerektirmez — 0.9.5 ≠ "Linux'tan eksiksiz", 0.9.5 = "headless çalışır". Tam Linux-sınıfı
+> çok-hedefli kernel = bu profillerin kapanması.
+
+---
+
 ## Kapsam Tamamlama — v1.0'dan ÖNCE kapanmalı (2026-06-01 Linux karşılaştırmasından)
 
 > Kullanıcı kararı: karşılaştırmada çıkan tüm eksikler tam sürümden önce tamamlanmalı.
@@ -792,8 +852,11 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 ### Kararlar (2026-05-30)
 - **Robustness:** kernel-invariant ihlali → BUG()/panic (gürültülü, limp etme); DIŞ hata
   (userspace/driver/IO/OOM) → contain, kernel asla düşmez. Linux modeli.
-- **Dinamik = runtime-growable:** compile-time config YASAK; per-CPU + RCU (Linux'tan
-  miras, üstüne iyileştir); dinamik AMA kilitsiz hot-path (global kmalloc'a bağlama).
+- **İki yapılandırma ekseni (2026-06-03 netleşti):** (1) ÖLÇEKLEME = runtime-growable,
+  mevcut alt-sistemin boyutu çalışma-zamanı büyür (per-CPU + RCU; compile-time SİZİNG yasak;
+  kilitsiz hot-path). (2) ÖZELLİK SEÇİMİ = Kconfig-tarzı derleme-zamanı, alt-sistemin var/yok'u
+  (5MB tiny-core için ağ/GPU/USB çıkarılabilmeli). Eski "compile-time config YASAK" SADECE
+  eksen-1 içindi; eksen-2 gerekli ve ayrı. Bkz "Yapılandırılabilirlik & Hedef Profiller".
 - **Driver:** native-first temiz/stable API gerçek; ileride (post-1.0) AÇIK Linux driver'ları
   için kaynak-seviyesi şim (LinuxKPI/BSD tarzı). Binary/kapalı ABI taklidi REDDEDİLDİ
   (ReactOS tuzağı). Kapalı driver (nvidia) hiçbir non-Linux kernelde çözülmez; nouveau hedef.
