@@ -964,6 +964,13 @@ void proc_reap(process_t *child)
 		p = &(*p)->next;
 	if (*p == child)
 		*p = child->next;
+	/* times(2): a reaped child's CPU time (and its own reaped children's) rolls
+	 * up into the parent's cutime/cstime. */
+	process_t *par = (child->ppid >= 0 && child->ppid < proc_cnt) ? proctab[child->ppid] : NULL;
+	if (par) {
+		par->cutime_ticks += child->utime_ticks + child->cutime_ticks;
+		par->cstime_ticks += child->stime_ticks + child->cstime_ticks;
+	}
 	spin_unlock_irq(&sched_lock, f);
 
 	/*

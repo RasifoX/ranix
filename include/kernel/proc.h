@@ -82,7 +82,11 @@ typedef struct process {
 
 	/* ── scheduling ──────────────────────────── */
 	int             ticks_remaining;
-	uint64_t        ticks;
+	uint64_t        ticks;          /* total CPU ticks (utime + stime) */
+	uint64_t        utime_ticks;    /* ticks spent in user mode */
+	uint64_t        stime_ticks;    /* ticks spent in kernel (syscalls) */
+	uint64_t        cutime_ticks;   /* reaped children's user time (times(2)) */
+	uint64_t        cstime_ticks;   /* reaped children's system time */
 	int             nice;          /* -20..19, default 0 */
 	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
 	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
