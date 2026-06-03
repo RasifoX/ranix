@@ -65,7 +65,7 @@ Claude CLI / SSH / dpkg "headless tam" alt-kilometre taşı (v0.9.5); masaüstü
 - /etc: /etc/passwd, /etc/hosts, /etc/resolv.conf, /etc/environment
 - Userspace: busybox 60+ applet, bash-5.2, statik ELF, DOOM; musl pthreads (create/join/mutex) çalışıyor
 - Network: ARP + ICMP + UDP + TCP tam stack + TCP flow control; AF_UNIX socketpair + path-based; ping + echo_server
-- Syscall: eventfd2, timerfd, memfd_create, signalfd4 (stub), epoll/select/poll/ppoll, statfs, capget/capset, xattr stubs; inotify gerçek (IN_CREATE/DELETE/MOVED_FROM/TO); getrandom; statx, copy_file_range, splice, pread64/pwrite64; auxv: AT_RANDOM/AT_EXECFN/AT_HWCAP/AT_PHDR/AT_ENTRY/AT_PAGESZ
+- Syscall: eventfd2, timerfd, memfd_create, signalfd4 (stub), epoll/select/poll/ppoll, statfs, capget/capset, xattr (gerçek: user./trusted./security./system. namespace, per-inode store, ENODATA/EEXIST/ERANGE/EOPNOTSUPP); inotify gerçek (IN_CREATE/DELETE/MOVED_FROM/TO); getrandom; statx, copy_file_range, splice, pread64/pwrite64; auxv: AT_RANDOM/AT_EXECFN/AT_HWCAP/AT_PHDR/AT_ENTRY/AT_PAGESZ
 - Kernel cmdline: Multiboot2 (x86_64) + DTB bootargs (aarch64); /proc/cmdline; init= ; quiet/debug
 - Donanım: virtio-blk, virtio-net MMIO (aarch64) + PCI (x86_64), sdhost (Pi4), PL011, GIC400
 - Security: ruid/euid/suid, capabilities v3 ABI, ASLR (splitmix64), su + /etc/shadow, CPIO uid/gid/mode initrd fix

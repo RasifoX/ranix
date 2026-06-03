@@ -98,23 +98,115 @@ static long sys_capset(void *hdrp, const void *datap)
 	return 0;
 }
 
-/* ── xattr (stubs: ENODATA) ──────────────────────────────── */
-static long sys_getxattr(const char *p, const char *n, void *v, size_t s)
-{ (void)p;(void)n;(void)v;(void)s; return -61; } /* ENODATA */
-static long sys_lgetxattr(const char *p, const char *n, void *v, size_t s)
-{ (void)p;(void)n;(void)v;(void)s; return -61; }
-static long sys_fgetxattr(int fd, const char *n, void *v, size_t s)
-{ (void)fd;(void)n;(void)v;(void)s; return -61; }
-static long sys_setxattr(const char *p, const char *n, const void *v, size_t s, int f)
-{ (void)p;(void)n;(void)v;(void)s;(void)f; return -1; }
-static long sys_lsetxattr(const char *p, const char *n, const void *v, size_t s, int f)
-{ (void)p;(void)n;(void)v;(void)s;(void)f; return -1; }
-static long sys_listxattr(const char *p, char *l, size_t s)
-{ (void)p;(void)l;(void)s; return 0; }
-static long sys_llistxattr(const char *p, char *l, size_t s)
-{ (void)p;(void)l;(void)s; return 0; }
+/* ── xattr — generic per-inode key/value store (vfs_inode_*xattr) ──
+ * Namespaces follow Linux: only user./trusted./security./system. are valid;
+ * the privileged namespaces need euid 0. Symlink (l*) variants currently
+ * resolve like the plain ones — user.* xattrs are not allowed on symlinks
+ * anyway, so this only differs for the rarely-used privileged namespaces. */
+#define XATTR_NAME_MAX_LEN 255
+#define XATTR_VALUE_MAX    65536
+
+static int xattr_ns(const char *name)
+{
+	if (!strncmp(name, "user.", 5))     return 1;
+	if (!strncmp(name, "trusted.", 8))  return 2;
+	if (!strncmp(name, "security.", 9)) return 2;
+	if (!strncmp(name, "system.", 7))   return 2;
+	return 0; /* unknown namespace → EOPNOTSUPP */
+}
+
+static vfs_inode_t *xattr_resolve(const char *upath, char *kpath)
+{
+	if (resolve_path(kpath, AT_FDCWD, upath)) return NULL;
+	vfs_dentry_t *d = vfs_dentry_resolve(kpath);
+	return (d && d->inode) ? d->inode : NULL;
+}
+
+static long xattr_set(const char *upath, const char *uname, const void *uval,
+                      size_t size, int flags)
+{
+	char kpath[PROC_NAME_MAX], kname[XATTR_NAME_MAX_LEN + 1];
+	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+	int ns = xattr_ns(kname);
+	if (!ns) return -95; /* EOPNOTSUPP */
+	process_t *cp = task_current();
+	if (ns == 2 && (!cp || cp->euid != 0)) return -1; /* EPERM */
+	if (size > XATTR_VALUE_MAX) return -7; /* E2BIG */
+	vfs_inode_t *in = xattr_resolve(upath, kpath);
+	if (!in) return -2;
+	if (ns == 1 && !S_ISREG(in->mode) && !S_ISDIR(in->mode)) return -95;
+	void *kv = NULL;
+	if (size) {
+		kv = kmalloc(size);
+		if (!kv) return -12;
+		if (copy_from_user(kv, uval, size) != 0) { kfree(kv); return -14; }
+	}
+	int r = vfs_inode_setxattr(in, kname, kv, size, flags);
+	if (kv) kfree(kv);
+	return r;
+}
+
+static long xattr_get_inode(vfs_inode_t *in, const char *kname, void *uval, size_t size)
+{
+	if (size == 0) return vfs_inode_getxattr(in, kname, NULL, 0);
+	if (size > XATTR_VALUE_MAX) size = XATTR_VALUE_MAX;
+	void *kv = kmalloc(size);
+	if (!kv) return -12;
+	ssize_t r = vfs_inode_getxattr(in, kname, kv, size);
+	if (r >= 0 && copy_to_user(uval, kv, (size_t)r) != 0) r = -14;
+	kfree(kv);
+	return r;
+}
+
+static long xattr_get(const char *upath, const char *uname, void *uval, size_t size)
+{
+	char kpath[PROC_NAME_MAX], kname[XATTR_NAME_MAX_LEN + 1];
+	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+	vfs_inode_t *in = xattr_resolve(upath, kpath);
+	if (!in) return -2;
+	return xattr_get_inode(in, kname, uval, size);
+}
+
+static long xattr_list(const char *upath, char *ulist, size_t size)
+{
+	char kpath[PROC_NAME_MAX];
+	vfs_inode_t *in = xattr_resolve(upath, kpath);
+	if (!in) return -2;
+	if (size == 0) return vfs_inode_listxattr(in, NULL, 0);
+	if (size > XATTR_VALUE_MAX) size = XATTR_VALUE_MAX;
+	char *kl = kmalloc(size);
+	if (!kl) return -12;
+	ssize_t r = vfs_inode_listxattr(in, kl, size);
+	if (r >= 0 && copy_to_user(ulist, kl, (size_t)r) != 0) r = -14;
+	kfree(kl);
+	return r;
+}
+
+static long sys_getxattr(const char *p, const char *n, void *v, size_t s) { return xattr_get(p, n, v, s); }
+static long sys_lgetxattr(const char *p, const char *n, void *v, size_t s) { return xattr_get(p, n, v, s); }
+static long sys_setxattr(const char *p, const char *n, const void *v, size_t s, int f) { return xattr_set(p, n, v, s, f); }
+static long sys_lsetxattr(const char *p, const char *n, const void *v, size_t s, int f) { return xattr_set(p, n, v, s, f); }
+static long sys_listxattr(const char *p, char *l, size_t s) { return xattr_list(p, l, s); }
+static long sys_llistxattr(const char *p, char *l, size_t s) { return xattr_list(p, l, s); }
+
 static long sys_removexattr(const char *p, const char *n)
-{ (void)p;(void)n; return -1; }
+{
+	char kpath[PROC_NAME_MAX], kname[XATTR_NAME_MAX_LEN + 1];
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
+	vfs_inode_t *in = xattr_resolve(p, kpath);
+	if (!in) return -2;
+	return vfs_inode_removexattr(in, kname);
+}
+
+static long sys_fgetxattr(int fd, const char *n, void *v, size_t s)
+{
+	process_t *cp = task_current();
+	vfs_file_t *f = (cp && cp->fds) ? fd_get(cp->fds, fd) : NULL;
+	if (!f || !f->inode) return -9; /* EBADF */
+	char kname[XATTR_NAME_MAX_LEN + 1];
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
+	return xattr_get_inode(f->inode, kname, v, s);
+}
 
 /* ── batch: missing syscalls ─────────────────────────────── */
 
