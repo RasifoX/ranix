@@ -115,6 +115,7 @@ typedef struct process {
 	fd_table_t     *fds;
 	char            cwd[256];
 	mode_t          umask;
+	void           *root;   /* chroot dir (vfs_dentry_t*); NULL = global root "/" */
 
 	/* ── virtual memory regions ──────────────── */
 	vma_t          *vmas;

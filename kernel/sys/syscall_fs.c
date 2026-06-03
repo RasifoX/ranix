@@ -371,6 +371,23 @@ static long sys_chdir(const char *path)
 	return 0;
 }
 
+static long sys_chroot(const char *path)
+{
+	process_t *p = task_current();
+	if (p->euid != 0) return -1;                /* EPERM (CAP_SYS_CHROOT) */
+	char kp[PROC_NAME_MAX];
+	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
+	if (r) return r;
+	vfs_dentry_t *d = vfs_dentry_resolve(kp);
+	if (!d || !d->inode) return -2;             /* ENOENT */
+	if (!S_ISDIR(d->inode->mode)) return -20;   /* ENOTDIR */
+	p->root = d;
+	/* cwd is now relative to the new root; reset to "/" so a path that pointed
+	 * outside the jail can't be reached (simple, escape-safe). */
+	p->cwd[0] = '/'; p->cwd[1] = '\0';
+	return 0;
+}
+
 static long sys_getcwd(char *buf, size_t size)
 {
 	if (!buf || size == 0) return -14;
