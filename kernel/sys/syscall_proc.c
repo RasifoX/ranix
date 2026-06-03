@@ -442,6 +442,8 @@ static void mono_time(int64_t *sec, int64_t *nsec)
  * clock_settime / NTP later). 0 offset until rtc_init → falls back to uptime. */
 static int64_t g_rt_off_sec  = 0;
 static int64_t g_rt_off_nsec = 0;
+extern void vdso_time_changed(void);   /* refresh the vDSO vvar after a clock step */
+static int vdso_advertise = 0;         /* AT_SYSINFO_EHDR on/off (see execve) */
 
 static void real_time(int64_t *sec, int64_t *nsec)
 {
@@ -466,6 +468,7 @@ void rtc_init(void)
 
 /* filesystem timestamps: real wall-clock once the RTC set it, else uptime. */
 void ranix_walltime(int64_t *sec, int64_t *nsec) { real_time(sec, nsec); }
+void ranix_monotime(int64_t *sec, int64_t *nsec) { mono_time(sec, nsec); }
 
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID  3
@@ -562,6 +565,7 @@ static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec  - ms;
 	g_rt_off_nsec = (int64_t)k.tv_nsec - mn;
+	vdso_time_changed();
 	return 0;
 }
 
@@ -582,6 +586,7 @@ static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec - ms;
 	g_rt_off_nsec = (int64_t)k.tv_usec * 1000 - mn;
+	vdso_time_changed();
 	rtc_sync_to_hw();   /* persist to hardware clock — survives reboot */
 	return 0;
 }
@@ -618,6 +623,7 @@ static long sys_adjtimex(k_timex_t *utx)
 		while (nn >= 1000000000LL) { nn -= 1000000000LL; ns++; }
 		while (nn < 0)             { nn += 1000000000LL; ns--; }
 		g_rt_off_sec = ns - ms; g_rt_off_nsec = nn - mn;
+		vdso_time_changed();
 		rtc_sync_to_hw();
 	}
 	if (tx.modes & 0x0002) g_tx_freq = tx.freq;   /* ADJ_FREQUENCY: store steer */
@@ -986,6 +992,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		}
 	}
 
+	extern void vdso_map(vm_space_t *);
+	vdso_map(new_vm);   /* REALTIME/gettimeofday fast path (AT_SYSINFO_EHDR below) */
+
 	/* update process name */
 	const char *last_slash = kpath;
 	for (int j = 0; kpath[j]; j++) if (kpath[j] == '/') last_slash = kpath + j + 1;
@@ -1126,6 +1135,10 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 } while (0)
 
 	PUSH_AUX(0,  0);
+	/* AT_SYSINFO_EHDR advertisement gated off until the signal-delivery latency
+	 * to syscall-free loops (exposed by c-itimer) is root-caused. The vDSO is
+	 * built, mapped and kept fresh; flip this on once that's fixed. */
+	if (vdso_advertise) PUSH_AUX(33, VDSO_VADDR);
 	PUSH_AUX(31, at_execfn_addr);
 	PUSH_AUX(25, at_random_addr);
 	PUSH_AUX(23, 0);

@@ -1,4 +1,5 @@
 #include <kernel/syscall.h>
+#include <uapi/vdso.h>
 #include <kernel/capabilities.h>
 #include <kernel/proc.h>
 #include <kernel/nsproxy.h>
