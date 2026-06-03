@@ -355,6 +355,7 @@ typedef struct {
 #define PROC_F_P_MAPS    13
 #define PROC_F_P_COMM    14
 #define PROC_F_P_STATM   19
+#define PROC_F_P_MOUNTINFO 25
 #define PROC_F_NET_DEV   20
 #define PROC_F_NET_TCP   21
 #define PROC_F_NET_UDP   22
@@ -471,6 +472,7 @@ static const struct {
 	{ "maps",    PROC_F_P_MAPS    },
 	{ "comm",    PROC_F_P_COMM    },
 	{ "statm",   PROC_F_P_STATM   },
+	{ "mountinfo", PROC_F_P_MOUNTINFO },
 };
 #define PID_FILES_N ((int)(sizeof(pid_files) / sizeof(pid_files[0])))
 
@@ -506,6 +508,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STATM:  n = fill_proc_statm(tmp,  PROCFS_BUF_SIZE, pr->pid); break;
+	case PROC_F_P_MOUNTINFO: n = (int)vfs_proc_mountinfo(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_MAPS:   n = fill_proc_maps(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_COMM:   n = fill_proc_comm(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
