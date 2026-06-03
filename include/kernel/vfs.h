@@ -55,6 +55,8 @@ typedef struct {
     gid_t    gid;
     uint64_t size;
     dev_t    rdev;
+    int64_t  atime, mtime, ctime;
+    uint32_t atime_nsec, mtime_nsec, ctime_nsec;
 } vfs_stat_t;
 
 /* ── inode operations (directory / metadata) ─────────────── */
@@ -101,6 +103,8 @@ typedef struct vfs_inode {
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
+    int64_t      atime, mtime, ctime;
+    uint32_t     atime_nsec, mtime_nsec, ctime_nsec;
 } vfs_inode_t;
 
 /* ── open file instance ──────────────────────────────────── */
@@ -196,6 +200,7 @@ int        vfs_symlink(const char *target, const char *linkpath);
 
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_lstat(const char *path, vfs_stat_t *out);
+void       ranix_walltime(int64_t *sec, int64_t *nsec);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
 int        vfs_chmod(const char *path, mode_t mode);
