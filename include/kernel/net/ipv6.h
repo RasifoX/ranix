@@ -4,9 +4,14 @@
 #include <kernel/net/net.h>   /* in6_addr_t lives here so netdev_t can embed it */
 
 /* next-header values reuse the IPv4 protocol numbers, plus ICMPv6 */
+#define IP6_NH_HOPOPTS  0    /* hop-by-hop options (extension header) */
 #define IP6_NH_TCP      6
 #define IP6_NH_UDP      17
+#define IP6_NH_ROUTING  43   /* routing (extension header) */
+#define IP6_NH_FRAGMENT 44   /* fragment (extension header) */
 #define IP6_NH_ICMPV6   58
+#define IP6_NH_NONE     59   /* no next header */
+#define IP6_NH_DSTOPTS  60   /* destination options (extension header) */
 
 typedef struct {
     uint8_t    ver_tc_fl[4]; /* version(4) | traffic-class(8) | flow-label(20) */
