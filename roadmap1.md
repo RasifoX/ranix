@@ -681,6 +681,7 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 
 ### Dağıtım yapılabilirliği
 - [x] ext4 (extent + 64BIT) + GPT bölümleme ✅ (GPT→ext4 /mnt mount test'li); ext4 **write**-64bit + journal kaldı
+- [x] FAT12/FAT16/FAT32 (VFAT LFN) read ✅ (2026-06-03: kernel/fs/fat.c; USB/SD/ESP medyası; x86 FAT32 mount+read+LFN test'li)
 - [ ] init kararı: "Ranix Debian" systemd ister (cgroups v2 + namespaces, v0.7.5) VEYA
       systemd'siz varyant (Devuan/Artix tarzı: OpenRC/runit) — KARAR netleşmeli
 - [ ] apt + dpkg (glibc) / pacman benzeri (statik) — paket deposu
