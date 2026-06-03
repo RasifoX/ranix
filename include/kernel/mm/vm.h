@@ -10,6 +10,7 @@
 #define VM_USER   (1 << 3)
 #define VM_NOCACHE (1 << 4)
 #define VM_DEVICE  (1 << 5)
+#define VM_NOFREE  (1 << 6)   /* kernel-shared page (vDSO/vvar): unmap, never free on teardown */
 
 #define HUGE_PAGE_SIZE  (2UL * 1024 * 1024)
 #define HUGE_PAGE_MASK  (~(HUGE_PAGE_SIZE - 1))

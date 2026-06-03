@@ -16,6 +16,7 @@
 #define PTE_PWT (1UL << 3)
 #define PTE_PCD (1UL << 4)
 #define PTE_PS  (1UL << 7)
+#define PTE_NOFREE (1UL << 9)   /* software bit: kernel-shared page, skip free on vm_destroy */
 
 extern uint64_t pml4[];      /* kernel (boot) PML4 — phys when cast to uint64_t */
 
@@ -133,7 +134,7 @@ void vm_destroy(vm_space_t *vs)
 				uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 				for (int l = 0; l < 512; l++) {
 					if (!(l1[l] & PTE_P)) continue;
-					if (l1[l] & PTE_U) {
+					if ((l1[l] & PTE_U) && !(l1[l] & PTE_NOFREE)) {
 						pmm_free((void *)(l1[l] & ~0xFFFUL));
 					}
 				}
@@ -195,6 +196,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (flags & VM_USER)    entry |= PTE_U;
 	if (flags & VM_NOCACHE) entry |= PTE_PWT | PTE_PCD;
 	if (flags & VM_DEVICE)  entry |= PTE_PWT | PTE_PCD;
+	if (flags & VM_NOFREE)  entry |= PTE_NOFREE;   /* shared page: don't free on teardown */
 	pt[(vaddr >> 12) & 0x1FF] = entry;
 
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");

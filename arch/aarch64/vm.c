@@ -159,7 +159,8 @@ void vm_destroy(vm_space_t *vs)
 				if (!(l3[k] & PTE_VALID)) continue;
 				if (l3[k] & PTE_USER) {
 					is_user_l3 = 1;
-					pmm_free((void *)(l3[k] & ~0xFFFUL));
+					if (!(l3[k] & PTE_NOFREE))
+						pmm_free((void *)(l3[k] & ~0xFFFUL));
 				}
 			}
 			/* Don't free kernel-inherited L3 tables (e.g. framebuffer split).
@@ -227,6 +228,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (flags & VM_DEVICE)      attr = PTE_ATTR_DEVICE;
 	if (flags & VM_USER)        attr |= PTE_USER | PTE_NG;
 	if (!(flags & VM_WRITE))    attr |= PTE_RO;
+	if (flags & VM_NOFREE)      attr |= PTE_NOFREE;   /* shared page: don't free on teardown */
 
 	l3[l3i] = (paddr & ~0xFFFUL) | L3_PAGE | attr;
 
