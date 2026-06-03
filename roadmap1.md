@@ -208,7 +208,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 - [x] `su` ile kullanıcı değiştiriliyor — su-switches-uid/gid, shadow-no-read geçiyor
 - [x] signalfd + epoll birlikte çalışıyor — c-signalfd testi geçiyor
 - [x] normal kullanıcı /dev/sda'yı açamıyor (EACCES) ✅ (block-node mode 0660 root; vfs_check_perm non-root open→EACCES; test_devperm)
-- [ ] dbus abstract socket üzerinden haberleşiyor
+- [~] dbus abstract socket: **abstract-namespace AF_UNIX (sun_path[0]=0) ✅** (bind/listen/accept/connect uçtan uca, test_abstract) — D-Bus daemon portu kaldı (userspace)
 - [ ] `python3 -c "import multiprocessing"` crash etmiyor (SysV IPC)
 
 ---
