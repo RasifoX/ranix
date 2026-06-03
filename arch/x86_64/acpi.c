@@ -123,6 +123,34 @@ static void *find_table(struct rsdp *r, const char *sig)
 	return 0;
 }
 
+/* ── HPET: high-resolution monotonic counter (a Linux clocksource) ──────────
+ * The HPET ACPI table gives an MMIO base; CAP[63:32] is the tick period in
+ * femtoseconds, MAIN_COUNTER (0xF0) a free-running 64-bit count. We enable it
+ * and expose hpet_now_ns() so x86 clock_gettime/mono_time get ns resolution
+ * instead of the 10 ms tick (aarch64 already has cntvct). */
+static volatile uint8_t *hpet_base;
+static uint64_t          hpet_period_fs;
+
+static void hpet_init_from(struct rsdp *r)
+{
+	void *t = find_table(r, "HPET");
+	if (!t) return;
+	uint64_t base = *(uint64_t *)((uint8_t *)t + 44);   /* GAS address @ offset 44 */
+	if (!base) return;
+	hpet_base = (volatile uint8_t *)PHYS_TO_VIRT(base);
+	hpet_period_fs = (*(volatile uint64_t *)hpet_base) >> 32;
+	if (!hpet_period_fs || hpet_period_fs > 100000000ULL) { hpet_base = 0; return; }
+	*(volatile uint64_t *)(hpet_base + 0x10) |= 1;      /* ENABLE_CNF */
+}
+
+uint64_t hpet_now_ns(void)
+{
+	if (!hpet_base) return 0;
+	uint64_t cnt = *(volatile uint64_t *)(hpet_base + 0xF0);
+	/* ns = cnt * period_fs / 1e6, split to avoid 64-bit overflow */
+	return (cnt / 1000000ULL) * hpet_period_fs + ((cnt % 1000000ULL) * hpet_period_fs) / 1000000ULL;
+}
+
 /* Returns the number of enabled CPUs from the ACPI MADT, 0 if no MADT. */
 int acpi_detect_cpus(void)
 {
@@ -130,6 +158,8 @@ int acpi_detect_cpus(void)
 
 	struct rsdp *r = find_rsdp();
 	if (!r) return 0;
+
+	hpet_init_from(r);   /* independent of the MADT */
 
 	struct madt *m = find_table(r, "APIC");
 	if (!m) return 0;
