@@ -51,6 +51,16 @@ int cgroup_charge_mem(void *cgp, long n)
 	return 0;
 }
 
+/* 1 if cgp is the same cgroup as ancestorp or a descendant of it. Lockless
+ * parent walk — used by the OOM killer to scope its victim search to a subtree. */
+int cgroup_is_in_subtree(void *cgp, void *ancestorp)
+{
+	cgroup_t *anc = ancestorp ? (cgroup_t *)ancestorp : &cgroup_root;
+	for (cgroup_t *c = cgp ? (cgroup_t *)cgp : &cgroup_root; c; c = c->parent)
+		if (c == anc) return 1;
+	return 0;
+}
+
 void cgroup_uncharge_mem(void *cgp, long n)
 {
 	cgroup_t *cg = cgp ? (cgroup_t *)cgp : &cgroup_root;

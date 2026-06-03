@@ -16,6 +16,8 @@ int  cgroup_mount(struct vfs_mount *mnt, void *data);
 /* memory controller (cg = a process's ->cgroup, void to keep cgroup_t opaque) */
 int  cgroup_charge_mem(void *cg, long n);   /* 0 ok, -1 over memory.max */
 void cgroup_uncharge_mem(void *cg, long n);
+int  cgroup_is_in_subtree(void *cg, void *ancestor);  /* 1 if cg == ancestor or below */
+void cgroup_oom_kill(void *over_cg);        /* SIGKILL biggest task in subtree (sched.c) */
 int  cgroup_frozen(void *cg);               /* 1 if cg or an ancestor is frozen */
 int  cgroup_cpu_weight(void *cg);           /* cpu.weight (1..10000, 100 = baseline) */
 

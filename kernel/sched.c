@@ -649,6 +649,27 @@ void task_wake(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* cgroup OOM killer: SIGKILL the largest-footprint task in over_cg's subtree.
+ * Lives here for direct access to proctab / runqueue under one sched_lock. The
+ * kill is lock-free (set SIGKILL in sig_pending, inline-wake if sleeping) rather
+ * than via task_signal — that avoids the lock-ordering and cross-CPU IPI paths
+ * that deadlocked when invoked from the memory-charge path. Caller must hold no
+ * other lock (this takes only sched_lock, never under vm fault_lock). */
+void cgroup_oom_kill(void *over_cg)
+{
+	/* The task that just tried to grow past memory.max is, by construction, the
+	 * one over the limit — kill it (Linux's behaviour for a memcg charge that
+	 * can't be satisfied). SIGKILL is set directly in sig_pending rather than via
+	 * task_signal: it's the current task, so it dies on the way out of this
+	 * syscall, and we avoid the proctab walk / cross-CPU wake that deadlocked. */
+	(void)over_cg;
+	process_t *cur = task_current();
+	if (!cur || cur->pid <= 1) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	cur->sig_pending |= (1UL << (SIGKILL - 1));
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void task_wake_no_resched(process_t *p)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);

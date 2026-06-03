@@ -60,7 +60,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			p->huge1g_next = (p->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
 			va = p->huge1g_next; p->huge1g_next += len;
 		}
-		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) return -12;
+		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
 			uint64_t blk = huge1g_alloc();
 			if (!blk || vm_map_huge_1g(p->vm, v, blk, vmflags) != 0) {
@@ -94,7 +94,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			p->mmap_next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
 			va = p->mmap_next; p->mmap_next += len;
 		}
-		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) return -12;
+		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		uint64_t done = 0;
 		for (uint64_t v = va; v < va + len; v += HUGE_PAGE_SIZE) {
 			void *blk = buddy_alloc(9);   /* 2 MB = 512 pages */
@@ -132,7 +132,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE)
 				vm_unmap(p->vm, v);
 		} else {
-			if (cgroup_charge_mem(p->cgroup, (long)len) != 0) return -12; /* over memory.max */
+			if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; } /* over memory.max */
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 				void *pg = buddy_alloc(0);
 				if (!pg) { cgroup_uncharge_mem(p->cgroup, (long)len); kprintf("mmap: ENOMEM pid=%u va=%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
