@@ -252,7 +252,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@cp "$(BUSYBOX_EXTRACT)/bin/busybox.static" $(BUILD_DIR)/initramfs/bin/busybox
 	@chmod +x $(BUILD_DIR)/initramfs/bin/busybox
 	@for cmd in sh ls cat touch mkdir rmdir rm cp mv ln chmod grep sed find \
-	            ps kill df free uname head tail wc echo printf vi \
+	            ps kill df free top uname head tail wc echo printf vi \
 	            reboot poweroff halt mount umount dmesg \
 	            awk sort uniq cut tr rev xargs dd stat du diff \
 	            env tee seq sleep date id whoami hostname \

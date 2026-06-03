@@ -252,6 +252,9 @@ check "proc-mounts-dev"   "1"  "$(grep -c ' /dev devfs ' /proc/mounts)"
 check "fstab-mount"       "1"  "$(grep -c ' /fstabtmp ' /proc/mounts)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
+# busybox top in batch mode walks /proc/[pid]/stat + /proc/meminfo — exercises
+# the procfs process table end to end (a real "monitoring works" check).
+check "top-batch"         "1"  "$(top -bn1 2>/dev/null | grep -c 'PID')"
 check "proc-version"      "1"  "$([ -f /proc/version ] && echo 1)"
 check "proc-net-dev"      "1"  "$([ -f /proc/net/dev ] && echo 1)"
 check "proc-self-pid"     "1"  "$(awk '/^Pid:/{print ($2>0)?1:0}' /proc/self/status)"
