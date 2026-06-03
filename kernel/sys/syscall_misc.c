@@ -510,13 +510,11 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
 static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 {
 	(void)arg;
-	kprintf("sys_reboot: magic1=%x magic2=%x cmd=%x\n",
-	        (uint32_t)magic1, (uint32_t)magic2, (uint32_t)cmd);
-	if ((uint32_t)magic1 != 0xfee1dead) { kprintf("bad magic1\n"); return -22; }
+	if ((uint32_t)magic1 != 0xfee1dead) return -22;
 	if ((uint32_t)magic2 != 0x28121969 &&
 	    (uint32_t)magic2 != 0x05121996 &&
 	    (uint32_t)magic2 != 0x16041998 &&
-	    (uint32_t)magic2 != 0x20112000) { kprintf("bad magic2\n"); return -22; }
+	    (uint32_t)magic2 != 0x20112000) return -22;
 	kprintf("reboot: system going down\n");
 	if (cmd == 0x4321fedc) /* LINUX_REBOOT_CMD_POWER_OFF */
 		board_poweroff();
