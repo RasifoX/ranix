@@ -511,7 +511,7 @@ Bu olmadan "Ranix Debian" hedefi boş laftan ibaret.
 **Runtime doğrulama**
 - [x] IFUNC resolver chain — dynamic glibc çalışıyor (her string fn IFUNC; reloc + resolver OK) ✅
 - [ ] locale: glibc locale/charset altyapısı çalışıyor (en_US.UTF-8 yeterli)
-- [ ] timezone: /etc/localtime okuma (tzdata paketi kurulabilmeli)
+- [x] timezone: /etc/localtime okuma ✅ (TZif tzdata /usr/share/zoneinfo; musl localtime/tzset; test_tz)
 - [x] NSS: /etc/passwd, /etc/hosts ✅ (musl getpwnam/getpwuid/getgrnam + gethostbyname→127.0.0.1; nsswitch dolaylaması yok; test_nss)
 - [x] math: libm.so.6 temel fonksiyonlar çalışıyor ✅ (gstress sqrt, gdl dlopen libm cos)
 
@@ -531,7 +531,7 @@ Bu olmadan "Ranix Debian" hedefi boş laftan ibaret.
 - [ ] `ldd /bin/bash` → libc.so.6 gösteriyor
 - [ ] `dpkg -i libc6_2.38_amd64.deb` çalışıyor
 - [ ] `python3 -c "import ctypes; ctypes.CDLL('libc.so.6')"` çalışıyor
-- [ ] `/etc/timezone → Europe/Istanbul; date` doğru saat dilimiyle çalışıyor
+- [x] `/etc/timezone → Europe/Istanbul; date` ✅ (/etc/localtime=Istanbul TZif; tm_gmtoff=+3h)
 
 ---
 
@@ -629,7 +629,7 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
       kurulu tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root.)
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
-- [ ] timezone: TZ=Europe/Istanbul date → doğru
+- [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
 - [ ] HTTP server: nginx veya lighttpd çalışıyor
 - [ ] top / htop çalışıyor — CPU + memory canlı görünüm
 - [ ] Raspberry Pi 4'te SD karttan boot, ethernet çalışıyor
