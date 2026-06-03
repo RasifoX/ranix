@@ -362,7 +362,7 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 - [x] bellek RAM'e uyarlanır ✅ (mem_map page_t* + _npages boot-detect; buddy tüm RAM'i kapsar)
 - [ ] per-CPU değişkenler + RCU-benzeri primitif (Linux'tan miras, üstüne iyileştir;
       dinamik AMA kilitsiz hot-path — global kmalloc'a bağlama, "akmalı")
-- [ ] devtmpfs + ttyN dinamik (sabit sayı yok)
+- [x] devtmpfs + ttyN dinamik ✅ (block_device_register→/dev/<name> S_IFBLK byte-addressable node otomatik; tty1..tty6 dinamik kayıt)
 - [ ] global sched_lock → per-CPU rq-lock (ölçeklenme engeli)
 - [x] **ASID'li TLB (aarch64)** ✅ — per-space 8-bit tag + PTE_NG; switch'te flush YOK (asid!=0). asid 0 = flush-sentinel (kernel/fallback); free'de `tlbi aside1is` (SMP-safe reuse). 5x temiz suite; gerçek-Pi4 stress kaldı.
 
@@ -664,7 +664,7 @@ ve musl/statik (Alpine-tarzı). Fark = linker + paket yöneticisi + üstündeki 
 - [ ] /dev/input/mice uyumluluk
 
 **Cihaz modeli (userspace beklentisi)**
-- [ ] devtmpfs — dinamik /dev (udev'in temeli) [bkz v0.7.x dinamik]
+- [x] devtmpfs — dinamik /dev ✅ (cihaz probe→/dev node; blkdev_read/write sektör-çeviri fops; test: /dev/sata0 -b + dd offset-512 'EFI PART')
 - [ ] sysfs tam (/sys/class, /sys/devices) — udev + libinput device enumeration
 - [ ] udev (veya eudev) çalışıyor — hotplug + device node
 

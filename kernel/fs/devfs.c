@@ -100,6 +100,7 @@ typedef struct devfs_entry {
 	vfs_fops_t         *fops;
 	dev_t               rdev;
 	struct devfs_entry *next;
+	void               *priv;
 } devfs_entry_t;
 
 /* ── /dev/stdin, /dev/stdout, /dev/stderr fd-proxy devices ──── */
@@ -160,16 +161,25 @@ static devfs_entry_t devfs_builtins[] = {
 };
 static devfs_entry_t *devfs_list = devfs_builtins;
 
-void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
+void devfs_register_device_priv(const char *name, mode_t mode, dev_t rdev,
+                                vfs_fops_t *fops, void *priv)
 {
+	for (devfs_entry_t *e = devfs_list; e; e = e->next)
+		if (strcmp(e->name, name) == 0) return;
 	devfs_entry_t *e = kmalloc(sizeof(*e));
 	if (!e) return;
 	e->name = name;
 	e->mode = mode;
 	e->rdev = rdev;
 	e->fops = fops;
+	e->priv = priv;
 	e->next = devfs_list;
 	devfs_list = e;
+}
+
+void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
+{
+	devfs_register_device_priv(name, mode, rdev, fops, NULL);
 }
 
 /* ── iops ────────────────────────────────────────────────────── */
@@ -190,6 +200,7 @@ static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 	in->rdev    = e->rdev;
 	in->refcount= 1;
 	in->fops    = e->fops;
+	in->priv    = e->priv;
 	return in;
 }
 
