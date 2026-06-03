@@ -231,6 +231,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	if (current->cwd[0] == '/') memcpy(p->cwd, current->cwd, 256);
 	else { p->cwd[0] = '/'; p->cwd[1] = '\0'; }
 	p->umask = current->umask;
+	p->root  = current->root;   /* chroot survives exec */
 
 	{
 		uint64_t f = spin_lock_irq(&sched_lock);
@@ -319,6 +320,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail_early;
 	memcpy(child->cwd, parent->cwd, 256);
+	child->root         = parent->root;
 	child->umask = parent->umask;
 
 	{
@@ -456,6 +458,7 @@ pid_t proc_vfork(void)
 	child->fds          = fd_table_copy(parent->fds);
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
 	memcpy(child->cwd, parent->cwd, 256);
+	child->root         = parent->root;
 	child->umask        = parent->umask;
 
 	child->kstack = kstack_alloc();
@@ -556,6 +559,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->fds = fd_table_get(parent->fds);
 
 	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+	child->root  = parent->root;
 	child->umask = parent->umask;
 
 	child->kstack = kstack_alloc();

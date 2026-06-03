@@ -120,6 +120,7 @@ typedef struct {
 #define SYS_ARCH_TRUNCATE          76
 #define SYS_ARCH_FTRUNCATE         77
 #define SYS_ARCH_GETCWD            79
+#define SYS_ARCH_CHROOT            161
 #define SYS_ARCH_CHDIR             80
 #define SYS_ARCH_FCHDIR            81
 #define SYS_ARCH_RENAME            82
