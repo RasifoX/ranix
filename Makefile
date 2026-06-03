@@ -229,6 +229,29 @@ MBEDTLS_DIR    = $(CACHE_DIR)/mbedtls-$(ARCH)
 MBEDTLS_A      = $(MBEDTLS_DIR)/library/libmbedtls.a
 MUSL_AR        = $(MUSL_CC:gcc=ar)
 
+# dropbear — SSH server + client (dbclient), cross-built static multi-binary.
+# Self-contained crypto (libtomcrypt/libtommath), no external deps.
+DROPBEAR_VER    = 2026.91
+DROPBEAR_URL    = https://matt.ucc.asn.au/dropbear/releases/dropbear-$(DROPBEAR_VER).tar.bz2
+DROPBEAR_TAR    = $(CACHE_DIR)/dropbear-$(DROPBEAR_VER).tar.bz2
+DROPBEAR_DIR    = $(CACHE_DIR)/dropbear-$(ARCH)
+DROPBEAR_BIN    = $(DROPBEAR_DIR)/dropbearmulti
+
+dropbear: $(DROPBEAR_BIN)
+$(DROPBEAR_BIN):
+	@mkdir -p $(CACHE_DIR)
+	@if [ ! -f "$(DROPBEAR_TAR)" ]; then echo "Downloading dropbear $(DROPBEAR_VER)..."; \
+		wget -q "$(DROPBEAR_URL)" -O "$(DROPBEAR_TAR)" || { rm -f "$(DROPBEAR_TAR)"; echo "ERROR: dropbear download failed"; exit 1; }; fi
+	@rm -rf "$(DROPBEAR_DIR)"; mkdir -p "$(DROPBEAR_DIR)"
+	@tar xjf "$(DROPBEAR_TAR)" -C "$(DROPBEAR_DIR)" --strip-components=1
+	@echo "Building dropbear (static multi) for $(ARCH)..."
+	@cd "$(DROPBEAR_DIR)" && CC="$(MUSL_CC)" ./configure --host=$(ARCH)-linux-musl \
+		--disable-zlib --disable-syslog --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp >/dev/null 2>&1
+	@cd "$(DROPBEAR_DIR)" && $(MAKE) CC="$(MUSL_CC)" MULTI=1 STATIC=1 \
+		PROGRAMS="dropbear dbclient dropbearkey scp" -j$$(nproc) >/dev/null 2>&1
+	@llvm-strip "$@" 2>/dev/null || true
+	@echo "[OK] dropbear $(DROPBEAR_VER) for $(ARCH) ($$(du -h $@ | cut -f1))"
+
 bash-static: $(BASH_CACHED)
 
 $(BASH_CACHED):
@@ -254,7 +277,7 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -287,6 +310,10 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@chmod u+s $(BUILD_DIR)/initramfs/bin/su
 	@cp "$(BASH_CACHED)" $(BUILD_DIR)/initramfs/bin/bash
 	@chmod +x $(BUILD_DIR)/initramfs/bin/bash
+	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
+	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
+	@for c in dropbear dbclient dropbearkey scp ssh; do ln -sf dropbearmulti $(BUILD_DIR)/initramfs/bin/$$c; done
+	@mkdir -p $(BUILD_DIR)/initramfs/etc/dropbear $(BUILD_DIR)/initramfs/root/.ssh
 	@if [ -z "$(DEMO)" ] && [ -f doomgeneric/doomgeneric ]; then \
 		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
 		NEED_ARCH="$(ARCH)"; \
