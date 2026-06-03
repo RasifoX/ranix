@@ -130,4 +130,7 @@ void board_reset(void)
 
 void board_poweroff(void) { board_reset(); }
 
+/* Pi4 has no PL031; its RTC (if any) is on I2C — not wired yet → no epoch. */
+int64_t arch_rtc_read(void) { return 0; }
+
 void board_get_reserved(uint64_t *base, uint32_t *size) { *base = 0; *size = 0; }

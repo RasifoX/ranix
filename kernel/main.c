@@ -275,6 +275,8 @@ void kernel_main(void)
 	net_init();
 
 	irq_enable();
+	extern void rtc_init(void);   /* read hardware clock → real wall-clock epoch */
+	rtc_init();
 	extern void smp_init(void);
 	smp_init();
 	board_drivers_register();

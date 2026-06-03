@@ -799,7 +799,7 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 
 ### Saat / zaman
 - [x] dosya zaman damgaları (atime/mtime/ctime + utimensat/futimens) ✅ (2026-06-03)
-- [ ] **RTC sürücüsü** (x86 CMOS / Pi RTC) → gerçek wall-clock epoch. Şu an mono_time =
+- [x] **RTC sürücüsü** ✅ (2026-06-03: x86 CMOS 0x70/0x71 + aarch64 PL031 @0x9010000; boot'ta realtime offset; CLOCK_REALTIME/gettimeofday/dosya-mtime gerçek tarih; clock_settime+settimeofday; test_rtc >2020. RTC write-back + NTP kaldı)
       boot'tan-beri-saniye (ordering doğru ama mutlak tarih 1970+uptime); RTC ile gettimeofday
       gerçek tarih + dosya mtime'ları gerçek tarih. NTP istemci (userspace) ayrı.
 
