@@ -68,6 +68,8 @@ typedef struct netdev {
 
     int       (*tx)(struct netdev *, skb_t *);
     void      (*poll)(struct netdev *);   /* hardware poll, set by driver */
+    int       (*link_check)(struct netdev *); /* 1=carrier up, 0=down; NULL=always up */
+    int         link_up;                  /* current carrier state (link watcher) */
     void       *priv;
 
     /* RX queue — filled by poll, drained by net_poll */
