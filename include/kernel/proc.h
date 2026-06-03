@@ -202,6 +202,7 @@ void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);
 int        task_has_actionable_signal(void);
 void       task_signal(process_t *p, int sig);
+void       task_signal_group(process_t *leader, int sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
 void       signal_dispatch(arch_context_t *tf);
 void       task_exit(void);

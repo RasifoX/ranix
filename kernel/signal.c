@@ -24,6 +24,38 @@ void task_signal(process_t *p, int sig)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* Process-directed signal (kill(2)): POSIX delivers it to *any one* thread of
+ * the group that doesn't have the signal blocked — not necessarily the leader.
+ * Prefer the leader when it isn't blocking (the common single-threaded case, so
+ * behaviour is unchanged there); otherwise hand it to the first eligible thread.
+ * If every thread blocks it, leave it pending on the leader. */
+void task_signal_group(process_t *leader, int sig)
+{
+	if (!leader || sig <= 0 || sig > NSIG) return;
+	uint64_t bit = 1UL << (sig - 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+
+	process_t *target = NULL;
+	if (leader->state != PROC_DEAD && leader->state != PROC_ZOMBIE && !(leader->sig_mask & bit))
+		target = leader;
+	if (!target) {
+		process_t *sentinel = proctab[0];
+		for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+			if (t->tgid == leader->tgid && t->state != PROC_DEAD && t->state != PROC_ZOMBIE
+			    && !(t->sig_mask & bit)) { target = t; break; }
+		}
+	}
+	if (!target) target = leader;   /* nobody can take it now → pend on the leader */
+
+	target->sig_pending |= bit;
+	if (target->state == PROC_SLEEPING) {
+		target->state = PROC_READY;
+		if (!target->on_cpu) runqueue_add(target);
+		arch_get_cpu_ctx()->need_resched = 1;
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void task_signal_pgrp(pid_t pgrp, int sig)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
