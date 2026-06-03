@@ -579,7 +579,7 @@ Claude CLI için TLS şart.
 
 ### PCIe İyileştirmeleri
 - [ ] MSI/MSI-X interrupt — NVMe için şart
-- [ ] PCIe capability walk — device feature discovery
+- [x] PCIe capability walk ✅ (pci_cap_ids/pci_find_cap: status bit-4→0x34→next zincir; /sys/bus/pci/devices/<addr>/capabilities cap-ID listesi; MSI/MSI-X/PCIe/PM keşfi; test_pcicaps)
 
 ### Terminal (pseudo-terminal)
 - [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN; raw mode)

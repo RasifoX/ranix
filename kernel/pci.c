@@ -78,9 +78,51 @@ int pci_find_class(uint8_t cls, uint8_t sub, uint8_t prog,
 	return -1;
 }
 
+static uint8_t pci_read8(uint8_t b, uint8_t d, uint8_t f, uint8_t r)
+{
+	return (uint8_t)(pci_read32(b, d, f, r) >> ((r & 3) * 8));
+}
+
+/* Walk the PCI capability list (status bit 4 → cap ptr at 0x34 → next-linked
+ * chain). Fills up to max capability IDs, returns the count. */
+int pci_cap_ids(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t *ids, int max)
+{
+	uint16_t status = pci_read16(bus, dev, fn, 0x06);
+	if (!(status & 0x10)) return 0;            /* no capability list */
+	int n = 0, guard = 0;
+	uint8_t off = pci_read8(bus, dev, fn, 0x34) & 0xFC;
+	while (off >= 0x40 && guard++ < 48) {
+		uint8_t id   = pci_read8(bus, dev, fn, off);
+		uint8_t next = pci_read8(bus, dev, fn, off + 1);
+		if (id == 0xFF) break;
+		if (n < max) ids[n] = id;
+		n++;
+		off = next & 0xFC;
+	}
+	return n;
+}
+
+/* Offset of the capability with the given ID, or 0 if absent. */
+uint8_t pci_find_cap(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t cap_id)
+{
+	uint16_t status = pci_read16(bus, dev, fn, 0x06);
+	if (!(status & 0x10)) return 0;
+	int guard = 0;
+	uint8_t off = pci_read8(bus, dev, fn, 0x34) & 0xFC;
+	while (off >= 0x40 && guard++ < 48) {
+		uint8_t id = pci_read8(bus, dev, fn, off);
+		if (id == 0xFF) break;
+		if (id == cap_id) return off;
+		off = pci_read8(bus, dev, fn, off + 1) & 0xFC;
+	}
+	return 0;
+}
+
 #else
 
 uint32_t pci_read32(uint8_t b, uint8_t d, uint8_t f, uint8_t r) { (void)b;(void)d;(void)f;(void)r; return 0xFFFFFFFF; }
+int      pci_cap_ids(uint8_t b, uint8_t d, uint8_t f, uint8_t *ids, int m) { (void)b;(void)d;(void)f;(void)ids;(void)m; return 0; }
+uint8_t  pci_find_cap(uint8_t b, uint8_t d, uint8_t f, uint8_t c) { (void)b;(void)d;(void)f;(void)c; return 0; }
 uint16_t pci_read16(uint8_t b, uint8_t d, uint8_t f, uint8_t r) { (void)b;(void)d;(void)f;(void)r; return 0xFFFF; }
 void pci_write32(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint32_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
 void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint16_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
