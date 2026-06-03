@@ -1,32 +1,45 @@
 /* TLS over the real stack: open a TLS 1.2/1.3 connection to host:443, do the
- * handshake, send an HTTPS GET, print the status line and negotiated cipher.
- * Cert verification is off here — this proves the crypto + handshake + record
- * layer run on Ranix, not the PKI. Ad-hoc; needs a NIC + connectivity. */
+ * handshake against the system CA bundle (/etc/ssl/certs/ca-certificates.crt)
+ * with full certificate verification, send an HTTPS GET, print the status line
+ * and negotiated cipher. Proves crypto + handshake + record layer + the PKI
+ * chain (root trust + validity dates from the RTC) all run on Ranix.
+ * Ad-hoc; needs a NIC + connectivity. */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/x509_crt.h"
+
+#define CA_BUNDLE "/etc/ssl/certs/ca-certificates.crt"
 
 int main(int argc, char **argv)
 {
 	const char *host = argc > 1 ? argv[1] : "example.com";
 	int ret;
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	mbedtls_net_context net;
 	mbedtls_ssl_context ssl;
 	mbedtls_ssl_config conf;
 	mbedtls_ctr_drbg_context drbg;
 	mbedtls_entropy_context entropy;
+	mbedtls_x509_crt cacert;
 
 	mbedtls_net_init(&net);
 	mbedtls_ssl_init(&ssl);
 	mbedtls_ssl_config_init(&conf);
 	mbedtls_ctr_drbg_init(&drbg);
 	mbedtls_entropy_init(&entropy);
+	mbedtls_x509_crt_init(&cacert);
+
+	if ((ret = mbedtls_x509_crt_parse_file(&cacert, CA_BUNDLE)) < 0) {
+		printf("TLS FAIL ca-parse %s -0x%x\n", CA_BUNDLE, -ret); return 1;
+	}
 
 	if ((ret = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
 	                                 (const unsigned char *)"ranix", 5)) != 0) {
@@ -42,7 +55,8 @@ int main(int argc, char **argv)
 	                                       MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
 		printf("TLS FAIL config -0x%x\n", -ret); return 1;
 	}
-	mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+	mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+	mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
 	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
 
 	if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0) {
@@ -53,11 +67,17 @@ int main(int argc, char **argv)
 
 	while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
 		if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-			printf("TLS FAIL handshake -0x%x\n", -ret); return 1;
+			uint32_t fl = mbedtls_ssl_get_verify_result(&ssl);
+			char vbuf[256];
+			mbedtls_x509_crt_verify_info(vbuf, sizeof(vbuf), "  ", fl);
+			printf("TLS FAIL handshake -0x%x verify=0x%x %s\n", -ret, fl, vbuf);
+			return 1;
 		}
 	}
-	printf("TLS handshake OK: %s / %s\n",
-	       mbedtls_ssl_get_version(&ssl), mbedtls_ssl_get_ciphersuite(&ssl));
+	uint32_t vr = mbedtls_ssl_get_verify_result(&ssl);
+	printf("TLS handshake OK: %s / %s (cert verify %s)\n",
+	       mbedtls_ssl_get_version(&ssl), mbedtls_ssl_get_ciphersuite(&ssl),
+	       vr == 0 ? "PASSED" : "FAILED");
 
 	char req[256];
 	int n = snprintf(req, sizeof(req),
@@ -80,5 +100,6 @@ int main(int argc, char **argv)
 	mbedtls_ssl_config_free(&conf);
 	mbedtls_ctr_drbg_free(&drbg);
 	mbedtls_entropy_free(&entropy);
+	mbedtls_x509_crt_free(&cacert);
 	return 0;
 }
