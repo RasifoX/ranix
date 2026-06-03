@@ -184,7 +184,7 @@ USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_pt
                  userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
                  userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
                  userspace/test_cgroup userspace/test_mountns userspace/test_pidns userspace/test_pidnsproc \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_devperm userspace/test_sysvmsg userspace/test_realpath userspace/test_xattr userspace/test_nss userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls userspace/test_tcpperf
+                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_devperm userspace/test_sysvmsg userspace/test_realpath userspace/test_xattr userspace/test_nss userspace/test_tz userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls userspace/test_tcpperf
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
@@ -279,6 +279,13 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	    > $(BUILD_DIR)/initramfs/etc/shadow
 	@chmod 640 $(BUILD_DIR)/initramfs/etc/shadow
 	@printf 'root:x:0:\ntest:x:1000:\n' > $(BUILD_DIR)/initramfs/etc/group
+	@mkdir -p $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Etc
+	@if [ -f /usr/share/zoneinfo/Europe/Istanbul ]; then \
+		cp /usr/share/zoneinfo/Europe/Istanbul $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe/Istanbul; \
+		cp -L /usr/share/zoneinfo/UTC          $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Etc/UTC 2>/dev/null || true; \
+		cp /usr/share/zoneinfo/Europe/Istanbul $(BUILD_DIR)/initramfs/etc/localtime; \
+		printf 'Europe/Istanbul\n' > $(BUILD_DIR)/initramfs/etc/timezone; \
+	fi
 	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 

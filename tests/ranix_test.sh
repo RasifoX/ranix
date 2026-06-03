@@ -200,6 +200,7 @@ check "etc-hosts"    "localhost"     "$(grep localhost /etc/hosts | awk '{print 
 check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 check "c-nss"        "OK"            "$(timeout 8 /bin/test_nss 2>/dev/null)"
+check "c-tz"         "OK"            "$(timeout 8 /bin/test_tz 2>/dev/null)"
 
 # ── 25. statfs / df ───────────────────────────────────────────
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
