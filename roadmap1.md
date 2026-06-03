@@ -322,7 +322,7 @@ SMP olmadan gerçek performans yok; "Linux rakibi" tek çekirdekle olmaz.
 
 ### x86_64 RAM genişletme (→ Linux seviyesi, bkz Kapasite hedefleri)
 - [x] boot.S direct map: 4 entry → **512 entry (512 GB)** ✅; **1G huge page** ✅ (kullanıcı MAP_HUGE_1GB + direct-map). ≥128TB/5-level kaldı.
-- [ ] 5-level paging (LA57) opsiyonu — PB-sınıfı adresleme
+- [x] 5-level paging (LA57) ✅ (CPUID-gated, 128 PB VA — bkz aşağıda RAM(x86); bu madde duplikeydi)
 - [ ] PHYS_TO_VIRT sınırını kaldır — 64-bit PML4 tam kullanımı
 
 ### Test hedefleri
@@ -350,12 +350,11 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 - [x] poison-on-free: serbest sayfaya pattern bas, alloc'ta kontrol (UAF-read yakala) ✅ (buddy_poison + buddy_poison_ok + double-free guard)
 - [x] process_t / vm_space_t / kstack magic alanları — bozulma anında lokalize panic ✅ (PROC_MAGIC, VM_SPACE_MAGIC, cpu->magic+BUG_ON, HEAP_MAGIC)
 - [x] kstack canary trap-giriş/çıkışta da kontrol (şu an sadece schedule'da) ✅ (2026-06-03: syscall_handle girişi + signal_dispatch çıkışı)
-- [ ] ucuz invariant'lar KALICI (gerekçeyi belgeler; AI slop değil) — pahalılar CONFIG_DEBUG
+- [x] ucuz invariant'lar KALICI ✅ (include/kernel/bug.h BUG/BUG_ON/KASSERT; buddy poison-on-free; sched per-CPU magic tripwire; gerekçeli, kalıcı)
 
 ### Robustness modeli (Linux'u takip et)
-- [ ] kernel-invariant ihlali → gürültülü panic (BUG()); bozulmuş halde limp etme
-- [ ] DIŞ hata (userspace çöp pointer, driver probe fail, I/O hata, OOM) → contain et,
-      o process/driver'ı öldür, kernel ASLA düşmesin. "Ranix taş gibi" = bu.
+- [x] kernel-invariant ihlali → gürültülü panic ✅ (BUG_ON→panic_report markalı ekran file:line+backtrace; limp etmez)
+- [x] DIŞ hata → contain ✅ (EL0/ring3 fault→process SIGSEGV+task_exit, kernel düşmez; OOM→SIGKILL; connect-no-NIC→ENETUNREACH; "Ranix taş gibi")
 
 ### Dinamik runtime-growable ölçeklenme (boyut runtime büyür — sabit-TAVAN yok)
 > Bu eksen YALNIZ *boyutlandırma* ile ilgili (MAX_CPUS/tablo/RAM tavanı hardcode edilmez,
