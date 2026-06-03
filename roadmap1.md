@@ -623,9 +623,9 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 
 ### Sistem olgunluğu
 - [ ] **Kalıcı root (switch_root/pivot_root)** — root şu an initramfs (ramfs, uçucu).
-      ext2/ext4 rw + /mnt auto-mount VAR; eksik: switch_root mekanizması + diske kurulu
-      tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root yapar.)
-      SIRA: ağ tam + SSH/TLS bittikten SONRA (kullanıcı kararı 2026-06-02).
+      ext2/ext4 rw + /mnt auto-mount VAR; **chroot(2) ✅ (2026-06-03: per-process root,
+      jail-safe — switch_root temeli)**; eksik: mount-move (MS_MOVE) + pivot_root + diske
+      kurulu tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root.)
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
 - [ ] timezone: TZ=Europe/Istanbul date → doğru
