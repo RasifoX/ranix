@@ -210,6 +210,8 @@ void       ranix_walltime(int64_t *sec, int64_t *nsec);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
 int        vfs_chmod(const char *path, mode_t mode);
+int        vfs_chown(const char *path, uid_t uid, gid_t gid);
+int        vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid);
 int        vfs_link(const char *oldpath, const char *newpath);
 
 /* fd_table helpers */
