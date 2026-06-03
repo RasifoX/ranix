@@ -470,7 +470,7 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 ### auxv tamamlama
 - [x] AT_HWCAP doğru değer: x86_64'te CPUID'den SSE2/AVX bitlerini oku; aarch64'te ID_AA64ISAR0_EL1 oku ✅ (aarch64 FP|ASIMD; x86-64 glibc CPUID-direkt)
 - [x] AT_HWCAP2 — x86_64 AVX512 ve aarch64 ek feature'ları ✅ (auxv'de 0 — ek feature beyan edilmiyor)
-- [ ] AT_SYSINFO_EHDR — VDSO load adresi (VDSO v0.9'da; şimdilik 0)
+- [x] AT_SYSINFO_EHDR — VDSO load adresi ✅ (2026-06-03, vDSO açık)
 - [x] AT_BASE — interpreter load adresi (dinamik linker yüklenince düzeltilmeli) ✅ (proc_exec+execve veriyor)
 
 ### glibc için gerekli /proc eksikleri
@@ -488,19 +488,15 @@ Dinamik linker + glibc birlikte gelir — sıra önemli.
 - [x] prlimit64 — setrlimit64 + getrlimit64 kombinasyonu ✅
 
 ### VDSO (temel)
-- [~] **Altyapı TAM, advertising ERTELENDİ** (2026-06-03, commit 02f7bed + 1814ac3): vDSO shared object
-      (freestanding PIC, version'lı semboller x86 `__vdso_*`@LINUX_2.6 / aarch64 `__kernel_*`@LINUX_2.6.39,
-      sıfır reloc, tek PT_LOAD layout) + kernel wiring (exec'te map + tick'te vvar updater + settime'da anlık
-      refresh) + VM_NOFREE (shared sayfa teardown UAF fix, iki arch) + REALTIME/gettimeofday→vvar,
-      MONOTONIC→syscall (timens-doğru). `vdso_advertise=1` yapıldığında AT_SYSINFO_EHDR push edilir ve libc
-      kullanır; clock_gettime DOĞRU değer döner (c-vdso geçer) AMA ITIMER_VIRTUAL ile ince bir etkileşim
-      c-itimer'ı bozuyor (advertise açıkken process busy-loop'ta beklenenden az user-tick alıyor; mekanizma
-      otonom hızlı-iterasyonda — build güvenilmezliği — kesin teşhis edilemedi). Bu yüzden `vdso_advertise=0`
-      (gated-off) ship ediliyor: altyapı hazır, zararsız. KALAN: ITIMER charging etkileşimini odaklı/temiz-build
-      debug ile çöz → advertise aç. (clock_gettime/gettimeofday/AT_SYSINFO_EHDR hepsi kodda mevcut.)
-- [ ] clock_gettime(CLOCK_REALTIME/MONOTONIC) VDSO'dan — syscall overhead yok
-- [ ] gettimeofday VDSO'dan
-- [ ] AT_SYSINFO_EHDR auxv entry
+- [x] **vDSO TAM ve AÇIK** ✅ (2026-06-03, commit 02f7bed→59ce957): freestanding PIC vDSO (version'lı
+      semboller x86 `__vdso_*`@LINUX_2.6 / aarch64 `__kernel_*`@LINUX_2.6.39, sıfır reloc, tek PT_LOAD) +
+      kernel wiring (exec'te map + tick vvar updater + settime anlık refresh) + VM_NOFREE (shared sayfa
+      teardown UAF fix). AT_SYSINFO_EHDR push'lu, libc kullanıyor; c-vdso + c-itimer iki arch yeşil.
+      Açığa çıkardığı KÖK BUG: `rt_sigreturn` in_syscall'i temizlemeden dönüyordu → sinyal işleyen her
+      process'in CPU-zaman muhasebesi bozuktu (vDSO öncesi sık syscall'lar maskeliyordu); düzeltildi.
+- [x] clock_gettime(CLOCK_REALTIME) VDSO'dan — syscall overhead yok ✅ (MONOTONIC syscall'a düşer, timens-doğru)
+- [x] gettimeofday VDSO'dan ✅
+- [x] AT_SYSINFO_EHDR auxv entry ✅
 
 ### Test hedefleri
 - [x] musl dinamik linked "hello world" çalışıyor (test_dynamic, iki arch) ✅
