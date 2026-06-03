@@ -43,4 +43,7 @@ void ipv6_linklocal_from_mac(const uint8_t mac[6], in6_addr_t *out);
 /* pick the source address this device would use to reach dst */
 in6_addr_t ipv6_src_for(netdev_t *dev, const in6_addr_t *dst);
 
+/* reachability gate for connect()/sendto() fast-fail (EHOSTUNREACH) */
+int        ipv6_reachable(netdev_t *dev, const in6_addr_t *dst);
+
 #endif

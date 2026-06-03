@@ -381,6 +381,12 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     if (s->type == SOCK_DGRAM) return 0;
     if (s->type != SOCK_STREAM) return -38;
     if (!s->dev) return -101; /* ENETUNREACH — no network device to reach the peer */
+    /* fail fast on an unreachable IPv6 peer (no on-link prefix, no router) so an
+     * AF_UNSPEC client falls back to IPv4 instead of blocking on a dropped SYN */
+    if (s->domain == AF_INET6) {
+        netdev_t *d6 = net_route_dev6(&s->remote_ip6);
+        if (!ipv6_reachable(d6, &s->remote_ip6)) return -113; /* EHOSTUNREACH */
+    }
 
     int rc = tcp_connect(s);
     if (rc < 0) return rc;
@@ -428,6 +434,9 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         uint8_t *kb = kmalloc(len);
         if (!kb) return -12;
         if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
+        /* fail fast if the destination has no route, rather than spinning the
+         * resolve loop and returning a misleading ENOSYS */
+        if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -113; }
 
         long rr = -38;
         if (s->type == SOCK_RAW && s->proto == IPPROTO_ICMPV6 &&
