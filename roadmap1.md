@@ -568,7 +568,7 @@ Claude CLI için TLS şart.
 - [ ] x86_64: TF (trap flag) ile single-step; aarch64: MDSCR_EL1.SS
 - [ ] strace çalışıyor — ptrace tabanlı, statik derlenmiş
 - [ ] gdb temel breakpoint + step (dinamik linker ile birlikte)
-- [ ] core dump: SIGSEGV'de core file (/proc/sys/kernel/core_pattern)
+- [x] core dump: SIGSEGV'de ELF core file ✅ (kernel/coredump.c: ET_CORE + NT_PRSTATUS register + NT_PRPSINFO + VMA PT_LOAD'lar, 8MB cap; /proc/sys/kernel/core_pattern okuma+yazma; iki arch fault+signal yolu; test_coredump sentinel doğrular)
 - [x] /proc/[pid]/mem — cross-process memory R/W (gdb için) ✅ (procfs_mem_rw)
 
 ### ACPI (x86_64)

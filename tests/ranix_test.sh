@@ -201,6 +201,8 @@ check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 check "c-nss"        "OK"            "$(timeout 8 /bin/test_nss 2>/dev/null)"
 check "c-tz"         "OK"            "$(timeout 8 /bin/test_tz 2>/dev/null)"
+check "c-coredump"   "OK"            "$(timeout 12 /bin/test_coredump 2>/dev/null)"
+check "core-pattern"  "core"          "$(cat /proc/sys/kernel/core_pattern 2>/dev/null | tr -d "\n")"
 
 # ── 25. statfs / df ───────────────────────────────────────────
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
