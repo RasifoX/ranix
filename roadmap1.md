@@ -620,6 +620,19 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 - [ ] Claude CLI: `npm install -g @anthropic-ai/claude-code` veya statik binary
 - [ ] `claude` komutu terminalde çalışıyor — API'ye bağlanıyor
 
+### Self-hosting (kullanıcı 2026-06-03: "0.9.5 ile bitmeli, sırada olmalı")
+> Ranix'i Ranix üstünde derleyebilmek — gerçek-OS olgunluk taşı. Parçalar: kabuk (bash ✅),
+> coreutils (busybox ✅), libc (musl static+dynamic ✅ + glibc ✅), dinamik linker ✅. EKSİK:
+> derleyici + assembler + linker + make. İki yol:
+- [ ] **tiny self-host (yakın yol)**: tcc (Tiny C Compiler) + minimal as/ld (veya tcc-internal)
+      + make portu → basit C programlarını Ranix'te derle-çalıştır. tcc musl ile derlenir, hafif.
+- [ ] **tam self-host (gerçek hedef)**: clang/lld VEYA gcc/binutils + make Ranix'te çalışır →
+      Ranix çekirdeği Ranix üstünde yeniden derlenir. Ağır userspace port (python/node sınıfı).
+- [ ] kabul ölçütü: `make ARCH=x86_64` Ranix içinde koşar → bootable kernel üretir (tam),
+      veya en azından `cc hello.c -o hello && ./hello` (tiny).
+> NOT: bu bir userspace TOOLCHAIN PORT işi (derleyici/binutils derlemek) — kernel değil; otonom
+> yapılamaz (gerçek yazılım portu). 0.9.5'in Python/Node portuyla aynı kategoride, sıraya kondu.
+
 ### Claude CLI önkoşulları (özetle)
 - [ ] Node.js 20 dinamik linked → glibc + libstdc++ + libz gerekiyor
 - [x] DNS çalışıyor (api.anthropic.com çözülüyor) ✓ (v0.9) ✅ (getaddrinfo, gerçek NIC)
