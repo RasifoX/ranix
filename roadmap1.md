@@ -584,7 +584,7 @@ Claude CLI için TLS şart.
 - [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN; raw mode)
 - [x] proper TTY line discipline (canonical mod, erase, kill, intr) ✅ (canonical/erase/intr vardı; VKILL satır-silme + VERASE eklendi)
 - [x] TIOCSWINSZ window resize ✅ (2026-06-03: tty_core stored winsize + SIGWINCH; pty'de zaten vardı)
-- [ ] openpty / forkpty
+- [x] openpty / forkpty ✅ (2026-06-03: musl openpty+forkpty PASS — kernel ptmx/pts/TIOCGPTN/TIOCSCTTY yeterli)
 
 ### Depolama
 - [ ] NVMe (PCIe SSD) — MSI-X gerektirir
