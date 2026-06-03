@@ -107,6 +107,7 @@ typedef struct process {
 	uint64_t        ptimer_value;     /* ITIMER_PROF: user+sys-CPU ticks until SIGPROF */
 	uint64_t        ptimer_interval;
 	int             in_syscall;       /* 1 while executing a syscall (kernel CPU time) */
+	int             last_syscall;     /* arch syscall number last entered (watchdog/diag) */
 
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
