@@ -283,6 +283,7 @@ static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 
 static int ramfs_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
 {
+	if (!S_ISLNK(inode->mode)) return -22; /* EINVAL: priv is dir/file data, not a target */
 	const char *target = (const char *)inode->priv;
 	if (!target) return -1;
 	int len = 0;

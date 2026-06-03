@@ -614,6 +614,34 @@ int vfs_open(const char *path, int flags, mode_t mode)
 	return vfs_open_fds(p->fds, p->euid, p->egid, p->umask, path, flags, mode);
 }
 
+/* lexical canonicalization of an absolute path (collapse "//", ".", "..").
+ * Stored in f->path so /proc/self/fd/N (realpath), fchdir and fexecve see a
+ * clean path. Symlinks are already resolved component-by-component by
+ * vfs_dentry_resolve, so this matches the getcwd/chdir model. */
+static void vfs_canon_path(const char *in, char *out, size_t outsz)
+{
+	if (!in || in[0] != '/' || outsz < 2) { if (outsz) out[0] = '\0'; return; }
+	char *o = out, *oend = out + outsz - 1;
+	const char *p = in;
+	while (*p) {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *start = p;
+		while (*p && *p != '/') p++;
+		size_t len = (size_t)(p - start);
+		if (len == 1 && start[0] == '.') continue;
+		if (len == 2 && start[0] == '.' && start[1] == '.') {
+			while (o > out && o[-1] != '/') o--;
+			if (o > out) o--;
+			continue;
+		}
+		if (o < oend) *o++ = '/';
+		for (size_t i = 0; i < len && o < oend; i++) *o++ = start[i];
+	}
+	if (o == out) *o++ = '/';
+	*o = '\0';
+}
+
 int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
                  const char *path, int flags, mode_t mode)
 {
@@ -674,7 +702,8 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	f->inode    = inode;
 	f->flags    = flags & ~O_CLOEXEC; /* cloexec is per-fd, stored in fd_table */
 	f->refcount = 0; /* incremented by fd_alloc */
-	{ size_t pl = strlen(path); if (pl < sizeof(f->path)) memcpy(f->path, path, pl + 1); }
+	if (path[0] == '/') vfs_canon_path(path, f->path, sizeof(f->path));
+	else { size_t pl = strlen(path); if (pl < sizeof(f->path)) memcpy(f->path, path, pl + 1); }
 
 	if (inode->fops && inode->fops->open && inode->fops->open(inode, f, flags) != 0) {
 		kfree(f);
