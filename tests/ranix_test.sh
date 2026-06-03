@@ -433,3 +433,7 @@ check "smp-cow-race" "OK" \
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
+
+# clean ACPI/PSCI poweroff: QEMU exits here instead of idling until timeout.
+sync
+poweroff -f 2>/dev/null || halt -f 2>/dev/null

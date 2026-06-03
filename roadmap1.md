@@ -595,7 +595,7 @@ Claude CLI için TLS şart.
 - [ ] `curl https://api.anthropic.com` → 401 (bağlandı, auth yok — doğru)
 - [ ] `strace ls` çalışıyor, syscall listesi görünüyor
 - [ ] `gdb /bin/hello` → breakpoint koyduk, step attık
-- [ ] shutdown -h → sistem kapandı (ACPI poweroff)
+- [x] shutdown -h → sistem kapandı ✅ (sys_reboot POWER_OFF→board_poweroff; x86 ACPI PM1a+isa-debug-exit, aarch64 PSCI SYSTEM_OFF; suite sonu poweroff -f ile QEMU temiz çıkış doğrulandı)
 - [ ] NVMe diskten ext2 mount + read/write
 
 ---
