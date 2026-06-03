@@ -573,7 +573,7 @@ Claude CLI için TLS şart.
 ### ACPI (x86_64)
 - [x] RSDP/RSDT/XSDT parse — ACPI table discovery ✅ (arch/x86_64/acpi.c)
 - [x] MADT okuma — CPU listesi ✅ (LAPIC/x2APIC say; -smp16→16/16)
-- [ ] HPET timer — PIT'e alternatif, yüksek çözünürlük
+- [x] HPET timer — PIT'e alternatif, yüksek çözünürlük ✅ (2026-06-03: ACPI HPET table + MMIO counter → x86 mono_time ns; clock-monotonic PASS)
 - [x] ACPI_POWEROFF (S5) ✅ (board_poweroff: isa-debug-exit + PIIX4 0x604/0xb004)
 
 ### PCIe İyileştirmeleri
