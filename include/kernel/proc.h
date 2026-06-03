@@ -31,6 +31,19 @@ typedef struct {
 	uint64_t sa_mask;
 } sigaction_t;
 
+/* Signal dispositions are a process-wide property in POSIX: every thread of a
+ * thread group shares one table (Linux's sighand_struct, CLONE_SIGHAND). Heap-
+ * allocated and refcounted so it outlives whichever thread created or last
+ * touched it. fork() gets a private copy; pthread_create() shares. */
+typedef struct sighand {
+	sigaction_t actions[NSIG];
+	int         refcount;
+} sighand_t;
+
+sighand_t *sighand_alloc(sighand_t *copy_from);   /* refcount 1; NULL src → zeroed */
+sighand_t *sighand_get(sighand_t *sh);            /* refcount++ */
+void       sighand_put(sighand_t *sh);            /* refcount--; frees at 0 */
+
 typedef struct {
 	void   *ss_sp;
 	int     ss_flags;
@@ -79,8 +92,8 @@ typedef struct process {
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;
-	uint64_t        sig_mask;
-	sigaction_t     sig_actions[NSIG];
+	uint64_t        sig_mask;             /* per-thread blocked mask */
+	struct sighand *sighand;              /* signal dispositions, shared across a thread group */
 
 	/* ── interval timer (ITIMER_REAL → SIGALRM) ─ */
 	uint64_t        itimer_value;     /* ticks until next SIGALRM (0 = disabled) */
