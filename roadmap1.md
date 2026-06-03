@@ -357,7 +357,11 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 - [ ] DIŞ hata (userspace çöp pointer, driver probe fail, I/O hata, OOM) → contain et,
       o process/driver'ı öldür, kernel ASLA düşmesin. "Ranix taş gibi" = bu.
 
-### Dinamik runtime-growable ölçeklenme (compile-time config YASAK)
+### Dinamik runtime-growable ölçeklenme (boyut runtime büyür — sabit-TAVAN yok)
+> Bu eksen YALNIZ *boyutlandırma* ile ilgili (MAX_CPUS/tablo/RAM tavanı hardcode edilmez,
+> donanıma göre runtime büyür). Hangi alt-sistemin derlemeye GİRDİĞİ ayrı bir eksen
+> (Kconfig-tarzı feature-select) ve DESTEKLENİR — bkz "Yapılandırılabilirlik & Hedef Profiller".
+> Linux ikisini de yapar; biz de yapmalıyız.
 - [x] MAX_CPUS sabiti → **dinamik per-CPU** ✅ (büyük diziler buddy'den çekirdek sayısına göre; tavan 1024, ≥2048 vmalloc kaldı)
 - [x] proctab/runqueue dinamik ✅ (proctab process_t** PROCTAB_INIT_CAP 64→realloc-grow; per-CPU runqueue). sched_lock→per-CPU-rq kaldı (366)
 - [x] bellek RAM'e uyarlanır ✅ (mem_map page_t* + _npages boot-detect; buddy tüm RAM'i kapsar)
@@ -787,9 +791,14 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - [ ] **TCP congestion control** (Reno/CUBIC) + pencere ölçekleme — şu an LAN-only, WAN zayıf
 - [ ] **IPv6** temel (SLAAC) — şu an yalnız IPv4
 
-### Mimari KARAR gerektirenler (yapılacak mı?)
-- [ ] **32-bit userspace** (ia32/aarch32 compat) — muhtemelen NON-GOAL (saf 64-bit); karar netleşsin
-- [ ] **LKM** (yüklenebilir modül) — Ranix monolitik-statik felsefesi; muhtemelen NON-GOAL (driver=derleme-içi), gerekirse imzalı modül
+### Mimari KARAR gerektirenler (açık — prejudge YOK)
+- [ ] **32-bit userspace** (ia32/aarch32 compat) — "eski-PC" profili için anlamlı (çok eski
+      donanım 64-bit değil). Maliyet yüksek ama Linux yapıyor; kapsam-dışı yerine profil-bağlı
+      bir karar: eski-PC profilini ciddiye alırsak GEREKLİ. Net karar kullanıcıyla.
+- [ ] **LKM** (yüklenebilir modül) — Linux destekliyor, dağıtımlar modül paketliyor; "Ranix
+      Debian/Arch" hedefi (v1.0) modül bekleyebilir. Kconfig (derleme-zamanı feature-select)
+      tiny/gömülü için yeterli; modül = çalışma-zamanı esneklik (hotplug sürücü, 3.-parti).
+      İmzalı modül + stabil sürücü-API ile yapılabilir. Açık karar — felsefe değil, tradeoff.
 
 ---
 
