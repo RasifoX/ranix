@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/times.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -49,6 +50,11 @@ int main(void)
 	/* same data via /proc/self/stat field 14 */
 	if (proc_self_utime() <= 0) { printf("times-fail procstat utime=%ld\n", proc_self_utime()); return 0; }
 
+	/* getrusage(RUSAGE_SELF) reports the same user time */
+	struct rusage ru;
+	getrusage(RUSAGE_SELF, &ru);
+	if (ru.ru_utime.tv_sec == 0 && ru.ru_utime.tv_usec == 0) { printf("times-fail rusage self\n"); return 0; }
+
 	pid_t c = fork();
 	if (c == 0) { burn(20); _exit(0); }
 	waitpid(c, 0, 0);
@@ -56,6 +62,10 @@ int main(void)
 	struct tms d;
 	times(&d);
 	if (d.tms_cutime <= 0) { printf("times-fail cutime %ld\n", (long)d.tms_cutime); return 0; }
+
+	struct rusage rc;
+	getrusage(RUSAGE_CHILDREN, &rc);
+	if (rc.ru_utime.tv_sec == 0 && rc.ru_utime.tv_usec == 0) { printf("times-fail rusage children\n"); return 0; }
 
 	printf("OK\n");
 	return 0;
