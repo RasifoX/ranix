@@ -870,6 +870,97 @@ int vfs_flock_try(vfs_file_t *f, int cmd)
 	return 0;
 }
 
+/* ── POSIX advisory record locks (fcntl F_SETLK/F_GETLK) ─────────────
+ * Owned by the process (pid); byte ranges; released on close of any fd to the
+ * file and on process exit. A global list — fine for the small lock counts in
+ * practice (sqlite, dpkg). type: 0=F_RDLCK 1=F_WRLCK. */
+typedef struct posix_lock {
+	void              *inode;
+	int                pid;
+	int                type;
+	int64_t            start, end;
+	struct posix_lock *next;
+} posix_lock_t;
+
+static posix_lock_t *g_plocks = NULL;
+static spinlock_t    plock_lock = SPINLOCK_INIT;
+
+static int pl_overlap(posix_lock_t *l, int64_t s, int64_t e)
+{ return l->start <= e && s <= l->end; }
+
+/* returns 0 if granted, -11 (EAGAIN) on conflict; F_UNLCK via vfs_posix_unlock */
+int vfs_posix_setlk(void *inode, int pid, int type, int64_t start, int64_t end)
+{
+	uint64_t f = spin_lock_irq(&plock_lock);
+	for (posix_lock_t *l = g_plocks; l; l = l->next) {
+		if (l->inode != inode || l->pid == pid) continue;
+		if (pl_overlap(l, start, end) && (type == 1 || l->type == 1)) {
+			spin_unlock_irq(&plock_lock, f);
+			return -11; /* EAGAIN: conflicting lock held by another process */
+		}
+	}
+	/* drop this pid's existing records overlapping the range, then add fresh */
+	posix_lock_t **pp = &g_plocks;
+	while (*pp) {
+		posix_lock_t *l = *pp;
+		if (l->inode == inode && l->pid == pid && pl_overlap(l, start, end)) {
+			*pp = l->next; kfree(l);
+		} else pp = &l->next;
+	}
+	posix_lock_t *nl = kmalloc(sizeof(*nl));
+	if (!nl) { spin_unlock_irq(&plock_lock, f); return -12; }
+	nl->inode = inode; nl->pid = pid; nl->type = type;
+	nl->start = start; nl->end = end;
+	nl->next = g_plocks; g_plocks = nl;
+	spin_unlock_irq(&plock_lock, f);
+	return 0;
+}
+
+void vfs_posix_unlock(void *inode, int pid, int64_t start, int64_t end)
+{
+	uint64_t f = spin_lock_irq(&plock_lock);
+	posix_lock_t **pp = &g_plocks;
+	while (*pp) {
+		posix_lock_t *l = *pp;
+		if (l->inode == inode && l->pid == pid && pl_overlap(l, start, end)) {
+			*pp = l->next; kfree(l);
+		} else pp = &l->next;
+	}
+	spin_unlock_irq(&plock_lock, f);
+}
+
+/* find a lock conflicting with the (type,range) request; returns 1 + fills the
+ * holder's type/range/pid, or 0 if the range is free. */
+int vfs_posix_getlk(void *inode, int pid, int *type, int64_t *start, int64_t *end, int *holder_pid)
+{
+	uint64_t f = spin_lock_irq(&plock_lock);
+	for (posix_lock_t *l = g_plocks; l; l = l->next) {
+		if (l->inode != inode || l->pid == pid) continue;
+		if (pl_overlap(l, *start, *end) && (*type == 1 || l->type == 1)) {
+			*type = l->type; *start = l->start; *end = l->end; *holder_pid = l->pid;
+			spin_unlock_irq(&plock_lock, f);
+			return 1;
+		}
+	}
+	spin_unlock_irq(&plock_lock, f);
+	return 0;
+}
+
+static void plock_drop(void *inode, int pid, int all)
+{
+	uint64_t f = spin_lock_irq(&plock_lock);
+	posix_lock_t **pp = &g_plocks;
+	while (*pp) {
+		posix_lock_t *l = *pp;
+		if (l->pid == pid && (all || l->inode == inode)) { *pp = l->next; kfree(l); }
+		else pp = &l->next;
+	}
+	spin_unlock_irq(&plock_lock, f);
+}
+
+void vfs_posix_drop_pid(int pid)              { plock_drop(NULL, pid, 1); }
+void vfs_posix_drop_pid_inode(void *in, int pid) { plock_drop(in, pid, 0); }
+
 /* drop one reference to an open file; close + free it when the last goes.
  * Used by SCM_RIGHTS fd-passing to manage in-flight file references. */
 void vfs_file_put(vfs_file_t *f)
@@ -892,6 +983,7 @@ int vfs_close(int fd)
 	if (!f) return -1;
 
 	fd_free(p->fds, fd);
+	if (f->inode && p) vfs_posix_drop_pid_inode(f->inode, (int)p->pid);
 	if (--f->refcount == 0) {
 		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
