@@ -791,14 +791,19 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - [ ] **TCP congestion control** (Reno/CUBIC) + pencere ölçekleme — şu an LAN-only, WAN zayıf
 - [ ] **IPv6** temel (SLAAC) — şu an yalnız IPv4
 
-### Mimari KARAR gerektirenler (açık — prejudge YOK)
-- [ ] **32-bit userspace** (ia32/aarch32 compat) — "eski-PC" profili için anlamlı (çok eski
-      donanım 64-bit değil). Maliyet yüksek ama Linux yapıyor; kapsam-dışı yerine profil-bağlı
-      bir karar: eski-PC profilini ciddiye alırsak GEREKLİ. Net karar kullanıcıyla.
-- [ ] **LKM** (yüklenebilir modül) — Linux destekliyor, dağıtımlar modül paketliyor; "Ranix
-      Debian/Arch" hedefi (v1.0) modül bekleyebilir. Kconfig (derleme-zamanı feature-select)
-      tiny/gömülü için yeterli; modül = çalışma-zamanı esneklik (hotplug sürücü, 3.-parti).
-      İmzalı modül + stabil sürücü-API ile yapılabilir. Açık karar — felsefe değil, tradeoff.
+### Mimari hedefler — KARAR VERİLDİ (2026-06-03, kullanıcı): modüler monolit, ikisi de ZORUNLU
+> Felsefe: "Linux'tan eksiğimiz değil **fazlamız** olmalı." Mimari kimlik = **modüler monolit**
+> (saf-monolit eski/esneksiz; mikrokernel hayali/IPC-overhead). Linux'un da modeli: tek
+> adres-uzayı/ring-0 (hız, IPC yok) + temiz alt-sistem sınırları + İKİ YÖNLÜ modülerlik
+> (Kconfig ile derlemeden çıkar · LKM ile runtime yükle). Fazlamız: modül-API'si Linux'un
+> stabil-olmayan iç ABI'sinden daha temiz/stabil + runtime-dinamik ölçekleme (zaten var).
+- [ ] **LKM (yüklenebilir kernel modülü)** — ZORUNLU. Temiz modül-API + ELF .ko yükleyici
+      (relocate + sembol çözümleme + init/exit) + imzalı modül + Kconfig'le "derleme-içi mi
+      modül mü" seçimi. Dağıtım (Ranix Debian/Arch) + hotplug sürücü + 3.-parti + tiny-core.
+- [ ] **32-bit hedef** — ZORUNLU (eski-PC profili + "fazla olmalı"). İki ayrı iş:
+      (a) 64-bit kernelde **32-bit userspace** (x86 ia32 / ARM aarch32 compat) — orta;
+      (b) saf **32-bit kernel** (i686 / armv7) gerçekten-eski 64-bitsiz donanım için — büyük port.
+      Önce (a), sonra (b). Mimari paritesi: x86+ARM, 32+64.
 
 ---
 
@@ -859,6 +864,10 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - clone3 + rseq + pidfd_* glibc fallback'i var, geçici stub yeterli.
 
 ### Kararlar (2026-05-30)
+- **Mimari kimlik = MODÜLER MONOLİT (2026-06-03 kullanıcı):** saf-monolit (eski/esneksiz)
+  DEĞİL, mikrokernel (hayali/IPC-overhead) DEĞİL. Tek adres-uzayı/ring-0 (hız) + temiz
+  alt-sistem sınırları + iki yönlü modülerlik (Kconfig derle-çıkar · LKM runtime-yükle).
+  **LKM ve 32-bit ZORUNLU** — "Linux'tan eksik değil fazla olmalı". Bkz "Mimari hedefler".
 - **Robustness:** kernel-invariant ihlali → BUG()/panic (gürültülü, limp etme); DIŞ hata
   (userspace/driver/IO/OOM) → contain, kernel asla düşmez. Linux modeli.
 - **İki yapılandırma ekseni (2026-06-03 netleşti):** (1) ÖLÇEKLEME = runtime-growable,
