@@ -294,8 +294,23 @@ static long sys_socketpair(int domain, int type, int protocol, int *sv)
 
 static long sys_flock(int fd, int operation)
 {
-	(void)fd; (void)operation;
-	return 0;
+#define LOCK_SH 1
+#define LOCK_EX 2
+#define LOCK_NB 4
+#define LOCK_UN 8
+	process_t *p = task_current();
+	vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, fd) : NULL;
+	if (!f) return -9; /* EBADF */
+	int cmd = operation & ~LOCK_NB;
+	if (cmd == LOCK_UN) { vfs_flock_release(f); return 0; }
+	if (cmd != LOCK_SH && cmd != LOCK_EX) return -22; /* EINVAL */
+	for (;;) {
+		int r = vfs_flock_try(f, cmd);
+		if (r == 0) return 0;
+		if (operation & LOCK_NB) return -11; /* EWOULDBLOCK */
+		yield();                              /* block: retry when holder releases */
+		if (task_has_actionable_signal()) return -4; /* EINTR */
+	}
 }
 
 static long sys_fsync(int fd)    { (void)fd; return 0; }
