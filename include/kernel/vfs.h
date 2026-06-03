@@ -197,6 +197,11 @@ int        vfs_close(int fd);
 void       vfs_file_put(vfs_file_t *f);
 int        vfs_flock_try(vfs_file_t *f, int cmd);   /* cmd: 1=LOCK_SH 2=LOCK_EX */
 void       vfs_flock_release(vfs_file_t *f);
+int        vfs_posix_setlk(void *inode, int pid, int type, int64_t start, int64_t end);
+void       vfs_posix_unlock(void *inode, int pid, int64_t start, int64_t end);
+int        vfs_posix_getlk(void *inode, int pid, int *type, int64_t *start, int64_t *end, int *holder_pid);
+void       vfs_posix_drop_pid(int pid);
+void       vfs_posix_drop_pid_inode(void *inode, int pid);
 ssize_t    vfs_read(int fd, void *buf, size_t len);
 ssize_t    vfs_write(int fd, const void *buf, size_t len);
 off_t      vfs_seek(int fd, off_t off, int whence);

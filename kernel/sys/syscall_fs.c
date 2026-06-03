@@ -308,6 +308,10 @@ static long sys_dup3(int oldfd, int newfd, int flags)
 #define F_GETFL    3
 #define F_SETFL    4
 #define F_DUPFD_CLOEXEC 1030
+#define F_GETLK    5
+#define F_SETLK    6
+#define F_SETLKW   7
+typedef struct { int16_t l_type; int16_t l_whence; int32_t _p; int64_t l_start; int64_t l_len; int32_t l_pid; int32_t _p2; } k_flock;
 #define FD_CLOEXEC 1
 
 static long sys_fcntl(int fd, int cmd, uint64_t arg)
@@ -343,6 +347,40 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 		if (!f) return -9;
 		f->flags = (f->flags & ~0xFFF) | ((int)arg & 0xFFF);
 		return 0;
+	}
+	case F_GETLK:
+	case F_SETLK:
+	case F_SETLKW: {
+		vfs_file_t *f = fd_get(p->fds, fd);
+		if (!f || !f->inode) return -9;
+		k_flock fl;
+		if (copy_from_user(&fl, (const void *)arg, sizeof(fl)) != 0) return -14;
+		int64_t start = fl.l_start;
+		if (fl.l_whence == 1) start += (int64_t)f->pos;             /* SEEK_CUR */
+		else if (fl.l_whence == 2) start += (int64_t)f->inode->size; /* SEEK_END */
+		int64_t end = (fl.l_len == 0) ? 0x7FFFFFFFFFFFFFFFLL : (start + fl.l_len - 1);
+		int pid = (int)p->pid;
+		if (cmd == F_GETLK) {
+			int t = (fl.l_type == 1) ? 1 : 0; int64_t s = start, e = end, hp = 0; int hpid = 0;
+			(void)hp;
+			if (vfs_posix_getlk(f->inode, pid, &t, &s, &e, &hpid)) {
+				fl.l_type = (int16_t)t; fl.l_start = s;
+				fl.l_len  = (e == 0x7FFFFFFFFFFFFFFFLL) ? 0 : (e - s + 1);
+				fl.l_pid  = hpid;
+			} else {
+				fl.l_type = 2; /* F_UNLCK: range is free */
+			}
+			return copy_to_user((void *)arg, &fl, sizeof(fl)) == 0 ? 0 : -14;
+		}
+		if (fl.l_type == 2) { vfs_posix_unlock(f->inode, pid, start, end); return 0; } /* F_UNLCK */
+		int type = (fl.l_type == 1) ? 1 : 0;   /* F_WRLCK : F_RDLCK */
+		for (;;) {
+			int r = vfs_posix_setlk(f->inode, pid, type, start, end);
+			if (r == 0) return 0;
+			if (cmd != F_SETLKW) return r;     /* F_SETLK: EAGAIN on conflict */
+			yield();
+			if (task_has_actionable_signal()) return -4; /* EINTR */
+		}
 	}
 	default: return 0;
 	}

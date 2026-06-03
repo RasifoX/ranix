@@ -691,6 +691,9 @@ void task_exit(void)
 			arch_yield();
 		}
 	}
+	extern void vfs_posix_drop_pid(int pid);
+	vfs_posix_drop_pid((int)p->pid);   /* release this process's fcntl record locks */
+
 	uint32_t *cctid = p->clear_child_tid;
 
 	/* Write tid=0 and wake futex waiter while p->vm is still set.
