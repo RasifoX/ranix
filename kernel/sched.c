@@ -200,9 +200,46 @@ void sched_tick_local(void)
 	}
 }
 
+/* The cpu0-only sched_watchdog cannot report a wedge on cpu0 itself — its own
+ * tick is what runs the check, so a cpu0 lockup silently freezes the detector.
+ * cpu1 runs this twin to close that blind spot. Own statics, single runner →
+ * lock-free. */
+static void sched_watchdog_remote(void)
+{
+	extern int smp_ncpus;
+	extern cpu_context_t *all_cpus[];
+	static uint64_t last_seen[MAX_CPUS];
+	static unsigned frozen[MAX_CPUS];
+	static unsigned n, warm;
+
+	if ((++n & 0x7F) != 0) return;
+	if (warm < 2) {
+		warm++;
+		for (int i = 0; i < smp_ncpus; i++)
+			if (all_cpus[i]) last_seen[i] = all_cpus[i]->wd_ticks;
+		return;
+	}
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c || !c->online) continue;
+		process_t *cur = c->current;
+		if (cur && cur->pid != 0 && c->wd_ticks == last_seen[i]) frozen[i]++;
+		else frozen[i] = 0;
+		if (frozen[i] >= 3) {
+			kprintf("WATCHDOG: cpu%d wedged in %s, pid=%d (%s) syscall=%d\n",
+			        i, c->wd_where ? c->wd_where : "?",
+			        cur ? (int)cur->pid : -1, cur ? cur->name : "-",
+			        cur ? cur->last_syscall : -1);
+			kpanic("cpu wedged (cross-cpu watchdog)");
+		}
+		last_seen[i] = c->wd_ticks;
+	}
+}
+
 void tick_notify_local(void)
 {
 	sched_tick_local();
+	if (arch_get_cpu_ctx()->cpu_id == 1) sched_watchdog_remote();
 }
 
 volatile uint64_t kernel_ticks  = 0;

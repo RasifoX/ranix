@@ -286,7 +286,7 @@ void syscall_handle(arch_context_t *ctx)
 	 * this syscall builds more frames on a already-clobbered stack. */
 	extern void kstack_check(void);
 	kstack_check();
-	{ process_t *cur = task_current(); if (cur) { cur->uctx = ctx; cur->in_syscall = 1; } }   /* ptrace task_pt_regs: syscalls always enter from user */
+	{ process_t *cur = task_current(); if (cur) { cur->uctx = ctx; cur->in_syscall = 1; cur->last_syscall = (int)CTX_SYSCALL_N(ctx); } }   /* ptrace task_pt_regs: syscalls always enter from user */
 	long n    = (long)CTX_SYSCALL_N(ctx);
 	long arg0 = (long)CTX_SYSCALL_ARG0(ctx);
 	long arg1 = (long)CTX_SYSCALL_ARG1(ctx);
