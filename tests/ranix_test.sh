@@ -199,6 +199,7 @@ check "mount-write"  "hi"  "$(echo hi > /tmp/x && cat /tmp/x)"
 check "etc-hosts"    "localhost"     "$(grep localhost /etc/hosts | awk '{print $2}')"
 check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
+check "c-nss"        "OK"            "$(timeout 8 /bin/test_nss 2>/dev/null)"
 
 # ── 25. statfs / df ───────────────────────────────────────────
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
