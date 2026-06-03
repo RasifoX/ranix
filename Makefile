@@ -25,7 +25,7 @@ LD  = ld.lld
 BUILD_DIR = build
 TARGET    = $(BUILD_DIR)/ranix.elf
 
-INCLUDES = -Iinclude -Idrivers -I. -Iarch/$(ARCH)/include
+INCLUDES = -Iinclude -Idrivers -I. -Iarch/$(ARCH)/include -I$(BUILD_DIR)
 
 ifeq ($(ARCH),aarch64)
     ARCH_CFLAGS = -mgeneral-regs-only -mcmodel=large -march=armv8.1-a
@@ -127,6 +127,7 @@ SRCS_KERNEL = \
     kernel/elf.c \
     kernel/syscall.c \
     kernel/coredump.c \
+    kernel/vdso.c \
     kernel/vfs.c \
     kernel/fs/ramfs.c \
     kernel/fs/pipe.c \
@@ -181,12 +182,21 @@ flakehunt:
 # mapping + vvar updater + AT_SYSINFO_EHDR — lands separately.)
 VDSO_SO = $(BUILD_DIR)/vdso-$(ARCH).so
 vdso: $(VDSO_SO)
-$(VDSO_SO): vdso/vdso.c vdso/vdso_$(ARCH).lds include/uapi/vdso.h
+$(VDSO_SO): vdso/vdso.c vdso/vdso_$(ARCH).lds vdso/vdso_layout.lds include/uapi/vdso.h
 	@mkdir -p $(BUILD_DIR)
 	$(MUSL_CC) -shared -fPIC -fno-stack-protector -nostdlib -O2 -Iinclude \
-	    -Wl,--version-script=vdso/vdso_$(ARCH).lds -Wl,-soname,linux-vdso.so.1 \
-	    -Wl,--hash-style=both -Wl,-Bsymbolic -o $@ vdso/vdso.c
+	    -Wl,--version-script=vdso/vdso_$(ARCH).lds -Wl,-T,vdso/vdso_layout.lds \
+	    -Wl,-soname,linux-vdso.so.1 -Wl,--hash-style=both -Wl,-Bsymbolic \
+	    -Wl,-z,max-page-size=4096 -o $@ vdso/vdso.c
 	@echo "[OK] $@ ($$($(MUSL_CC:gcc=nm) -D $@ 2>/dev/null | grep -c @@) vDSO symbols, no relocs)"
+
+# Embed the vDSO image as a byte array for the kernel to map.
+$(BUILD_DIR)/vdso_image.h: $(VDSO_SO)
+	@printf 'static const unsigned char vdso_image[] = {\n' > $@
+	@od -An -v -tx1 $(VDSO_SO) | sed 's/[0-9a-f][0-9a-f]/0x&,/g' >> $@
+	@printf '};\nstatic const unsigned long vdso_image_len = sizeof(vdso_image);\n' >> $@
+
+$(BUILD_DIR)/kernel/vdso.o: $(BUILD_DIR)/vdso_image.h
 
 all: initramfs $(TARGET)
 

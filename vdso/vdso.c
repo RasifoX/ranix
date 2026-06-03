@@ -66,14 +66,17 @@ static inline long vsyscall2(long n, long a, long b)
 int VNAME(clock_gettime)(int clk, struct vts *ts)
 {
 	const volatile struct vdso_vvar *v = VVAR;
-	if (clk != 0 /*REALTIME*/ && clk != 1 /*MONOTONIC*/)
+	/* Only CLOCK_REALTIME is served from vvar. CLOCK_MONOTONIC/BOOTTIME carry a
+	 * per-process time-namespace offset the global vvar can't express, so they
+	 * fall back to the syscall (which applies it). REALTIME is timens-invariant. */
+	if (clk != 0 /*REALTIME*/)
 		return (int)vsyscall2(SYS_clock_gettime_, clk, (long)ts);
 	for (;;) {
 		uint32_t s = v->seq;
 		if (s & 1u) continue;
 		__asm__ volatile("" ::: "memory");
-		int64_t sec  = (clk == 0) ? v->real_sec  : v->mono_sec;
-		int64_t nsec = (clk == 0) ? v->real_nsec : v->mono_nsec;
+		int64_t sec  = v->real_sec;
+		int64_t nsec = v->real_nsec;
 		if (v->cnt_valid) {
 			uint64_t delta = read_cnt() - v->cnt_base;
 			nsec += (int64_t)((delta * v->cnt_mult) >> v->cnt_shift);
