@@ -848,9 +848,9 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 
 - `exceptions_asm.S` → `process_t.ctx` offset 16 hardcode. struct başı değişmesin.
 - Her değişiklikten sonra hem x86_64 hem aarch64 build edilmeli.
-- aarch64 virt max RAM: 512 GB (T1SZ=25). x86_64 max RAM: 4 GB (boot.S direct map 4 entry — v0.7'de genişlet).
-- SMP için spinlock'lar IRQ-disable ile çalışıyor; v0.7'de atomik olmalı (LDAXR/STLXR, LOCK CMPXCHG).
-- TCP retransmit: sabit timeout yeterli. SRTT/Karn v0.9'a bırak.
+- ~~aarch64 512GB / x86 4GB~~ ESKİDİ → x86 5-level LA57 (128 PB VA) ✅, aarch64 48-bit (256 TB) ✅.
+- ~~spinlock IRQ-disable, v0.7'de atomik olmalı~~ YAPILDI → ticket spinlock (atomic head/tail) ✅.
+- ~~TCP sabit timeout~~ YAPILDI → adaptif RTO (RFC 6298 SRTT/RTTVAR/Karn) ✅.
 - Doom: `make ARCH=x86_64 qemu-doom`
 - Namespace + cgroups birlikte implement edilmeli; yarım namespace tehlikeli.
 - io_uring'i SMP'den önce yazmak hata — ring buffer per-CPU cache'e bağlı.
@@ -868,7 +868,8 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
   eksen-1 içindi; eksen-2 gerekli ve ayrı. Bkz "Yapılandırılabilirlik & Hedef Profiller".
 - **Driver:** native-first temiz/stable API gerçek; ileride (post-1.0) AÇIK Linux driver'ları
   için kaynak-seviyesi şim (LinuxKPI/BSD tarzı). Binary/kapalı ABI taklidi REDDEDİLDİ
-  (ReactOS tuzağı). Kapalı driver (nvidia) hiçbir non-Linux kernelde çözülmez; nouveau hedef.
+  (ReactOS tuzağı). NVIDIA için: nouveau (açık) + **nvidia-open** (2022'den beri açık kaynak
+  kernel modülü, Turing+) kaynak-şim adayı; tamamen-kapalı blob hedef DEĞİL.
 - **Instrumentation = gerekçe:** ucuz invariant/poison/magic kalıcı olabilir; "okunacak şey"
   budur, AI slop değil. Pahalı kontroller CONFIG_DEBUG.
 - **v1.0 = masaüstü+dağıtım** (KDE/Hyprland/Wine, Ranix Debian/Arch); Claude-CLI/headless = v0.9.5.
