@@ -112,6 +112,8 @@ static tick_fn_t *tick_cbs;
 static int        tick_cb_cnt = 0;
 static int        tick_cb_cap = 0;
 
+static void itimer_charge_cpu(process_t *p);
+
 void tick_register(tick_fn_t fn)
 {
 	if (tick_cb_cnt >= tick_cb_cap) {
@@ -189,6 +191,7 @@ void sched_tick_local(void)
 	process_t *current = task_current();
 	if (!current) return;
 	current->ticks++;
+	itimer_charge_cpu(current);
 	if (current->pid != 0) {
 		if (--current->ticks_remaining <= 0)
 			arch_get_cpu_ctx()->need_resched = 1;
@@ -402,6 +405,26 @@ void sched_init(void)
 	tick_register(timerfd_tick);
 }
 
+/* Charge the running process's CPU-time interval timers for this tick.
+ * ITIMER_PROF counts every tick the process is current (user + kernel time);
+ * ITIMER_VIRTUAL counts only ticks spent in user mode (not in a syscall).
+ * Caller holds no lock; runs in timer-IRQ context with the process current. */
+static void itimer_charge_cpu(process_t *p)
+{
+	if (!p || p->pid == 0 || (!p->vtimer_value && !p->ptimer_value)) return;
+	int in_user = !p->in_syscall;
+	uint64_t f = spin_lock_irq(&sched_lock);   /* set under the lock task_signal uses */
+	if (in_user && p->vtimer_value && --p->vtimer_value == 0) {
+		p->vtimer_value = p->vtimer_interval;
+		p->sig_pending |= (1ULL << (26 - 1));   /* SIGVTALRM */
+	}
+	if (p->ptimer_value && --p->ptimer_value == 0) {
+		p->ptimer_value = p->ptimer_interval;
+		p->sig_pending |= (1ULL << (27 - 1));   /* SIGPROF */
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void sched_tick(void)
 {
 	kernel_ticks++;
@@ -410,6 +433,7 @@ void sched_tick(void)
 	if (!current) return;
 
 	current->ticks++;
+	itimer_charge_cpu(current);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 

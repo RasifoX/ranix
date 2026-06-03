@@ -651,25 +651,30 @@ typedef struct { itimerval_tv_t it_interval; itimerval_tv_t it_value; } itimerva
 
 static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_v)
 {
-    if (which != 0 /* ITIMER_REAL */) return 0; /* ignore VIRTUAL/PROF */
     process_t *p = task_current();
+    uint64_t *value, *interval;
+    switch (which) {
+    case 0: value = &p->itimer_value; interval = &p->itimer_interval; break; /* REAL    → SIGALRM   */
+    case 1: value = &p->vtimer_value; interval = &p->vtimer_interval; break; /* VIRTUAL → SIGVTALRM */
+    case 2: value = &p->ptimer_value; interval = &p->ptimer_interval; break; /* PROF    → SIGPROF   */
+    default: return -22; /* EINVAL */
+    }
+    uint64_t hz = TIMER_HZ;
     if (old_v) {
         itimerval_t oval;
-        uint64_t hz = TIMER_HZ;
-        oval.it_value.tv_sec    = (int64_t)(p->itimer_value / hz);
-        oval.it_value.tv_usec   = (int64_t)((p->itimer_value % hz) * (1000000 / hz));
-        oval.it_interval.tv_sec = (int64_t)(p->itimer_interval / hz);
-        oval.it_interval.tv_usec= (int64_t)((p->itimer_interval % hz) * (1000000 / hz));
+        oval.it_value.tv_sec    = (int64_t)(*value / hz);
+        oval.it_value.tv_usec   = (int64_t)((*value % hz) * (1000000 / hz));
+        oval.it_interval.tv_sec = (int64_t)(*interval / hz);
+        oval.it_interval.tv_usec= (int64_t)((*interval % hz) * (1000000 / hz));
         copy_to_user(old_v, &oval, sizeof(oval));
     }
     if (new_v) {
         itimerval_t nval;
         if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -14;
-        uint64_t hz = TIMER_HZ;
-        p->itimer_value    = (uint64_t)nval.it_value.tv_sec * hz +
-                             (uint64_t)nval.it_value.tv_usec * hz / 1000000;
-        p->itimer_interval = (uint64_t)nval.it_interval.tv_sec * hz +
-                             (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
+        *value    = (uint64_t)nval.it_value.tv_sec * hz +
+                    (uint64_t)nval.it_value.tv_usec * hz / 1000000;
+        *interval = (uint64_t)nval.it_interval.tv_sec * hz +
+                    (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
     }
     return 0;
 }

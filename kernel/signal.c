@@ -81,6 +81,8 @@ static int sig_default_kill(int sig)
 	case 13: /* SIGPIPE */
 	case 14: /* SIGALRM */
 	case 15: /* SIGTERM */
+	case 26: /* SIGVTALRM */
+	case 27: /* SIGPROF */
 		return 1;
 	default:
 		return 0;

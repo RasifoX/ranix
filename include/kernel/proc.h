@@ -95,9 +95,14 @@ typedef struct process {
 	uint64_t        sig_mask;             /* per-thread blocked mask */
 	struct sighand *sighand;              /* signal dispositions, shared across a thread group */
 
-	/* ── interval timer (ITIMER_REAL → SIGALRM) ─ */
-	uint64_t        itimer_value;     /* ticks until next SIGALRM (0 = disabled) */
+	/* ── interval timers ───────────────────────── */
+	uint64_t        itimer_value;     /* ITIMER_REAL: ticks until next SIGALRM (0 = off) */
 	uint64_t        itimer_interval;  /* reload value (0 = one-shot) */
+	uint64_t        vtimer_value;     /* ITIMER_VIRTUAL: user-CPU ticks until SIGVTALRM */
+	uint64_t        vtimer_interval;
+	uint64_t        ptimer_value;     /* ITIMER_PROF: user+sys-CPU ticks until SIGPROF */
+	uint64_t        ptimer_interval;
+	int             in_syscall;       /* 1 while executing a syscall (kernel CPU time) */
 
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
