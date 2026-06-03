@@ -535,8 +535,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
 
 	/* map tmpfs → ramfs; sysfs/cgroup/devtmpfs → accept silently */
-	const char *fsname = kfstype;
-	if (strcmp(kfstype, "tmpfs") == 0)   fsname = "ramfs";
+	const char *fsname = kfstype;   /* tmpfs is registered as a ramfs alias → keeps its name */
 	if (strcmp(kfstype, "sysfs") == 0)   return 0;
 	if (strcmp(kfstype, "cgroup") == 0)  return 0;
 	if (strcmp(kfstype, "cgroup2") == 0) return 0;
