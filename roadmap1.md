@@ -624,9 +624,14 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 
 ### Sistem olgunluğu
 - [x] **Kalıcı root (pivot_root)** ✅ — pivot_root(2) syscall (per-process root switch; PID1 pivot+exec ile tüm ağaç yeni root'a geçer, global mount-tree cerrahisi yok); put_old new_root-altı doğrulaması; test_pivot. Disk-root boot entegrasyonu (init akışı) gerçek diskte.
-      ext2/ext4 rw + /mnt auto-mount VAR; **chroot(2) ✅ (2026-06-03: per-process root,
-      jail-safe — switch_root temeli)**; eksik: mount-move (MS_MOVE) + pivot_root + diske
-      kurulu tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root.)
+      ext2/ext4 rw + /mnt auto-mount VAR; **chroot(2) ✅ + pivot_root(2) ✅ (2026-06-03)**.
+- [ ] **GERÇEK KALICILIK (uçtan uca) — ÖNEMLİ**: diske/USB'ye kurulu tam rootfs (/etc /bin
+      /usr /home /root) + boot init akışı: kalıcı bölümü mount → `pivot_root` → gerçek init'i
+      exec. Yazılan veri **reboot'tan sağ çıkmalı**. Doğrulama: QEMU'da kalıcı disk imajı —
+      boot-1 sentinel yaz, **reboot**, boot-2 sentinel hâlâ var (iki-boot persist testi).
+      Parçalar hazır: ext2/FAT rw + pivot_root + /mnt auto-mount; eksik: disk-rootfs kurulumu
+      + init-pivot akışı (madde 630/631) + iki-boot persist test harness'ı. /tmp /proc /sys
+      /dev uçucu kalır (Linux'ta da öyle — kasıtlı). USB-FAT-boot ayağı gerçek donanım ister (636).
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
