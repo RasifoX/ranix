@@ -563,10 +563,10 @@ static long sys_clock_nanosleep(int clkid, int flags,
 
 static long sys_waitid(int idtype, int id, void *infop, int options, void *rusage)
 {
-	(void)infop; (void)rusage;
+	(void)infop;
 	pid_t wpid = (idtype == 0) ? -1 : (idtype == 1) ? (pid_t)id : -(pid_t)id;
 	int status;
-	long r = sys_waitpid(wpid, &status, options);
+	long r = sys_waitpid(wpid, &status, options, rusage);
 	return (r < 0) ? r : 0;
 }
 
