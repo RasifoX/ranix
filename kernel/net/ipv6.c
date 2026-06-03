@@ -57,6 +57,19 @@ static int ipv6_on_link(netdev_t *dev, const in6_addr_t *dst)
     return memcmp(dst->s6, dev->ip6.s6, 8) == 0;
 }
 
+/* Can we reach dst at all? Loopback, link-local, multicast and on-link globals
+ * are always reachable; an off-link global needs a default router. Used by
+ * connect()/sendto() to fail fast (EHOSTUNREACH) instead of blocking on a SYN
+ * that can never be resolved — this is what lets AF_UNSPEC fall back to IPv4. */
+int ipv6_reachable(netdev_t *dev, const in6_addr_t *dst)
+{
+    if (!dev) return 0;
+    if (in6_eq(dst, &in6addr_loopback) || in6_is_ll(dst) || in6_is_mcast(dst))
+        return 1;
+    if (ipv6_on_link(dev, dst)) return 1;
+    return dev->ip6_has_router;
+}
+
 static int ipv6_for_us(netdev_t *dev, const in6_addr_t *dst)
 {
     return in6_eq(dst, &in6addr_loopback) ||
