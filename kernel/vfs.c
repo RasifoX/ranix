@@ -581,6 +581,30 @@ size_t vfs_proc_mounts(char *buf, size_t sz)
 	return pos;
 }
 
+/* fstype of the mount covering an absolute path — the mount whose mountpoint is
+ * the longest prefix of path (statfs(2)). Defaults to the root fs. */
+const char *vfs_path_fstype(const char *path)
+{
+	if (!path || path[0] != '/') return "ramfs";
+	mnt_namespace_t *mns = current_mnt_ns();
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	const char *best = "ramfs";
+	size_t bestlen = 0;
+	for (vfs_mount_t *m = mns->mounts; m; m = m->next) {
+		char mp[256];
+		if (!m->mountpoint) { mp[0] = '/'; mp[1] = '\0'; }
+		else                  dentry_abspath(m->mountpoint, mp, sizeof(mp));
+		size_t l = strlen(mp);
+		if (l == 0) continue;
+		if (strncmp(path, mp, l) != 0) continue;
+		/* mp must end at a path boundary (or be the root "/") */
+		if (l > 1 && path[l] != '/' && path[l] != '\0') continue;
+		if (l >= bestlen) { bestlen = l; best = m->fstype ? m->fstype : "ramfs"; }
+	}
+	spin_unlock_irq(&vfs_lock, f);
+	return best;
+}
+
 int vfs_umount(const char *path)
 {
 	if (!path || path[0] != '/') return -22;

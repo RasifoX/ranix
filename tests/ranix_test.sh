@@ -328,6 +328,7 @@ check "c-access"      "OK"            "$(timeout 8 /bin/test_access 2>/dev/null)
 check "c-fifo"        "OK"            "$(timeout 10 /bin/test_fifo 2>/dev/null)"
 check "c-fcntllock"   "OK"            "$(timeout 10 /bin/test_fcntllock 2>/dev/null)"
 check "c-mknoddev"    "OK"            "$(timeout 8 /bin/test_mknoddev 2>/dev/null)"
+check "c-statfs"      "OK"            "$(timeout 8 /bin/test_statfs 2>/dev/null)"
 check "c-tgkill"      "OK"            "$(timeout 10 /bin/test_tgkill 2>/dev/null)"
 check "c-killgroup"   "OK"            "$(timeout 10 /bin/test_killgroup 2>/dev/null)"
 check "c-itimer"      "OK"            "$(timeout 18 /bin/test_itimer 2>/dev/null)"
