@@ -358,8 +358,8 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
 
 ### Dinamik runtime-growable ölçeklenme (compile-time config YASAK)
 - [x] MAX_CPUS sabiti → **dinamik per-CPU** ✅ (büyük diziler buddy'den çekirdek sayısına göre; tavan 1024, ≥2048 vmalloc kaldı)
-- [ ] proctab/runqueue/scheduler tam dinamik (1 ↔ binlerce çekirdek, aynı binary)
-- [ ] bellek yapıları RAM miktarına uyarlanır (128MB ↔ TB+, mem_map/buddy dinamik)
+- [x] proctab/runqueue dinamik ✅ (proctab process_t** PROCTAB_INIT_CAP 64→realloc-grow; per-CPU runqueue). sched_lock→per-CPU-rq kaldı (366)
+- [x] bellek RAM'e uyarlanır ✅ (mem_map page_t* + _npages boot-detect; buddy tüm RAM'i kapsar)
 - [ ] per-CPU değişkenler + RCU-benzeri primitif (Linux'tan miras, üstüne iyileştir;
       dinamik AMA kilitsiz hot-path — global kmalloc'a bağlama, "akmalı")
 - [ ] devtmpfs + ttyN dinamik (sabit sayı yok)
@@ -373,7 +373,7 @@ bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne 
   - [x] **RAM/VA (aarch64): 48-bit / 256 TB** ✅ (3→4 level, T0SZ/T1SZ=16, kernel_l0 shim + l1_for vaddr-indexed walk; **Linux paritesi**). Direct map tüm RAM'i 1GB block ile haritalar (eskiden 8GB'de tıkalıydı). 241/241, SMP 4/4. 52-bit (FEAT_LPA) = follow-up.
 - [x] **Disk:** 64-bit LBA ✅ + **GPT** ✅ (CRC32 header + entry-array CRC + backup fallback, >2TB) + **ext4 extent read + 64BIT (>16TB)** ✅ + **ext4 write-64bit metadata** ✅ + **journaled ext4 mount/read/write** ✅ (has_journal, inode 8). Kalan: jbd2 replay (crash recovery), ext4 write extent (>4TB dosya).
 - [~] **Sayfa boyutu:** 4K + **2M hugepage** ✅ + **1G hugepage** ✅ (MAP_HUGE_1GB, iki arch; boot-time refcount'lu havuz, ayrı yüksek VA penceresi, fork 1G-COW; x86 -m6G/aarch64 -m4G test'li). THP (otomatik promosyon/khugepaged) = follow-up.
-- [ ] **Açık dosya / process / PID:** dinamik tablo, RAM'le ölçeklenen üst sınır (statik cap yok)
+- [x] **Açık dosya / process / PID dinamik** ✅ (fd_table FD_INIT_CAP 64→grow; proctab realloc; PID proctab-tarar — statik cap yok)
 - [ ] Ölçüt: aynı binary 1 çekirdek/128 MB cihazda da, binlerce çekirdek/TB sunucuda da çalışır
 
 ---
