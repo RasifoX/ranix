@@ -150,6 +150,9 @@ static int fill_stat(char *buf, size_t sz)
 		pb_str(&b, "cpu"); pb_u64(&b, i); pb_str(&b, " ");
 		pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
 	}
+	pb_str(&b, "intr 0\n");
+	pb_str(&b, "ctxt 0\n");
+	pb_str(&b, "btime 0\n");          /* boot epoch — vmstat/uptime read these */
 	pb_str(&b, "processes "); pb_u64(&b, (uint64_t)task_count()); pb_char(&b, '\n');
 	pb_str(&b, "procs_running 1\n");
 	pb_str(&b, "procs_blocked 0\n");
