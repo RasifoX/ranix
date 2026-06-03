@@ -116,3 +116,10 @@ void board_poweroff(void)
 }
 
 void board_get_reserved(uint64_t *base, uint32_t *size) { *base = 0; *size = 0; }
+
+/* PL031 RTC @ 0x09010000 (QEMU virt): DR register holds Unix epoch seconds. */
+int64_t arch_rtc_read(void)
+{
+	volatile uint32_t *rtc = (volatile uint32_t *)MMIO_TO_VIRT(0x09010000UL);
+	return (int64_t)(uint32_t)rtc[0];
+}
