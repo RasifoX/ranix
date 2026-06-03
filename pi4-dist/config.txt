@@ -2,3 +2,5 @@ arm_64bit=1
 kernel=kernel8.img
 initramfs initramfs.cpio followkernel
 enable_uart=1
+hdmi_force_hotplug=1
+disable_overscan=1
