@@ -340,9 +340,19 @@ static long sys_lchown(const char *path, uid_t uid, gid_t gid)
 
 static long sys_getrusage(int who, void *usage)
 {
-	(void)who;
-	if (!access_ok(usage, 144)) return -14;
-	memset(usage, 0, 144); /* struct rusage is 144 bytes */
+	if (!usage) return -14;
+	process_t *p = task_current();
+	uint64_t ut, st;
+	if (who == -1 /* RUSAGE_CHILDREN */) { ut = p->cutime_ticks; st = p->cstime_ticks; }
+	else                                  { ut = p->utime_ticks;  st = p->stime_ticks; }  /* SELF / THREAD */
+	int64_t r[18];   /* struct rusage = 18 longs (144 bytes) */
+	memset(r, 0, sizeof(r));
+	uint64_t hz = TIMER_HZ;
+	r[0] = (int64_t)(ut / hz);                       /* ru_utime.tv_sec  */
+	r[1] = (int64_t)((ut % hz) * (1000000 / hz));    /* ru_utime.tv_usec */
+	r[2] = (int64_t)(st / hz);                       /* ru_stime.tv_sec  */
+	r[3] = (int64_t)((st % hz) * (1000000 / hz));    /* ru_stime.tv_usec */
+	if (copy_to_user(usage, r, sizeof(r)) != 0) return -14;
 	return 0;
 }
 
