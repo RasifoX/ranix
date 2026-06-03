@@ -566,6 +566,18 @@ Claude CLI için TLS şart.
 - [ ] cert doğrulama (CA bundle + time) — şimdilik VERIFY_NONE (handshake/crypto kanıtlandı)
 - KRİTİK enabler: TCP short-read bug fix (986a96e) — TLS record framing'i bu açtı
 
+### SSH ✅ (2026-06-03, iki arch, uçtan uca loopback)
+
+- [x] dropbear 2026.91 statik multi-binary cross-build (dropbear/dbclient/dropbearkey/scp), kendi libtomcrypt/libtommath crypto'su (Makefile rule, .cache)
+- [x] dropbearkey ed25519/rsa keygen — gerçek crypto + ELF yükleme (static-PIE, ET_DYN loader)
+- [x] **tam sshd ↔ dbclient loopback oturumu**: KEX + ed25519 pubkey auth + komut exec + çıktı geri okuma (`echo SSHWORKS`), değiştirilmemiş dropbear. test: c-ssh-session
+- KRİTİK enabler 1: **listen socket'i select/poll-okunabilir yaptık** (sock_poll_vfs accept_head) — dropbear listen fd'sini select ile bekliyordu, hiç accept etmiyordu (bloklayan accept() bu açığı gizlemişti). Gerçek kernel bug'ı.
+- KRİTİK enabler 2: poll/select sinyalde EINTR döner (uninterruptible blok düzeltildi)
+- KRİTİK enabler 3: /etc/shells (dropbear getusershell() shell doğrulaması root'un /bin/bash'ini kabul etsin)
+- [ ] sshd dinleyici servis olarak boot'ta (init), gerçek NIC üzerinden uzaktan login
+- [ ] scp/sftp dosya transferi testi
+- [ ] pty tahsisli interaktif oturum (`ssh host` shell, -t)
+
 ### Ağ konfigürasyonu — DHCP ✅ (2026-06-02)
 - [x] DHCP client: DISCOVER/OFFER/REQUEST/ACK, boot'ta NIC'i konfigüre (ip/gw/mask), iki arch
 - [x] /etc/resolv.conf'u DHCP'nin verdiği nameserver'a yazar (yazılabilir dosya, elle de değişir)
