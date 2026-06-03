@@ -641,13 +641,16 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 ### Sistem olgunluğu
 - [x] **Kalıcı root (pivot_root)** ✅ — pivot_root(2) syscall (per-process root switch; PID1 pivot+exec ile tüm ağaç yeni root'a geçer, global mount-tree cerrahisi yok); put_old new_root-altı doğrulaması; test_pivot. Disk-root boot entegrasyonu (init akışı) gerçek diskte.
       ext2/ext4 rw + /mnt auto-mount VAR; **chroot(2) ✅ + pivot_root(2) ✅ (2026-06-03)**.
-- [ ] **GERÇEK KALICILIK (uçtan uca) — ÖNEMLİ**: diske/USB'ye kurulu tam rootfs (/etc /bin
-      /usr /home /root) + boot init akışı: kalıcı bölümü mount → `pivot_root` → gerçek init'i
-      exec. Yazılan veri **reboot'tan sağ çıkmalı**. Doğrulama: QEMU'da kalıcı disk imajı —
-      boot-1 sentinel yaz, **reboot**, boot-2 sentinel hâlâ var (iki-boot persist testi).
-      Parçalar hazır: ext2/FAT rw + pivot_root + /mnt auto-mount; eksik: disk-rootfs kurulumu
-      + init-pivot akışı (madde 630/631) + iki-boot persist test harness'ı. /tmp /proc /sys
-      /dev uçucu kalır (Linux'ta da öyle — kasıtlı). USB-FAT-boot ayağı gerçek donanım ister (636).
+- [x] **İki-boot persist KANITLANDI** ✅ (2026-06-03): ext2 write → disk → **reboot** → oku
+      zinciri gerçekten çalışıyor. tests/persist.sh: temiz imaj → boot-1 marker yazar
+      (PERSISTMARK:FRESH) → poweroff (QEMU imajı flush eder) → boot-2 aynı imaj, marker hâlâ
+      orada (PERSISTMARK:SURVIVED). Suite'e c-persist eklendi (regression koruması). ext2_write
+      block/inode/dirent/bitmap'i write-through bd->write ile diske yazıyor — gerçek rw.
+- [ ] **GERÇEK KALICILIK kalan parça — disk-rootfs + init-pivot**: persist altyapısı kanıtlandı
+      (üstte); kalan = / kökünün ramfs yerine GERÇEKTEN disk olması. Tam rootfs (/etc /bin /usr
+      /home /root) diske kurulu + boot init akışı: kalıcı bölümü mount → `pivot_root` → gerçek
+      init'i exec. /tmp /proc /sys /dev uçucu kalır (Linux'ta da öyle — kasıtlı). USB-FAT-boot
+      ayağı gerçek donanım ister (636).
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
