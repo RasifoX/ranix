@@ -318,6 +318,7 @@ check "ext4-write"   "ranix-w64"    "$(echo -n ranix-w64 > /mnt/wtest.txt 2>/dev
 # devtmpfs: the disk shows up as a byte-addressable /dev block node
 check "devtmpfs-blknode" "b"        "$([ -b /dev/sata0 ] || [ -b /dev/vblk0 ] && echo b)"
 check "devtmpfs-blkread" "EFI PART" "$(dd if=/dev/sata0 bs=1 skip=512 count=8 2>/dev/null || dd if=/dev/vblk0 bs=1 skip=512 count=8 2>/dev/null)"
+check "devperm-eacces"  "OK"        "$(timeout 8 /bin/test_devperm 2>/dev/null)"
 fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"

@@ -206,7 +206,7 @@ yoksa uid/gid race'lerini SMP'de sonradan çözmek zorunda kalırız.
 ### Test hedefleri
 - [x] `su` ile kullanıcı değiştiriliyor — su-switches-uid/gid, shadow-no-read geçiyor
 - [x] signalfd + epoll birlikte çalışıyor — c-signalfd testi geçiyor
-- [ ] normal kullanıcı /dev/sda'yı açamıyor (EACCES)
+- [x] normal kullanıcı /dev/sda'yı açamıyor (EACCES) ✅ (block-node mode 0660 root; vfs_check_perm non-root open→EACCES; test_devperm)
 - [ ] dbus abstract socket üzerinden haberleşiyor
 - [ ] `python3 -c "import multiprocessing"` crash etmiyor (SysV IPC)
 
