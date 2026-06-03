@@ -1023,6 +1023,7 @@ extern void ramfs_register(void);
 extern void procfs_register(void);
 extern void devfs_register(void);
 extern void ext2_register(void);
+extern void fat_register(void);
 
 void vfs_init(void)
 {
@@ -1039,6 +1040,7 @@ void vfs_init(void)
 	procfs_register();
 	devfs_register();
 	ext2_register();
+	fat_register();
 	extern void sysfs_register(void);
 	sysfs_register();
 	extern void cgroup_register(void);

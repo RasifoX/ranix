@@ -316,6 +316,17 @@ void kernel_main(void)
 					}
 				}
 			}
+			/* not ext2 — try FAT (boot-sector 0x55AA + 512-byte sectors) */
+			{
+				uint8_t bpb[512];
+				if (bd->read(bd, 0, bpb, 1) == 0 && bpb[510] == 0x55 && bpb[511] == 0xAA &&
+				    (uint16_t)(bpb[11] | (bpb[12] << 8)) == 512) {
+					if (vfs_mount("/mnt", "vfat", bd) == 0) {
+						kprintf("fat: mounted /mnt (%s)\n", bd->name);
+						break;
+					}
+				}
+			}
 		}
 	}
 
