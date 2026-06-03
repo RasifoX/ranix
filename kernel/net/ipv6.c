@@ -92,11 +92,29 @@ void ipv6_rx(netdev_t *dev, skb_t *skb)
     skb_pull(skb, sizeof(ipv6_hdr_t));
     skb->len = plen;   /* trim any padding the link layer added */
 
-    switch (ip6_copy.next_hdr) {
+    /* walk past extension headers (hop-by-hop, routing, destination options) to
+     * the upper-layer protocol — real IPv6 traffic carries these, and a switch
+     * on the fixed next_hdr alone would drop it. Each such header is
+     * [next(1)][hdr_ext_len(1)] + payload, total (hdr_ext_len+1)*8 bytes. */
+    uint8_t nh = ip6_copy.next_hdr;
+    for (;;) {
+        if (nh == IP6_NH_HOPOPTS || nh == IP6_NH_ROUTING || nh == IP6_NH_DSTOPTS) {
+            if (skb->len < 8) { skb_free(skb); return; }
+            uint8_t  next = skb->data[0];
+            uint16_t elen = ((uint16_t)skb->data[1] + 1) * 8;
+            if (skb->len < elen) { skb_free(skb); return; }
+            skb_pull(skb, elen);   /* advances data and reduces len */
+            nh = next;
+            continue;
+        }
+        break;
+    }
+
+    switch (nh) {
     case IP6_NH_ICMPV6: icmpv6_rx(dev, skb, &ip6_copy); break;
     case IP6_NH_UDP:    udp6_rx(dev, skb, &ip6_copy);   break;
     case IP6_NH_TCP:    tcp6_rx(dev, skb, &ip6_copy);   break;
-    default:            skb_free(skb); break;
+    default:            skb_free(skb); break;   /* fragment/unknown: not yet */
     }
 }
 

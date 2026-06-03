@@ -126,7 +126,7 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->net_ns != ns) continue;
-        if (s->type != SOCK_RAW) continue;
+        if (s->type != SOCK_RAW && s->type != SOCK_DGRAM) continue;  /* incl. ping socket */
         if (s->proto != 1 /* IPPROTO_ICMP */) continue;
         found = s;
         break;
@@ -134,21 +134,25 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
     spin_unlock_irq(&gsock_lock, f);
     if (!found) return;
 
-    /* prepend a fake IP header — src in network byte order, TTL=64 */
-    uint8_t ipbuf[20 + SKB_DATA_MAX];
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
-    memset(ipbuf, 0, 20);
-    ipbuf[0] = 0x45;   /* ver=4, ihl=5 */
-    ipbuf[8] = 64;     /* TTL */
-    uint32_t src_net = htonl(src_ip);
-    memcpy(ipbuf + 12, &src_net, 4);
-    memcpy(ipbuf + 20, data, len);
-    uint16_t total = (uint16_t)(20 + len);
-    if (total > SKB_DATA_MAX) total = SKB_DATA_MAX;
-
     skb_t *skb = skb_alloc();
     if (!skb) return;
-    memcpy(skb->data, ipbuf, total);
+    uint16_t total;
+    if (found->type == SOCK_RAW) {
+        /* SOCK_RAW: deliver with a fake IP header (src net order, TTL=64) — Linux
+         * raw ICMP sockets include the IP header; SOCK_DGRAM ping sockets do not */
+        memset(skb->data, 0, 20);
+        skb->data[0] = 0x45;   /* ver=4, ihl=5 */
+        skb->data[8] = 64;     /* TTL */
+        uint32_t src_net = htonl(src_ip);
+        memcpy(skb->data + 12, &src_net, 4);
+        if ((int)len > SKB_DATA_MAX - 20) len = (uint16_t)(SKB_DATA_MAX - 20);
+        memcpy(skb->data + 20, data, len);
+        total = (uint16_t)(20 + len);
+    } else {
+        memcpy(skb->data, data, len);   /* DGRAM ping socket: ICMP message only */
+        total = len;
+    }
     skb->len = total;
 
     uint64_t sf = spin_lock_irq(&found->recv_lock);
@@ -173,7 +177,8 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->net_ns != ns) continue;
-        if (s->domain != AF_INET6 || s->type != SOCK_RAW) continue;
+        if (s->domain != AF_INET6) continue;
+        if (s->type != SOCK_RAW && s->type != SOCK_DGRAM) continue;  /* incl. ping socket */
         if (s->proto != IPPROTO_ICMPV6) continue;
         found = s;
         break;
