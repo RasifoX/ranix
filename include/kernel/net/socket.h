@@ -153,5 +153,6 @@ void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
 
 /* AF_UNIX send */
 int unix_send(socket_t *s, const void *data, uint16_t len);
+int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int nfiles);
 
 #endif
