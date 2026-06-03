@@ -439,7 +439,11 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -113; }
 
         long rr = -38;
-        if (s->type == SOCK_RAW && s->proto == IPPROTO_ICMPV6 &&
+        /* ICMPv6 over SOCK_RAW *or* SOCK_DGRAM (Linux "ping socket": unprivileged
+         * ping uses socket(AF_INET6,SOCK_DGRAM,IPPROTO_ICMPV6)). Both carry a
+         * user-built ICMPv6 message; the kernel just checksums and ships it. */
+        if (s->proto == IPPROTO_ICMPV6 &&
+            (s->type == SOCK_RAW || s->type == SOCK_DGRAM) &&
             len >= sizeof(icmp6_hdr_t)) {
             netdev_t  *txdev = net_route_dev6(&dst6);
             in6_addr_t src6  = ipv6_src_for(txdev, &dst6);
@@ -447,7 +451,14 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             ih->checksum = 0;
             ih->checksum = ipv6_pseudo_cksum(&src6, &dst6, IP6_NH_ICMPV6,
                                              kb, (uint16_t)len);
-            for (int attempt = 0; attempt < 64; attempt++) {
+            /* time-based resolve: a fresh neighbour's NS→NA round-trip takes real
+             * milliseconds (on the wire, not just loopback), so spin net_poll
+             * against a wall-clock deadline rather than a fixed iteration count —
+             * a tight 64-spin finishes in microseconds, long before the NA. */
+            extern volatile uint64_t kernel_ticks;
+            uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
+            rr = -113;   /* EHOSTUNREACH if the neighbour never answers */
+            do {
                 skb_t *skb = skb_alloc();
                 if (!skb) { rr = -12; break; }
                 memcpy(skb->data, kb, len);
@@ -455,8 +466,8 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 int rc = ipv6_tx(txdev, skb, &dst6, IP6_NH_ICMPV6);
                 if (rc >= 0) { rr = (long)len; break; }
                 if (rc != -1) { rr = rc; break; }
-                net_poll();   /* drain RX — NDP reply may arrive (later phase) */
-            }
+                net_poll();   /* drain RX — the NDP NA may arrive */
+            } while (kernel_ticks < deadline);
         } else if (s->type == SOCK_DGRAM) {
             if (!s->local_port) { extern uint16_t alloc_port(void); s->local_port = alloc_port(); }
             sock_register(s);
@@ -498,7 +509,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
         }
         r = rc;   /* bytes tcp_send actually queued (clamped to MSS); caller loops for the rest */
-    } else if (s->type == SOCK_DGRAM) {
+    } else if (s->type == SOCK_DGRAM && s->proto != 1 /* not an ICMP ping socket */) {
         /* an unbound socket needs a source port and a delivery registration, or
          * the peer's reply lands on port 0 and matches nothing */
         if (!s->local_port) { extern uint16_t alloc_port(void); s->local_port = alloc_port(); }
@@ -512,7 +523,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             if (rc == -1) net_poll();
         }
         r = rc < 0 ? rc : (long)len;
-    } else if (s->type == SOCK_RAW && s->proto == 1 /* IPPROTO_ICMP */) {
+    } else if ((s->type == SOCK_RAW || s->type == SOCK_DGRAM) && s->proto == 1 /* IPPROTO_ICMP */) {
         if (len >= sizeof(icmp_hdr_t)) {
             icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
             ih->checksum = 0;
