@@ -76,6 +76,7 @@ typedef struct {
 #define SYS_ARCH_FALLOCATE         47
 #define SYS_ARCH_FACCESSAT         48
 #define SYS_ARCH_CHROOT            51
+#define SYS_ARCH_PIVOT_ROOT        41
 #define SYS_ARCH_CHDIR             49
 #define SYS_ARCH_FCHDIR            50
 #define SYS_ARCH_FCHMOD            52

@@ -388,6 +388,30 @@ static long sys_chroot(const char *path)
 	return 0;
 }
 
+static long sys_pivot_root(const char *new_root, const char *put_old)
+{
+	process_t *p = task_current();
+	if (p->euid != 0) return -1;                       /* EPERM */
+	char knew[PROC_NAME_MAX], kold[PROC_NAME_MAX];
+	if (resolve_path(knew, -100, new_root)) return -14;
+	if (resolve_path(kold, -100, put_old))  return -14;
+	vfs_dentry_t *dn = vfs_dentry_resolve(knew);
+	if (!dn || !dn->inode) return -2;                  /* ENOENT */
+	if (!S_ISDIR(dn->inode->mode)) return -20;         /* ENOTDIR */
+	vfs_dentry_t *dold = vfs_dentry_resolve(kold);
+	if (!dold || !dold->inode || !S_ISDIR(dold->inode->mode)) return -22; /* EINVAL */
+	/* put_old must lie at or under new_root (as Linux requires) */
+	size_t nl = strlen(knew);
+	if (strncmp(kold, knew, nl) != 0 || (kold[nl] != '/' && kold[nl] != '\0'))
+		return -22;
+	/* Switch the caller's root to new_root. Children inherit it, so an init that
+	 * pivot_roots and then execs the real init moves the whole process tree to
+	 * the new root without global mount-tree surgery (initramfs→disk switch). */
+	p->root = dn;
+	p->cwd[0] = '/'; p->cwd[1] = '\0';
+	return 0;
+}
+
 static long sys_getcwd(char *buf, size_t size)
 {
 	if (!buf || size == 0) return -14;

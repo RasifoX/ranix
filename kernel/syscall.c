@@ -353,6 +353,7 @@ void syscall_handle(arch_context_t *ctx)
 	/* ── fs ops ──────────────────────────────────────────── */
 	case SYS_ARCH_CHDIR:    ret = sys_chdir((const char*)arg0); break;
 	case SYS_ARCH_CHROOT:   ret = sys_chroot((const char*)arg0); break;
+	case SYS_ARCH_PIVOT_ROOT: ret = sys_pivot_root((const char*)arg0, (const char*)arg1); break;
 	case SYS_ARCH_GETCWD:   ret = sys_getcwd((char*)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MKDIRAT:  ret = sys_mkdirat((int)arg0, (const char*)arg1, (mode_t)arg2); break;
 	case SYS_ARCH_UNLINKAT: ret = sys_unlinkat((int)arg0, (const char*)arg1, (int)arg2); break;
