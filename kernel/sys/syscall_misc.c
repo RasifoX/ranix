@@ -634,13 +634,37 @@ static long sys_syslog(int type, char *buf, int len)
 
 static long sys_utimensat(int dirfd, const char *path, const void *times, int flags)
 {
-	(void)times; (void)flags;
-	if (!path) return 0;
-	char kp[PROC_NAME_MAX];
-	int r = resolve_path(kp, dirfd, path);
-	if (r) return r;
-	vfs_stat_t st;
-	if (vfs_stat(kp, &st) != 0) return -2; /* ENOENT */
+	(void)flags;
+	vfs_inode_t *in = NULL;
+	if (!path) {                                   /* futimens: dirfd is the fd */
+		process_t *p = task_current();
+		vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
+		if (!f || !f->inode) return -9;            /* EBADF */
+		in = f->inode;
+	} else {
+		char kp[PROC_NAME_MAX];
+		int r = resolve_path(kp, dirfd, path);
+		if (r) return r;
+		vfs_dentry_t *d = vfs_dentry_resolve(kp);
+		if (!d || !d->inode) return -2;            /* ENOENT */
+		in = d->inode;
+	}
+
+	int64_t now_s, now_ns; ranix_walltime(&now_s, &now_ns);
+	int64_t at_s = now_s, mt_s = now_s;
+	uint32_t at_n = (uint32_t)now_ns, mt_n = (uint32_t)now_ns;
+	int set_at = 1, set_mt = 1;
+	if (times) {
+		struct { int64_t sec, nsec; } ts[2];
+		if (copy_from_user(ts, times, sizeof(ts)) != 0) return -14;
+		if (ts[0].nsec == 0x3FFFFFFE) set_at = 0;          /* UTIME_OMIT */
+		else if (ts[0].nsec != 0x3FFFFFFF) { at_s = ts[0].sec; at_n = (uint32_t)ts[0].nsec; }
+		if (ts[1].nsec == 0x3FFFFFFE) set_mt = 0;
+		else if (ts[1].nsec != 0x3FFFFFFF) { mt_s = ts[1].sec; mt_n = (uint32_t)ts[1].nsec; }
+	}
+	if (set_at) { in->atime = at_s; in->atime_nsec = at_n; }
+	if (set_mt) { in->mtime = mt_s; in->mtime_nsec = mt_n; }
+	in->ctime = now_s; in->ctime_nsec = (uint32_t)now_ns;
 	return 0;
 }
 
@@ -833,6 +857,10 @@ fill:;
 	sx.stx_dev_minor  = 1;
 	sx.stx_rdev_major = (uint32_t)(ks.rdev >> 8);
 	sx.stx_rdev_minor = (uint32_t)(ks.rdev & 0xFF);
+	sx.stx_atime_sec = ks.atime; sx.stx_atime_nsec = ks.atime_nsec;
+	sx.stx_mtime_sec = ks.mtime; sx.stx_mtime_nsec = ks.mtime_nsec;
+	sx.stx_ctime_sec = ks.ctime; sx.stx_ctime_nsec = ks.ctime_nsec;
+	sx.stx_btime_sec = ks.ctime; sx.stx_btime_nsec = ks.ctime_nsec;
 	return copy_to_user(buf, &sx, sizeof(sx));
 }
 
