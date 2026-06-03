@@ -61,8 +61,17 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE)
+		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE) {
 			t->sig_pending |= (1UL << (sig - 1));
+			/* wake a blocked member so the signal is actually delivered — Ctrl-C/
+			 * Ctrl-Z to a foreground job stuck in a blocking syscall must fire.
+			 * (Linux: signal_wake_up.) */
+			if (t->state == PROC_SLEEPING) {
+				t->state = PROC_READY;
+				if (!t->on_cpu) runqueue_add(t);
+				arch_get_cpu_ctx()->need_resched = 1;
+			}
+		}
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
