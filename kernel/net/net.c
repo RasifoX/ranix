@@ -377,8 +377,12 @@ void net_dhcp_all(void)
     for (int i = 0; i < ndevs; i++) {
         netdev_t *d = devs[i];
         if (!d->poll || (d->ip >> 24) == 127) continue;
-        d->link_up = 1;   /* boot-time configure; watcher tracks changes hereafter */
-        net_dhcp_one(d);
+        d->link_up = 1;   /* watcher tracks changes hereafter */
+        /* A NIC with a carrier watcher (link_check) is configured by the net_link
+         * thread, not here — doing both would run two net_dhcp_one at once and
+         * race the driver's poll. NICs without link_check (e.g. virtio) have no
+         * watcher, so configure them synchronously at boot. */
+        if (!d->link_check) net_dhcp_one(d);
     }
 }
 
