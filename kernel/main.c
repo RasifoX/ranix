@@ -327,6 +327,17 @@ void kernel_main(void)
 					}
 				}
 			}
+			/* not FAT — try ISO 9660 (PVD "CD001" at sector 16 = LBA 64) */
+			{
+				uint8_t pvd[512];
+				if (bd->read(bd, 64, pvd, 1) == 0 && pvd[0] == 1 &&
+				    pvd[1]=='C' && pvd[2]=='D' && pvd[3]=='0' && pvd[4]=='0' && pvd[5]=='1') {
+					if (vfs_mount("/mnt", "iso9660", bd) == 0) {
+						kprintf("iso9660: mounted /mnt (%s)\n", bd->name);
+						break;
+					}
+				}
+			}
 		}
 	}
 

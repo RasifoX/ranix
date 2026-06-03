@@ -137,6 +137,7 @@ SRCS_KERNEL = \
     kernel/fs/gpt.c \
     kernel/fs/ext2.c \
     kernel/fs/fat.c \
+    kernel/fs/iso9660.c \
     kernel/pci.c \
     kernel/block.c \
     kernel/mm/buddy.c \
