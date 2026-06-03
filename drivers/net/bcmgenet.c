@@ -86,9 +86,14 @@ extern void kprintf(const char *, ...);
 #define RDMA_CTL_BASE           (RDMA_REG_OFF + DMA_RINGS_SIZE)
 #define TDMA_CTL_BASE           (TDMA_REG_OFF + DMA_RINGS_SIZE)
 
-/* per-ring registers (relative to the ring base) */
-#define DMA_PROD_INDEX          0x08
-#define DMA_CONS_INDEX          0x0c
+/* per-ring registers (relative to the ring base). NOTE: prod/cons sit at
+ * SWAPPED offsets between the TX and RX rings — TDMA has CONS@0x08/PROD@0x0c,
+ * RDMA has PROD@0x08/CONS@0x0c. Using one shared pair silently posts TX to the
+ * wrong register and the NIC never fetches the descriptor (no packets go out). */
+#define RDMA_PROD_INDEX         0x08
+#define RDMA_CONS_INDEX         0x0c
+#define TDMA_CONS_INDEX         0x08
+#define TDMA_PROD_INDEX         0x0c
 #define DMA_RING_BUF_SIZE       0x10
 #define DMA_START_ADDR          0x14
 #define DMA_END_ADDR            0x1c
@@ -269,8 +274,8 @@ static void dma_init(void)
     gw(RDMA_RING_BASE + DMA_READ_PTR, 0);
     gw(RDMA_RING_BASE + DMA_WRITE_PTR, 0);
     gw(RDMA_RING_BASE + DMA_END_ADDR, RX_DESCS * DMA_DESC_SIZE / 4 - 1);
-    rx_cons = gr(RDMA_RING_BASE + DMA_PROD_INDEX);
-    gw(RDMA_RING_BASE + DMA_CONS_INDEX, rx_cons);
+    rx_cons = gr(RDMA_RING_BASE + RDMA_PROD_INDEX);
+    gw(RDMA_RING_BASE + RDMA_CONS_INDEX, rx_cons);
     rx_idx = rx_cons & (RX_DESCS - 1);
     gw(RDMA_RING_BASE + DMA_RING_BUF_SIZE,
        (RX_DESCS << DMA_RING_SIZE_SHIFT) | RX_BUF_LENGTH);
@@ -283,8 +288,8 @@ static void dma_init(void)
     gw(TDMA_RING_BASE + DMA_READ_PTR, 0);
     gw(TDMA_RING_BASE + DMA_WRITE_PTR, 0);
     gw(TDMA_RING_BASE + DMA_END_ADDR, TX_DESCS * DMA_DESC_SIZE / 4 - 1);
-    tx_prod = gr(TDMA_RING_BASE + DMA_CONS_INDEX);
-    gw(TDMA_RING_BASE + DMA_PROD_INDEX, tx_prod);
+    tx_prod = gr(TDMA_RING_BASE + TDMA_CONS_INDEX);
+    gw(TDMA_RING_BASE + TDMA_PROD_INDEX, tx_prod);
     tx_idx = tx_prod & (TX_DESCS - 1);
     gw(TDMA_RING_BASE + DMA_MBUF_DONE_THRESH, 1);
     gw(TDMA_RING_BASE + DMA_FLOW_PERIOD, 0);
@@ -316,20 +321,26 @@ static int genet_tx(netdev_t *dev, skb_t *skb)
 
     tx_idx = (tx_idx + 1) & (TX_DESCS - 1);
     tx_prod = (tx_prod + 1) & 0xffff;
-    gw(TDMA_RING_BASE + DMA_PROD_INDEX, tx_prod);
+    gw(TDMA_RING_BASE + TDMA_PROD_INDEX, tx_prod);
 
     /* wait for the descriptor to drain (poll model) */
     for (int i = 0; i < 100000; i++) {
-        if ((gr(TDMA_RING_BASE + DMA_CONS_INDEX) & 0xffff) == tx_prod) break;
+        if ((gr(TDMA_RING_BASE + TDMA_CONS_INDEX) & 0xffff) == tx_prod) break;
         genet_udelay(1);
     }
+    { static int n = 0; if (n < 6) { n++;
+        uint32_t c = gr(TDMA_RING_BASE + TDMA_CONS_INDEX) & 0xffff;
+        kprintf("genet tx#%d len=%u prod=%u cons=%u %s\n", n, len, tx_prod, c,
+                c == tx_prod ? "sent" : "TIMEOUT"); } }
     skb_free(skb);
     return (int)len;
 }
 
 static void genet_poll(netdev_t *dev)
 {
-    uint32_t prod = gr(RDMA_RING_BASE + DMA_PROD_INDEX) & 0xffff;
+    uint32_t prod = gr(RDMA_RING_BASE + RDMA_PROD_INDEX) & 0xffff;
+    { static int n = 0; if (prod != (rx_cons & 0xffff) && n < 6) { n++;
+        kprintf("genet rx prod=%u cons=%u\n", prod, rx_cons & 0xffff); } }
     while (prod != (rx_cons & 0xffff)) {
         uint32_t d  = RX_OFF + rx_idx * DMA_DESC_SIZE;
         uint32_t ls = gr(d + 0x00);
@@ -351,7 +362,7 @@ static void genet_poll(netdev_t *dev)
         dcache_inval(rx_buf[rx_idx], RX_BUF_LENGTH);
         gw(d + 0x00, (RX_BUF_LENGTH << DMA_BUFLENGTH_SHIFT) | DMA_OWN);
         rx_cons = (rx_cons + 1) & 0xffff;
-        gw(RDMA_RING_BASE + DMA_CONS_INDEX, rx_cons);
+        gw(RDMA_RING_BASE + RDMA_CONS_INDEX, rx_cons);
         rx_idx = (rx_idx + 1) & (RX_DESCS - 1);
     }
 }
