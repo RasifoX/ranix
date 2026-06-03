@@ -421,6 +421,14 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 		*nsec = (int64_t)(((cnt % frq) * 1000000000ULL) / frq);
 		return;
 	}
+#elif defined(__x86_64__)
+	extern uint64_t hpet_now_ns(void);
+	uint64_t hns = hpet_now_ns();
+	if (hns) {
+		*sec  = (int64_t)(hns / 1000000000ULL);
+		*nsec = (int64_t)(hns % 1000000000ULL);
+		return;
+	}
 #endif
 	*sec  = (int64_t)(kernel_ticks / TIMER_HZ);
 	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
