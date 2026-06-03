@@ -14,6 +14,10 @@ LOG=build/serial-test.log
 
 declare -A fails
 runs=0 nolog=0
+# Clean once up front: the per-iter build is incremental, so without this the
+# first run can inherit a previous invocation's object files for a DIFFERENT
+# arch and silently measure the wrong target (false green).
+make clean >/dev/null 2>&1
 for i in $(seq 1 "$ITERS"); do
     make ARCH="$ARCH" BOARD="$BOARD" test >/dev/null 2>&1
     if [ ! -f "$LOG" ] || ! grep -qE '^(ALL_PASS|SOME_FAIL)' "$LOG"; then
