@@ -363,6 +363,7 @@ typedef struct {
 #define PROC_F_SYS_WMEM_MAX      41
 #define PROC_F_SYS_NFILE         42
 #define PROC_F_SYS_RANDOMIZE_VA  43
+#define PROC_F_SYS_CORE_PATTERN  44
 
 /* /proc/modules — monolithic kernel: no loadable modules (lsmod shows nothing). */
 static int fill_modules(char *buf, size_t sz) { (void)buf; (void)sz; return 0; }
@@ -512,6 +513,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_WMEM_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"134217728\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_NFILE:        { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"4096\t0\t65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_CORE_PATTERN: { extern char core_pattern[128]; pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -546,6 +548,17 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 			memcpy(ns->nodename, tmp, n);
 			ns->nodename[n] = '\0';
 		}
+		return (ssize_t)len;
+	}
+	if (pr->type == PROC_F_SYS_CORE_PATTERN) {
+		extern char core_pattern[128];
+		if (len == 0 || len >= 128) return -22;
+		char tmp[128];
+		if (copy_from_user(tmp, buf, len) != 0) return -14;
+		size_t n = len;
+		if (n > 0 && tmp[n-1] == '\n') n--;
+		memcpy(core_pattern, tmp, n);
+		core_pattern[n] = '\0';
 		return (ssize_t)len;
 	}
 	return -1;
@@ -1662,8 +1675,9 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "pid_max",       PROC_F_SYS_PID_MAX     },
 	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT },
 	{ "randomize_va_space", PROC_F_SYS_RANDOMIZE_VA },
+	{ "core_pattern",  PROC_F_SYS_CORE_PATTERN },
 };
-#define SYS_KERNEL_N 7
+#define SYS_KERNEL_N 8
 
 static procfs_sysfile_t sys_net_core_files[] = {
 	{ "somaxconn",       PROC_F_SYS_SOMAXCONN    },
