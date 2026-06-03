@@ -123,3 +123,11 @@ int64_t arch_rtc_read(void)
 	volatile uint32_t *rtc = (volatile uint32_t *)MMIO_TO_VIRT(0x09010000UL);
 	return (int64_t)(uint32_t)rtc[0];
 }
+
+/* PL031 LR (load register, offset 0x08) sets the counter → persist epoch. */
+void arch_rtc_write(int64_t epoch)
+{
+	if (epoch <= 0) return;
+	volatile uint32_t *rtc = (volatile uint32_t *)MMIO_TO_VIRT(0x09010000UL);
+	rtc[2] = (uint32_t)epoch;   /* offset 0x08 = LR */
+}

@@ -507,7 +507,8 @@ static long sys_tkill(pid_t tid, int sig) { return sys_kill(tid, sig); }
 
 static long sys_time_syscall(long *tloc)
 {
-	long t = (long)(kernel_ticks / TIMER_HZ);
+	int64_t s, n; ranix_walltime(&s, &n);   /* real wall-clock (RTC-based) */
+	long t = (long)s;
 	if (tloc && access_ok(tloc, sizeof(long)))
 		copy_to_user(tloc, &t, sizeof(t));
 	return t;
