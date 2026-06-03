@@ -3,6 +3,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/driver.h>
 #include <kernel/tick.h>
+#include <kernel/hal.h>
 
 static volatile uint64_t ticks = 0;
 static uint32_t timer_hz = 100;
@@ -17,7 +18,12 @@ void timer_handler(void) {
     next += freq / timer_hz;
     __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(next));
 
-    tick_notify();
+    /* Only the BSP advances global time + runs the global walk (kernel_ticks,
+     * sleeper wakeups, itimers). Secondary cores do scheduler accounting only —
+     * otherwise every core bumps kernel_ticks and wall-clock runs N× fast on an
+     * N-core SMP (the printk timestamps were ~4-5x real on the Pi). Mirrors x86. */
+    if (arch_get_cpu_ctx()->cpu_id == 0) tick_notify();
+    else                                 tick_notify_local();
 }
 
 /* Allow EL0 to read the virtual + physical counters (CNTKCTL_EL1.EL0VCTEN|

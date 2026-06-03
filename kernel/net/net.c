@@ -216,6 +216,8 @@ void net_rx_wake(void)
     if (t) task_wake(t);
 }
 
+static void net_link_thread(void);   /* carrier hotplug watcher, defined below */
+
 static void net_rx_thread(void)
 {
     net_rx_task = task_current();
@@ -320,7 +322,8 @@ void net_init(void)
         net_drop_n = n;
     }
 
-    proc_create("net_rx", net_rx_thread);   /* event-driven RX softirq */
+    proc_create("net_rx", net_rx_thread);     /* event-driven RX softirq */
+    proc_create("net_link", net_link_thread); /* carrier hotplug watcher */
 }
 
 /* Point /etc/resolv.conf at the DHCP-supplied nameserver, replacing the static
@@ -344,30 +347,63 @@ static void write_resolv_conf(uint32_t dns)
     vfs_kernel_install("/etc/resolv.conf", buf, n);
 }
 
-/* Configure every real NIC over DHCP, falling back to its driver static IP. Run
- * after the drivers register (NICs present) and the VFS is up. */
-void net_dhcp_all(void)
+/* Configure one NIC: DHCPv4 (falling back to its driver static IP) + IPv6
+ * stateless autoconfig (RS → SLAAC). Reused by boot and the link watcher. */
+static void net_dhcp_one(netdev_t *d)
 {
     extern int dhcp_configure(netdev_t *dev, uint32_t *out_dns);
+    extern volatile uint64_t kernel_ticks;
+    if (!d || !d->poll || (d->ip >> 24) == 127) return;   /* skip loopback */
+
+    uint32_t dns = 0;
+    if (dhcp_configure(d, &dns) == 0) {
+        if (dns) write_resolv_conf(dns);
+    } else {
+        kprintf("dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
+                (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
+                (d->ip >> 8) & 0xff, d->ip & 0xff);
+    }
+
+    ndp_send_rs(d);
+    uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
+    while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) net_poll();
+    if (!in6_is_unspec(&d->ip6))
+        kprintf("slaac: %s configured a global IPv6 address\n", d->name);
+}
+
+/* Configure every real NIC. Run after the drivers register and the VFS is up. */
+void net_dhcp_all(void)
+{
     for (int i = 0; i < ndevs; i++) {
         netdev_t *d = devs[i];
-        if (!d->poll || (d->ip >> 24) == 127) continue;   /* skip loopback */
-        uint32_t dns = 0;
-        if (dhcp_configure(d, &dns) == 0) {
-            if (dns) write_resolv_conf(dns);
-        } else {
-            kprintf("dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
-                    (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
-                    (d->ip >> 8) & 0xff, d->ip & 0xff);
-        }
+        if (!d->poll || (d->ip >> 24) == 127) continue;
+        d->link_up = 1;   /* boot-time configure; watcher tracks changes hereafter */
+        net_dhcp_one(d);
+    }
+}
 
-        /* IPv6 stateless autoconfig: solicit a router advertisement, then poll
-         * briefly for the reply so a SLAAC global address is ready. */
-        extern volatile uint64_t kernel_ticks;
-        ndp_send_rs(d);
-        uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
-        while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) net_poll();
-        if (!in6_is_unspec(&d->ip6))
-            kprintf("slaac: %s configured a global IPv6 address\n", d->name);
+/* Carrier watcher: Linux-style hotplug. A NIC driver exposes link_check(); on a
+ * down→up transition (cable replugged) the address config is renewed (DHCP + RS/
+ * SLAAC), on up→down the carrier is marked off. NICs without link_check are
+ * assumed always-up and skipped. Runs in its own blockable thread (net_dhcp_one
+ * polls), woken ~1 Hz by the deadline sweep. */
+static void net_link_thread(void)
+{
+    extern volatile uint64_t kernel_ticks;
+    for (;;) {
+        task_sleep_until(kernel_ticks + 100);   /* ~1s */
+        for (int i = 0; i < ndevs; i++) {
+            netdev_t *d = devs[i];
+            if (!d->poll || !d->link_check || (d->ip >> 24) == 127) continue;
+            int up = d->link_check(d);
+            if (up && !d->link_up) {
+                kprintf("%s: link up — renewing address configuration\n", d->name);
+                d->link_up = 1;
+                net_dhcp_one(d);
+            } else if (!up && d->link_up) {
+                kprintf("%s: link down (carrier lost)\n", d->name);
+                d->link_up = 0;
+            }
+        }
     }
 }

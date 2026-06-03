@@ -606,7 +606,7 @@ size_t vfs_proc_mountinfo(char *buf, size_t sz)
 		idbuf[n] = '\0';
 		/* "<id> 1 0:<id> / <path> rw - <fs> <fs> rw\n" */
 		const char *cols[] = { idbuf, " 1 0:", idbuf, " / ", path, " rw - ", fs, " ", fs, " rw\n" };
-		for (int ci = 0; ci < 11; ci++)
+		for (int ci = 0; ci < (int)(sizeof(cols) / sizeof(cols[0])); ci++)
 			for (const char *s = cols[ci]; *s && pos + 1 < sz; s++) buf[pos++] = *s;
 	}
 	spin_unlock_irq(&vfs_lock, f);

@@ -181,26 +181,48 @@ static void mdio_write(int phy, int reg, uint16_t val)
 
 #define PHY_ADDR 1   /* BCM54213PE on the Pi 4 sits at MDIO address 1 */
 
-/* return UMAC speed code, after waiting for link; -1 = no link */
-static int phy_bringup(void)
+/* decode the negotiated speed from the BCM auxiliary status summary (reg 0x19),
+ * bits [10:8] = HCD speed */
+static int phy_speed(void)
 {
-    /* restart autonegotiation (BMCR bit 9 | enable bit 12) */
-    mdio_write(PHY_ADDR, 0x00, (1 << 12) | (1 << 9));
-    /* wait for link (BMSR bit 2), up to ~3s */
-    int up = 0;
-    for (int i = 0; i < 3000; i++) {
-        uint16_t bmsr = mdio_read(PHY_ADDR, 0x01);
-        if (bmsr & (1 << 2)) { up = 1; break; }
-        genet_udelay(1000);
-    }
-    if (!up) return -1;
-    /* BCM auxiliary status summary (reg 0x19), bits [10:8] = negotiated speed */
     uint16_t aux = mdio_read(PHY_ADDR, 0x19);
     switch ((aux >> 8) & 7) {
     case 7: case 6: return UMAC_SPEED_1000;  /* 1000 FD/HD */
     case 5: case 4: return UMAC_SPEED_100;   /* 100 FD/HD */
     default:        return UMAC_SPEED_10;
     }
+}
+
+static int phy_link_up(void) { return (mdio_read(PHY_ADDR, 0x01) & (1 << 2)) ? 1 : 0; }
+
+/* return UMAC speed code, after waiting for link; -1 = no link */
+static int phy_bringup(void)
+{
+    /* restart autonegotiation (BMCR bit 9 | enable bit 12) */
+    mdio_write(PHY_ADDR, 0x00, (1 << 12) | (1 << 9));
+    int up = 0;
+    for (int i = 0; i < 3000; i++) {       /* wait for link, up to ~3s */
+        if (phy_link_up()) { up = 1; break; }
+        genet_udelay(1000);
+    }
+    if (!up) return -1;
+    return phy_speed();
+}
+
+static void umac_set_speed(int speed)
+{
+    uint32_t cmd = gr(UMAC_CMD) & ~(3u << CMD_SPEED_SHIFT);
+    gw(UMAC_CMD, cmd | ((uint32_t)speed << CMD_SPEED_SHIFT) | CMD_TX_EN | CMD_RX_EN);
+}
+
+/* netdev carrier poll (Linux-style hotplug): the link watcher calls this ~1 Hz.
+ * On a down→up edge it re-reads the negotiated speed and re-applies it so a
+ * cable replugged into a different-speed port still works. */
+static int genet_link_check(netdev_t *dev)
+{
+    int up = phy_link_up();
+    if (up && !dev->link_up) umac_set_speed(phy_speed());
+    return up;
 }
 
 /* ── MAC + DMA init ──────────────────────────────────────────────────────── */
@@ -278,9 +300,9 @@ static void dma_init(void)
 /* ── netdev tx / poll ────────────────────────────────────────────────────── */
 static int genet_tx(netdev_t *dev, skb_t *skb)
 {
-    (void)dev;
     uint16_t len = skb->len;
-    if (len > RX_BUF_LENGTH) { skb_free(skb); return -1; }
+    if (!dev->link_up)        { skb_free(skb); return -1; }  /* no carrier */
+    if (len > RX_BUF_LENGTH)  { skb_free(skb); return -1; }
     memcpy(tx_buf, skb->data, len);
     dcache_clean(tx_buf, len);
 
@@ -371,9 +393,11 @@ void bcmgenet_init(void)
     dma_init();
     gw(UMAC_CMD, gr(UMAC_CMD) | CMD_TX_EN | CMD_RX_EN);
 
-    g_genet.tx   = genet_tx;
-    g_genet.poll = genet_poll;
-    g_genet.ip   = 0;   /* configured by DHCP/SLAAC */
+    g_genet.tx         = genet_tx;
+    g_genet.poll       = genet_poll;
+    g_genet.link_check = genet_link_check;   /* Linux-style carrier hotplug */
+    g_genet.link_up    = 1;                  /* link is up (we just brought it up) */
+    g_genet.ip         = 0;   /* configured by DHCP/SLAAC */
     net_register(&g_genet);
     kprintf("bcmgenet: eth0 up, speed=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
             speed, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
