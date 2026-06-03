@@ -633,6 +633,7 @@ void fd_table_destroy(fd_table_t *t)
 		if (t->files[i]) {
 			vfs_file_t *f = t->files[i];
 			if (--f->refcount == 0) {
+				vfs_flock_release(f);
 				if (f->inode && f->inode->fops && f->inode->fops->close)
 					f->inode->fops->close(f);
 				if (f->inode && !f->inode->cached)
@@ -836,12 +837,46 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	return fd;
 }
 
+/* ── flock(2): BSD whole-file advisory locks, tied to the open file ──
+ * LOCK_SH=1 LOCK_EX=2 LOCK_NB=4 LOCK_UN=8. The lock follows the open file
+ * description (shared by dup/fork), released when the file is finally closed. */
+static spinlock_t flock_lock = SPINLOCK_INIT;
+
+void vfs_flock_release(vfs_file_t *f)
+{
+	if (!f || !f->inode || !f->flock_held) return;
+	uint64_t fl = spin_lock_irq(&flock_lock);
+	if (f->flock_held == 2 && f->inode->flock_ex == f) f->inode->flock_ex = NULL;
+	else if (f->flock_held == 1 && f->inode->flock_sh > 0) f->inode->flock_sh--;
+	f->flock_held = 0;
+	spin_unlock_irq(&flock_lock, fl);
+}
+
+/* try to acquire LOCK_SH(1)/LOCK_EX(2); 0 = got it, -11 (EWOULDBLOCK) = conflict */
+int vfs_flock_try(vfs_file_t *f, int cmd)
+{
+	if (!f || !f->inode) return -9;
+	vfs_inode_t *in = f->inode;
+	uint64_t fl = spin_lock_irq(&flock_lock);
+	int other_ex = in->flock_ex && in->flock_ex != f;
+	int other_sh = in->flock_sh - (f->flock_held == 1 ? 1 : 0);
+	int conflict = (cmd == 2) ? (other_ex || other_sh > 0) : other_ex;
+	if (conflict) { spin_unlock_irq(&flock_lock, fl); return -11; }
+	if (f->flock_held == 2) in->flock_ex = NULL;          /* drop prior hold */
+	else if (f->flock_held == 1) in->flock_sh--;
+	if (cmd == 2) { in->flock_ex = f; f->flock_held = 2; }
+	else          { in->flock_sh++;  f->flock_held = 1; }
+	spin_unlock_irq(&flock_lock, fl);
+	return 0;
+}
+
 /* drop one reference to an open file; close + free it when the last goes.
  * Used by SCM_RIGHTS fd-passing to manage in-flight file references. */
 void vfs_file_put(vfs_file_t *f)
 {
 	if (!f) return;
 	if (--f->refcount == 0) {
+		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
 		if (f->inode && !f->inode->cached)
@@ -858,6 +893,7 @@ int vfs_close(int fd)
 
 	fd_free(p->fds, fd);
 	if (--f->refcount == 0) {
+		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
 		if (f->inode && !f->inode->cached)
