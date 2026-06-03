@@ -646,11 +646,15 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
       (PERSISTMARK:FRESH) → poweroff (QEMU imajı flush eder) → boot-2 aynı imaj, marker hâlâ
       orada (PERSISTMARK:SURVIVED). Suite'e c-persist eklendi (regression koruması). ext2_write
       block/inode/dirent/bitmap'i write-through bd->write ile diske yazıyor — gerçek rw.
-- [ ] **GERÇEK KALICILIK kalan parça — disk-rootfs + init-pivot**: persist altyapısı kanıtlandı
-      (üstte); kalan = / kökünün ramfs yerine GERÇEKTEN disk olması. Tam rootfs (/etc /bin /usr
-      /home /root) diske kurulu + boot init akışı: kalıcı bölümü mount → `pivot_root` → gerçek
-      init'i exec. /tmp /proc /sys /dev uçucu kalır (Linux'ta da öyle — kasıtlı). USB-FAT-boot
-      ayağı gerçek donanım ister (636).
+- [x] **GERÇEK KALICILIK — disk-rootfs + init-pivot (switch_root) KANITLANDI** ✅ (2026-06-03):
+      / kökü artık GERÇEKTEN disk olabiliyor. init (`userspace/init.c` `maybe_switch_root`):
+      auto-mount edilen /mnt'te tam rootfs varsa (`/mnt/bin/init`) → `pivot_root(/mnt,/mnt/oldroot)`
+      → /dev (devtmpfs) + /proc yeniden mount → diskteki `/bin/init`'i re-exec. tests/diskroot.sh:
+      diske tam rootfs (initramfs ağacının kopyası) seed → iki boot → boot1 /var'a marker yazar
+      (FRESH) → boot2 aynı imaj marker duruyor (SURVIVED) + /etc/diskroot-id sentinel ONDISK doğrular.
+      Mutlak /var yazısı reboot'tan sağ çıkıyor → / kalıcı disk. Normal `make test` etkilenmez
+      (gpt-test.img'de /bin/init yok → pivot yok; iki arch 307/301 yeşil). /tmp /proc /sys /dev
+      uçucu (Linux'ta da öyle). KALAN: gerçek donanım USB/SD-boot (636), /etc/fstab okuma (631).
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
 - [ ] /etc/fstab okuma, boot'ta otomatik mount
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
