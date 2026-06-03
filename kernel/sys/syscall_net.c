@@ -400,7 +400,8 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         long rr = -38;
         if (s->type == SOCK_RAW && s->proto == IPPROTO_ICMPV6 &&
             len >= sizeof(icmp6_hdr_t)) {
-            in6_addr_t src6 = ipv6_src_for(s->dev, &dst6);
+            netdev_t  *txdev = net_route_dev6(&dst6);
+            in6_addr_t src6  = ipv6_src_for(txdev, &dst6);
             icmp6_hdr_t *ih = (icmp6_hdr_t *)kb;
             ih->checksum = 0;
             ih->checksum = ipv6_pseudo_cksum(&src6, &dst6, IP6_NH_ICMPV6,
@@ -410,7 +411,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 if (!skb) { rr = -12; break; }
                 memcpy(skb->data, kb, len);
                 skb->len = (uint16_t)len;
-                int rc = ipv6_tx(s->dev, skb, &dst6, IP6_NH_ICMPV6);
+                int rc = ipv6_tx(txdev, skb, &dst6, IP6_NH_ICMPV6);
                 if (rc >= 0) { rr = (long)len; break; }
                 if (rc != -1) { rr = rc; break; }
                 net_poll();   /* drain RX — NDP reply may arrive (later phase) */
@@ -730,6 +731,12 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
 
     vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
     if (!parent || !parent->inode) return -2;
+    /* a final component of "", ".", or ".." names a directory (the parent or an
+     * ancestor, already shown to exist) — never a symlink → EINVAL, not ENOENT. */
+    if (fname[0] == '\0' ||
+        (fname[0] == '.' && (fname[1] == '\0' ||
+                             (fname[1] == '.' && fname[2] == '\0'))))
+        return -22;
     if (!parent->inode->iops || !parent->inode->iops->lookup) return -2;
 
     vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
