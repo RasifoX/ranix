@@ -9,11 +9,44 @@
  * (proctab, sched_lock, alloc_pid, runqueue_add, kstack_order_val) are in scope.
  * ───────────────────────────────────────────────────────────────────────── */
 
+static spinlock_t sighand_lock;
+
+sighand_t *sighand_alloc(sighand_t *copy_from)
+{
+	sighand_t *sh = kmalloc(sizeof(*sh));
+	if (!sh) return NULL;
+	if (copy_from) memcpy(sh->actions, copy_from->actions, sizeof(sh->actions));
+	else           memset(sh->actions, 0, sizeof(sh->actions));
+	sh->refcount = 1;
+	return sh;
+}
+
+sighand_t *sighand_get(sighand_t *sh)
+{
+	if (sh) {
+		uint64_t f = spin_lock_irq(&sighand_lock);
+		sh->refcount++;
+		spin_unlock_irq(&sighand_lock, f);
+	}
+	return sh;
+}
+
+void sighand_put(sighand_t *sh)
+{
+	if (!sh) return;
+	uint64_t f = spin_lock_irq(&sighand_lock);
+	int r = --sh->refcount;
+	spin_unlock_irq(&sighand_lock, f);
+	if (r == 0) kfree(sh);
+}
+
 pid_t proc_create(const char *name, void (*fn)(void))
 {
 	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
 	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
+	p->sighand = sighand_alloc(NULL);
+	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), 0); return -1; }
 	p->magic = PROC_MAGIC;
 
 	process_t *current = task_current();
@@ -70,6 +103,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	if (!p) return -1;
 	memset(p, 0, sizeof(*p));
 	p->magic = PROC_MAGIC;
+	p->sighand = sighand_alloc(NULL);
+	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), 0); return -1; }
 
 	process_t *current = task_current();
 	p->ppid  = current->pid;
@@ -255,6 +290,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 fail:
 	if (p->vm) vm_destroy(p->vm);
 	if (p->fds) fd_table_destroy(p->fds);
+	sighand_put(p->sighand);
 	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(p), 0);
 	return -1;
@@ -333,7 +369,8 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 		}
 	}
 
-	memcpy(child->sig_actions, parent->sig_actions, sizeof(parent->sig_actions));
+	child->sighand = sighand_alloc(parent->sighand);   /* fork → private copy */
+	if (!child->sighand) goto fail_early;
 	child->sig_mask = parent->sig_mask;
 
 	child->kstack = kstack_alloc();
@@ -415,6 +452,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 fail_early:
 	if (child->vm)     vm_destroy(child->vm);
 	if (child->fds)    fd_table_destroy(child->fds);
+	sighand_put(child->sighand);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	if (child->uts_ns) uts_ns_put(child->uts_ns);
 	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
@@ -460,9 +498,13 @@ pid_t proc_vfork(void)
 	memcpy(child->cwd, parent->cwd, 256);
 	child->root         = parent->root;
 	child->umask        = parent->umask;
+	child->sighand      = sighand_alloc(parent->sighand);
+	if (!child->sighand) { buddy_free(VIRT_TO_PHYS(child), 0); return -1; }
+	child->sig_mask     = parent->sig_mask;
 
 	child->kstack = kstack_alloc();
 	if (!child->kstack) {
+		sighand_put(child->sighand);
 		buddy_free(VIRT_TO_PHYS(child), 0);
 		return -1;
 	}
@@ -562,6 +604,11 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->root  = parent->root;
 	child->umask = parent->umask;
 
+	/* Threads share signal dispositions (CLONE_SIGHAND) but each has its own
+	 * blocked mask, inherited from the creator. */
+	child->sighand  = sighand_get(parent->sighand);
+	child->sig_mask = parent->sig_mask;
+
 	child->kstack = kstack_alloc();
 	if (!child->kstack) goto fail;
 
@@ -630,6 +677,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 
 fail:
 	if (child->vm) vm_destroy(child->vm);
+	sighand_put(child->sighand);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(child), 0);
 	return -1;
@@ -746,9 +794,11 @@ void task_exit(void)
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
 	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
+	sighand_t  *dying_sh  = p->sighand; p->sighand = NULL;
 	spin_unlock_irq(&sched_lock, f);
 
 	/* Free resources — process is still schedulable during this. */
+	sighand_put(dying_sh);
 	arch_get_cpu_ctx()->wd_where = "exit:fdput";
 	if (dying_fds) fd_table_put(dying_fds);
 	if (dying_vm) {

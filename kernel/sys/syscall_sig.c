@@ -24,11 +24,11 @@ static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldac
 
 	process_t *p = task_current();
 	if (oldact) {
-		if (copy_to_user(oldact, &p->sig_actions[sig - 1], copy_sz) != 0)
+		if (copy_to_user(oldact, &p->sighand->actions[sig - 1], copy_sz) != 0)
 			return -14;
 	}
 	if (act) {
-		if (copy_from_user(&p->sig_actions[sig - 1], act, copy_sz) != 0)
+		if (copy_from_user(&p->sighand->actions[sig - 1], act, copy_sz) != 0)
 			return -14;
 	}
 	return 0;
@@ -66,11 +66,20 @@ static long sys_kill(pid_t pid, int sig)
 	return 0;
 }
 
-/* tgkill: simplified — thread groups not implemented, just route to kill */
+/* tgkill: signal a specific thread (tid), but only if it still belongs to the
+ * named thread group (tgid). Threads are individual process_t sharing a tgid,
+ * so the tid resolves directly; the tgid check guards against a stale tid that
+ * has exited and been reused by an unrelated process. */
 static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 {
-	(void)tgid;
-	return sys_kill(tid, sig);
+	if (tgid <= 0 || tid <= 0) return -22; /* EINVAL */
+	pid_namespace_t *ns = current_pid_ns();
+	process_t *t = pidns_find(ns, (int)tid);
+	if (!t) return -3; /* ESRCH */
+	process_t *leader = pidns_find(ns, (int)tgid);
+	if (!leader || t->tgid != leader->pid) return -3; /* tid not in tgid */
+	task_signal(t, sig);
+	return 0;
 }
 
 /* Return from a signal handler: restore the trap frame that signal_dispatch

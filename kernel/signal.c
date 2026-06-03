@@ -62,7 +62,7 @@ int task_has_actionable_signal(void)
 	while (mask) {
 		int sig = __builtin_ctzll(mask) + 1;
 		mask &= mask - 1;
-		void (*handler)(int) = p->sig_actions[sig - 1].sa_handler;
+		void (*handler)(int) = p->sighand->actions[sig - 1].sa_handler;
 		if ((uintptr_t)handler == 1) continue;   /* SIG_IGN */
 		if (!handler && !sig_default_kill(sig)) continue; /* SIG_DFL non-fatal */
 		return 1;
@@ -101,7 +101,7 @@ void signal_dispatch(arch_context_t *tf)
 
 	p->sig_pending &= ~(1UL << (sig - 1));
 
-	sigaction_t *sa = &p->sig_actions[sig - 1];
+	sigaction_t *sa = &p->sighand->actions[sig - 1];
 	void (*handler)(int) = sa->sa_handler;
 
 	/* SIG_IGN = 1 */

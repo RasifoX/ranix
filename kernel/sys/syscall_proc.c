@@ -1007,10 +1007,16 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		}
 	}
 
-	/* reset signal state: SIG_IGN stays, user handlers reset to SIG_DFL */
+	/* reset signal state: SIG_IGN stays, user handlers reset to SIG_DFL. If the
+	 * disposition table is still shared with sibling threads, detach to a private
+	 * copy first so the reset doesn't reach them. */
+	if (p->sighand->refcount > 1) {
+		sighand_t *priv = sighand_alloc(p->sighand);
+		if (priv) { sighand_put(p->sighand); p->sighand = priv; }
+	}
 	for (int i = 0; i < NSIG; i++) {
-		if (p->sig_actions[i].sa_handler != (void (*)(int))1 /* SIG_IGN */)
-			p->sig_actions[i] = (sigaction_t){0};
+		if (p->sighand->actions[i].sa_handler != (void (*)(int))1 /* SIG_IGN */)
+			p->sighand->actions[i] = (sigaction_t){0};
 	}
 	p->sig_mask    = 0;
 	p->sig_pending = 0;
