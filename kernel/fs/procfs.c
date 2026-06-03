@@ -12,6 +12,7 @@
 #include <kernel/sync.h>
 #include <kernel/net/socket.h>
 #include <kernel/net/net.h>
+#include <kernel/net/ipv6.h>
 #include <kernel/block.h>
 #include <kernel/hal.h>
 
@@ -1616,9 +1617,38 @@ static int fill_net_route(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* one /proc/net/if_inet6 line: 32-hex addr, ifindex, prefixlen, scope, flags, name */
+static void pb_if6(pb_t *b, const in6_addr_t *a, int ifindex,
+                   int prefixlen, int scope, const char *name)
+{
+	static const char hx[] = "0123456789abcdef";
+	for (int i = 0; i < 16; i++) {
+		pb_char(b, hx[(a->s6[i] >> 4) & 0xf]);
+		pb_char(b, hx[a->s6[i] & 0xf]);
+	}
+	pb_char(b, ' '); pb_char(b, hx[(ifindex >> 4) & 0xf]); pb_char(b, hx[ifindex & 0xf]);
+	pb_char(b, ' '); pb_char(b, hx[(prefixlen >> 4) & 0xf]); pb_char(b, hx[prefixlen & 0xf]);
+	pb_char(b, ' '); pb_char(b, hx[(scope >> 4) & 0xf]); pb_char(b, hx[scope & 0xf]);
+	pb_char(b, ' '); pb_char(b, '8'); pb_char(b, '0');   /* IFA_F_PERMANENT */
+	pb_char(b, ' '); pb_char(b, ' '); pb_char(b, ' '); pb_char(b, ' ');
+	pb_str(b, name); pb_char(b, '\n');
+}
+
 static int fill_net_if_inet6(char *buf, size_t sz)
 {
-	(void)buf; (void)sz; return 0; /* no IPv6 */
+	pb_t b = {buf, sz};
+	pb_if6(&b, &in6addr_loopback, 1, 128, 0x10, "lo");   /* host scope */
+	for (int i = 0; ; i++) {
+		netdev_t *dev = net_dev(i);
+		if (!dev) break;
+		if ((dev->ip >> 24) == 127) continue;   /* loopback: only ::1, above */
+		int ifindex = i + 2;
+		if (in6_is_ll(&dev->ip6_ll))
+			pb_if6(&b, &dev->ip6_ll, ifindex, 64, 0x20, dev->name);  /* link scope */
+		if (!in6_is_unspec(&dev->ip6))
+			pb_if6(&b, &dev->ip6, ifindex, 64, 0x00, dev->name);     /* global scope */
+	}
+	return (int)(sz - b.rem);
 }
 
 static const struct { const char *name; int type; } net_files[] = {
