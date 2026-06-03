@@ -191,6 +191,7 @@ struct vfs_file;
 mnt_namespace_t *nsfile_to_mnt(struct vfs_file *f);
 int        vfs_umount(const char *path);
 size_t     vfs_proc_mounts(char *buf, size_t sz);
+const char *vfs_path_fstype(const char *path);
 int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
                         const char *path, int flags, mode_t mode);

@@ -566,6 +566,7 @@ Claude CLI için TLS şart.
 - [x] SNI (mbedtls_ssl_set_hostname) çalışıyor
 - [x] gerçek-internet TCP doğrulandı: HTTP GET (off-link routing→gateway→NAT), test_http
 - [ ] curl statik (mbedTLS backend) — bir sonraki (binary diagnostic var, curl portu kaldı)
+- [x] statfs(2) path-aware f_type ✅ (2026-06-03): path/fd'nin gerçekten üstünde olduğu fs'in magic'i (proc/sysfs/ext2/vfat/iso9660/tmpfs/cgroup2/ramfs) — en uzun mountpoint-prefix eşleşmesi (vfs_path_fstype). Önce hardcoded RAMFS dönüyordu. test_statfs. KALAN: gerçek blok sayıları (per-fs statfs op).
 - [ ] cert doğrulama (CA bundle + time) — şimdilik VERIFY_NONE (handshake/crypto kanıtlandı)
 - KRİTİK enabler: TCP short-read bug fix (986a96e) — TLS record framing'i bu açtı
 

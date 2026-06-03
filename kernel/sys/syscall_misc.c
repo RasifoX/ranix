@@ -17,28 +17,57 @@ typedef struct {
 	long     f_spare[4];
 } kernel_statfs_t;
 
+/* filesystem-type → statfs f_type magic (Linux values, what programs branch on) */
+static long fstype_to_magic(const char *fs)
+{
+	if (!fs) return 0x858458f6;
+	if (!strcmp(fs, "proc"))     return 0x9fa0;
+	if (!strcmp(fs, "sysfs"))    return 0x62656572;
+	if (!strcmp(fs, "ext2") || !strcmp(fs, "ext4")) return 0xEF53;
+	if (!strcmp(fs, "vfat") || !strcmp(fs, "fat"))  return 0x4d44;
+	if (!strcmp(fs, "iso9660"))  return 0x9660;
+	if (!strcmp(fs, "tmpfs"))    return 0x01021994;
+	if (!strcmp(fs, "cgroup2"))  return 0x63677270;
+	if (!strcmp(fs, "devfs") || !strcmp(fs, "devtmpfs")) return 0x1cd1;
+	return 0x858458f6; /* RAMFS_MAGIC */
+}
+
+static void fill_statfs(kernel_statfs_t *st, const char *fs)
+{
+	memset(st, 0, sizeof(*st));
+	st->f_type    = fstype_to_magic(fs);
+	st->f_bsize   = 4096;
+	st->f_blocks  = 1024;          /* block counts are still nominal (no per-fs statfs op yet) */
+	st->f_bfree   = 512;
+	st->f_bavail  = 512;
+	st->f_files   = 1024;
+	st->f_ffree   = 512;
+	st->f_namelen = 255;
+}
+
 static long sys_statfs(const char *path, kernel_statfs_t *buf)
 {
-	(void)path;
 	if (!access_ok(buf, sizeof(*buf))) return -14;
+	char kp[PROC_NAME_MAX];
+	const char *fs = "ramfs";
+	if (path && resolve_path(kp, -100 /*AT_FDCWD*/, path) == 0)
+		fs = vfs_path_fstype(kp);
 	kernel_statfs_t st;
-	memset(&st, 0, sizeof(st));
-	st.f_type    = 0x858458f6; /* RAMFS_MAGIC */
-	st.f_bsize   = 4096;
-	st.f_blocks  = 1024;
-	st.f_bfree   = 512;
-	st.f_bavail  = 512;
-	st.f_files   = 1024;
-	st.f_ffree   = 512;
-	st.f_namelen = 255;
+	fill_statfs(&st, fs);
 	copy_to_user(buf, &st, sizeof(st));
 	return 0;
 }
 
 static long sys_fstatfs(int fd, kernel_statfs_t *buf)
 {
-	(void)fd;
-	return sys_statfs(NULL, buf);
+	if (!access_ok(buf, sizeof(*buf))) return -14;
+	const char *fs = "ramfs";
+	vfs_file_t *f = fd_get(task_current()->fds, fd);
+	if (f && f->path[0] == '/') fs = vfs_path_fstype(f->path);
+	kernel_statfs_t st;
+	fill_statfs(&st, fs);
+	copy_to_user(buf, &st, sizeof(st));
+	return 0;
 }
 
 /* ── capabilities (root always has all) ─────────────────── */
