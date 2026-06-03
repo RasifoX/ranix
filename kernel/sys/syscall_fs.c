@@ -143,24 +143,46 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 	return copy_to_user(st, &ks, sizeof(ks));
 }
 
+/* R_OK=4 W_OK=2 X_OK=1 happen to equal the rwx permission bits. access() uses
+ * the REAL uid/gid (faccessat with AT_EACCESS would use effective — minor). */
+static long access_check(const char *kp, int mode, int use_eff)
+{
+	vfs_stat_t vs = {0};
+	if (vfs_stat(kp, &vs) != 0) return -2;          /* ENOENT */
+	if (mode == 0) return 0;                        /* F_OK: exists */
+	process_t *p = task_current();
+	uid_t uid = !p ? 0 : (use_eff ? p->euid : p->uid);
+	gid_t gid = !p ? 0 : (use_eff ? p->egid : p->gid);
+	if (uid == 0) {                                 /* root: r/w always, x if any x bit */
+		if ((mode & 1) && !(vs.mode & 0111)) return -13; /* EACCES */
+		return 0;
+	}
+	int shift;
+	if (vs.uid == uid) shift = 6;
+	else {
+		int in_group = (vs.gid == gid);
+		for (int i = 0; !in_group && p && i < p->ngroups; i++)
+			if (p->groups[i] == vs.gid) in_group = 1;
+		shift = in_group ? 3 : 0;
+	}
+	int want = mode & 7;
+	return (((vs.mode >> shift) & 7) & want) == want ? 0 : -13;
+}
+
 static long sys_access(const char *path, int mode)
 {
-	(void)mode;
 	char kp[PROC_NAME_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
-	vfs_stat_t vs = {0};
-	return vfs_stat(kp, &vs) == 0 ? 0 : -2;
+	return access_check(kp, mode, 0);
 }
 
 static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 {
-	(void)flags; (void)mode;
 	char kp[PROC_NAME_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
-	vfs_stat_t vs = {0};
-	return vfs_stat(kp, &vs) == 0 ? 0 : -2;
+	return access_check(kp, mode, flags & 0x200 /*AT_EACCESS*/);
 }
 
 static long sys_truncate(const char *path, off_t len)
