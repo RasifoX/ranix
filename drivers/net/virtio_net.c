@@ -339,6 +339,10 @@ static void virtio_net_setup(volatile uint32_t *regs)
     vw(p, VNET_HOST_SEL, 0);
     uint32_t feat = vr(p, VNET_HOST_FEAT);
     feat &= ~(1u << 6);   /* no VIRTIO_NET_F_MAC forced — we read MAC separately */
+    /* Decline the control virtqueue: we set up only rx/tx and never program an
+     * RX filter, so without CTRL_VQ the device must deliver every frame —
+     * including IPv6 solicited-node multicast, which NDP depends on. */
+    feat &= ~((1u << 17) | (1u << 18));   /* VIRTIO_NET_F_CTRL_VQ | CTRL_RX */
     vw(p, VNET_GUEST_SEL, 0);
     vw(p, VNET_GUEST_FEAT, feat);
     vw(p, VNET_GUEST_PG_SZ, 4096);

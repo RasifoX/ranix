@@ -24,6 +24,8 @@ static inline int in6_eq(const in6_addr_t *a, const in6_addr_t *b)
 { for (int i = 0; i < 16; i++) if (a->s6[i] != b->s6[i]) return 0; return 1; }
 
 static inline int in6_is_mcast(const in6_addr_t *a) { return a->s6[0] == 0xff; }
+static inline int in6_is_unspec(const in6_addr_t *a)   /* :: */
+{ for (int i = 0; i < 16; i++) if (a->s6[i]) return 0; return 1; }
 static inline int in6_is_ll(const in6_addr_t *a)     /* fe80::/10 */
 { return a->s6[0] == 0xfe && (a->s6[1] & 0xc0) == 0x80; }
 

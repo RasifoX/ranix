@@ -1088,7 +1088,35 @@ int vfs_mkfifo(const char *path, mode_t mode)
 
 	const char *fname = slash + 1;
 	mode_t cmode = (mode & 07777 & ~(p ? p->umask : 022)) | S_IFIFO;
-	int r = parent->inode->iops->mknod(parent->inode, fname, cmode);
+	int r = parent->inode->iops->mknod(parent->inode, fname, cmode, 0);
+	if (r != 0) return r;
+	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
+	if (in) vfs_dentry_create(parent, fname, in);
+	return 0;
+}
+
+/* mknod for character/block device nodes (S_IFCHR/S_IFBLK) — routes to the
+ * driver registered for that major:minor (devfs registry). */
+int vfs_mknod(const char *path, mode_t mode, dev_t dev)
+{
+	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
+	const char *slash = path + strlen(path) - 1;
+	while (slash > path && *slash != '/') slash--;
+	char dir_path[256];
+	int dlen = (int)(slash - path);
+	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
+	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+
+	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	if (!parent || !parent->inode || !parent->inode->iops) return -2;
+	if (!parent->inode->iops->mknod) return -1;
+	process_t *p = task_current();
+	if (p && p->euid != 0) return -1; /* EPERM: only root may create device nodes */
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
+	if (pr) return pr;
+
+	const char *fname = slash + 1;
+	int r = parent->inode->iops->mknod(parent->inode, fname, mode, dev);
 	if (r != 0) return r;
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
 	if (in) vfs_dentry_create(parent, fname, in);
