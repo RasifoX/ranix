@@ -200,6 +200,7 @@ check "etc-hosts"    "localhost"     "$(grep localhost /etc/hosts | awk '{print 
 check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 check "c-nss"        "OK"            "$(timeout 8 /bin/test_nss 2>/dev/null)"
+check "c-statx"      "OK"            "$(timeout 8 /bin/test_statx 2>/dev/null)"
 check "c-tz"         "OK"            "$(timeout 8 /bin/test_tz 2>/dev/null)"
 check "c-coredump"   "OK"            "$(timeout 12 /bin/test_coredump 2>/dev/null)"
 check "core-pattern"  "core"          "$(cat /proc/sys/kernel/core_pattern 2>/dev/null | tr -d "\n")"

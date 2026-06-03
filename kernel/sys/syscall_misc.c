@@ -792,14 +792,31 @@ typedef struct {
 
 static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask, linux_statx_t *buf)
 {
-	(void)flags; (void)mask;
+	(void)mask;
 	char kp[PROC_NAME_MAX];
-	int r = resolve_path(kp, dirfd, path);
-	if (r) return r;
-
 	vfs_stat_t ks;
-	r = vfs_stat(kp, &ks);
-	if (r < 0) return -2;
+
+	if (flags & AT_EMPTY_PATH) {
+		char tmp[2];
+		if (strncpy_from_user(tmp, path, 2) >= 0 && tmp[0] == '\0') {
+			process_t *p = task_current();
+			vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
+			if (!f || !f->inode) return -9; /* EBADF */
+			memset(&ks, 0, sizeof(ks));
+			ks.ino = f->inode->ino; ks.mode = f->inode->mode;
+			ks.uid = f->inode->uid; ks.gid = f->inode->gid;
+			ks.size = (uint64_t)f->inode->size; ks.nlink = f->inode->nlink;
+			ks.rdev = f->inode->rdev;
+			goto fill;
+		}
+	}
+	{
+		int r = resolve_path(kp, dirfd, path);
+		if (r) return r;
+		int sr = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lstat(kp, &ks) : vfs_stat(kp, &ks);
+		if (sr < 0) return -2;
+	}
+fill:;
 
 	linux_statx_t sx;
 	memset(&sx, 0, sizeof(sx));
