@@ -113,6 +113,10 @@ typedef struct {
 #define SYS_ARCH_SEMOP             65
 #define SYS_ARCH_SEMCTL            66
 #define SYS_ARCH_SHMDT             67
+#define SYS_ARCH_MSGGET            68
+#define SYS_ARCH_MSGSND            69
+#define SYS_ARCH_MSGRCV            70
+#define SYS_ARCH_MSGCTL            71
 #define SYS_ARCH_FCNTL             72
 #define SYS_ARCH_FLOCK             73
 #define SYS_ARCH_FSYNC             74
