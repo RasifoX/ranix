@@ -101,6 +101,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			if (kfds[i].revents) ready++;
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
+		if (task_has_actionable_signal()) { kfree(kfds); return -4; }
 		poll_block(deadline);
 	}
 
@@ -138,6 +139,7 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 			if ((wfds & (1ULL << i)) && fd_is_writable(i)) { wres |= (1ULL << i); ready++; }
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
+		if (task_has_actionable_signal()) return -4;
 		poll_block(deadline);
 	}
 
