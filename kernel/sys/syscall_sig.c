@@ -62,7 +62,7 @@ static long sys_kill(pid_t pid, int sig)
 	/* pid is namespace-local; resolve through the caller's pid namespace */
 	process_t *p = pidns_find(current_pid_ns(), (int)pid);
 	if (!p) return -3; /* ESRCH */
-	task_signal(p, sig);
+	task_signal_group(p, sig);   /* kill(2) is process-directed: any eligible thread */
 	return 0;
 }
 
