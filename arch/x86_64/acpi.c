@@ -39,6 +39,40 @@ int64_t arch_rtc_read(void)
 	return days * 86400 + (int64_t)h * 3600 + (int64_t)mi * 60 + s;
 }
 
+static uint8_t bin2bcd(unsigned v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+static void cmos_write(uint8_t reg, uint8_t val) { outb(0x70, reg); outb(0x71, val); }
+
+/* persist epoch seconds to the CMOS RTC (hwclock --systohc) */
+void arch_rtc_write(int64_t epoch)
+{
+	if (epoch <= 0) return;
+	int64_t days = epoch / 86400, rem = epoch % 86400;
+	unsigned hh = (unsigned)(rem / 3600), mm = (unsigned)((rem % 3600) / 60), ss = (unsigned)(rem % 60);
+	/* civil_from_days (inverse of days_from_civil) */
+	int64_t z = days + 719468;
+	int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+	unsigned doe = (unsigned)(z - era * 146097);
+	unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	int64_t y = (int64_t)yoe + era * 400;
+	unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	unsigned mp = (5 * doy + 2) / 153;
+	unsigned dd = doy - (153 * mp + 2) / 5 + 1;
+	unsigned mo = mp < 10 ? mp + 3 : mp - 9;
+	y += (mo <= 2);
+
+	uint8_t regb = cmos_read(0x0B);
+	int bcd = !(regb & 0x04);
+	cmos_write(0x0B, (uint8_t)(regb | 0x80));   /* SET: halt updates during write */
+	cmos_write(0x00, bcd ? bin2bcd(ss) : (uint8_t)ss);
+	cmos_write(0x02, bcd ? bin2bcd(mm) : (uint8_t)mm);
+	cmos_write(0x04, bcd ? bin2bcd(hh) : (uint8_t)hh);
+	cmos_write(0x07, bcd ? bin2bcd(dd) : (uint8_t)dd);
+	cmos_write(0x08, bcd ? bin2bcd(mo) : (uint8_t)mo);
+	cmos_write(0x09, bcd ? bin2bcd((unsigned)(y % 100)) : (uint8_t)(y % 100));
+	cmos_write(0x32, bcd ? bin2bcd((unsigned)(y / 100)) : (uint8_t)(y / 100));
+	cmos_write(0x0B, regb);                     /* clear SET: resume */
+}
+
 struct rsdp {
 	char     signature[8];      /* "RSD PTR " */
 	uint8_t  checksum;
