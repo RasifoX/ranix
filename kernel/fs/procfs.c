@@ -1883,7 +1883,7 @@ static int procfs_self_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
 	(void)in;
 	process_t *cur = task_current();
-	uint64_t pid = cur ? cur->pid : 0;
+	uint64_t pid = cur ? (uint64_t)task_vpid(cur) : 0;
 	/* build "/proc/N" */
 	char tmp[32]; int ti = 0;
 	const char *prefix = "/proc/";
@@ -1943,11 +1943,15 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 		if (strcmp(root_files[i].name, name) == 0)
 			return procfs_inode_file(-1, root_files[i].type);
 
-	/* numeric PID dirs */
-	int pid = 0; const char *p = name;
-	while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
-	if (*p == '\0' && p != name)
-		return procfs_piddir_inode(pid);
+	/* numeric PID dirs: the name is a pid as seen in the caller's pid namespace;
+	 * translate it to the global task (and reject pids not visible in this ns). */
+	int vnr = 0; const char *p = name;
+	while (*p >= '0' && *p <= '9') { vnr = vnr * 10 + (*p - '0'); p++; }
+	if (*p == '\0' && p != name) {
+		process_t *tp = pidns_find(current_pid_ns(), vnr);
+		if (!tp) return NULL;
+		return procfs_piddir_inode((int)tp->pid);
+	}
 
 	return NULL;
 }
@@ -2002,19 +2006,26 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	}
 	idx--;
 
-	/* per-process dirs: find the idx-th non-reaped process */
+	/* per-process dirs: the idx-th process visible in the caller's pid namespace,
+	 * named by its pid as seen in that namespace (vnr). */
+	pid_namespace_t *cur_ns = current_pid_ns();
 	int live = 0;
 	for (int i = 0; i < n_proc; i++) {
 		process_t *p = task_get(i);
 		if (!p) continue;
+		int vnr = task_pid_nr_ns(p, cur_ns);
+		if (vnr <= 0) {
+			if (cur_ns != &init_pid_ns) continue;   /* not visible in this ns */
+			vnr = (int)p->pid;                      /* root ns sees every task */
+		}
 		if (live == (int)idx) {
-			out->ino      = 0x8000 + (uint64_t)p->pid * 100 + 50;
+			out->ino      = 0x8000 + (uint64_t)vnr * 100 + 50;
 			out->mode     = S_IFDIR | 0555;
 			out->next_off = ROOT_FILES_N + 3 + idx + 1;
 			char tmp[16]; int ti = 0;
-			uint32_t pid = p->pid;
-			if (pid == 0) { tmp[ti++] = '0'; }
-			else { char rev[10]; int ri = 0; while (pid) { rev[ri++] = '0' + (pid % 10); pid /= 10; } for (int j = ri-1; j >= 0; j--) tmp[ti++] = rev[j]; }
+			uint32_t v = (uint32_t)vnr;
+			if (v == 0) { tmp[ti++] = '0'; }
+			else { char rev[10]; int ri = 0; while (v) { rev[ri++] = '0' + (v % 10); v /= 10; } for (int j = ri-1; j >= 0; j--) tmp[ti++] = rev[j]; }
 			memcpy(out->name, tmp, ti); out->name[ti] = '\0';
 			return 0;
 		}

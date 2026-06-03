@@ -418,7 +418,7 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 - [x] seccomp(SECCOMP_SET_MODE_FILTER, ...) — BPF filtre ✅ (cBPF interpreter)
 
 ### Test hedefleri
-- [ ] unshare --pid --fork --mount-proc /bin/sh çalışıyor
+- [x] unshare --pid --fork --mount-proc /bin/sh ✅ (procfs root readdir/lookup + /proc/self artık current_pid_ns'e göre vpid çevirir; yeni pidns'te /proc yalnız ns-görünür pid'leri gösterir, host sızıntısı yok; test_pidnsproc)
 - [x] memory limit aşılınca OOM killer doğru process'i öldürüyor ✅ (2026-06-03: memcg charge-fail → SIGKILL; test_memcg PASS, iki arch)
 - [x] ls /sys/devices çalışıyor ✅ (sys-cpu-online suite /sys/devices/system/cpu okuyor — PASS)
 
