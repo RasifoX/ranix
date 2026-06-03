@@ -623,7 +623,7 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 - [x] /tmp yazılabilir ✓; $HOME var; environment variables ✓ ✅
 
 ### Sistem olgunluğu
-- [ ] **Kalıcı root (switch_root/pivot_root)** — root şu an initramfs (ramfs, uçucu).
+- [x] **Kalıcı root (pivot_root)** ✅ — pivot_root(2) syscall (per-process root switch; PID1 pivot+exec ile tüm ağaç yeni root'a geçer, global mount-tree cerrahisi yok); put_old new_root-altı doğrulaması; test_pivot. Disk-root boot entegrasyonu (init akışı) gerçek diskte.
       ext2/ext4 rw + /mnt auto-mount VAR; **chroot(2) ✅ (2026-06-03: per-process root,
       jail-safe — switch_root temeli)**; eksik: mount-move (MS_MOVE) + pivot_root + diske
       kurulu tam rootfs + ext4-write-as-live-root doğrulama. (Linux de initramfs→switch_root.)
