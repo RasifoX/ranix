@@ -586,6 +586,33 @@ size_t vfs_proc_mounts(char *buf, size_t sz)
 	return pos;
 }
 
+/* /proc/PID/mountinfo: the richer per-mount format libmount/findmnt parse —
+ * "id parent major:minor root mountpoint opts - fstype source super_opts". */
+size_t vfs_proc_mountinfo(char *buf, size_t sz)
+{
+	mnt_namespace_t *mns = current_mnt_ns();
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	size_t pos = 0;
+	int id = 36;
+	for (vfs_mount_t *m = mns->mounts; m; m = m->next, id++) {
+		char path[256];
+		if (!m->mountpoint) { path[0] = '/'; path[1] = '\0'; }
+		else                  dentry_abspath(m->mountpoint, path, sizeof(path));
+		const char *fs = m->fstype ? m->fstype : "none";
+		char idbuf[12]; int n = 0; int v = id;
+		char tmp[12]; int t = 0;
+		do { tmp[t++] = '0' + v % 10; v /= 10; } while (v);
+		while (t) idbuf[n++] = tmp[--t];
+		idbuf[n] = '\0';
+		/* "<id> 1 0:<id> / <path> rw - <fs> <fs> rw\n" */
+		const char *cols[] = { idbuf, " 1 0:", idbuf, " / ", path, " rw - ", fs, " ", fs, " rw\n" };
+		for (int ci = 0; ci < 11; ci++)
+			for (const char *s = cols[ci]; *s && pos + 1 < sz; s++) buf[pos++] = *s;
+	}
+	spin_unlock_irq(&vfs_lock, f);
+	return pos;
+}
+
 /* fstype of the mount covering an absolute path — the mount whose mountpoint is
  * the longest prefix of path (statfs(2)). Defaults to the root fs. */
 const char *vfs_path_fstype(const char *path)

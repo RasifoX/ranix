@@ -253,6 +253,7 @@ check "fstab-mount"       "1"  "$(grep -c ' /fstabtmp tmpfs ' /proc/mounts)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
 check "proc-statm"        "7"  "$(cat /proc/self/statm 2>/dev/null | wc -w | tr -d ' ')"
 check "resolv-conf"       "1"  "$(grep -c nameserver /etc/resolv.conf 2>/dev/null)"
+check "proc-mountinfo"    "1"  "$([ -n "$(grep 'proc rw - proc' /proc/self/mountinfo 2>/dev/null)" ] && echo 1)"
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
 # busybox top in batch mode walks /proc/[pid]/stat + /proc/meminfo — exercises
 # the procfs process table end to end (a real "monitoring works" check).
