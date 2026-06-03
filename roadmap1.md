@@ -865,6 +865,15 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
       her testi FLAKE/HARD diye raporlar; ad-hoc flake-avının sistematik yerine geçer)
 - [ ] sürekli/otomatik CI runner (zamanlı veya her-commit; şu an manuel + otonom-loop)
 - [ ] tam **KASAN/KCSAN** (CONFIG_DEBUG; data-race + use-after-free otomatik)
+      > DE-RISK (2026-06-03, ertelendi): feasible — AMA `--target=<arch>-none-elf`
+      > `-fsanitize=kernel-address`'i REDDEDER; `<arch>-unknown-linux-gnu` hedefi KABUL eder
+      > (outline `__asan_loadN/storeN` üretir: `-mllvm -asan-instrumentation-with-call-threshold=0
+      > -mllvm -asan-globals=0 -mllvm -asan-stack=0`). Tasarım: opt-in `make KASAN=1` (target-switch),
+      > outline __asan runtime, shadow direct-map-indeksli (`(addr-DMAP_BASE)>>3`), range-guard +
+      > kasan_ready bayrağı (boot/MMIO/non-covered erişimleri atla). BLOKER: kmalloc SLAB'ları
+      > buddy'den TÜM RAM'e yayılı çeker → shadow tüm RAM'i kapsamalı (ram/8); ya boot-time bitişik
+      > rezervasyon ya da vmalloc-backed shadow gerekir (büyük buddy-order sorunu). kasan.c +
+      > buddy/heap hook + iki-arch boot-bringup = adanmış oturum işi, taze bağlamda incremental.
 - [ ] **syzkaller-sınıfı syscall fuzzer** (rastgele syscall + sanitizer = derin bug)
 - [ ] **kcov-benzeri coverage** ölçümü (hangi yol test edilmiyor)
 - [ ] LTP-benzeri geniş POSIX uyumluluk suite + stress-ng-benzeri yük
