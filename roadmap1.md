@@ -341,9 +341,14 @@ sıfır-flake değiliz ve gelecekteki temel bug'ları (boot.S dahil) anında yak
 bir ağ yok. Dinamik-ölçeklenme yeniden-yazımı da bu sağlam taban üstüne oturmalı.
 
 ### Sıfır-flake (önce bunu)
-- [ ] cow-race 1/10 flake (Pi'de got='' sessiz ölüm) — kökü bulunmalı, sebep gizli
-- [ ] signal-storm wedge — child sürekli `kill` → full-suite'te sistem kilitleniyor
-      (gerçek signal/IPI scheduler soundness bug'ı; 1/10 flake'le aynı kök olabilir)
+- **ÖLÇÜM (2026-06-03):** flakehunt düzgün arch-clean ile — x86 12/12, aarch64-virt 10/10 YEŞİL,
+  sıfır flake/wedge. Test edilebilir hedefler temiz. (flakehunt.sh artık başta `make clean` yapıyor;
+  öncesi arch karışımıyla yanlış-yeşil veriyordu — commit 94f8c0c.)
+- [ ] cow-race 1/10 flake — yalnız **gerçek Pi (raspi4)** timing'inde; QEMU virt'te ÜREMİYOR →
+      gerçek donanım gerektirir (kullanıcı). Testable hedeflerde temiz.
+- [~] signal-storm wedge — 22 düzgün koşuda (12 x86 + 10 aarch64) ÜREMEDİ; bu oturumdaki sinyal
+      alt sistemi yeniden yazımı (shared sighand + process-directed kill + task_signal_group)
+      muhtemelen giderdi. Üreyen reproducer yok; kapatmadan önce Pi'de doğrulama beklenebilir.
 - [ ] "10'da 1 = sorun var, çözülür" — non-determinizm sıfırlanmadan üste inşa yok
 
 ### Sessiz bozulmayı gürültülü yap (invariant katmanı)
