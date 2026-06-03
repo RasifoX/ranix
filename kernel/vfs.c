@@ -1024,6 +1024,7 @@ extern void procfs_register(void);
 extern void devfs_register(void);
 extern void ext2_register(void);
 extern void fat_register(void);
+extern void iso9660_register(void);
 
 void vfs_init(void)
 {
@@ -1041,6 +1042,7 @@ void vfs_init(void)
 	devfs_register();
 	ext2_register();
 	fat_register();
+	iso9660_register();
 	extern void sysfs_register(void);
 	sysfs_register();
 	extern void cgroup_register(void);
