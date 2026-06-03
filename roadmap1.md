@@ -512,7 +512,7 @@ Bu olmadan "Ranix Debian" hedefi boş laftan ibaret.
 - [x] IFUNC resolver chain — dynamic glibc çalışıyor (her string fn IFUNC; reloc + resolver OK) ✅
 - [ ] locale: glibc locale/charset altyapısı çalışıyor (en_US.UTF-8 yeterli)
 - [ ] timezone: /etc/localtime okuma (tzdata paketi kurulabilmeli)
-- [ ] NSS (Name Service Switch): /etc/passwd, /etc/hosts — getpwnam, gethostbyname
+- [x] NSS: /etc/passwd, /etc/hosts ✅ (musl getpwnam/getpwuid/getgrnam + gethostbyname→127.0.0.1; nsswitch dolaylaması yok; test_nss)
 - [x] math: libm.so.6 temel fonksiyonlar çalışıyor ✅ (gstress sqrt, gdl dlopen libm cos)
 
 **Paket sistemi temeli**
