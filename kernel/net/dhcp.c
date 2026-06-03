@@ -114,11 +114,16 @@ static int dhcp_parse(skb_t *skb, uint32_t xid, uint32_t *yiaddr,
 	return msgtype;
 }
 
+/* Wait until `deadline` (kernel_ticks) for a reply of want_type. Time-based,
+ * not a fixed iteration count: on real hardware the OFFER/ACK round-trip takes
+ * real milliseconds, and a tight count-loop finishes in microseconds — long
+ * before a real server answers (it was fine only against QEMU's instant SLIRP). */
 static skb_t *dhcp_poll_reply(netdev_t *dev, uint32_t xid, int want_type,
                               uint32_t *yiaddr, uint32_t *mask, uint32_t *gw,
-                              uint32_t *dns, uint32_t *serverid)
+                              uint32_t *dns, uint32_t *serverid, uint64_t deadline)
 {
-	for (int tries = 0; tries < 200000; tries++) {
+	extern volatile uint64_t kernel_ticks;
+	while (kernel_ticks < deadline) {
 		if (dev->poll) dev->poll(dev);
 		skb_t *skb;
 		while ((skb = netdev_rx_dequeue(dev)) != NULL) {
@@ -138,14 +143,24 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	uint32_t xid = htonl((uint32_t)(0x52414e00u ^ (kernel_ticks * 2654435761u)));
 	uint32_t yiaddr = 0, mask = 0, gw = 0, dns = 0, serverid = 0;
 
-	dhcp_send(dev, xid, DHCP_DISCOVER, 0, 0);
-	skb_t *off = dhcp_poll_reply(dev, xid, DHCP_OFFER, &yiaddr, &mask, &gw, &dns, &serverid);
+	/* DISCOVER → OFFER, retransmitting up to 4× (a real server may be slow or
+	 * the first DISCOVER may be lost); ~1.5s per attempt. */
+	skb_t *off = NULL;
+	for (int attempt = 0; attempt < 4 && !off; attempt++) {
+		dhcp_send(dev, xid, DHCP_DISCOVER, 0, 0);
+		off = dhcp_poll_reply(dev, xid, DHCP_OFFER, &yiaddr, &mask, &gw, &dns,
+		                      &serverid, kernel_ticks + 150);
+	}
 	if (!off) return -1;
 	skb_free(off);
 	if (!yiaddr) return -1;
 
-	dhcp_send(dev, xid, DHCP_REQUEST, yiaddr, serverid);
-	skb_t *ack = dhcp_poll_reply(dev, xid, DHCP_ACK, &yiaddr, &mask, &gw, &dns, &serverid);
+	skb_t *ack = NULL;
+	for (int attempt = 0; attempt < 4 && !ack; attempt++) {
+		dhcp_send(dev, xid, DHCP_REQUEST, yiaddr, serverid);
+		ack = dhcp_poll_reply(dev, xid, DHCP_ACK, &yiaddr, &mask, &gw, &dns,
+		                      &serverid, kernel_ticks + 150);
+	}
 	if (!ack) return -1;
 	skb_free(ack);
 
