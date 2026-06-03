@@ -420,7 +420,7 @@ Namespaces SMP'den sonra geliyor çünkü per-CPU struct'lar değişiyor.
 ### Test hedefleri
 - [ ] unshare --pid --fork --mount-proc /bin/sh çalışıyor
 - [ ] memory limit aşılınca OOM killer doğru process'i öldürüyor
-- [ ] ls /sys/devices çalışıyor
+- [x] ls /sys/devices çalışıyor ✅ (sys-cpu-online suite /sys/devices/system/cpu okuyor — PASS)
 
 ---
 
