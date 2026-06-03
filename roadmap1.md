@@ -815,9 +815,22 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 > adres-uzayı/ring-0 (hız, IPC yok) + temiz alt-sistem sınırları + İKİ YÖNLÜ modülerlik
 > (Kconfig ile derlemeden çıkar · LKM ile runtime yükle). Fazlamız: modül-API'si Linux'un
 > stabil-olmayan iç ABI'sinden daha temiz/stabil + runtime-dinamik ölçekleme (zaten var).
-- [ ] **LKM (yüklenebilir kernel modülü)** — ZORUNLU. Temiz modül-API + ELF .ko yükleyici
-      (relocate + sembol çözümleme + init/exit) + imzalı modül + Kconfig'le "derleme-içi mi
-      modül mü" seçimi. Dağıtım (Ranix Debian/Arch) + hotplug sürücü + 3.-parti + tiny-core.
+- [ ] **LKM (yüklenebilir kernel modülü)** — ZORUNLU, Linux-dengi. Tasarım (kullanıcı 2026-06-03):
+      - **Modül ABI** (`<ranix/module.h>` + `<ranix/kernel.h>`): `module_init(fn)`/`module_exit(fn)`
+        (veya init_module/cleanup_module isimleri), `EXPORT_SYMBOL(x)`, `MODULE_LICENSE/AUTHOR/DESCRIPTION`.
+      - **.ko = ELF ET_REL** (relocatable): `cc -c -ffreestanding -mcmodel=large` + kernel başlıkları
+        (large-model → mutlak 64-bit reloc: x86 R_X86_64_64, aarch64 R_AARCH64_ABS64 + MOVW_UABS_*;
+        ADRP/CALL26 ±128MB veneer derdi YOK — her yere yüklenir).
+      - **Yükleyici** (kernel/module.c): ET_REL parse → SHF_ALLOC section'ları (.text/.data/.bss/.rodata)
+        ayır+kopyala → tanımsız sembolleri **ksym name→addr** ile çöz (ksyms zaten var, addr→name'i
+        name→addr'a genişlet) → relocation uygula → init fonksiyonunu çağır.
+      - **Syscall'lar:** `init_module(image,len,args)` + `finit_module(fd,args,flags)` + `delete_module(name)`.
+      - **Yaşam döngüsü:** yüklü modül listesi (isim, mem, init/exit, refcount), rmmod→cleanup_module+free.
+      - **/proc/modules** gerçek liste (şu an stub). **EXPORT_SYMBOL** ile kernel→modül + modül→modül sembol.
+      - İmzalı modül + Kconfig "derleme-içi mi modül mü" = sonraki rötuş.
+      > DURUM: modül sistemi YOK (statik derleme). Bu BÜYÜK bir alt-sistem (reloc engine + loader +
+      > lifecycle + .ko build tooling + test) — adanmış odaklı iş, incremental boot-bring-up. ksyms
+      > (sembol tablosu) + ELF altyapısı var, large-model reloc'ı basitleştiriyor → feasible.
 - [ ] **32-bit hedef** — ZORUNLU (eski-PC profili + "fazla olmalı"). İki ayrı iş:
       (a) 64-bit kernelde **32-bit userspace** (x86 ia32 / ARM aarch32 compat) — orta;
       (b) saf **32-bit kernel** (i686 / armv7) gerçekten-eski 64-bitsiz donanım için — büyük port.
