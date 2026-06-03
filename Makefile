@@ -169,7 +169,11 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static test
+.PHONY: all clean qemu image initramfs bash-static test flakehunt
+
+# Run the suite N times, report any test that isn't 100% green (flake hunter).
+flakehunt:
+	@ITERS=$(or $(ITERS),20) ARCH=$(ARCH) BOARD=$(BOARD) bash tests/flakehunt.sh
 
 all: initramfs $(TARGET)
 
