@@ -661,7 +661,7 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
       (gpt-test.img'de /bin/init yok → pivot yok; iki arch 307/301 yeşil). /tmp /proc /sys /dev
       uçucu (Linux'ta da öyle). KALAN: gerçek donanım USB/SD-boot (636), /etc/fstab okuma (631).
 - [ ] init system: PID 1 service manager (sinit veya s6 — systemd değil)
-- [ ] /etc/fstab okuma, boot'ta otomatik mount
+- [x] /etc/fstab okuma, boot'ta otomatik mount ✅ (2026-06-03): init `mount -a` (busybox, fstab parse + noauto/zaten-mounted atla — gerçek /proc/mounts sayesinde); örnek fstab tmpfs entry boot'ta mount, suite `fstab-mount` doğruluyor. + /proc/mounts gerçek mount-tablosu (procfs stub'ı kaldırıldı).
 - [x] timezone: TZ=Europe/Istanbul date ✅ (named zone tzdata + POSIX TZ string ikisi de; test_tz)
 - [ ] HTTP server: nginx veya lighttpd çalışıyor
 - [ ] top / htop çalışıyor — CPU + memory canlı görünüm
