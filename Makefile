@@ -169,11 +169,24 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static test flakehunt
+.PHONY: all clean qemu image initramfs bash-static test flakehunt vdso
 
 # Run the suite N times, report any test that isn't 100% green (flake hunter).
 flakehunt:
 	@ITERS=$(or $(ITERS),20) ARCH=$(ARCH) BOARD=$(BOARD) bash tests/flakehunt.sh
+
+# vDSO: a freestanding PIC shared object the kernel maps into every process for
+# syscall-free clock_gettime/gettimeofday. Linked with a version script and no
+# relocations so it can be mapped without a dynamic loader. (Kernel wiring —
+# mapping + vvar updater + AT_SYSINFO_EHDR — lands separately.)
+VDSO_SO = $(BUILD_DIR)/vdso-$(ARCH).so
+vdso: $(VDSO_SO)
+$(VDSO_SO): vdso/vdso.c vdso/vdso_$(ARCH).lds include/uapi/vdso.h
+	@mkdir -p $(BUILD_DIR)
+	$(MUSL_CC) -shared -fPIC -fno-stack-protector -nostdlib -O2 -Iinclude \
+	    -Wl,--version-script=vdso/vdso_$(ARCH).lds -Wl,-soname,linux-vdso.so.1 \
+	    -Wl,--hash-style=both -Wl,-Bsymbolic -o $@ vdso/vdso.c
+	@echo "[OK] $@ ($$($(MUSL_CC:gcc=nm) -D $@ 2>/dev/null | grep -c @@) vDSO symbols, no relocs)"
 
 all: initramfs $(TARGET)
 
