@@ -541,6 +541,46 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 	return 0;
 }
 
+/* Reconstruct a dentry's absolute path by walking parents (caller holds
+ * vfs_lock). Root (no parent, or self-parent) yields "/". */
+static void dentry_abspath(vfs_dentry_t *d, char *out, size_t sz)
+{
+	vfs_dentry_t *chain[64];
+	int n = 0;
+	for (vfs_dentry_t *c = d; c && n < 64; c = c->parent) {
+		if (!c->parent || c->parent == c) break;   /* reached root */
+		chain[n++] = c;
+	}
+	if (n == 0) { if (sz > 1) { out[0] = '/'; out[1] = '\0'; } else if (sz) out[0] = '\0'; return; }
+	size_t p = 0;
+	for (int i = n - 1; i >= 0 && p + 1 < sz; i--) {
+		out[p++] = '/';
+		for (const char *nm = chain[i]->name; *nm && p + 1 < sz; nm++) out[p++] = *nm;
+	}
+	out[p < sz ? p : sz - 1] = '\0';
+}
+
+/* /proc/mounts: one line per mount in the caller's namespace —
+ * "source mountpoint fstype rw 0 0". Source isn't tracked, so the fstype name
+ * stands in (as it does for virtual filesystems on Linux). */
+size_t vfs_proc_mounts(char *buf, size_t sz)
+{
+	mnt_namespace_t *mns = current_mnt_ns();
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	size_t pos = 0;
+	for (vfs_mount_t *m = mns->mounts; m; m = m->next) {
+		char path[256];
+		if (!m->mountpoint) { path[0] = '/'; path[1] = '\0'; }
+		else                  dentry_abspath(m->mountpoint, path, sizeof(path));
+		const char *fs = m->fstype ? m->fstype : "none";
+		const char *cols[] = { fs, " ", path, " ", fs, " rw 0 0\n" };
+		for (int ci = 0; ci < 6; ci++)
+			for (const char *s = cols[ci]; *s && pos + 1 < sz; s++) buf[pos++] = *s;
+	}
+	spin_unlock_irq(&vfs_lock, f);
+	return pos;
+}
+
 int vfs_umount(const char *path)
 {
 	if (!path || path[0] != '/') return -22;

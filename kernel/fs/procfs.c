@@ -121,11 +121,7 @@ static int fill_meminfo(char *buf, size_t sz)
 
 static int fill_mounts(char *buf, size_t sz)
 {
-	pb_t b = {buf, sz};
-	pb_str(&b, "rootfs / ramfs rw 0 0\n");
-	pb_str(&b, "proc /proc proc ro 0 0\n");
-	pb_str(&b, "devfs /dev devfs rw 0 0\n");
-	return (int)(sz - b.rem);
+	return (int)vfs_proc_mounts(buf, sz);
 }
 
 #include <kernel/board.h>
