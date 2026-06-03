@@ -340,6 +340,16 @@ check "c-pty"        "OK"  "$(timeout 8 /bin/test_pty 2>/dev/null)"
 if ls /sys/block 2>/dev/null | grep -qE 'vblk|sata'; then
 check "gpt-ext4"     "ranix-gpt-ok" "$(cat /mnt/hello.txt 2>/dev/null)"
 check "ext4-write"   "ranix-w64"    "$(echo -n ranix-w64 > /mnt/wtest.txt 2>/dev/null; cat /mnt/wtest.txt 2>/dev/null)"
+# two-boot persistence: prove an ext2 write reaches the disk and survives a
+# reboot. tests/persist.sh boots twice against the same image and checks the
+# FRESH→SURVIVED transition in these markers.
+if [ -f /mnt/persist_marker ]; then
+    echo "PERSISTMARK:SURVIVED:$(cat /mnt/persist_marker)"
+else
+    echo RANIX_PERSIST_OK > /mnt/persist_marker; sync
+    echo "PERSISTMARK:FRESH"
+fi
+check "c-persist"    "ok"           "$([ -f /mnt/persist_marker ] && echo ok)"
 # devtmpfs: the disk shows up as a byte-addressable /dev block node
 check "devtmpfs-blknode" "b"        "$([ -b /dev/sata0 ] || [ -b /dev/vblk0 ] && echo b)"
 check "devtmpfs-blkread" "EFI PART" "$(dd if=/dev/sata0 bs=1 skip=512 count=8 2>/dev/null || dd if=/dev/vblk0 bs=1 skip=512 count=8 2>/dev/null)"
