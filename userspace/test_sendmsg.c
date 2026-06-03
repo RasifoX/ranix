@@ -12,9 +12,10 @@ int main(void)
 	int sv[2];
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { printf("sendmsg-fail pair\n"); return 0; }
 
-	struct iovec siov = { "helloworld", 10 };
+	/* two writes, then one read must coalesce them (stream has no boundaries) */
+	struct iovec siov[2] = { { "hello", 5 }, { "world", 5 } };
 	struct msghdr sm; memset(&sm, 0, sizeof(sm));
-	sm.msg_iov = &siov; sm.msg_iovlen = 1;
+	sm.msg_iov = siov; sm.msg_iovlen = 2;
 	ssize_t w = sendmsg(sv[0], &sm, 0);
 	if (w != 10) { printf("sendmsg-fail send w=%zd\n", w); return 0; }
 
