@@ -20,6 +20,7 @@
 #include <kernel/net/eth.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
+#include <kernel/sync.h>
 #include <asm/mmu.h>
 
 extern void kprintf(const char *, ...);
@@ -137,6 +138,11 @@ static uint64_t genet_base;     /* virtual MMIO base */
 static uint32_t rx_cons, rx_idx;
 static uint32_t tx_prod, tx_idx;
 static netdev_t g_genet;
+/* serialises tx and poll: both are reached from several contexts (the net_rx
+ * thread, the idle loop's net_poll, and the DHCP/SLAAC poll in the net_link
+ * watcher), and on a 4-core Pi two ran genet_poll at once and shredded the RX
+ * ring → a wild skb → arp_rx fault. One lock makes the ring state SMP-safe. */
+static spinlock_t genet_lock = SPINLOCK_INIT;
 
 /* ── MMIO + cache + delay helpers ────────────────────────────────────────── */
 static inline uint32_t gr(uint32_t off)        { return reg_read32(genet_base + off); }
@@ -308,6 +314,8 @@ static int genet_tx(netdev_t *dev, skb_t *skb)
     uint16_t len = skb->len;
     if (!dev->link_up)        { skb_free(skb); return -1; }  /* no carrier */
     if (len > RX_BUF_LENGTH)  { skb_free(skb); return -1; }
+
+    uint64_t f = spin_lock_irq(&genet_lock);
     memcpy(tx_buf, skb->data, len);
     dcache_clean(tx_buf, len);
 
@@ -323,24 +331,21 @@ static int genet_tx(netdev_t *dev, skb_t *skb)
     tx_prod = (tx_prod + 1) & 0xffff;
     gw(TDMA_RING_BASE + TDMA_PROD_INDEX, tx_prod);
 
-    /* wait for the descriptor to drain (poll model) */
-    for (int i = 0; i < 100000; i++) {
+    /* wait for the descriptor to drain (single tx_buf is reused next call). The
+     * cap bounds the lock hold if the link drops mid-send; normal drain is <1ms. */
+    for (int i = 0; i < 20000; i++) {
         if ((gr(TDMA_RING_BASE + TDMA_CONS_INDEX) & 0xffff) == tx_prod) break;
         genet_udelay(1);
     }
-    { static int n = 0; if (n < 6) { n++;
-        uint32_t c = gr(TDMA_RING_BASE + TDMA_CONS_INDEX) & 0xffff;
-        kprintf("genet tx#%d len=%u prod=%u cons=%u %s\n", n, len, tx_prod, c,
-                c == tx_prod ? "sent" : "TIMEOUT"); } }
+    spin_unlock_irq(&genet_lock, f);
     skb_free(skb);
     return (int)len;
 }
 
 static void genet_poll(netdev_t *dev)
 {
+    uint64_t f = spin_lock_irq(&genet_lock);
     uint32_t prod = gr(RDMA_RING_BASE + RDMA_PROD_INDEX) & 0xffff;
-    { static int n = 0; if (prod != (rx_cons & 0xffff) && n < 6) { n++;
-        kprintf("genet rx prod=%u cons=%u\n", prod, rx_cons & 0xffff); } }
     while (prod != (rx_cons & 0xffff)) {
         uint32_t d  = RX_OFF + rx_idx * DMA_DESC_SIZE;
         uint32_t ls = gr(d + 0x00);
@@ -365,6 +370,7 @@ static void genet_poll(netdev_t *dev)
         gw(RDMA_RING_BASE + RDMA_CONS_INDEX, rx_cons);
         rx_idx = (rx_idx + 1) & (RX_DESCS - 1);
     }
+    spin_unlock_irq(&genet_lock, f);
 }
 
 /* ── probe / register ────────────────────────────────────────────────────── */
