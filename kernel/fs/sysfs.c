@@ -23,7 +23,7 @@ extern int  smp_ncpus;
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
        SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
-       SF_PCI_VENDOR, SF_PCI_DEVICE };
+       SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -142,6 +142,20 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		tmp[n++] = '0'; tmp[n++] = 'x';
 		tmp[n++] = h[(v >> 12) & 15]; tmp[n++] = h[(v >> 8) & 15];
 		tmp[n++] = h[(v >> 4) & 15];  tmp[n++] = h[v & 15];
+		tmp[n++] = '\n';
+		break;
+	}
+	case SF_PCI_CAPS: {
+		int bdf = pr->dev;
+		uint8_t ids[32];
+		int cnt = pci_cap_ids((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
+		                      (uint8_t)(bdf & 7), ids, 32);
+		const char *h = "0123456789abcdef";
+		for (int i = 0; i < cnt; i++) {
+			if (i) tmp[n++] = ' ';
+			tmp[n++] = h[(ids[i] >> 4) & 15];
+			tmp[n++] = h[ids[i] & 15];
+		}
 		tmp[n++] = '\n';
 		break;
 	}
@@ -352,12 +366,14 @@ static vfs_inode_t *sysfs_pcidev_lookup(vfs_inode_t *dir, const char *name)
 }
 static const struct { const char *name; int type; } pcidev_files[] = {
 	{ "vendor", SF_PCI_VENDOR }, { "device", SF_PCI_DEVICE },
+	{ "capabilities", SF_PCI_CAPS },
 };
 static vfs_inode_t *sysfs_pcidev_entry_lookup(vfs_inode_t *dir, const char *name)
 {
 	sysfs_priv_t *pr = dir->priv;
 	int bdf = pr ? pr->dev : 0;
-	for (unsigned i = 0; i < 2; i++)
+	unsigned nf = sizeof(pcidev_files) / sizeof(pcidev_files[0]);
+	for (unsigned i = 0; i < nf; i++)
 		if (strcmp(pcidev_files[i].name, name) == 0)
 			return sysfs_file(pcidev_files[i].type, bdf);
 	return NULL;
@@ -365,7 +381,7 @@ static vfs_inode_t *sysfs_pcidev_entry_lookup(vfs_inode_t *dir, const char *name
 static int sysfs_pcidev_entry_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx >= 2) return -1;
+	if (idx >= sizeof(pcidev_files) / sizeof(pcidev_files[0])) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	put_str(out->name, pcidev_files[idx].name);
 	out->name[strlen(pcidev_files[idx].name)] = '\0';
