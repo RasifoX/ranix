@@ -105,6 +105,8 @@ typedef struct vfs_inode {
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
     int64_t      atime, mtime, ctime;
     uint32_t     atime_nsec, mtime_nsec, ctime_nsec;
+    void        *flock_ex;   /* vfs_file holding an exclusive flock, or NULL */
+    int          flock_sh;   /* count of shared flock holders */
 } vfs_inode_t;
 
 /* ── open file instance ──────────────────────────────────── */
@@ -115,6 +117,7 @@ typedef struct vfs_file {
     uint32_t     refcount;
     char         path[256];
     void        *priv;       /* per-open private data (e.g. captured namespace) */
+    int          flock_held; /* this open file's flock: 0, LOCK_SH(1) or LOCK_EX(2) */
 } vfs_file_t;
 
 /* ── directory entry (path tree node) ───────────────────── */
@@ -191,6 +194,8 @@ int        vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
                         const char *path, int flags, mode_t mode);
 int        vfs_close(int fd);
 void       vfs_file_put(vfs_file_t *f);
+int        vfs_flock_try(vfs_file_t *f, int cmd);   /* cmd: 1=LOCK_SH 2=LOCK_EX */
+void       vfs_flock_release(vfs_file_t *f);
 ssize_t    vfs_read(int fd, void *buf, size_t len);
 ssize_t    vfs_write(int fd, const void *buf, size_t len);
 off_t      vfs_seek(int fd, off_t off, int whence);
