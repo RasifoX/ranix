@@ -61,7 +61,8 @@ ifeq ($(ARCH),aarch64)
         drivers/mailbox/bcm2711_mbox.c \
         drivers/block/sdhost_pi4.c \
         drivers/block/virtio_blk.c \
-        drivers/net/virtio_net.c
+        drivers/net/virtio_net.c \
+        drivers/net/bcmgenet.c
 else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld

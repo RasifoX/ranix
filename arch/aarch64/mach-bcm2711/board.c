@@ -82,6 +82,8 @@ void board_drivers_register(void)
 {
 	/* already initialized early */
 	pi4_sd_init();
+	extern void bcmgenet_init(void);   /* Pi 4 built-in gigabit ethernet */
+	bcmgenet_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }
