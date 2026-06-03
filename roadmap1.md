@@ -784,6 +784,12 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - [ ] **LSM framework** (hook altyapısı) + **SELinux veya AppArmor** (en az biri) — MAC
 - [ ] **kTLS** (in-kernel TLS) — opsiyonel, perf
 
+### Saat / zaman
+- [x] dosya zaman damgaları (atime/mtime/ctime + utimensat/futimens) ✅ (2026-06-03)
+- [ ] **RTC sürücüsü** (x86 CMOS / Pi RTC) → gerçek wall-clock epoch. Şu an mono_time =
+      boot'tan-beri-saniye (ordering doğru ama mutlak tarih 1970+uptime); RTC ile gettimeofday
+      gerçek tarih + dosya mtime'ları gerçek tarih. NTP istemci (userspace) ayrı.
+
 ### Güç yönetimi
 - [ ] **suspend/resume** (S3 / S0ix) — cpufreq zaten v0.9/Uzun Vade'de
 
@@ -848,6 +854,22 @@ uzay/gömülü kontrol, eski PC için hafif, günlük masaüstü (oyun/video/ofi
 - [ ] landlock LSM — sandboxing
 
 ---
+
+## Test & CI altyapısı (Linux'un kalite cephanesi — bizdeki durum)
+> Linux'ta: kselftest+LTP (fonksiyonel), syzkaller (fuzzing), KASAN/KCSAN/KMSAN/UBSAN
+> (sanitizer), KernelCI/0-day-bot (sürekli çok-arch CI), stress-ng, otomatik flake-bisect.
+> Sabah-akşam değil, **her commit + sürekli** koşar. Bizde ad-hoc'tan sistematiğe geçiş:
+- [x] 292-test fonksiyonel suite, iki arch (`make test`)
+- [x] ucuz kalıcı invariant'lar (BUG/poison/magic) = KASAN-lite; hang watchdog
+- [x] **flake hunter** ✅ (`make flakehunt ITERS=N` — suite'i N kez koşar, %100-yeşil-olmayan
+      her testi FLAKE/HARD diye raporlar; ad-hoc flake-avının sistematik yerine geçer)
+- [ ] sürekli/otomatik CI runner (zamanlı veya her-commit; şu an manuel + otonom-loop)
+- [ ] tam **KASAN/KCSAN** (CONFIG_DEBUG; data-race + use-after-free otomatik)
+- [ ] **syzkaller-sınıfı syscall fuzzer** (rastgele syscall + sanitizer = derin bug)
+- [ ] **kcov-benzeri coverage** ölçümü (hangi yol test edilmiyor)
+- [ ] LTP-benzeri geniş POSIX uyumluluk suite + stress-ng-benzeri yük
+> NE ZAMAN: flake-hunter VAR (bugün). Sürekli-CI + sanitizer + fuzzer = v0.7.x foundation'ın
+> devamı (robustness "SIFIR flake toleransı" kararının altyapısı); büyük ama foundation-kritik.
 
 ## Teknik Notlar
 
