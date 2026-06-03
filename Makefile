@@ -284,6 +284,8 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	    > $(BUILD_DIR)/initramfs/etc/shadow
 	@chmod 640 $(BUILD_DIR)/initramfs/etc/shadow
 	@printf 'root:x:0:\ntest:x:1000:\n' > $(BUILD_DIR)/initramfs/etc/group
+	@mkdir -p $(BUILD_DIR)/initramfs/fstabtmp
+	@printf 'tmpfs /fstabtmp tmpfs defaults 0 0\nproc /proc proc defaults 0 0\n' > $(BUILD_DIR)/initramfs/etc/fstab
 	@mkdir -p $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Etc
 	@if [ -f /usr/share/zoneinfo/Europe/Istanbul ]; then \
 		cp /usr/share/zoneinfo/Europe/Istanbul $(BUILD_DIR)/initramfs/usr/share/zoneinfo/Europe/Istanbul; \
