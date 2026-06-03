@@ -434,6 +434,10 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
 }
 
+/* wall time for filesystem timestamps (no RTC epoch yet → seconds since boot,
+ * but monotonic + per-event distinct, so mtime ordering works for make et al.) */
+void ranix_walltime(int64_t *sec, int64_t *nsec) { mono_time(sec, nsec); }
+
 #define CLOCK_MONOTONIC  1
 #define CLOCK_BOOTTIME   7
 

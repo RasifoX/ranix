@@ -89,6 +89,9 @@ static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
 	st->st_blksize = 4096;
 	st->st_blocks  = (vs->size + 511) / 512;
 	st->st_rdev    = vs->rdev;
+	st->st_atime_sec = vs->atime; st->st_atime_nsec = vs->atime_nsec;
+	st->st_mtime_sec = vs->mtime; st->st_mtime_nsec = vs->mtime_nsec;
+	st->st_ctime_sec = vs->ctime; st->st_ctime_nsec = vs->ctime_nsec;
 }
 
 static long sys_stat_path(const char *path, linux_stat_t *st)

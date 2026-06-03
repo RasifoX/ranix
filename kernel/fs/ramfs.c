@@ -52,6 +52,9 @@ static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 	process_t *p = task_current();
 	in->uid = p ? p->euid : 0;
 	in->gid = p ? p->egid : 0;
+	int64_t s, ns; ranix_walltime(&s, &ns);
+	in->atime = in->mtime = in->ctime = s;
+	in->atime_nsec = in->mtime_nsec = in->ctime_nsec = (uint32_t)ns;
 	return in;
 }
 
@@ -101,6 +104,9 @@ static ssize_t ramfs_write(vfs_file_t *f, const void *buf, size_t len)
 		rf->size         = (uint64_t)f->pos;
 		f->inode->size   = rf->size;
 	}
+	int64_t s, ns; ranix_walltime(&s, &ns);
+	f->inode->mtime = f->inode->ctime = s;
+	f->inode->mtime_nsec = f->inode->ctime_nsec = (uint32_t)ns;
 	return (ssize_t)len;
 }
 
@@ -278,6 +284,9 @@ static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 	out->uid   = inode->uid;
 	out->gid   = inode->gid;
 	out->size  = inode->size;
+	out->atime = inode->atime; out->atime_nsec = inode->atime_nsec;
+	out->mtime = inode->mtime; out->mtime_nsec = inode->mtime_nsec;
+	out->ctime = inode->ctime; out->ctime_nsec = inode->ctime_nsec;
 	return 0;
 }
 
