@@ -302,6 +302,7 @@ check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
 # ── 38. C test: AF_UNIX path socket ──────────────────────────
 check "c-unix-sock"  "OK"  "$(timeout 5 /bin/test_unix 2>/dev/null)"
 check "c-mqueue"     "OK"  "$(timeout 5 /bin/test_mqueue 2>/dev/null)"
+check "c-sysvmsg"    "OK"  "$(timeout 8 /bin/test_sysvmsg 2>/dev/null)"
 check "c-futex-timed" "OK" "$(timeout 8 /bin/test_futex_timed 2>/dev/null)"
 check "c-poll"       "OK"  "$(timeout 8 /bin/test_poll 2>/dev/null)"
 check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
