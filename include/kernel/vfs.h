@@ -100,6 +100,7 @@ typedef struct vfs_inode {
     uint32_t     refcount;
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
+    void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
 } vfs_inode_t;
 
 /* ── open file instance ──────────────────────────────────── */
@@ -232,5 +233,14 @@ int vfs_pipe(int pipefd[2]);
 /* internal: dentry ops */
 vfs_dentry_t *vfs_dentry_resolve(const char *path);
 vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode);
+
+/* extended attributes — generic per-inode key/value store */
+#define XATTR_CREATE  1   /* fail (EEXIST) if the attribute already exists */
+#define XATTR_REPLACE 2   /* fail (ENODATA) if the attribute does not exist */
+int     vfs_inode_setxattr(vfs_inode_t *in, const char *name, const void *val, size_t len, int flags);
+ssize_t vfs_inode_getxattr(vfs_inode_t *in, const char *name, void *val, size_t size);
+ssize_t vfs_inode_listxattr(vfs_inode_t *in, char *list, size_t size);
+int     vfs_inode_removexattr(vfs_inode_t *in, const char *name);
+void    vfs_inode_free_xattrs(vfs_inode_t *in);
 
 #endif
