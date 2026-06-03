@@ -16,6 +16,7 @@ typedef struct {
     spinlock_t    lock;
     wait_queue_t  rd_wait;
     wait_queue_t  wr_wait;
+    wait_queue_t  open_wait;   /* FIFO open rendezvous (wait for the other end) */
 } pipe_t;
 
 static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
@@ -137,6 +138,85 @@ static vfs_fops_t pipe_fops = {
     .close = pipe_close,
     .poll  = pipe_poll,
 };
+
+/* ── named pipes (FIFO) — mknod S_IFIFO + open rendezvous ──────────
+ * The pipe_t lives on the inode for its lifetime (lazily created on first
+ * open); reuses pipe_read/write/poll. open() blocks until both a reader and a
+ * writer are present (Linux FIFO semantics), unless O_NONBLOCK. */
+static spinlock_t fifo_glock = SPINLOCK_INIT;
+
+static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
+{
+    uint64_t g = spin_lock_irq(&fifo_glock);
+    pipe_t *pipe = (pipe_t *)inode->priv;
+    if (!pipe) {
+        pipe = kmalloc(sizeof(*pipe));
+        if (!pipe) { spin_unlock_irq(&fifo_glock, g); return -12; }
+        memset(pipe, 0, sizeof(*pipe));
+        uint64_t bp = (uint64_t)buddy_alloc(0);
+        if (!bp) { kfree(pipe); spin_unlock_irq(&fifo_glock, g); return -12; }
+        pipe->buffer = (uint8_t *)PHYS_TO_VIRT(bp);
+        pipe->lock = (spinlock_t)SPINLOCK_INIT;
+        wait_queue_init(&pipe->rd_wait);
+        wait_queue_init(&pipe->wr_wait);
+        wait_queue_init(&pipe->open_wait);
+        inode->priv = pipe;
+    }
+    spin_unlock_irq(&fifo_glock, g);
+
+    int acc = flags & 3;   /* O_RDONLY=0 O_WRONLY=1 O_RDWR=2 */
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    if (acc != O_WRONLY) pipe->readers++;
+    if (acc != O_RDONLY) pipe->writers++;
+    wake_up(&pipe->open_wait);
+    spin_unlock_irq(&pipe->lock, f);
+
+    if (acc == O_RDONLY) {
+        for (;;) {
+            f = spin_lock_irq(&pipe->lock);
+            if (pipe->writers > 0 || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
+            sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
+        }
+    } else if (acc == O_WRONLY) {
+        for (;;) {
+            f = spin_lock_irq(&pipe->lock);
+            if (pipe->readers > 0) { spin_unlock_irq(&pipe->lock, f); break; }
+            if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -6; /* ENXIO */ }
+            sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
+        }
+    }
+    return 0;
+}
+
+static int fifo_close(vfs_file_t *file)
+{
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    if (!pipe) return 0;
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    int acc = file->flags & 3;
+    if (acc != O_WRONLY && pipe->readers > 0) pipe->readers--;
+    if (acc != O_RDONLY && pipe->writers > 0) pipe->writers--;
+    wake_up(&pipe->rd_wait);
+    wake_up(&pipe->wr_wait);
+    wake_up(&pipe->open_wait);
+    spin_unlock_irq(&pipe->lock, f);
+    poll_notify();
+    return 0;   /* pipe_t kept on the inode for its lifetime (freed with inode) */
+}
+
+static vfs_fops_t fifo_fops = {
+    .open  = fifo_open,
+    .read  = pipe_read,
+    .write = pipe_write,
+    .close = fifo_close,
+    .poll  = pipe_poll,
+};
+
+void fifo_init_inode(vfs_inode_t *in)
+{
+    in->fops = &fifo_fops;
+    in->priv = NULL;   /* pipe created on first open */
+}
 
 int vfs_pipe(int pipefd[2])
 {

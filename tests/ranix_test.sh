@@ -316,6 +316,7 @@ check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null
 check "c-flock"       "OK"            "$(timeout 8 /bin/test_flock 2>/dev/null)"
 check "c-chown"       "OK"            "$(timeout 8 /bin/test_chown 2>/dev/null)"
 check "c-access"      "OK"            "$(timeout 8 /bin/test_access 2>/dev/null)"
+check "c-fifo"        "OK"            "$(timeout 10 /bin/test_fifo 2>/dev/null)"
 check "c-mqueue"     "OK"  "$(timeout 5 /bin/test_mqueue 2>/dev/null)"
 check "c-sysvmsg"    "OK"  "$(timeout 8 /bin/test_sysvmsg 2>/dev/null)"
 check "c-realpath"   "OK"  "$(timeout 8 /bin/test_realpath 2>/dev/null)"

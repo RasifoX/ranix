@@ -64,6 +64,7 @@ typedef struct {
     struct vfs_inode *(*lookup)(struct vfs_inode *dir, const char *name);
     int               (*create)(struct vfs_inode *dir, const char *name, mode_t mode);
     int               (*mkdir)(struct vfs_inode *dir, const char *name, mode_t mode);
+    int               (*mknod)(struct vfs_inode *dir, const char *name, mode_t mode);
     int               (*unlink)(struct vfs_inode *dir, const char *name);
     int               (*readdir)(struct vfs_inode *dir, uint32_t idx, vfs_dirent_t *out);
     int               (*stat)(struct vfs_inode *inode, vfs_stat_t *out);
@@ -200,6 +201,8 @@ ssize_t    vfs_read(int fd, void *buf, size_t len);
 ssize_t    vfs_write(int fd, const void *buf, size_t len);
 off_t      vfs_seek(int fd, off_t off, int whence);
 int        vfs_mkdir(const char *path, mode_t mode);
+int        vfs_mkfifo(const char *path, mode_t mode);
+void       fifo_init_inode(vfs_inode_t *in);
 int        vfs_unlink(const char *path);
 int        vfs_kernel_install(const char *path, const void *data, size_t len);
 int        vfs_symlink(const char *target, const char *linkpath);
