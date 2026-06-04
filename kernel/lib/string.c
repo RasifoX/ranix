@@ -2,9 +2,55 @@
 #include <kernel/hal.h>
 #include <kernel/proc.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/extable.h>
 #include <asm/mmu.h>
 
 extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+
+/* Byte copy whose load/store fault to the exit label via __ex_table, so an
+ * unmapped/bad user address returns the not-copied count instead of panicking.
+ * n is decremented only after both accesses succeed, so on a fault it still
+ * holds the bytes left to copy. */
+static unsigned long __copy_user(void *dst, const void *src, unsigned long n)
+{
+#if defined(__x86_64__)
+	__asm__ volatile(
+	".Lcu_loop%=:\n"
+	"	test	%[n], %[n]\n"
+	"	jz	.Lcu_out%=\n"
+	".Lcu_ld%=:\n"
+	"	movb	(%[src]), %%al\n"
+	".Lcu_st%=:\n"
+	"	movb	%%al, (%[dst])\n"
+	"	inc	%[src]\n"
+	"	inc	%[dst]\n"
+	"	dec	%[n]\n"
+	"	jmp	.Lcu_loop%=\n"
+	".Lcu_out%=:\n"
+	_ASM_EXTABLE(".Lcu_ld%=", ".Lcu_out%=")
+	_ASM_EXTABLE(".Lcu_st%=", ".Lcu_out%=")
+	: [n] "+r"(n), [src] "+r"(src), [dst] "+r"(dst)
+	:: "al", "memory", "cc");
+#else
+	__asm__ volatile(
+	".Lcu_loop%=:\n"
+	"	cbz	%[n], .Lcu_out%=\n"
+	".Lcu_ld%=:\n"
+	"	ldrb	w8, [%[src]]\n"
+	".Lcu_st%=:\n"
+	"	strb	w8, [%[dst]]\n"
+	"	add	%[src], %[src], #1\n"
+	"	add	%[dst], %[dst], #1\n"
+	"	sub	%[n], %[n], #1\n"
+	"	b	.Lcu_loop%=\n"
+	".Lcu_out%=:\n"
+	_ASM_EXTABLE(".Lcu_ld%=", ".Lcu_out%=")
+	_ASM_EXTABLE(".Lcu_st%=", ".Lcu_out%=")
+	: [n] "+r"(n), [src] "+r"(src), [dst] "+r"(dst)
+	:: "x8", "memory", "cc");
+#endif
+	return n;
+}
 
 int user_pages_mapped(const void *addr, size_t n)
 {
@@ -34,17 +80,13 @@ int access_ok(const void *addr, size_t n)
 long copy_from_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(src, n)) return -1;
-	if (!user_pages_mapped(src, n)) return -1;
-	memcpy(dst, src, n);
-	return 0;
+	return __copy_user(dst, (void *)src, n) ? -1 : 0;
 }
 
 long copy_to_user(void *dst, const void *src, size_t n)
 {
 	if (!access_ok(dst, n)) return -1;
-	if (!user_pages_mapped(dst, n)) return -1;
-	memcpy(dst, src, n);
-	return 0;
+	return __copy_user(dst, (void *)src, n) ? -1 : 0;
 }
 
 long strncpy_from_user(char *dst, const char *src, size_t n)
