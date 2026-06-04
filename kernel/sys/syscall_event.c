@@ -644,12 +644,20 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
     signalfd_t *sfd = (signalfd_t *)file->inode->priv;
     process_t  *p   = sfd->owner;
 
+    extern spinlock_t sched_lock;
     while (1) {
+        /* find+clear under sched_lock so the clear can't race (and lose) a bit a
+         * concurrent poster / nested timer tick OR's into sig_pending. */
+        uint64_t sf = spin_lock_irq(&sched_lock);
         uint64_t pending = p->sig_pending & sfd->mask;
+        int sig = 0;
         if (pending) {
-            int sig = 1;
+            sig = 1;
             while (sig <= 64 && !((pending >> (sig-1)) & 1)) sig++;
             p->sig_pending &= ~(1ULL << (sig-1));
+        }
+        spin_unlock_irq(&sched_lock, sf);
+        if (sig) {
             signalfd_siginfo_t info;
             __builtin_memset(&info, 0, sizeof(info));
             info.ssi_signo = (uint32_t)sig;
