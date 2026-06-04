@@ -17,7 +17,7 @@ static long sys_uname(linux_utsname_t *uts)
 	memset(&k, 0, sizeof(k));
 	memcpy(k.sysname,    "Ranix",   6);
 	memcpy(k.nodename,   ns->nodename,   sizeof(k.nodename));
-	memcpy(k.release,    "1.0.0",   6);
+	memcpy(k.release,    "6.6.0-ranix", 12);
 	memcpy(k.version,    "#1 SMP",  7);
 #if defined(__x86_64__)
 	memcpy(k.machine,    "x86_64",  7);

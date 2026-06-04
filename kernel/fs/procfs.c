@@ -67,7 +67,7 @@ static void pb_hex16(pb_t *b, uint64_t v)
 static int fill_version(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
-	pb_str(&b, "Ranix version 1.0.0 (ranix@ranix) "
+	pb_str(&b, "Ranix version 6.6.0-ranix (ranix@ranix) "
 	           "(gcc version 12.0) #1 SMP\n");
 	return (int)(sz - b.rem);
 }
