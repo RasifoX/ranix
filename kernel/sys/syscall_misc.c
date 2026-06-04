@@ -45,15 +45,30 @@ static void fill_statfs(kernel_statfs_t *st, const char *fs)
 	st->f_namelen = 255;
 }
 
+/* overlay the nominal counts with a filesystem's real statfs op, if it has one */
+static void apply_fs_statfs(kernel_statfs_t *st, const vfs_statfs_t *vs)
+{
+	st->f_bsize  = vs->bsize ? (long)vs->bsize : st->f_bsize;
+	st->f_frsize = st->f_bsize;
+	st->f_blocks = vs->blocks;
+	st->f_bfree  = vs->bfree;
+	st->f_bavail = vs->bavail;
+	st->f_files  = vs->files;
+	st->f_ffree  = vs->ffree;
+	if (vs->namelen) st->f_namelen = vs->namelen;
+}
+
 static long sys_statfs(const char *path, kernel_statfs_t *buf)
 {
 	if (!access_ok(buf, sizeof(*buf))) return -14;
 	char kp[PROC_NAME_MAX];
 	const char *fs = "ramfs";
-	if (path && resolve_path(kp, -100 /*AT_FDCWD*/, path) == 0)
-		fs = vfs_path_fstype(kp);
+	int have_path = (path && resolve_path(kp, -100 /*AT_FDCWD*/, path) == 0);
+	if (have_path) fs = vfs_path_fstype(kp);
 	kernel_statfs_t st;
 	fill_statfs(&st, fs);
+	vfs_statfs_t vs;
+	if (have_path && vfs_statfs_path(kp, &vs) == 0) apply_fs_statfs(&st, &vs);
 	copy_to_user(buf, &st, sizeof(st));
 	return 0;
 }
@@ -66,6 +81,10 @@ static long sys_fstatfs(int fd, kernel_statfs_t *buf)
 	if (f && f->path[0] == '/') fs = vfs_path_fstype(f->path);
 	kernel_statfs_t st;
 	fill_statfs(&st, fs);
+	if (f && f->inode) {
+		vfs_statfs_t vs;
+		if (vfs_statfs_inode(f->inode, &vs) == 0) apply_fs_statfs(&st, &vs);
+	}
 	copy_to_user(buf, &st, sizeof(st));
 	return 0;
 }
@@ -538,14 +557,14 @@ static long sys_sync(void) { return 0; }
 static long sys_mount(const char *source, const char *target, const char *fstype,
                       unsigned long flags, const void *data)
 {
-	(void)source; (void)flags; (void)data;
+	(void)source; (void)flags;
 	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	char ktarget[256]; char kfstype[64];
 	if (strncpy_from_user(ktarget, target, sizeof(ktarget)) < 0) return -14;
 	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
 
-	/* map tmpfs → ramfs; sysfs/cgroup/devtmpfs → accept silently */
-	const char *fsname = kfstype;   /* tmpfs is registered as a ramfs alias → keeps its name */
+	/* sysfs/cgroup/devtmpfs etc. → accept silently */
+	const char *fsname = kfstype;
 	if (strcmp(kfstype, "sysfs") == 0)   return 0;
 	if (strcmp(kfstype, "cgroup") == 0)  return 0;
 	if (strcmp(kfstype, "cgroup2") == 0) return 0;
@@ -557,7 +576,13 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	if (strcmp(kfstype, "securityfs") == 0) return 0;
 	if (strcmp(kfstype, "configfs") == 0) return 0;
 
-	int r = vfs_mount(ktarget, fsname, NULL);
+	/* mount options string (tmpfs size=, overlay lowerdir/upperdir/workdir).
+	 * The fill callback consumes it synchronously, so a stack copy suffices. */
+	char kdata[256];
+	const char *kdp = NULL;
+	if (data && strncpy_from_user(kdata, data, sizeof(kdata)) >= 0) kdp = kdata;
+
+	int r = vfs_mount(ktarget, fsname, (void *)kdp);
 	return r == 0 ? 0 : -1;
 }
 

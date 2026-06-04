@@ -60,6 +60,17 @@ typedef struct {
     uint32_t atime_nsec, mtime_nsec, ctime_nsec;
 } vfs_stat_t;
 
+/* ── filesystem statistics (statfs) ──────────────────────── */
+typedef struct {
+    uint32_t bsize;     /* block size in bytes */
+    uint64_t blocks;    /* total data blocks */
+    uint64_t bfree;     /* free blocks */
+    uint64_t bavail;    /* free blocks available to unprivileged users */
+    uint64_t files;     /* total inodes */
+    uint64_t ffree;     /* free inodes */
+    uint32_t namelen;   /* max filename length */
+} vfs_statfs_t;
+
 /* ── inode operations (directory / metadata) ─────────────── */
 typedef struct {
     struct vfs_inode *(*lookup)(struct vfs_inode *dir, const char *name);
@@ -75,6 +86,7 @@ typedef struct {
     int               (*symlink)(struct vfs_inode *dir, const char *name, const char *target);
     int               (*truncate)(struct vfs_inode *inode, off_t len);
     int               (*link)(struct vfs_inode *dir, const char *name, struct vfs_inode *target);
+    int               (*statfs)(struct vfs_inode *inode, vfs_statfs_t *out);
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
@@ -101,6 +113,7 @@ typedef struct vfs_inode {
     vfs_iops_t  *iops;
     vfs_fops_t  *fops;
     void        *priv;      /* filesystem-private data */
+    void        *i_sb;      /* per-mount superblock (tmpfs/overlay); NULL otherwise */
     uint32_t     refcount;
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
@@ -138,6 +151,8 @@ typedef struct vfs_mount {
     const char        *fstype;        /* points at fstype_name (self-owned copy) */
     char               fstype_name[32];
     void              *priv;
+    void             (*kill_sb)(void *priv);   /* umount destructor (tmpfs/overlay); may be NULL */
+    void             (*get_sb)(void *priv);    /* bump sb refcount when a namespace clones the mount */
     vfs_inode_t       *orig_inode;
     struct vfs_mount  *next;
 } vfs_mount_t;
@@ -195,6 +210,8 @@ mnt_namespace_t *nsfile_to_mnt(struct vfs_file *f);
 int        vfs_umount(const char *path);
 size_t     vfs_proc_mounts(char *buf, size_t sz);
 const char *vfs_path_fstype(const char *path);
+int        vfs_statfs_path(const char *path, vfs_statfs_t *out);   /* per-fs statfs op; <0 if none */
+int        vfs_statfs_inode(vfs_inode_t *in, vfs_statfs_t *out);
 size_t     vfs_proc_mountinfo(char *buf, size_t sz);
 int        vfs_open(const char *path, int flags, mode_t mode);
 int        vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,

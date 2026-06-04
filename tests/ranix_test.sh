@@ -212,6 +212,7 @@ check "c-pcicaps"     "OK"            "$(timeout 8 /bin/test_pcicaps 2>/dev/null
 # ── 25. statfs / df ───────────────────────────────────────────
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
 check "df-nonzero"   "1"    "$(df / 2>/dev/null | awk 'NR==2{print ($2>0)?1:0}')"
+check "c-tmpfs"      "OK"   "$(timeout 10 /bin/test_tmpfs 2>/dev/null)"
 
 
 # ── 26. umount ────────────────────────────────────────────────
