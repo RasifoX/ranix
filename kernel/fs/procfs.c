@@ -841,15 +841,19 @@ static int procfs_pidlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
 	procfs_pidlink_priv_t *pr = in->priv;
 	if (!pr) return -1;
-	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
+	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
 	if (!p) return -1;
-	const char *path;
+	const char *src;
 	switch (pr->kind) {
-	case PIDLINK_CWD:  path = p->cwd[0] ? p->cwd : "/"; break;
-	case PIDLINK_ROOT: path = "/"; break;
-	default:           path = p->exe_path[0] ? p->exe_path : p->name; break;
+	case PIDLINK_CWD:  src = p->cwd[0] ? p->cwd : "/"; break;
+	case PIDLINK_ROOT: src = "/"; break;
+	default:           src = p->exe_path[0] ? p->exe_path : p->name; break;
 	}
-	size_t n = strlen(path);
+	char path[256];
+	size_t n = strlen(src);
+	if (n >= sizeof(path)) n = sizeof(path) - 1;
+	memcpy(path, src, n); path[n] = '\0';
+	if (pr->pid) proc_put(p);
 	if (n + 1 > sz) return -1;
 	memcpy(buf, path, n + 1);
 	return 0;
@@ -886,34 +890,36 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
 	procfs_nslink_priv_t *pp = in->priv;
 	if (!pp) return -1;
-	process_t *p = pp->pid == 0 ? task_current() : proc_find((pid_t)pp->pid);
-	if (!p) return -1;
 
+	/* Pin the target's ns of this kind, snapshot its inum, then drop the pin —
+	 * so a concurrent exit can never free the ns out from under the read. */
 	const char *prefix;
 	unsigned long inum;
-	if (pp->kind == NS_IPC) {
-		ipc_namespace_t *ns = p->ipc_ns ? p->ipc_ns : &init_ipc_ns;
-		prefix = "ipc:["; inum = ns->inum;
-	} else if (pp->kind == NS_TIME) {
-		time_namespace_t *ns = p->time_ns ? p->time_ns : &init_time_ns;
-		prefix = "time:["; inum = ns->inum;
-	} else if (pp->kind == NS_MNT) {
-		mnt_namespace_t *ns = p->mnt_ns ? p->mnt_ns : &init_mnt_ns;
-		prefix = "mnt:["; inum = ns->inum;
-	} else if (pp->kind == NS_PID) {
-		pid_namespace_t *ns = p->pid_ns ? p->pid_ns : &init_pid_ns;
-		prefix = "pid:["; inum = ns->inum;
-	} else if (pp->kind == NS_USER) {
-		user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
-		prefix = "user:["; inum = ns->inum;
-	} else if (pp->kind == NS_NET) {
-		net_namespace_t *ns = p->net_ns ? p->net_ns : &init_net_ns;
-		prefix = "net:["; inum = ns->inum;
-	} else if (pp->kind == NS_CGROUP) {
-		prefix = "cgroup:["; inum = cgroup_ns_inum(p->cgroup_ns);
+	if (pp->pid == 0) {
+		process_t *p = task_current();
+		switch (pp->kind) {
+		case NS_IPC:    prefix = "ipc:[";    inum = (p->ipc_ns ? p->ipc_ns : &init_ipc_ns)->inum; break;
+		case NS_TIME:   prefix = "time:[";   inum = (p->time_ns ? p->time_ns : &init_time_ns)->inum; break;
+		case NS_MNT:    prefix = "mnt:[";    inum = (p->mnt_ns ? p->mnt_ns : &init_mnt_ns)->inum; break;
+		case NS_PID:    prefix = "pid:[";    inum = (p->pid_ns ? p->pid_ns : &init_pid_ns)->inum; break;
+		case NS_USER:   prefix = "user:[";   inum = (p->user_ns ? p->user_ns : &init_user_ns)->inum; break;
+		case NS_NET:    prefix = "net:[";    inum = (p->net_ns ? p->net_ns : &init_net_ns)->inum; break;
+		case NS_CGROUP: prefix = "cgroup:["; inum = cgroup_ns_inum(p->cgroup_ns); break;
+		default:        prefix = "uts:[";    inum = (p->uts_ns ? p->uts_ns : &init_uts_ns)->inum; break;
+		}
 	} else {
-		uts_namespace_t *ns = p->uts_ns ? p->uts_ns : &init_uts_ns;
-		prefix = "uts:["; inum = ns->inum;
+		void *ns = proc_get_ns((pid_t)pp->pid, pp->kind);
+		if (!ns) return -1;
+		switch (pp->kind) {
+		case NS_IPC:    prefix = "ipc:[";    inum = ((ipc_namespace_t *)ns)->inum;  ipc_ns_put(ns);  break;
+		case NS_TIME:   prefix = "time:[";   inum = ((time_namespace_t *)ns)->inum; time_ns_put(ns); break;
+		case NS_MNT:    prefix = "mnt:[";    inum = ((mnt_namespace_t *)ns)->inum;  mnt_ns_put(ns);  break;
+		case NS_PID:    prefix = "pid:[";    inum = ((pid_namespace_t *)ns)->inum;  pid_ns_put(ns);  break;
+		case NS_USER:   prefix = "user:[";   inum = ((user_namespace_t *)ns)->inum; user_ns_put(ns); break;
+		case NS_NET:    prefix = "net:[";    inum = ((net_namespace_t *)ns)->inum;  net_ns_put(ns);  break;
+		case NS_CGROUP: prefix = "cgroup:["; inum = cgroup_ns_inum(ns);             cgroup_ns_put(ns); break;
+		default:        prefix = "uts:[";    inum = ((uts_namespace_t *)ns)->inum;  uts_ns_put(ns);  break;
+		}
 	}
 
 	char tmp[40]; int i = 0;
@@ -942,9 +948,9 @@ static int procfs_utsns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = uts_ns_get(p->uts_ns);
+	f->priv = pid == 0 ? uts_ns_get(task_current()->uts_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_UTS);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -965,9 +971,9 @@ static int procfs_ipcns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = ipc_ns_get(p->ipc_ns);
+	f->priv = pid == 0 ? ipc_ns_get(task_current()->ipc_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_IPC);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -988,9 +994,9 @@ static int procfs_timens_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = time_ns_get(p->time_ns);
+	f->priv = pid == 0 ? time_ns_get(task_current()->time_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_TIME);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1011,9 +1017,9 @@ static int procfs_mntns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = mnt_ns_get(p->mnt_ns);
+	f->priv = pid == 0 ? mnt_ns_get(task_current()->mnt_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_MNT);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1034,9 +1040,9 @@ static int procfs_pidns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = pid_ns_get(p->pid_ns);
+	f->priv = pid == 0 ? pid_ns_get(task_current()->pid_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_PID);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1057,9 +1063,9 @@ static int procfs_userns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = user_ns_get(p->user_ns);
+	f->priv = pid == 0 ? user_ns_get(task_current()->user_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_USER);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1080,9 +1086,9 @@ static int procfs_netns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = net_ns_get(p->net_ns);
+	f->priv = pid == 0 ? net_ns_get(task_current()->net_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_NET);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1103,9 +1109,9 @@ static int procfs_cgroupns_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	(void)flags;
 	procfs_nslink_priv_t *pp = in->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p) return -1;
-	f->priv = cgroup_ns_get(p->cgroup_ns);
+	f->priv = pid == 0 ? cgroup_ns_get(task_current()->cgroup_ns)
+	                   : proc_get_ns((pid_t)pid, PROC_NS_CGROUP);
+	if (!f->priv) return -1;
 	return 0;
 }
 
@@ -1267,13 +1273,14 @@ static ssize_t procfs_timens_off_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_fddir_priv_t *pr = f->inode->priv;
 	int pid = pr ? pr->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	process_t *p = pid == 0 ? task_current() : proc_get((pid_t)pid);
 	if (!p) return -1;
 	time_namespace_t *ns = p->time_ns_new ? p->time_ns_new
 	                     : (p->time_ns ? p->time_ns : &init_time_ns);
 	char tmp[96]; int n = 0;
 	n += procfs_off_fmt(tmp + n, "monotonic", ns->mono_sec, ns->mono_nsec);
 	n += procfs_off_fmt(tmp + n, "boottime",  ns->boot_sec, ns->boot_nsec);
+	if (pid) proc_put(p);
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
@@ -1286,14 +1293,14 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 {
 	procfs_fddir_priv_t *pr = f->inode->priv;
 	int pid = pr ? pr->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	process_t *p = pid == 0 ? task_current() : proc_get((pid_t)pid);
 	if (!p) return -1;
 	/* offsets may only be set on a pending time ns (one no task has joined) */
-	if (!p->time_ns_new) return -13; /* EACCES */
+	if (!p->time_ns_new) { if (pid) proc_put(p); return -13; } /* EACCES */
 
 	char kb[128];
 	if (len >= sizeof(kb)) len = sizeof(kb) - 1;
-	if (copy_from_user(kb, buf, len) != 0) return -14;
+	if (copy_from_user(kb, buf, len) != 0) { if (pid) proc_put(p); return -14; }
 	kb[len] = '\0';
 
 	const char *s = kb;
@@ -1315,6 +1322,7 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 		if (first == 'm') { p->time_ns_new->mono_sec = sec; p->time_ns_new->mono_nsec = nsec; }
 		else if (first == 'b') { p->time_ns_new->boot_sec = sec; p->time_ns_new->boot_nsec = nsec; }
 	}
+	if (pid) proc_put(p);
 	return (ssize_t)len;
 }
 
@@ -1347,11 +1355,12 @@ typedef struct { int pid; int is_gid; } procfs_uidmap_priv_t;
 static ssize_t procfs_uidmap_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_uidmap_priv_t *pr = f->inode->priv;
-	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
+	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
 	if (!p) return -1;
 	user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
 	char tmp[256];
 	int n = user_ns_format_map(ns, tmp, sizeof(tmp), pr->is_gid);
+	if (pr->pid) proc_put(p);
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
@@ -1363,14 +1372,16 @@ static ssize_t procfs_uidmap_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t procfs_uidmap_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	procfs_uidmap_priv_t *pr = f->inode->priv;
-	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
-	if (!p || !p->user_ns) return -1;   /* only a non-initial user ns is mappable */
+	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
+	if (!p) return -1;
+	if (!p->user_ns) { if (pr->pid) proc_put(p); return -1; }   /* only a non-initial user ns is mappable */
 	char kb[256];
 	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
-	if (copy_from_user(kb, buf, n) != 0) return -14;
+	if (copy_from_user(kb, buf, n) != 0) { if (pr->pid) proc_put(p); return -14; }
 	kb[n] = '\0';
-	if (user_ns_set_map(p->user_ns, kb, pr->is_gid) != 0) return -1;
-	return (ssize_t)len;
+	int rc = user_ns_set_map(p->user_ns, kb, pr->is_gid);
+	if (pr->pid) proc_put(p);
+	return rc != 0 ? -1 : (ssize_t)len;
 }
 
 static vfs_fops_t procfs_uidmap_fops = { .read = procfs_uidmap_read, .write = procfs_uidmap_write };
@@ -1398,12 +1409,13 @@ static ssize_t procfs_cgroup_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_fddir_priv_t *pr = f->inode->priv;
 	int pid = pr ? pr->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
+	process_t *p = pid == 0 ? task_current() : proc_get((pid_t)pid);
 	if (!p) return -1;
 	char tmp[160];
 	tmp[0] = '0'; tmp[1] = ':'; tmp[2] = ':';
 	int n = 3 + cgroup_proc_path(p, tmp + 3, (int)sizeof(tmp) - 4);
 	tmp[n++] = '\n';
+	if (pid) proc_put(p);
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
