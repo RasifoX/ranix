@@ -390,6 +390,7 @@ check "c-mmsweep"    "OK"  "$(timeout 10 /bin/test_mmsweep 2>/dev/null | tail -1
 check "c-procsweep"  "OK"  "$(timeout 15 /bin/test_procsweep 2>/dev/null | tail -1)"
 check "c-fssweep"    "OK"  "$(timeout 10 /bin/test_fssweep 2>/dev/null | tail -1)"
 check "c-fdsweep"    "OK"  "$(timeout 10 /bin/test_fdsweep 2>/dev/null | tail -1)"
+check "c-closerange" "OK"  "$(timeout 10 /bin/test_closerange 2>/dev/null | tail -1)"
 check "c-pathsweep"  "OK"  "$(timeout 12 /bin/test_pathsweep 2>/dev/null | tail -1)"
 check "c-spairsweep" "OK"  "$(timeout 10 /bin/test_spairsweep 2>/dev/null | tail -1)"
 check "c-bigdir"     "OK"  "$(timeout 15 /bin/test_bigdir 2>/dev/null | tail -1)"

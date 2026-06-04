@@ -280,5 +280,6 @@ typedef struct {
 #define SYS_ARCH_PIDFD_SEND_SIGNAL 424
 #define SYS_ARCH_PIDFD_OPEN        434
 #define SYS_ARCH_CLONE3            435
+#define SYS_ARCH_CLOSE_RANGE       436
 
 #endif
