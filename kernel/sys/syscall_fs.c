@@ -494,8 +494,10 @@ static long sys_getegid(void) { return (long)from_kgid(current_user_ns(), task_c
 static long sys_getppid(void)
 {
 	process_t *p = task_current();
-	process_t *parent = proc_find(p->ppid);
-	return parent ? (long)task_pid_nr_ns(parent, current_pid_ns()) : 0;
+	process_t *parent = proc_get(p->ppid);
+	long r = parent ? (long)task_pid_nr_ns(parent, current_pid_ns()) : 0;
+	proc_put(parent);
+	return r;
 }
 static long sys_gettid(void)  { return (long)task_current()->pid; }
 static long sys_getgroups(int size, uint64_t *list) {
@@ -534,12 +536,16 @@ static long sys_getrlimit(int res, void *rlim) {
 static long sys_setrlimit(int res, const void *rlim) { (void)res; (void)rlim; return 0; }
 static long sys_getpgrp(void) { return (long)task_current()->pgrp; }
 static long sys_getpgid(pid_t pid) {
-	process_t *p = pid ? proc_find(pid) : task_current();
-	return p ? (long)p->pgrp : -3;
+	process_t *p = pid ? proc_get(pid) : task_current();
+	long r = p ? (long)p->pgrp : -3;
+	if (pid) proc_put(p);
+	return r;
 }
 static long sys_getsid(pid_t pid) {
-	process_t *p = pid ? proc_find(pid) : task_current();
-	return p ? (long)p->sid : -3;
+	process_t *p = pid ? proc_get(pid) : task_current();
+	long r = p ? (long)p->sid : -3;
+	if (pid) proc_put(p);
+	return r;
 }
 static long sys_setsid(void) {
 	process_t *p = task_current();
@@ -548,9 +554,10 @@ static long sys_setsid(void) {
 	return (long)p->pid;
 }
 static long sys_setpgid(pid_t pid, pid_t pgid) {
-	process_t *p = pid ? proc_find(pid) : task_current();
+	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
 	p->pgrp = pgid ? pgid : (pid_t)p->pid;
+	if (pid) proc_put(p);
 	return 0;
 }
 static long sys_setuid(uid_t uid)
