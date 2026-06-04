@@ -46,6 +46,13 @@ SECTIONS
         *(.rodata .rodata.* .gnu.linkonce.r*)
     }
 
+    . = ALIGN(8);
+    __ex_table : AT(ADDR(__ex_table) - VIRT_OFFSET) {
+        __start___ex_table = .;
+        *(.__ex_table)
+        __stop___ex_table = .;
+    }
+
     PROVIDE(_data = .);
     .data : AT(ADDR(.data) - VIRT_OFFSET) {
         *(.data .data.* .gnu.linkonce.d*)
