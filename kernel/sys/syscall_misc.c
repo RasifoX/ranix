@@ -300,6 +300,8 @@ static long sys_alarm(unsigned int seconds)
 static long sys_socketpair(int domain, int type, int protocol, int *sv)
 {
     (void)protocol;
+    int sflags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
+    type &= SOCK_TYPE_MASK;
     if (domain != AF_UNIX) return -97;
     if (type != SOCK_STREAM && type != SOCK_DGRAM) return -22;
 
@@ -312,9 +314,9 @@ static long sys_socketpair(int domain, int type, int protocol, int *sv)
     s0->tcp_state = TCP_ESTABLISHED;
     s1->tcp_state = TCP_ESTABLISHED;
 
-    int fd0 = sock_to_fd(s0);
+    int fd0 = sock_to_fd(s0, sflags);
     if (fd0 < 0) { sock_free(s0); sock_free(s1); return fd0; }
-    int fd1 = sock_to_fd(s1);
+    int fd1 = sock_to_fd(s1, sflags);
     if (fd1 < 0) {
         /* fd0 already allocated; free s1, let fd0 cleanup handle s0 */
         sock_free(s1); s0->unix_peer = NULL;
