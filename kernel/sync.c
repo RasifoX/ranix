@@ -363,6 +363,7 @@ void poll_block(uint64_t deadline)
 	c->state = PROC_SLEEPING;
 	c->sleeping_on_queue = 1;
 	c->wake_deadline = d;
+	sched_note_wake_deadline(d);
 	spin_unlock_irq(&poll_wq.lock, f);
 
 	arch_yield();

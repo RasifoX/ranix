@@ -291,7 +291,9 @@ static long sys_alarm(unsigned int seconds)
 	extern spinlock_t sched_lock;
 	uint64_t sf = spin_lock_irq(&sched_lock);
 	unsigned int remaining = (unsigned int)(p->itimer_value / TIMER_HZ);
-	p->itimer_value    = (uint64_t)seconds * TIMER_HZ;
+	uint64_t nv = (uint64_t)seconds * TIMER_HZ;
+	sched_itimer_account(p->itimer_value, nv);
+	p->itimer_value    = nv;
 	p->itimer_interval = 0;
 	spin_unlock_irq(&sched_lock, sf);
 	return (long)remaining;

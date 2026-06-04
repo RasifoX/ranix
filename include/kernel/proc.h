@@ -209,6 +209,12 @@ void       yield(void);
 void       task_sleep(void);
 void       task_sleep_until(uint64_t deadline);
 void       task_sleep_interruptible(void);
+/* Lower the sched_tick deadline-sweep gate to `deadline` (ticks). Callers that
+ * arm p->wake_deadline must call this so the sweep doesn't sleep past it. */
+void       sched_note_wake_deadline(uint64_t deadline);
+/* Adjust the count of armed ITIMER_REAL timers when itimer_value transitions
+ * between 0 and non-0. Caller holds sched_lock. */
+void       sched_itimer_account(uint64_t old_val, uint64_t new_val);
 void       task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags);
 void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);

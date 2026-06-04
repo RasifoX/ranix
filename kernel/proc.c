@@ -852,6 +852,7 @@ void task_exit(void)
 	arch_get_cpu_ctx()->wd_where = "exit:reparent";
 	f = spin_lock_irq(&sched_lock);
 	p->state = PROC_DEAD;
+	if (p->itimer_value) { sched_itimer_account(p->itimer_value, 0); p->itimer_value = 0; }
 
 	if (p->vfork_parent >= 0) {
 		process_t *pp = (p->vfork_parent < proc_cnt) ? proctab[p->vfork_parent] : NULL;
