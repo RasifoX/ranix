@@ -11,7 +11,7 @@ uts_namespace_t init_uts_ns = {
 	.domainname = "(none)",
 };
 
-static spinlock_t ns_lock;
+static spinlock_t ns_lock = SPINLOCK_INIT;
 static unsigned long ns_inum_next = 0xF0000100UL;
 
 unsigned long ns_inum_alloc(void)
