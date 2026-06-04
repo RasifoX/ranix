@@ -2,6 +2,7 @@
     #include <kernel/kprintf.h>
     #include <kernel/proc.h>
     #include <kernel/hal.h>
+    #include <kernel/extable.h>
 
     extern void exception_vectors(void);
 
@@ -98,6 +99,12 @@
             p->exit_code     = SIGSEGV;
             task_exit();
             __builtin_unreachable();
+        }
+
+        unsigned long fixup = search_extable(elr);
+        if (fixup) {
+            tf->elr = fixup;
+            return;
         }
 
         panic_report(ec_name(ec), tf);

@@ -45,6 +45,13 @@ SECTIONS {
         *(.rodata)
     }
 
+    . = ALIGN(8);
+    __ex_table : AT(ADDR(__ex_table) - VIRT_OFFSET) {
+        __start___ex_table = .;
+        *(.__ex_table)
+        __stop___ex_table = .;
+    }
+
     .data : AT(ADDR(.data) - VIRT_OFFSET) {
         *(.data)
     }

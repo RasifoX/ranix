@@ -150,6 +150,7 @@ SRCS_KERNEL = \
     kernel/mm/heap.c \
     kernel/mm/vmalloc.c \
     kernel/lib/string.c \
+    kernel/lib/extable.c \
     kernel/tty/tty_core.c \
     drivers/video/fbdev.c \
     drivers/input/input_core.c
