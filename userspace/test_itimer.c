@@ -6,11 +6,13 @@
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <unistd.h>
 #include <sys/time.h>
 
-static volatile sig_atomic_t prof_n, virt_n;
+static volatile sig_atomic_t prof_n, virt_n, real_n;
 static void on_prof(int s) { (void)s; prof_n++; }
 static void on_virt(int s) { (void)s; virt_n++; }
+static void on_real(int s) { (void)s; real_n++; }
 
 static void arm(int which, long usec)
 {
@@ -27,6 +29,16 @@ int main(void)
 {
 	signal(SIGPROF, on_prof);
 	signal(SIGVTALRM, on_virt);
+	signal(SIGALRM, on_real);
+
+	/* ITIMER_REAL: wall-clock interval, fires regardless of CPU use. Exercises
+	 * the bounded-tick itimer gate: arm raises the armed count, each fire reloads
+	 * the interval, disarm drops it back. Must fire repeatedly. */
+	arm(0, 30000);   /* 30 ms wall clock */
+	for (time_t t0 = time(0); real_n < 3 && time(0) - t0 < 6; )
+		pause();
+	disarm(0);
+	if (real_n < 3) { printf("itimer-fail real n=%d\n", (int)real_n); return 0; }
 
 	/* ITIMER_PROF: user+sys CPU time */
 	arm(2, 20000);   /* 20 ms */
