@@ -233,19 +233,31 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	process_t *p = find_proc(pid);
 	pb_t b = {buf, sz};
 	if (!p) { pb_u64(&b, (uint64_t)pid); pb_str(&b, " (gone) Z 0\n"); return (int)(sz - b.rem); }
-	pb_u64(&b, p->pid); pb_char(&b, ' ');
-	pb_char(&b, '('); pb_str(&b, p->name); pb_char(&b, ')');
-	/* fields 3-52 matching the /proc/PID/stat layout */
-	pb_str(&b, " R ");
-	pb_u64(&b, p->ppid);                   /* 4: ppid */
-	pb_str(&b, " 0 0 0 0 0 0 0 0 0 ");  /* 5-13: pgrp..cmajflt (9 fields) */
-	pb_u64(&b, p->utime_ticks);  pb_char(&b, ' ');  /* 14: utime  */
-	pb_u64(&b, p->stime_ticks);  pb_char(&b, ' ');  /* 15: stime  */
-	pb_u64(&b, p->cutime_ticks); pb_char(&b, ' ');  /* 16: cutime */
-	pb_u64(&b, p->cstime_ticks); pb_char(&b, ' ');  /* 17: cstime */
-	pb_str(&b, "0 0 0 1 0 0 0"             /* 18-24: priority..itrealvalue */
-	           " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"  /* 25-44 */
-	           " 0 0 0 0 0 0 0 0\n");                       /* 45-52 */
+	/* /proc/PID/stat: the fields ps/top actually read (state, pgrp, session,
+	 * nice, num_threads, vsize, rss) carry real values; the rest stay 0. */
+	char st = (p->state == PROC_SLEEPING) ? 'S'
+	        : (p->state == PROC_ZOMBIE)   ? 'Z'
+	        : (p->state == PROC_DEAD)     ? 'X' : 'R';
+	int prio = (p->rt_priority > 0) ? -(1 + p->rt_priority) : 20;
+	pb_u64(&b, p->pid); pb_str(&b, " ("); pb_str(&b, p->name); pb_str(&b, ") ");
+	pb_char(&b, st); pb_char(&b, ' ');                          /* 3: state */
+	pb_u64(&b, p->ppid);           pb_char(&b, ' ');            /* 4: ppid */
+	pb_u64(&b, (uint64_t)p->pgrp); pb_char(&b, ' ');            /* 5: pgrp */
+	pb_u64(&b, (uint64_t)p->sid);  pb_char(&b, ' ');            /* 6: session */
+	pb_str(&b, "0 -1 0 0 0 0 0 ");                              /* 7-13: tty_nr tpgid flags flt counters */
+	pb_u64(&b, p->utime_ticks);  pb_char(&b, ' ');              /* 14: utime  */
+	pb_u64(&b, p->stime_ticks);  pb_char(&b, ' ');              /* 15: stime  */
+	pb_u64(&b, p->cutime_ticks); pb_char(&b, ' ');              /* 16: cutime */
+	pb_u64(&b, p->cstime_ticks); pb_char(&b, ' ');              /* 17: cstime */
+	if (prio < 0) { pb_char(&b, '-'); pb_u64(&b, (uint64_t)(-prio)); }       else pb_u64(&b, (uint64_t)prio);
+	pb_char(&b, ' ');                                           /* 18: priority */
+	if (p->nice < 0) { pb_char(&b, '-'); pb_u64(&b, (uint64_t)(-p->nice)); } else pb_u64(&b, (uint64_t)p->nice);
+	pb_char(&b, ' ');                                           /* 19: nice */
+	pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, ' ');  /* 20: num_threads */
+	pb_str(&b, "0 0 ");                                         /* 21: itrealvalue, 22: starttime */
+	pb_u64(&b, p->brk);          pb_char(&b, ' ');              /* 23: vsize (bytes) */
+	pb_str(&b, "64 ");                                          /* 24: rss (pages, estimate) */
+	pb_str(&b, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");  /* 25-52 */
 	proc_put(p);
 	return (int)(sz - b.rem);
 }
