@@ -253,6 +253,13 @@ void       proc_put(process_t *p);         /* drop a proc_get/proc_hold pin (NUL
 vm_space_t *proc_get_vm(pid_t pid);        /* pin a target's address space (/proc/<pid>/mem); release with vm_destroy */
 vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid);  /* + sample euid (process_vm_readv access check) */
 fd_table_t *proc_get_fds(pid_t pid);       /* pin a target's fd table (/proc/<pid>/fd); release with fd_table_put */
+
+/* namespace kinds for proc_get_ns (matches procfs ns-link ordering) */
+enum { PROC_NS_UTS = 0, PROC_NS_IPC, PROC_NS_TIME, PROC_NS_MNT, PROC_NS_PID,
+       PROC_NS_USER, PROC_NS_NET, PROC_NS_CGROUP };
+/* pin a target's namespace of the given kind for an ns-link open; NULL if the
+ * target is gone or the ns is. Release with the matching xxx_ns_put. */
+void      *proc_get_ns(pid_t pid, int kind);
 int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);
