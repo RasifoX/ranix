@@ -40,6 +40,7 @@
 #define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_GROWSDOWN 0x0100   /* stack mapping — pages fault in on demand (auto-grow) */
+#define MAP_LOCKED    0x2000   /* lock+prefault the mapping (mmap-time mlock) */
 #define MAP_POPULATE  0x8000   /* prefault hint — honoured lazily (best-effort, like Linux) */
 #define MAP_HUGETLB   0x40000
 #define MAP_HUGE_SHIFT 26
@@ -208,6 +209,11 @@ static long sys_munmap(uint64_t addr, size_t len);
 static long sys_mprotect(uint64_t addr, size_t len, int prot);
 static long sys_madvise(uint64_t addr, size_t len, int advice);
 static long sys_msync(uint64_t addr, size_t len, int flags);
+static long sys_mlock(uint64_t addr, size_t len);
+static long sys_munlock(uint64_t addr, size_t len);
+static long sys_mlock2(uint64_t addr, size_t len, int flags);
+static long sys_mlockall(int flags);
+static long sys_munlockall(void);
 
 /* signal-management syscalls (defined in sys/syscall_sig.c) */
 static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldact, size_t sigsetsize);
@@ -596,6 +602,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MLOCK:       ret = sys_mlock((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MUNLOCK:     ret = sys_munlock((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MLOCK2:      ret = sys_mlock2((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
+	case SYS_ARCH_MLOCKALL:    ret = sys_mlockall((int)arg0); break;
+	case SYS_ARCH_MUNLOCKALL:  ret = sys_munlockall(); break;
 	case SYS_ARCH_SYNC:        ret = sys_sync(); break;
 	case SYS_ARCH_MOUNT:       ret = sys_mount((const char*)arg0, (const char*)arg1, (const char*)arg2, (unsigned long)arg3, (const void*)arg4); break;
 	case SYS_ARCH_UMOUNT2:     ret = sys_umount2((const char*)arg0, (int)arg1); break;

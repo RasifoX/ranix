@@ -223,6 +223,8 @@ typedef struct {
 #define SYS_ARCH_MSYNC             227
 #define SYS_ARCH_MLOCK             228
 #define SYS_ARCH_MUNLOCK           229
+#define SYS_ARCH_MLOCKALL          230
+#define SYS_ARCH_MUNLOCKALL        231
 #define SYS_ARCH_FADVISE64         223
 #define SYS_ARCH_MADVISE           233
 #define SYS_ARCH_ACCEPT4           242

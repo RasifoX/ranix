@@ -3,8 +3,9 @@
  * and unmapping regions (mmap/munmap), and changing their protection
  * (mprotect). Each mapped region is tracked by a VMA (see vma_add in syscall.c)
  * so the page-fault handler knows a region's intent — anonymous vs file-backed,
- * shared vs private, and which permissions it carries. madvise/msync are
- * accepted as no-ops: we have no page cache to flush or readahead to tune.
+ * shared vs private, and which permissions it carries. madvise acts on the hints
+ * that matter without a page cache (prefault, drop, lazy-free, hugepage); msync
+ * is a no-op as there is nothing to write back. mlock prefaults and pins a range.
  *
  * Compiled as part of syscall.c (textual include), so the static helpers it
  * relies on — vma_add and the PROT_, MAP_ and VMA_ flag macros — are in scope.
@@ -174,6 +175,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
+			if ((flags & MAP_LOCKED) || p->mlock_future) vf |= VMA_LOCKED;
 			vma_clip(p, va, len); vma_add(p, va, len, vf);
 		}
 		return (long)va;
@@ -326,7 +328,14 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	return 0;
 }
 
-#define MADV_HUGEPAGE 14
+#define MADV_NORMAL     0
+#define MADV_RANDOM     1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED   3
+#define MADV_DONTNEED   4
+#define MADV_FREE       8
+#define MADV_HUGEPAGE   14
+#define MADV_NOHUGEPAGE 15
 
 /* Transparent hugepages: collapse a 2 MB-aligned span of sole-owned, fully
  * present anonymous 4K pages into one 2 MB block, preserving contents. Shared
@@ -364,14 +373,175 @@ static void thp_collapse(process_t *p, uint64_t va)
 		buddy_free((uint64_t)blk, 9);
 }
 
+/* Locate the anonymous VMA covering [va, va+PAGE_SIZE). Huge VMAs are excluded:
+ * they are eagerly populated and never carry a 4K demand-fault path, so the
+ * per-page prefault/drop helpers must leave them alone. */
+static vma_t *anon_vma_at(process_t *p, uint64_t va)
+{
+	for (vma_t *v = p->vmas; v; v = v->next) {
+		if (va < v->vaddr || va >= v->vaddr + v->size) continue;
+		if (!(v->flags & VMA_ANON) || (v->flags & (VMA_HUGE | VMA_HUGE_1G))) return NULL;
+		return v;
+	}
+	return NULL;
+}
+
+/* Prefault every absent page of an anonymous range with a zero page carrying
+ * the VMA's permissions — the work MADV_WILLNEED and mlock want done up front so
+ * a later touch never faults. Best-effort: a dry buddy just stops early. */
+static void mm_prefault(process_t *p, uint64_t addr, size_t len)
+{
+	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+	uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+		vma_t *v = anon_vma_at(p, va);
+		if (!v || !(v->flags & VMA_READ)) continue;
+		if (arch_vm_get_paddr(p->vm->root, va)) continue;
+		if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) return;
+		void *pg = mm_alloc_page_oom();
+		if (!pg) { cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); return; }
+		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+		uint32_t mf = VM_USER | VM_READ;
+		if (v->flags & VMA_WRITE) mf |= VM_WRITE;
+		if (v->flags & VMA_EXEC)  mf |= VM_EXEC;
+		if (vm_map(p->vm, va, (uint64_t)pg, mf) != 0) { buddy_free((uint64_t)pg, 0); cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); return; }
+		p->mem_charged += PAGE_SIZE;
+	}
+}
+
+/* Drop the present pages of a private anonymous range (MADV_DONTNEED / MADV_FREE).
+ * The pages are freed and the charge reversed; the next access demand-faults a
+ * fresh zero page (vm_handle_fault). Shared anon is left intact — its pages back
+ * other mappings — matching MADV_DONTNEED's no-op on MAP_SHARED. We lack reclaim,
+ * so MADV_FREE drops eagerly rather than lazily; a re-read still reads as zero,
+ * which is a permitted MADV_FREE outcome. */
+static void mm_drop(process_t *p, uint64_t addr, size_t len)
+{
+	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+	uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+		vma_t *v = anon_vma_at(p, va);
+		if (!v || (v->flags & VMA_SHARED)) continue;
+		if (!arch_vm_get_paddr(p->vm->root, va)) continue;
+		vm_unmap(p->vm, va);
+		cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
+		p->mem_charged -= PAGE_SIZE;
+	}
+}
+
 static long sys_madvise(uint64_t addr, size_t len, int advice)
 {
-	if (advice != MADV_HUGEPAGE) return 0;   /* others: no page cache → no-op */
 	process_t *p = task_current();
-	uint64_t start = (addr + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-	uint64_t end   = (addr + len) & HUGE_PAGE_MASK;
-	for (uint64_t va = start; va < end; va += HUGE_PAGE_SIZE)
-		thp_collapse(p, va);
+	switch (advice) {
+	case MADV_HUGEPAGE: {
+		uint64_t start = (addr + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+		uint64_t end   = (addr + len) & HUGE_PAGE_MASK;
+		for (uint64_t va = start; va < end; va += HUGE_PAGE_SIZE)
+			thp_collapse(p, va);
+		return 0;
+	}
+	case MADV_WILLNEED:        mm_prefault(p, addr, len); return 0;
+	case MADV_DONTNEED:
+	case MADV_FREE:            mm_drop(p, addr, len);     return 0;
+	default:                   return 0;   /* NORMAL/RANDOM/SEQUENTIAL/NOHUGEPAGE: advisory */
+	}
+}
+
+/* Mark/clear VMA_LOCKED across [addr, addr+len), splitting any VMA the range only
+ * partly covers so the flag lands on exactly the requested span (same carve as
+ * mprotect). There is no reclaim yet, so the flag's effect today is the prefault
+ * mlock already did plus the promise that future reclaim skips it. */
+static void mm_set_locked(process_t *p, uint64_t addr, size_t len, int on)
+{
+	uint64_t end = addr + len;
+	for (vma_t *v = p->vmas; v; v = v->next) {
+		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
+		if (vend <= addr || vstart >= end) continue;
+		uint64_t lo = addr > vstart ? addr : vstart;
+		uint64_t hi = end < vend ? end : vend;
+		uint32_t newf = on ? (v->flags | VMA_LOCKED) : (v->flags & ~(uint32_t)VMA_LOCKED);
+		if (newf == v->flags) continue;
+		if (vstart == lo && vend == hi) {
+			v->flags = newf;
+		} else {
+			uint32_t oldf = v->flags;
+			if (vstart < lo) vma_add(p, vstart, lo - vstart, oldf);
+			if (hi < vend)   vma_add(p, hi, vend - hi, oldf);
+			v->vaddr = lo; v->size = hi - lo; v->flags = newf;
+		}
+	}
+}
+
+static long sys_mlock(uint64_t addr, size_t len)
+{
+	if (len == 0) return 0;
+	process_t *p = task_current();
+	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+	len = (addr - start) + len;
+	if (!access_ok((void *)start, len)) return -12;   /* ENOMEM: range outside user space */
+	mm_prefault(p, start, len);
+	mm_set_locked(p, start, len, 1);
+	return 0;
+}
+
+static long sys_munlock(uint64_t addr, size_t len)
+{
+	if (len == 0) return 0;
+	process_t *p = task_current();
+	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+	len = (addr - start) + len;
+	if (!access_ok((void *)start, len)) return -12;
+	mm_set_locked(p, start, len, 0);
+	return 0;
+}
+
+#define MLOCK_ONFAULT 0x01
+
+static long sys_mlock2(uint64_t addr, size_t len, int flags)
+{
+	if (flags & ~MLOCK_ONFAULT) return -22;
+	if (flags & MLOCK_ONFAULT) {   /* lock present pages now, lock the rest as they fault */
+		if (len == 0) return 0;
+		process_t *p = task_current();
+		uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
+		len = (addr - start) + len;
+		if (!access_ok((void *)start, len)) return -12;
+		mm_set_locked(p, start, len, 1);
+		return 0;
+	}
+	return sys_mlock(addr, len);
+}
+
+#define MCL_CURRENT 1
+#define MCL_FUTURE  2
+#define MCL_ONFAULT 4
+
+/* Lock all current mappings (MCL_CURRENT) and/or arrange for future ones to be
+ * locked as they are created (MCL_FUTURE). mmap already populates anonymous
+ * regions, so the future effect is the VMA_LOCKED flag carried forward. */
+static long sys_mlockall(int flags)
+{
+	if (!(flags & (MCL_CURRENT | MCL_FUTURE)) || (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)))
+		return -22;
+	process_t *p = task_current();
+	p->mlock_future = (flags & MCL_FUTURE) ? 1 : 0;
+	if (flags & MCL_CURRENT) {
+		for (vma_t *v = p->vmas; v; v = v->next) {
+			if (!(flags & MCL_ONFAULT)) mm_prefault(p, v->vaddr, v->size);
+			v->flags |= VMA_LOCKED;
+		}
+	}
+	return 0;
+}
+
+static long sys_munlockall(void)
+{
+	process_t *p = task_current();
+	p->mlock_future = 0;
+	for (vma_t *v = p->vmas; v; v = v->next)
+		v->flags &= ~(uint32_t)VMA_LOCKED;
 	return 0;
 }
 

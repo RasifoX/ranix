@@ -113,6 +113,7 @@ typedef struct process {
 	uint64_t        brk;
 	uint64_t        mmap_next;
 	uint64_t        huge1g_next;   /* next VA for 1 GB hugepage mmaps (own window) */
+	int             mlock_future;  /* mlockall(MCL_FUTURE): lock+prefault later mmaps */
 	pid_t           ppid;
 	pid_t           tgid;          /* thread group id (== pid for main thread) */
 	pid_t           pgrp;
