@@ -390,6 +390,10 @@ void kernel_main(void)
 	extern void net_poll(void);
 	while (1) {
 		net_poll();
-		arch_halt();
+		/* Non-preemptible kernel: cpu0's idle yields voluntarily when a task
+		 * became runnable here (irq_handler preempts only user space). */
+		cpu_context_t *c = arch_get_cpu_ctx();
+		if (c->need_resched) { c->need_resched = 0; yield(); }
+		else                  arch_halt();
 	}
 }

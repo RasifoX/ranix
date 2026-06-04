@@ -187,12 +187,24 @@ exception_vectors:
 irq_handler:
 	save_trapframe
 	bl   task_current
+	ldr  x21, [x0, #16]   /* interrupted ctx, restored for an EL1 nested IRQ */
 	mov  x1, sp
 	str  x1, [x0, #16]    /* task->ctx = sp */
 	mov  w0, #0
 	bl   irq_dispatch
 
-	/* Check per-CPU need_resched (cpu_context_t offset 80) */
+	/* An EL1 (kernel) interruption is non-preemptible and MUST restore the
+	 * interrupted kernel path's ctx (held in x21) before returning — so the
+	 * EL0/EL1 split has to come BEFORE the need_resched test. .irq_ret does not
+	 * restore x21, so a nested EL1 IRQ with need_resched==0 reaching it would
+	 * leave task->ctx dangling at this IRQ frame (which the resumed syscall then
+	 * overwrites); a later fork's memcpy(parent->ctx) would copy that garbage and
+	 * the child would eret into junk. A kernel path keeps need_resched set and is
+	 * honoured at the next syscall-return / idle turn. */
+	mrs  x2, spsr_el1
+	tst  x2, #0xF
+	b.ne .irq_ret_kernel
+	/* EL0 (user) interruption: preemptible — honour need_resched. */
 	mrs  x19, tpidr_el1
 	ldr  w20, [x19, #80]
 	cbz  w20, .irq_ret
@@ -218,6 +230,13 @@ irq_handler:
 	restore_trapframe
 	eret
 
+.irq_ret_kernel:
+	bl   task_current
+	str  x21, [x0, #16]   /* restore the interrupted kernel path's ctx */
+	mov  x0, sp           /* restore_trapframe takes the frame pointer in x0 */
+	restore_trapframe
+	eret
+
 sync_handler:
 	save_trapframe
 	mrs  x0, esr_el1
@@ -234,7 +253,9 @@ sync_handler:
 	mov  x1, sp
 	str  x1, [x0, #16]
 	mov  x0, sp
+	msr  daifclr, #2        /* syscall body runs with IRQs enabled (Linux) */
 	bl   syscall_handle
+	msr  daifset, #2
 
 	/* Check per-CPU need_resched */
 	mrs  x19, tpidr_el1
