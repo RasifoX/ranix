@@ -130,6 +130,7 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 		return 0;
 
 	case PTRACE_GETREGS: {
+		if (tracee->tracer != (pid_t)p->pid) return -1;   /* only the tracer may peek */
 		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
 		if (!c)
 			return -5; /* EIO */
@@ -154,6 +155,7 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	}
 
 	case PTRACE_SETREGS: {
+		if (tracee->tracer != (pid_t)p->pid) return -1;
 		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
 		if (!c)
 			return -5;
@@ -166,18 +168,33 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 		c->r11 = ur.r11; c->r10 = ur.r10; c->r9  = ur.r9;  c->r8  = ur.r8;
 		c->rax = ur.rax; c->rcx = ur.rcx; c->rdx = ur.rdx;
 		c->rsi = ur.rsi; c->rdi = ur.rdi;
-		c->rip = ur.rip; c->rflags = ur.eflags;
+		c->rip = ur.rip;
+		/* a tracee runs at ring 3 — sanitize like rt_sigreturn: keep the user
+		 * arithmetic flags, force IF=1 / IOPL=0 so SETREGS can't disable IRQs or
+		 * grant I/O privilege in the tracee. */
+		c->rflags = (ur.eflags & 0x00000CD5UL) | 0x202UL;
 		c->rsp = ur.rsp;
 #else
 		for (int i = 0; i < 31; i++) c->regs[i] = ur.regs[i];
 		c->sp   = ur.sp;
 		c->elr  = ur.pc;
-		c->spsr = ur.pstate;
+		/* keep only NZCV; force EL0t + IRQs-enabled so SETREGS can't make the
+		 * tracee eret into EL1 (local root). Same sanitize as rt_sigreturn. */
+		c->spsr = ur.pstate & 0xF0000000UL;
 #endif
 		return 0;
 	}
 
 	case PTRACE_PEEKDATA: {
+		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+		if (tracee->tracer != (pid_t)p->pid) return -1;
+		/* addr is fully user-controlled and dereferenced at EL1 after switching to
+		 * the tracee's space. The kernel half is mapped in every space, so without
+		 * a bound an addr >= VIRT_OFFSET would read kernel memory. Require a mapped
+		 * user address in the tracee. */
+		if (!access_ok((void *)addr, sizeof(uint64_t)) ||
+		    !arch_vm_get_paddr(tracee->vm->root, addr & ~0xFFFUL))
+			return -14;
 		uint64_t val = 0;
 		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
 		val = *(volatile uint64_t *)addr;
@@ -187,6 +204,11 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	}
 
 	case PTRACE_POKEDATA: {
+		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+		if (tracee->tracer != (pid_t)p->pid) return -1;
+		if (!access_ok((void *)addr, sizeof(uint64_t)) ||
+		    !arch_vm_get_paddr(tracee->vm->root, addr & ~0xFFFUL))
+			return -14;
 		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
 		*(volatile uint64_t *)addr = (uint64_t)data;
 		arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
