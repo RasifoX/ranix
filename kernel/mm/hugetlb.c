@@ -1,4 +1,7 @@
 #include <kernel/mm/hugetlb.h>
+#include <kernel/mm/buddy.h>
+#include <kernel/mm/pmm.h>
+#include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/kprintf.h>
 
@@ -94,3 +97,57 @@ int huge1g_owns(uint64_t pa)
 	spin_unlock_irq(&pool_lock, f);
 	return i >= 0;
 }
+
+/* ── 2 MB pool ───────────────────────────────────────────────
+ * The Linux nr_hugepages model, as a permit count over the buddy: nr_total is
+ * the pool size (a ceiling), nr_free the uncommitted permits. A 2 MB block is
+ * order 9, which the buddy serves directly, so the physical lifetime of a block
+ * is left to the page refcount (like the anon MAP_HUGETLB path): huge2m_free
+ * drops the owner's reference per page, and a block still mapped survives until
+ * the last unmap pmm_frees it. The permit count is what nr_hugepages reserves
+ * and what hugetlbfs spends, so the counter visibly tracks pool use. */
+static long       pool2m_total = 0;
+static long       pool2m_free  = 0;
+static spinlock_t pool2m_lock = SPINLOCK_INIT;
+
+uint64_t huge2m_alloc(void)
+{
+	uint64_t f = spin_lock_irq(&pool2m_lock);
+	if (pool2m_free <= 0) { spin_unlock_irq(&pool2m_lock, f); return 0; }
+	pool2m_free--;
+	spin_unlock_irq(&pool2m_lock, f);
+
+	void *blk = buddy_alloc(9);            /* 2 MB, 2 MB-aligned; pages refcount 1 */
+	if (!blk) {
+		f = spin_lock_irq(&pool2m_lock);
+		pool2m_free++;
+		spin_unlock_irq(&pool2m_lock, f);
+		return 0;
+	}
+	return (uint64_t)blk;
+}
+
+void huge2m_free(uint64_t pa)
+{
+	if (!pa) return;
+	for (int i = 0; i < 512; i++)
+		pmm_free((void *)(pa + (uint64_t)i * PAGE_SIZE));
+	uint64_t f = spin_lock_irq(&pool2m_lock);
+	if (pool2m_free < pool2m_total) pool2m_free++;
+	spin_unlock_irq(&pool2m_lock, f);
+}
+
+long huge2m_nr_set(long n)
+{
+	if (n < 0) n = 0;
+	uint64_t f = spin_lock_irq(&pool2m_lock);
+	long inuse = pool2m_total - pool2m_free;
+	if (n < inuse) n = inuse;              /* can't reclaim committed pages */
+	pool2m_free += n - pool2m_total;
+	pool2m_total = n;
+	spin_unlock_irq(&pool2m_lock, f);
+	return n;
+}
+
+long huge2m_nr_total(void) { return pool2m_total; }
+long huge2m_nr_free(void)  { return pool2m_free; }
