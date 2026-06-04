@@ -2,6 +2,7 @@
 #define VFS_H
 
 #include <uapi/types.h>
+#include <kernel/sync.h>
 
 /* ── mode bits ───────────────────────────────────────────── */
 #define S_IFREG  0x8000
@@ -150,6 +151,7 @@ typedef struct {
     int          cap;
     uint64_t    *open_bm;
     uint64_t    *cloexec;
+    spinlock_t   lock;      /* guards files[]/open_bm/cloexec and the per-fd refcount bumps */
     int          refcount;  /* number of threads sharing this table */
 } fd_table_t;
 
@@ -238,6 +240,8 @@ int         fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd);
 int         fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start);
 void        fd_free(fd_table_t *t, int fd);
 vfs_file_t *fd_get(fd_table_t *t, int fd);
+vfs_file_t *fget(fd_table_t *t, int fd);   /* fd_get + take a reference; release with fput */
+void        fput(vfs_file_t *f);           /* drop a fget reference (frees the file at refcount 0) */
 
 static inline int fd_is_cloexec(fd_table_t *t, int fd)
 { return fd >= 0 && fd < t->cap && !!(t->cloexec[fd/64] & (1ULL << (fd%64))); }
