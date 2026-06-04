@@ -711,15 +711,21 @@ static int procfs_fdlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
 	procfs_fdlink_priv_t *pr = in->priv;
 	if (!pr) return -1;
-	process_t *p = pr->pid == 0 ? task_current() : proc_find((pid_t)pr->pid);
-	if (!p || !p->fds) return -1;
-	vfs_file_t *f = fd_get(p->fds, pr->fd_n);
-	if (!f || !f->inode) return -1;
-	const char *path = f->path[0] ? f->path : "anon";
-	size_t n = strlen(path);
-	if (n + 1 > sz) return -1;
-	memcpy(buf, path, n + 1);
-	return 0;
+	int self = (pr->pid == 0);
+	fd_table_t *fds = self ? task_current()->fds : proc_get_fds((pid_t)pr->pid);
+	if (!fds) return -1;
+	int ret = -1;
+	vfs_file_t *f = fget(fds, pr->fd_n);   /* pin the file across the deref */
+	if (f) {
+		if (f->inode) {
+			const char *path = f->path[0] ? f->path : "anon";
+			size_t n = strlen(path);
+			if (n + 1 <= sz) { memcpy(buf, path, n + 1); ret = 0; }
+		}
+		fput(f);
+	}
+	if (!self) fd_table_put(fds);
+	return ret;
 }
 
 static vfs_iops_t procfs_fdlink_iops = { .readlink = procfs_fdlink_readlink };
@@ -753,21 +759,25 @@ static vfs_inode_t *procfs_fddir_lookup(vfs_inode_t *dir, const char *name)
 	if (!*s) return NULL;
 	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
 	if (*s) return NULL;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p || !p->fds) return NULL;
-	if (!fd_get(p->fds, fd_n)) return NULL;
-	return procfs_fdlink_inode(pid, fd_n);
+	int self = (pid == 0);
+	fd_table_t *fds = self ? task_current()->fds : proc_get_fds((pid_t)pid);
+	if (!fds) return NULL;
+	vfs_inode_t *ret = fd_get(fds, fd_n) ? procfs_fdlink_inode(pid, fd_n) : NULL;
+	if (!self) fd_table_put(fds);
+	return ret;
 }
 
 static int procfs_fddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	process_t *p = pid == 0 ? task_current() : proc_find((pid_t)pid);
-	if (!p || !p->fds) return -1;
+	int self = (pid == 0);
+	fd_table_t *fds = self ? task_current()->fds : proc_get_fds((pid_t)pid);
+	if (!fds) return -1;
+	int ret = -1;
 	uint32_t found = 0;
-	for (int i = 0; i < p->fds->cap; i++) {
-		if (!fd_get(p->fds, i)) continue;
+	for (int i = 0; i < fds->cap; i++) {
+		if (!fd_get(fds, i)) continue;
 		if (found == idx) {
 			out->ino      = proc_ino_next;
 			out->mode     = S_IFLNK | 0777;
@@ -781,11 +791,13 @@ static int procfs_fddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 			}
 			memcpy(out->name, tmp, (size_t)ti);
 			out->name[ti] = '\0';
-			return 0;
+			ret = 0;
+			break;
 		}
 		found++;
 	}
-	return -1;
+	if (!self) fd_table_put(fds);
+	return ret;
 }
 
 static vfs_iops_t procfs_fddir_iops = {
