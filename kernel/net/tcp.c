@@ -334,6 +334,7 @@ uint16_t alloc_port(void)
 socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t local_port,
                         uint32_t remote_ip, uint16_t remote_port)
 {
+    uint64_t f = spin_lock_irq(&gsock_lock);
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
@@ -343,14 +344,18 @@ socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t lo
         if (s->remote_port != remote_port) continue;
         if (s->remote_ip   != remote_ip)   continue;
         (void)local_ip;
+        sock_hold(s);
+        spin_unlock_irq(&gsock_lock, f);
         return s;
     }
+    spin_unlock_irq(&gsock_lock, f);
     return NULL;
 }
 
 socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
                          const in6_addr_t *remote_ip6, uint16_t remote_port)
 {
+    uint64_t f = spin_lock_irq(&gsock_lock);
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
@@ -360,13 +365,17 @@ socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
         if (s->local_port  != local_port)  continue;
         if (s->remote_port != remote_port) continue;
         if (!in6_eq(&s->remote_ip6, remote_ip6)) continue;
+        sock_hold(s);
+        spin_unlock_irq(&gsock_lock, f);
         return s;
     }
+    spin_unlock_irq(&gsock_lock, f);
     return NULL;
 }
 
 socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int domain)
 {
+    uint64_t f = spin_lock_irq(&gsock_lock);
     for (int i = 0; i < gsock_cap; i++) {
         socket_t *s = gsock[i];
         if (!s) continue;
@@ -375,8 +384,11 @@ socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int dom
         if (s->domain != domain) continue;
         if (s->tcp_state != TCP_LISTEN) continue;
         if (s->local_port != local_port) continue;
+        sock_hold(s);
+        spin_unlock_irq(&gsock_lock, f);
         return s;
     }
+    spin_unlock_irq(&gsock_lock, f);
     return NULL;
 }
 
@@ -579,7 +591,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
         if (ls && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
             /* incoming SYN → create new socket, send SYN-ACK */
             socket_t *ns = sock_alloc(key->family, SOCK_STREAM, IP_PROTO_TCP);
-            if (!ns) { skb_free(skb); return; }
+            if (!ns) { skb_free(skb); sock_put(ls); return; }
             ns->dev         = dev;
             if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
             else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
@@ -600,7 +612,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0);
             ns->snd_nxt++;
 
-            skb_free(skb); return;
+            skb_free(skb); sock_put(ls); return;
         }
         /* unexpected segment → RST */
         if (!(flags & TCP_RST)) {
@@ -608,6 +620,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             if (v6) send_rst6(dev, &key->src6, &key->dst6, th, seglen);
             else    send_rst_v4(dev, key->src4, key->dst4, th, seglen);
         }
+        sock_put(ls);
         skb_free(skb); return;
     }
 
@@ -625,6 +638,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
         if (w) task_wake(w);
         tcp_wake_close(s);
         spin_unlock_irq(&tcp_lock, tl);
+        sock_put(s);
         skb_free(skb); return;
     }
 
@@ -670,6 +684,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
                 spin_unlock_irq(&ls->recv_lock, af);
                 if (aw) task_wake(aw);
             }
+            sock_put(ls);
         }
         break;
 
@@ -790,6 +805,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
     }
 
     spin_unlock_irq(&tcp_lock, tl);
+    sock_put(s);
     skb_free(skb);
 }
 
@@ -896,13 +912,21 @@ int tcp_listen(socket_t *s, int backlog)
 void tcp_tick(void)
 {
     for (int i = 0; i < gsock_cap; i++) {
-        socket_t *s = gsock[i];
-        if (!s || s->type != SOCK_STREAM) continue;
-        if (s->retx_deadline == 0 || kernel_ticks < s->retx_deadline) continue;
+        /* Read + pin the slot under gsock_lock: a concurrent close runs
+         * sock_free under it, and gsock_ensure may realloc the array, so the
+         * bare gsock[i] read + deref raced both. */
+        uint64_t gf = spin_lock_irq(&gsock_lock);
+        socket_t *s = (i < gsock_cap) ? gsock[i] : NULL;
+        if (s && (s->type != SOCK_STREAM ||
+                  s->retx_deadline == 0 || kernel_ticks < s->retx_deadline))
+            s = NULL;
+        if (s) sock_hold(s);
+        spin_unlock_irq(&gsock_lock, gf);
+        if (!s) continue;
 
         uint64_t tl = spin_lock_irq(&tcp_lock);   /* serialise vs RX + syscalls */
         tcp_seg_t *g = s->unacked_head;
-        if (!g) { s->retx_deadline = 0; spin_unlock_irq(&tcp_lock, tl); continue; }
+        if (!g) { s->retx_deadline = 0; spin_unlock_irq(&tcp_lock, tl); sock_put(s); continue; }
 
         s->retx_count++;
         if (s->retx_count > TCP_RETX_GIVEUP) {
@@ -915,6 +939,7 @@ void tcp_tick(void)
             spin_unlock_irq(&s->recv_lock, lf);
             if (w) task_wake(w);
             spin_unlock_irq(&tcp_lock, tl);
+            sock_put(s);
             continue;
         }
 
@@ -931,5 +956,6 @@ void tcp_tick(void)
         if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;
         s->retx_deadline = kernel_ticks + s->rto;
         spin_unlock_irq(&tcp_lock, tl);
+        sock_put(s);
     }
 }
