@@ -50,6 +50,7 @@ void board_irq_init(void)
 	timer_init(TIMER_HZ);
 	extern void smp_ipi_handler(void);
 	irq_register(0, smp_ipi_handler);  /* SGI #0 = reschedule IPI */
+	pl011_irq_init();
 }
 
 void board_secondary_irq_init(void)
