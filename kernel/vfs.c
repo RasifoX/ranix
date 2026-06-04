@@ -1584,6 +1584,8 @@ void vfs_init(void)
 	ramfs_register();
 	extern void tmpfs_register(void);
 	tmpfs_register();
+	extern void overlay_register(void);
+	overlay_register();
 	procfs_register();
 	devfs_register();
 	ext2_register();
