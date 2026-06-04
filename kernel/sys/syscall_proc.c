@@ -1370,46 +1370,55 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
 {
 	(void)flags;
 	if (lcnt > 16 || rcnt > 16) return -22;        /* EINVAL (we cap at 16 iovecs) */
-	process_t *t = proc_find(pid);
-	if (!t || !t->vm) return -3;                   /* ESRCH */
+	uid_t teuid = 0;
+	vm_space_t *tvm = proc_get_vm_cred(pid, &teuid);   /* pinned; vm_destroy to release */
+	if (!tvm) return -3;                               /* ESRCH */
 	process_t *cur = task_current();
-	if (cur->euid != 0 && cur->euid != t->euid) return -1;   /* EPERM */
+	long ret;
 
-	iovec_t liov[16], riov[16];
-	if (copy_from_user(liov, uliov, lcnt * sizeof(iovec_t)) != 0) return -14;
-	if (copy_from_user(riov, uriov, rcnt * sizeof(iovec_t)) != 0) return -14;
-
-	char tmp[256];
-	long total = 0;
-	unsigned long li = 0, ri = 0;
-	size_t lo = 0, ro = 0;
-	while (li < lcnt && ri < rcnt) {
-		if (lo >= liov[li].iov_len) { li++; lo = 0; continue; }
-		if (ro >= riov[ri].iov_len) { ri++; ro = 0; continue; }
-		size_t n = liov[li].iov_len - lo;
-		size_t rrem = riov[ri].iov_len - ro;
-		if (rrem < n) n = rrem;
-		if (n > sizeof(tmp)) n = sizeof(tmp);
-		uint64_t lva = (uint64_t)liov[li].iov_base + lo;
-		uint64_t rva = (uint64_t)riov[ri].iov_base + ro;
-		/* rva is memcpy'd raw at EL1 in the target's space; the kernel half is
-		 * mapped in every space, so an rva >= VIRT_OFFSET would copy kernel memory
-		 * (targeting your own pid passes the euid gate). Bound it to the user range. */
-		if (!access_ok((void *)rva, n)) break;
-		if (write) {
-			if (copy_from_user(tmp, (void *)lva, n) != 0) break;
-			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
-			memcpy((void *)rva, tmp, n);
-			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+	if (cur->euid != 0 && cur->euid != teuid) {
+		ret = -1;                                      /* EPERM */
+	} else {
+		iovec_t liov[16], riov[16];
+		if (copy_from_user(liov, uliov, lcnt * sizeof(iovec_t)) != 0 ||
+		    copy_from_user(riov, uriov, rcnt * sizeof(iovec_t)) != 0) {
+			ret = -14;
 		} else {
-			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
-			memcpy(tmp, (void *)rva, n);
-			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
-			if (copy_to_user((void *)lva, tmp, n) != 0) break;
+			char tmp[256];
+			long total = 0;
+			unsigned long li = 0, ri = 0;
+			size_t lo = 0, ro = 0;
+			while (li < lcnt && ri < rcnt) {
+				if (lo >= liov[li].iov_len) { li++; lo = 0; continue; }
+				if (ro >= riov[ri].iov_len) { ri++; ro = 0; continue; }
+				size_t n = liov[li].iov_len - lo;
+				size_t rrem = riov[ri].iov_len - ro;
+				if (rrem < n) n = rrem;
+				if (n > sizeof(tmp)) n = sizeof(tmp);
+				uint64_t lva = (uint64_t)liov[li].iov_base + lo;
+				uint64_t rva = (uint64_t)riov[ri].iov_base + ro;
+				/* rva is memcpy'd raw at EL1 in the target's space; the kernel half
+				 * is mapped in every space, so an rva >= VIRT_OFFSET would copy
+				 * kernel memory (your own pid passes the euid gate). Bound it. */
+				if (!access_ok((void *)rva, n)) break;
+				if (write) {
+					if (copy_from_user(tmp, (void *)lva, n) != 0) break;
+					arch_vm_switch((uint64_t)tvm->root, tvm->asid);
+					memcpy((void *)rva, tmp, n);
+					arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+				} else {
+					arch_vm_switch((uint64_t)tvm->root, tvm->asid);
+					memcpy(tmp, (void *)rva, n);
+					arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+					if (copy_to_user((void *)lva, tmp, n) != 0) break;
+				}
+				lo += n; ro += n; total += (long)n;
+			}
+			ret = total;
 		}
-		lo += n; ro += n; total += (long)n;
 	}
-	return total;
+	vm_destroy(tvm);
+	return ret;
 }
 
 static long sys_vfork(uint64_t newsp)
