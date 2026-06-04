@@ -15,6 +15,7 @@ static long sys_brk(uint64_t addr)
 {
 	process_t *p = task_current();
 	if (addr == 0) return (long)p->brk;
+	if (!access_ok((void *)addr, 1)) return (long)p->brk;   /* reject kernel-range brk */
 
 	uint64_t new_brk = (addr + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
@@ -43,6 +44,10 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 {
 	if (len == 0) return -22;
 	process_t *p = task_current();
+
+	/* MAP_FIXED maps at a user-chosen address; reject a kernel-range target so it
+	 * cannot write a PTE over the (shared) kernel half of the page tables. */
+	if ((flags & MAP_FIXED) && addr && !access_ok((void *)addr, len)) return -22;
 
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
@@ -222,6 +227,7 @@ static long sys_munmap(uint64_t addr, size_t len)
 	process_t *p  = task_current();
 	addr          = addr & ~(PAGE_SIZE - 1);
 	len           = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE)
 		vm_unmap(p->vm, va);
 	/* remove fully-covered VMAs */
@@ -247,6 +253,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	process_t *p = task_current();
 	addr &= ~(uint64_t)(PAGE_SIZE - 1);
 	len  = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
 
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
