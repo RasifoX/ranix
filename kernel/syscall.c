@@ -28,6 +28,7 @@
 #include <kernel/net/icmpv6.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/net.h>
+#include <kernel/net/netfilter.h>
 #include <kernel/config.h>
 
 #define AT_FDCWD     (-100)
