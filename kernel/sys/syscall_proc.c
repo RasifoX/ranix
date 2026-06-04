@@ -1061,8 +1061,11 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	uint64_t jump_entry = ei.entry;   /* where the kernel transfers control */
 	uint64_t at_base    = 0;          /* AT_BASE: dynamic linker load base */
 	uint64_t interp_lo = 0, interp_hi = 0;
-	/* ASLR mmap base; the dynamic linker (if any) loads at its bottom */
-	uint64_t mmap_base  = USER_MMAP_BASE_ + ((rng_next() & 0xffffULL) << 12);
+	/* ASLR mmap base; the dynamic linker (if any) loads at its bottom.
+	 * personality ADDR_NO_RANDOMIZE (0x0040000) pins it (setarch -R, debuggers). */
+	int no_aslr = (task_current()->personality & 0x0040000) != 0;
+	uint64_t mmap_base  = USER_MMAP_BASE_ +
+		(no_aslr ? 0 : ((rng_next() & 0xffffULL) << 12));
 
 	/* Dynamically linked: load the interpreter (ld.so) too and enter it
 	 * instead of the executable. It performs relocations in userspace, then
@@ -1215,7 +1218,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	memset(uenvp, 0, sizeof(uenvp));
 
 	/* ASLR: randomize stack top within last stack page (up to 4080 bytes) */
-	uint64_t sp = USER_STACK_TOP_ - ((rng_next() & 0xffULL) << 4);
+	uint64_t sp = USER_STACK_TOP_ - (no_aslr ? 0 : ((rng_next() & 0xffULL) << 4));
 	if (kstrs) {
 		for (int j = envc - 1; j >= 0; j--) {
 			int n = 0; while (kenvp[j][n]) n++;

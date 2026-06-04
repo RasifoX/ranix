@@ -495,6 +495,59 @@ static long sys_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
 	return 0;
 }
 
+/* fsuid/fsgid: the credential used for filesystem access checks. An unprivileged
+ * process may only set it to one of ruid/euid/suid (or fsuid); root anything.
+ * Returns the *previous* fsuid, which is euid until first overridden. */
+static long sys_setfsuid(uid_t fsuid)
+{
+	process_t *p = task_current();
+	uid_t prev = p->fs_uid_set ? p->fsuid : p->euid;
+	if (fsuid == p->uid || fsuid == p->euid || fsuid == p->suid ||
+	    (p->fs_uid_set && fsuid == p->fsuid) || p->euid == 0) {
+		p->fsuid = fsuid;
+		p->fs_uid_set = 1;
+	}
+	return (long)prev;
+}
+
+static long sys_setfsgid(gid_t fsgid)
+{
+	process_t *p = task_current();
+	gid_t prev = p->fs_gid_set ? p->fsgid : p->egid;
+	if (fsgid == p->gid || fsgid == p->egid || fsgid == p->sgid ||
+	    (p->fs_gid_set && fsgid == p->fsgid) || p->euid == 0) {
+		p->fsgid = fsgid;
+		p->fs_gid_set = 1;
+	}
+	return (long)prev;
+}
+
+#define PER_LINUX        0x0000
+#define ADDR_NO_RANDOMIZE 0x0040000
+#define PER_MASK         0x00ffffff
+/* personality(2): a process can read its current execution domain by passing
+ * 0xffffffff, or set a new one. Only ADDR_NO_RANDOMIZE has a cheap effect here
+ * (it disables ASLR for the next exec); the rest is stored and echoed back. */
+static long sys_personality(unsigned int persona)
+{
+	process_t *p = task_current();
+	uint32_t old = p->personality;
+	if (persona != 0xffffffffu)
+		p->personality = persona;
+	return (long)old;
+}
+
+/* getcpu(2): which CPU the caller is running on, and its NUMA node (always 0). */
+static long sys_getcpu(unsigned int *cpu, unsigned int *node, void *tcache)
+{
+	(void)tcache;
+	unsigned int c = (unsigned int)arch_get_cpu_ctx()->cpu_id;
+	unsigned int n = 0;
+	if (cpu  && copy_to_user(cpu,  &c, sizeof(c))) return -14;
+	if (node && copy_to_user(node, &n, sizeof(n))) return -14;
+	return 0;
+}
+
 static long sys_rt_sigpending(uint64_t *uset, size_t sigsetsize)
 {
 	(void)sigsetsize;
