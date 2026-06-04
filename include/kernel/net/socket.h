@@ -15,6 +15,9 @@ typedef struct process process_t;
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3
+#define SOCK_NONBLOCK 0x800    /* == O_NONBLOCK; OR'd into type / accept4 flags */
+#define SOCK_CLOEXEC  0x80000  /* == O_CLOEXEC */
+#define SOCK_TYPE_MASK 0xff    /* low bits select the socket type */
 
 #define IPPROTO_ICMPV6 58
 

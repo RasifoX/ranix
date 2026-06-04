@@ -133,6 +133,10 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             spin_unlock_irq(&s->recv_lock, f);
             return 0;
         }
+        if (file->flags & O_NONBLOCK) {
+            spin_unlock_irq(&s->recv_lock, f);
+            return -11;
+        }
         s->recv_waiter = task_current();
         task_sleep_unlock(&s->recv_lock, f);
         process_t *p = task_current();
@@ -159,6 +163,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
          * loops for the rest. */
         uint16_t chunk = len > 65535 ? 65535 : (uint16_t)len;
         while ((rc = tcp_send(s, kbuf, chunk)) == -11) {
+            if (file->flags & O_NONBLOCK) { kfree(kbuf); return -11; }
             s->connect_waiter = task_current();
             poll_block((uint64_t)-1);
             if (task_has_actionable_signal()) { s->connect_waiter = NULL; kfree(kbuf); return -4; }
@@ -184,7 +189,7 @@ static socket_t *fd_to_sock(int fd)
     return (socket_t *)f->inode->priv;
 }
 
-static int sock_to_fd(socket_t *s)
+static int sock_to_fd(socket_t *s, int sflags)
 {
     vfs_inode_t *in = kmalloc(sizeof(*in));
     if (!in) return -12;
@@ -198,10 +203,12 @@ static int sock_to_fd(socket_t *s)
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->refcount = 0;   /* fd_alloc takes the +1, like vfs_open; a single close() then frees */
+    if (sflags & SOCK_NONBLOCK) f->flags |= O_NONBLOCK;
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
     if (fd < 0) { kfree(f); kfree(in); return -12; }
+    if (sflags & SOCK_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
     return fd;
 }
 
@@ -262,13 +269,15 @@ static void unix_reg_remove(socket_t *s)
 
 static long sys_socket(int domain, int type, int proto)
 {
+    int sflags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
+    type &= SOCK_TYPE_MASK;
     if (domain != AF_INET && domain != AF_INET6 && domain != AF_UNIX) return -97;
     if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
     socket_t *s = sock_alloc(domain, type, proto);
     if (!s) return -12;
     s->dev = net_default_dev();
     if (type == SOCK_RAW) sock_register(s);
-    int fd = sock_to_fd(s);
+    int fd = sock_to_fd(s, sflags);
     if (fd < 0) { sock_free(s); return fd; }
     return fd;
 }
@@ -969,15 +978,18 @@ static long sys_listen(int fd, int bl)
 
 static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
 {
-    (void)fl;
-    socket_t *ls = fd_to_sock(fd);
-    if (!ls) return -9;
+    process_t *lp = task_current();
+    vfs_file_t *lf = fd_get(lp->fds, fd);
+    if (!lf || !lf->inode || lf->inode->fops != &sock_fops) return -9;
+    socket_t *ls = (socket_t *)lf->inode->priv;
     if (ls->tcp_state != TCP_LISTEN) return -22;
+    int nonblock = (lf->flags & O_NONBLOCK) ? 1 : 0;
 
     /* wait for a completed connection — tcp_input enqueues it then wakes
      * accept_waiter under recv_lock, so this register + re-check is atomic. */
     uint64_t af = spin_lock_irq(&ls->recv_lock);
     while (!ls->accept_head) {
+        if (nonblock) { spin_unlock_irq(&ls->recv_lock, af); return -11; }
         ls->accept_waiter = task_current();
         task_sleep_unlock(&ls->recv_lock, af);
         if (task_has_actionable_signal()) {
@@ -1014,7 +1026,7 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
         }
     }
 
-    int nfd = sock_to_fd(ns);
+    int nfd = sock_to_fd(ns, fl & (SOCK_CLOEXEC | SOCK_NONBLOCK));
     if (nfd < 0) { sock_free(ns); return nfd; }
     return nfd;
 }
