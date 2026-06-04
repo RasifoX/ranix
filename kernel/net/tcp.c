@@ -139,9 +139,19 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 
 /* ── send window: queue of unacked segments ──────────────── */
 
-#define TCP_CWND_INIT  (4u * TCP_MSS)   /* initial congestion window */
-#define TCP_CWND_MAX   65535u
+#define TCP_CWND_INIT  (10u * TCP_MSS)  /* IW10 (RFC 6928) */
+#define TCP_CWND_MAX   (1u << 24)       /* 16MB ceiling; window scaling caps the real rate */
 #define TCP_RETX_GIVEUP 8
+
+/* CUBIC (RFC 8312), integer-only. Window in MSS-segments, time in milliseconds.
+ *   W(t) = C·(t_s − K)³ + W_max,  C = 0.4 seg/s³,  beta = 0.7
+ * Scaled to ms with t_s = t_ms/1000, C·(t_ms/1000)³ = CUBIC_C_NUM·t_ms³/CUBIC_C_DEN
+ * (2/5e9 = 0.4/1e9). K_ms = cbrt(W_max·(1−beta)/C)·1000 = cbrt(W_max·3/4·1e9). */
+#define CUBIC_C_NUM  2ULL
+#define CUBIC_C_DEN  5000000000ULL
+#define CUBIC_BETA   7u     /* W_max multiplier on loss, /10 */
+#define CUBIC_BETA_SCALE 10u
+#define TICK_MS      10u    /* one timer tick, ms (the 100Hz the RTO consts assume) */
 
 /* Serialises every TCP state-machine mutation — RX processing (tcp_rx, tcp_tick)
  * and the syscalls (connect/send/close) — so a close() and an incoming FIN can't
@@ -202,6 +212,111 @@ static void seg_clear(socket_t *s)
     s->dup_acks      = 0;
 }
 
+/* ── congestion control: CUBIC (default) + NewReno ───────── */
+
+/* Integer cube root of a 64-bit value (Newton's method). */
+static uint32_t icbrt(uint64_t x)
+{
+    if (x == 0) return 0;
+    uint64_t r = 1;
+    while (r * r * r <= x) r <<= 1;   /* bracket from above */
+    r >>= 1;
+    for (int i = 0; i < 8; i++) {
+        uint64_t r2 = r * r;
+        if (r2 == 0) break;
+        r = (2 * r + x / r2) / 3;     /* x^(1/3) fixed point of t→(2t+x/t²)/3 */
+    }
+    while (r * r * r > x) r--;
+    return (uint32_t)r;
+}
+
+/* New congestion epoch: recompute the cubic origin and the time-to-origin K (ms)
+ * from the window at the moment of loss (RFC 8312 §3.1). cubic_wmax already holds
+ * the post-fast-convergence W_max set by tcp_cc_on_loss. */
+static void tcp_cubic_epoch(socket_t *s)
+{
+    s->cubic_epoch = kernel_ticks ? kernel_ticks : 1;
+    s->cubic_tcp   = s->cwnd;
+    s->cubic_cnt   = 0;
+    uint32_t wmax_seg = s->cubic_wmax / TCP_MSS;
+    uint32_t cwnd_seg = s->cwnd / TCP_MSS;
+    if (wmax_seg <= cwnd_seg) {            /* no plateau above us → grow from here */
+        s->cubic_K      = 0;
+        s->cubic_origin = s->cwnd;
+    } else {
+        /* K = cbrt(W_max·(1−beta)/C)·1000  ⇒  cbrt(W_max·3/4·1e9) ms */
+        s->cubic_K      = icbrt((uint64_t)wmax_seg * 3 * 1000000000ULL / 4);
+        s->cubic_origin = s->cubic_wmax;
+    }
+}
+
+/* CUBIC window for the current epoch, blended with a Reno-friendly estimate so a
+ * single CUBIC flow never underperforms Reno on short/low-BDP paths. */
+static void tcp_cubic_update(socket_t *s, uint32_t acked)
+{
+    if (s->cubic_epoch == 0) tcp_cubic_epoch(s);
+
+    uint64_t t_ms = (kernel_ticks - s->cubic_epoch) * TICK_MS;
+    int64_t  d    = (int64_t)t_ms - (int64_t)s->cubic_K;   /* ms from the origin */
+    if (d >  (1 << 20)) d =  (1 << 20);   /* keep d³ in int64; window saturates anyway */
+    if (d < -(1 << 20)) d = -(1 << 20);
+    int64_t  cube = CUBIC_C_NUM * d * d * d / (int64_t)CUBIC_C_DEN;   /* segments */
+    int64_t  target_seg = (int64_t)(s->cubic_origin / TCP_MSS) + cube;
+    if (target_seg < 1) target_seg = 1;
+    uint32_t target = (uint32_t)target_seg * TCP_MSS;
+
+    /* per-ACK gate: it takes cnt acked segments to add one MSS */
+    uint32_t cwnd_seg = s->cwnd / TCP_MSS;
+    if (cwnd_seg == 0) cwnd_seg = 1;
+    uint32_t cnt = (target > s->cwnd) ? s->cwnd / (target - s->cwnd) : 100u * cwnd_seg;
+    if (cnt == 0) cnt = 1;
+
+    /* Reno-friendly region: track Reno's window (bytes) and, if it would be
+     * ahead, clamp cnt so CUBIC grows at least as fast (RFC 8312 §4.2). Reno adds
+     * MSS²/cwnd per ACK; CUBIC-TCP scales that by 3(1−beta)/(1+beta). */
+    uint32_t aimd = (TCP_MSS * TCP_MSS) / s->cwnd;
+    s->cubic_tcp += aimd * 3u * (CUBIC_BETA_SCALE - CUBIC_BETA) / (CUBIC_BETA_SCALE + CUBIC_BETA);
+    if (s->cubic_tcp > s->cwnd) {
+        uint32_t tcp_cnt = s->cwnd / (s->cubic_tcp - s->cwnd + 1);
+        if (tcp_cnt < cnt) cnt = tcp_cnt ? tcp_cnt : 1;
+    }
+
+    s->cubic_cnt += acked / TCP_MSS ? acked / TCP_MSS : 1;
+    if (s->cubic_cnt >= cnt) { s->cwnd += TCP_MSS; s->cubic_cnt = 0; }
+}
+
+/* One ACK acknowledged bytes_acked new bytes: advance the window. */
+static void tcp_cc_on_ack(socket_t *s, uint32_t bytes_acked)
+{
+    if (!bytes_acked) return;
+    if (s->cwnd < s->ssthresh) {                       /* slow start (both algorithms) */
+        s->cwnd += bytes_acked > TCP_MSS ? TCP_MSS : bytes_acked;
+        if (s->cwnd >= s->ssthresh && s->cc_cubic) tcp_cubic_epoch(s);
+    } else if (s->cc_cubic) {
+        tcp_cubic_update(s, bytes_acked);
+    } else {
+        s->cwnd += (TCP_MSS * TCP_MSS) / (s->cwnd ? s->cwnd : TCP_MSS);   /* Reno AIMD */
+    }
+    if (s->cwnd > TCP_CWND_MAX) s->cwnd = TCP_CWND_MAX;
+}
+
+/* Loss event (3 dup-ACKs or RTO): set the new ssthresh and reduce the window.
+ * CUBIC multiplicative decrease with fast convergence; Reno halves. */
+static void tcp_cc_on_loss(socket_t *s)
+{
+    if (s->cc_cubic) {
+        if (s->cwnd < s->cubic_wmax)               /* fast convergence (RFC 8312 §4.2) */
+            s->cubic_wmax = s->cwnd * (CUBIC_BETA_SCALE + CUBIC_BETA) / (2u * CUBIC_BETA_SCALE);
+        else
+            s->cubic_wmax = s->cwnd;
+        s->ssthresh = s->cwnd * CUBIC_BETA / CUBIC_BETA_SCALE;
+        s->cubic_epoch = 0;                        /* start a fresh epoch on recovery */
+    } else {
+        s->ssthresh = s->cwnd / 2;
+    }
+    if (s->ssthresh < 2u * TCP_MSS) s->ssthresh = 2u * TCP_MSS;
+}
+
 /* Remove fully-acked segments, take an RTT sample, and grow the window. */
 static void seg_ack(socket_t *s, uint32_t ack, uint32_t bytes_acked)
 {
@@ -216,20 +331,31 @@ static void seg_ack(socket_t *s, uint32_t ack, uint32_t bytes_acked)
     }
     s->retx_deadline = s->unacked_head ? (kernel_ticks + s->rto) : 0;
     s->retx_count = 0;
-    if (bytes_acked) {
-        if (s->cwnd < s->ssthresh) s->cwnd += bytes_acked;                 /* slow start */
-        else s->cwnd += (TCP_MSS * TCP_MSS) / (s->cwnd ? s->cwnd : TCP_MSS); /* avoidance */
-        if (s->cwnd > TCP_CWND_MAX) s->cwnd = TCP_CWND_MAX;
-    }
+    tcp_cc_on_ack(s, bytes_acked);
 }
 
 /* Initialise the congestion state when a connection is set up. */
 static void tcp_cc_init(socket_t *s)
 {
-    s->cwnd     = TCP_CWND_INIT;
-    s->ssthresh = TCP_CWND_MAX;
-    s->dup_acks = 0;
+    s->cwnd        = TCP_CWND_INIT;
+    s->ssthresh    = TCP_CWND_MAX;
+    s->dup_acks    = 0;
+    s->in_recovery = 0;
+    s->cc_cubic    = 1;          /* CUBIC by default, like Linux */
+    s->cubic_wmax  = 0;
+    s->cubic_epoch = 0;
+    s->cubic_cnt   = 0;
     if (!s->snd_wnd) s->snd_wnd = TCP_RCV_WND;
+}
+
+/* Retransmit the oldest unacked segment the peer has NOT SACKed. */
+static void tcp_retransmit_one(socket_t *s)
+{
+    tcp_seg_t *g = s->unacked_head;
+    while (g && g->sacked) g = g->next;
+    if (!g) return;
+    tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt, g->len ? g->data : NULL, g->len);
+    g->resent = 1;
 }
 
 /* ── out-of-order receive buffer ─────────────────────────── */
@@ -713,29 +839,42 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 
     case TCP_ESTABLISHED:
         if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
-        /* ACK advances snd_una; duplicate ACKs trigger fast retransmit */
+        /* ACK advances snd_una; 3 duplicate ACKs trigger fast retransmit and the
+         * NewReno fast-recovery loop (RFC 5681 §3.2, RFC 6582). */
         if (flags & TCP_ACK) {
             if (s->sack_ok && rx_hlen > sizeof(tcp_hdr_t)) tcp_process_sack(s, th, rx_hlen);
             if (s->ts_ok && rx_has_ts && rx_tsecr)        /* RTT from echoed timestamp (no Karn) */
                 tcp_rtt_update(s, rx_tsecr);
             if (!seq_le(ack, s->snd_una)) {           /* ack > snd_una: new data acked */
                 uint32_t acked = ack - s->snd_una;
+                uint32_t old_una = s->snd_una;
                 s->snd_una = ack;
-                s->dup_acks = 0;
-                seg_ack(s, ack, acked);
+                if (s->in_recovery) {
+                    seg_ack(s, ack, 0);               /* free acked segments, no cwnd growth */
+                    if (seq_le(s->recover, ack)) {    /* full ACK → leave fast recovery */
+                        s->in_recovery = 0;
+                        s->dup_acks = 0;
+                        s->cwnd = s->ssthresh;        /* deflate (RFC 6582 §3.2 step 6) */
+                    } else {                          /* partial ACK: resend next, deflate */
+                        tcp_retransmit_one(s);
+                        uint32_t dec = ack - old_una;
+                        s->cwnd = (s->cwnd > dec) ? s->cwnd - dec : TCP_MSS;
+                        if (dec >= TCP_MSS) s->cwnd += TCP_MSS;
+                    }
+                } else {
+                    s->dup_acks = 0;
+                    seg_ack(s, ack, acked);
+                }
             } else if (ack == s->snd_una && dlen == 0 && s->unacked_head &&
                        !(flags & (TCP_SYN | TCP_FIN))) {
-                if (++s->dup_acks == 3) {             /* three dup ACKs → resend first real gap */
-                    tcp_seg_t *g = s->unacked_head;
-                    while (g && g->sacked) g = g->next;   /* skip what the peer already has */
-                    if (g) {
-                        tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt,
-                                   g->len ? g->data : NULL, g->len);
-                        g->resent = 1;
-                    }
-                    uint32_t inf = s->snd_nxt - s->snd_una;
-                    s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
-                    s->cwnd     = s->ssthresh + 3u * TCP_MSS;
+                if (s->in_recovery) {
+                    s->cwnd += TCP_MSS;               /* inflate per extra dup-ACK */
+                } else if (++s->dup_acks == 3) {
+                    tcp_cc_on_loss(s);
+                    s->recover     = s->snd_nxt;      /* recovery point (NewReno) */
+                    s->in_recovery = 1;
+                    s->cwnd        = s->ssthresh + 3u * TCP_MSS;
+                    tcp_retransmit_one(s);
                 }
             }
             s->snd_wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
@@ -846,6 +985,44 @@ void tcp6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
 }
 
 /* ── public API ──────────────────────────────────────────── */
+
+/* TCP_INFO prefix, matching the Linux/musl struct tcp_info byte layout up to
+ * snd_cwnd (the fields a getsockopt(TCP_INFO) reader cares about for cc state).
+ * Windows are reported in MSS units, like Linux. */
+typedef struct {
+    uint8_t  state, ca_state, retransmits, probes, backoff, options, wscale, flags;
+    uint32_t rto, ato, snd_mss, rcv_mss;
+    uint32_t unacked, sacked, lost, retrans, fackets;
+    uint32_t last_data_sent, last_ack_sent, last_data_recv, last_ack_recv;
+    uint32_t pmtu, rcv_ssthresh, rtt, rttvar, snd_ssthresh, snd_cwnd;
+} __attribute__((packed)) tcp_info_t;
+
+/* Fill caller's buffer with up to sizeof(tcp_info_t) bytes; returns bytes written. */
+uint32_t tcp_get_info(socket_t *s, void *buf, uint32_t buflen)
+{
+    tcp_info_t ti;
+    memset(&ti, 0, sizeof(ti));
+    uint64_t tl = spin_lock_irq(&tcp_lock);
+    ti.state        = (uint8_t)s->tcp_state;
+    ti.ca_state     = s->in_recovery ? 3 : 0;   /* TCP_CA_Recovery / TCP_CA_Open */
+    ti.backoff      = (uint8_t)s->retx_count;
+    ti.options      = (uint8_t)((s->ts_ok ? 1 : 0) | (s->sack_ok ? 2 : 0) |
+                                (s->rcv_wscale ? 4 : 0));
+    ti.wscale       = (uint8_t)((s->snd_wscale & 0xf) | ((s->rcv_wscale & 0xf) << 4));
+    ti.rto          = s->rto;
+    ti.snd_mss      = TCP_MSS;
+    ti.rcv_mss      = TCP_MSS;
+    ti.unacked      = (s->snd_nxt - s->snd_una) / TCP_MSS;
+    ti.rtt          = s->srtt;
+    ti.rttvar       = s->rttvar;
+    ti.snd_ssthresh = s->ssthresh / TCP_MSS;
+    ti.snd_cwnd     = s->cwnd / TCP_MSS;
+    spin_unlock_irq(&tcp_lock, tl);
+
+    uint32_t n = buflen < sizeof(ti) ? buflen : sizeof(ti);
+    if (n) memcpy(buf, &ti, n);
+    return n;
+}
 
 int tcp_connect(socket_t *s)
 {
@@ -966,15 +1143,15 @@ void tcp_tick(void)
             continue;
         }
 
-        /* timeout: collapse to slow start, retransmit the oldest segment the peer
-         * has NOT SACKed, and back off the timer (RFC 6298 §5.5). */
-        uint32_t inf = s->snd_nxt - s->snd_una;
-        s->ssthresh = (inf / 2 > 2u * TCP_MSS) ? inf / 2 : 2u * TCP_MSS;
-        s->cwnd     = TCP_MSS;
-        s->dup_acks = 0;
-        while (g->next && g->sacked) g = g->next;   /* skip SACKed segments */
-        tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt, g->len ? g->data : NULL, g->len);
-        g->resent = 1;
+        /* timeout: drop ssthresh per the active algorithm, collapse cwnd to slow
+         * start, abandon any fast recovery, retransmit the oldest non-SACKed
+         * segment, and back off the timer (RFC 6298 §5.5). */
+        tcp_cc_on_loss(s);
+        s->cwnd        = TCP_MSS;
+        s->dup_acks    = 0;
+        s->in_recovery = 0;
+        s->cubic_epoch = 0;
+        tcp_retransmit_one(s);
         s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
         if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;
         s->retx_deadline = kernel_ticks + s->rto;

@@ -47,6 +47,10 @@ int tcp_send(socket_t *s, const void *data, uint16_t len);
 /* Called by close() — send FIN */
 int tcp_close(socket_t *s);
 
+/* Fill a struct tcp_info prefix (cwnd/ssthresh/rtt) for getsockopt(TCP_INFO);
+ * returns the number of bytes written into buf (≤ buflen). */
+uint32_t tcp_get_info(socket_t *s, void *buf, uint32_t buflen);
+
 /* Called by close() on a LISTEN socket — RST and free every queued connection
  * that was never accept()ed (otherwise they leak in gsock[] and tcp_tick keeps
  * driving them). */
