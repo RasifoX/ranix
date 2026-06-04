@@ -895,45 +895,53 @@ struct ranix_sched_param { int sched_priority; };
 static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
 {
 	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
-	process_t *p = pid ? proc_find(pid) : task_current();
+	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
+	long ret = 0;
 	int prio = 0;
 	if (uparam) {
 		struct ranix_sched_param sp;
-		if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) return -14;
-		prio = sp.sched_priority;
+		if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) ret = -14;
+		else prio = sp.sched_priority;
 	}
-	if (policy == SCHED_NORMAL) { if (prio != 0) return -22; }
-	else if (prio < 1 || prio > 99) return -22;
-	p->sched_policy = policy;
-	p->rt_priority  = prio;
-	return 0;
+	if (ret == 0) {
+		if (policy == SCHED_NORMAL) { if (prio != 0) ret = -22; }
+		else if (prio < 1 || prio > 99) ret = -22;
+	}
+	if (ret == 0) { p->sched_policy = policy; p->rt_priority = prio; }
+	if (pid) proc_put(p);
+	return ret;
 }
 
 static long sys_sched_setparam(pid_t pid, const void *uparam)
 {
-	process_t *p = pid ? proc_find(pid) : task_current();
+	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
-	if (!uparam) return -14;
+	long ret = 0;
 	struct ranix_sched_param sp;
-	if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) return -14;
-	if (p->sched_policy == SCHED_NORMAL) { if (sp.sched_priority != 0) return -22; }
-	else if (sp.sched_priority < 1 || sp.sched_priority > 99) return -22;
-	p->rt_priority = sp.sched_priority;
-	return 0;
+	if (!uparam) ret = -14;
+	else if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) ret = -14;
+	else if (p->sched_policy == SCHED_NORMAL) { if (sp.sched_priority != 0) ret = -22; }
+	else if (sp.sched_priority < 1 || sp.sched_priority > 99) ret = -22;
+	if (ret == 0) p->rt_priority = sp.sched_priority;
+	if (pid) proc_put(p);
+	return ret;
 }
 
 static long sys_sched_getscheduler(pid_t pid)
 {
-	process_t *p = pid ? proc_find(pid) : task_current();
-	return p ? p->sched_policy : -3;
+	process_t *p = pid ? proc_get(pid) : task_current();
+	long r = p ? (long)p->sched_policy : -3;
+	if (pid) proc_put(p);
+	return r;
 }
 
 static long sys_sched_getparam(pid_t pid, void *uparam)
 {
-	process_t *p = pid ? proc_find(pid) : task_current();
+	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
 	struct ranix_sched_param sp = { p->rt_priority };
+	if (pid) proc_put(p);
 	if (copy_to_user(uparam, &sp, sizeof(sp)) != 0) return -14;
 	return 0;
 }
@@ -1341,8 +1349,9 @@ static long sys_getpid(void)
 {
 	process_t *p = task_current();
 	pid_t glead = p->tgid ? p->tgid : p->pid;
-	process_t *leader = (glead == (pid_t)p->pid) ? p : proc_find(glead);
+	process_t *leader = (glead == (pid_t)p->pid) ? NULL : proc_get(glead);
 	int nr = task_pid_nr_ns(leader ? leader : p, current_pid_ns());
+	proc_put(leader);
 	return nr ? (long)nr : (long)glead;   /* nr==global in the init ns */
 }
 
