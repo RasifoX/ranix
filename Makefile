@@ -94,67 +94,19 @@ else ifeq ($(ARCH),x86_64)
         drivers/net/virtio_net.c
 endif
 
-SRCS_NET = \
-    kernel/net/net.c \
-    kernel/net/eth.c \
-    kernel/net/arp.c \
-    kernel/net/ip.c \
-    kernel/net/icmp.c \
-    kernel/net/ipv6.c \
-    kernel/net/icmpv6.c \
-    kernel/net/ndp.c \
-    kernel/net/udp.c \
-    kernel/net/tcp.c \
-    kernel/net/dhcp.c \
-    kernel/net/socket.c
+# Auto-discovered: every .c in kernel/net is compiled (no textual-includes here).
+SRCS_NET = $(wildcard kernel/net/*.c)
 
-SRCS_KERNEL = \
-    kernel/main.c \
-    kernel/smp.c \
-    kernel/initrd.c \
-    kernel/cmdline.c \
-    kernel/driver.c \
-    kernel/fdt.c \
-    kernel/irq.c \
-    kernel/kprintf.c \
-    kernel/sched.c \
-    kernel/nsproxy.c \
-    kernel/cgroup.c \
-    kernel/pid.c \
-    kernel/user_ns.c \
-    kernel/tty/fb_tty.c \
-    kernel/sync.c \
-    kernel/ksyms.c \
-    kernel/elf.c \
-    kernel/syscall.c \
-    kernel/coredump.c \
-    kernel/vdso.c \
-    kernel/vfs.c \
-    kernel/fs/ramfs.c \
-    kernel/fs/tmpfs.c \
-    kernel/fs/overlay.c \
-    kernel/fs/pipe.c \
-    kernel/fs/procfs.c \
-    kernel/fs/sysfs.c \
-    kernel/fs/devfs.c \
-    kernel/fs/pty.c \
-    kernel/fs/mbr.c \
-    kernel/fs/gpt.c \
-    kernel/fs/ext2.c \
-    kernel/fs/fat.c \
-    kernel/fs/iso9660.c \
-    kernel/pci.c \
-    kernel/block.c \
-    kernel/mm/buddy.c \
-    kernel/mm/vm.c \
-    kernel/mm/pmm.c \
-    kernel/mm/hugetlb.c \
-    kernel/mm/heap.c \
-    kernel/mm/vmalloc.c \
-    kernel/mm/oom.c \
-    kernel/lib/string.c \
-    kernel/lib/extable.c \
-    kernel/tty/tty_core.c \
+# Auto-discovered. proc.c + signal.c are textual-#included by sched.c, and
+# mm/mmu.c is not built standalone, so they are filtered out. kernel/sys/*.c
+# (syscall_*.c) are #included by syscall.c and live in a subdir the kernel/*.c
+# glob doesn't reach. New files under kernel/{,fs,mm,lib,tty} are picked up
+# automatically — no hand-editing this list.
+SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c)) \
+    $(wildcard kernel/fs/*.c) \
+    $(filter-out kernel/mm/mmu.c,$(wildcard kernel/mm/*.c)) \
+    $(wildcard kernel/lib/*.c) \
+    $(wildcard kernel/tty/*.c) \
     drivers/video/fbdev.c \
     drivers/input/input_core.c
 
@@ -207,17 +159,10 @@ all: initramfs $(TARGET)
 
 # Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
 USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server
-USER_TEST_BINS = userspace/test_threads userspace/test_inotify userspace/test_ptrace \
-                 userspace/test_unix userspace/test_mqueue userspace/test_creds \
-                 userspace/test_aslr userspace/test_signalfd userspace/test_affinity \
-                 userspace/test_fpsig userspace/test_cowrace userspace/bench userspace/test_clock \
-                 userspace/test_futex_timed userspace/test_poll userspace/test_timerfd userspace/test_eventfd \
-                 userspace/test_mmap userspace/test_tcp userspace/test_udp userspace/test_ping6 userspace/test_udp6 userspace/test_tcp6 userspace/test_ipfrag userspace/test_ip6frag userspace/test_sockopt userspace/test_execveat userspace/test_pidfd userspace/test_sched userspace/test_seccomp userspace/test_procmem userspace/test_extable userspace/test_closerange userspace/test_pipestress \
-                 userspace/test_uts userspace/test_setns userspace/test_clonens \
-                 userspace/test_ipcns userspace/test_ipcsetns userspace/test_timens \
-                 userspace/test_dynamic userspace/test_sharedlib userspace/test_dlopen \
-                 userspace/test_cgroup userspace/test_mountns userspace/test_pidns userspace/test_pidnsproc \
-                 userspace/test_userns userspace/test_netns userspace/test_cgroupns userspace/test_container userspace/test_memcg userspace/test_freeze userspace/test_cpuweight userspace/test_hugepage userspace/test_hugepage1g userspace/test_thp userspace/test_pty userspace/test_singlestep userspace/test_execstress userspace/test_posix userspace/test_sigsweep userspace/test_timesweep userspace/test_dirsweep userspace/test_mmsweep userspace/test_procsweep userspace/test_fssweep userspace/test_fdsweep userspace/test_pathsweep userspace/test_spairsweep userspace/test_bigdir userspace/test_ptysweep userspace/test_envsweep userspace/test_siguncatch userspace/test_devperm userspace/test_sysvmsg userspace/test_realpath userspace/test_xattr userspace/test_nss userspace/test_statx userspace/test_mtime userspace/test_sendmsg userspace/test_rtc userspace/test_scmrights userspace/test_abstract userspace/test_flock userspace/test_chown userspace/test_access userspace/test_fifo userspace/test_fcntllock userspace/test_mknoddev userspace/test_statfs userspace/test_tmpfs userspace/test_tgkill userspace/test_killgroup userspace/test_itimer userspace/test_times userspace/test_vdso userspace/test_tz userspace/test_coredump userspace/test_pivot userspace/test_pcicaps userspace/test_dns userspace/test_tcpbulk userspace/test_http userspace/test_tls userspace/test_tcpperf userspace/test_oom userspace/test_ext4fs userspace/test_overlay
+# Auto-discovered: the bench harness plus every userspace/test_*.c. Adding a
+# test_*.c is enough — no hand-editing this list (and no more merge conflicts
+# from everyone appending to it).
+USER_TEST_BINS = userspace/bench $(patsubst %.c,%,$(wildcard userspace/test_*.c))
 
 initramfs: $(BUILD_DIR)/initramfs.cpio
 
