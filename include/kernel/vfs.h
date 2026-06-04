@@ -242,6 +242,7 @@ void        fd_free(fd_table_t *t, int fd);
 vfs_file_t *fd_get(fd_table_t *t, int fd);
 vfs_file_t *fget(fd_table_t *t, int fd);   /* fd_get + take a reference; release with fput */
 void        fput(vfs_file_t *f);           /* drop a fget reference (frees the file at refcount 0) */
+vfs_file_t *fd_remove(fd_table_t *t, int fd); /* atomically detach fd; caller fputs the result */
 
 static inline int fd_is_cloexec(fd_table_t *t, int fd)
 { return fd >= 0 && fd < t->cap && !!(t->cloexec[fd/64] & (1ULL << (fd%64))); }
