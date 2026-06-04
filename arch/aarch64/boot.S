@@ -79,7 +79,7 @@ _start_code:
 	isb
 
 	/* clear .bss (at physical addresses — subtract VIRT_OFFSET from VMA) */
-	ldr  x3, =0xFFFFFF8000000000
+	ldr  x3, =0xFFFF800000000000
 	ldr  x1, =__bss_start
 	ldr  x2, =__bss_end
 	sub  x1, x1, x3
@@ -94,7 +94,7 @@ _start_code:
 	bl   mmu_tables_init
 
 	/* move SP from physical to TTBR1 virtual — kernel stack must be in high half */
-	ldr  x0, =0xFFFFFF8000000000
+	ldr  x0, =0xFFFF800000000000
 	add  sp, sp, x0
 
 	/* jump to high-half kernel_main */
@@ -202,7 +202,7 @@ secondary_trampoline:
 	bl   enable_mmu
 
 	/* MMU on — convert physical SP to virtual */
-	ldr  x1, =0xFFFFFF8000000000
+	ldr  x1, =0xFFFF800000000000
 	add  sp, sp, x1
 
 	mov  x0, x20         /* cpu_id */

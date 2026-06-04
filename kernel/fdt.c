@@ -286,7 +286,7 @@ void fdt_remap(void)
     /* Only remap if still using physical address (< 0xffff...0) */
     if ((uint64_t)(uintptr_t)_dtb < 0xffff000000000000ULL) {
 #if defined(__aarch64__)
-        _dtb = (void *)((uint64_t)(uintptr_t)_dtb + 0xFFFFFF8000000000ULL);
+        _dtb = (void *)((uint64_t)(uintptr_t)_dtb + 0xFFFF800000000000ULL);
 #endif
     }
 }

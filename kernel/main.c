@@ -9,6 +9,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/buddy.h>
+#include <kernel/mm/vm.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/proc.h>
 #include <kernel/block.h>
@@ -175,6 +176,22 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 
 	/* Map high RAM (1GB huge pages, no buddy dep) before freeing it */
 	arch_map_high_memory(max_limit);
+
+	/* Round-trip + liveness check on the top RAM page: PHYS_TO_VIRT/VIRT_TO_PHYS
+	 * must invert (catches a mis-set direct-map base, e.g. x86's text-vs-dmap
+	 * boundary), and the direct-map VA must actually resolve through the kernel
+	 * page tables — i.e. arch_map_high_memory really mapped the top of RAM. */
+	{
+		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+		uint64_t top = (max_limit - PAGE_SIZE) & PAGE_MASK;
+		uint64_t va  = PHYS_TO_VIRT(top);
+		if (VIRT_TO_PHYS(va) != top)
+			kprintf("BUG: PHYS_TO_VIRT round-trip failed for phys %p\n", (void *)top);
+		uint64_t resolved = arch_vm_get_paddr(kernel_vm_space->root, va);
+		if (resolved != top)
+			kprintf("BUG: top RAM phys %p not mapped (got %p)\n",
+			        (void *)top, (void *)resolved);
+	}
 
 	struct _pmm_ctx ac = { free_start, 0, (uint64_t)-1, {{{0}}}, n_exc, 0 };
 	for (int i = 0; i < n_exc; i++) {
