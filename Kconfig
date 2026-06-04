@@ -35,6 +35,9 @@ config FD_TABLE_INIT
 config FD_INIT_CAP
 	int "Initial per-process open-file array capacity"
 	default 64
+	help
+	  Must be a multiple of 64 (the open/cloexec bitmaps are sized in
+	  64-bit words); enforced by a _Static_assert in kernel/vfs.c.
 
 config FD_MAX
 	int "Soft RLIMIT_NOFILE default (table grows beyond this)"
