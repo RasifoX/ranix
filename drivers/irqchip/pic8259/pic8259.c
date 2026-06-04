@@ -60,7 +60,9 @@ void irqchip_init(uint64_t a, uint64_t b)
 
 void irqchip_enable_irq(uint32_t irq)
 {
-	pic8259_unmask(irq - 0x20);
+	uint32_t line = irq - 0x20;
+	if (line >= 8) pic8259_unmask(2);   /* slave reaches the CPU via cascade IRQ2 */
+	pic8259_unmask(line);
 }
 
 void irq_dispatch(uint32_t irq)

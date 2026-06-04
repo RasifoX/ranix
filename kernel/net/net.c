@@ -141,8 +141,6 @@ netdev_t *net_dev_by_ip(uint32_t ip)
 
 /* ── RX queue ────────────────────────────────────────────── */
 
-void net_rx_wake(void);
-
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
 {
     skb->next = NULL;
