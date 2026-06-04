@@ -728,7 +728,7 @@ void fd_table_destroy(fd_table_t *t)
 	for (int i = 0; i < t->cap; i++) {
 		if (t->files[i]) {
 			vfs_file_t *f = t->files[i];
-			if (--f->refcount == 0) {
+			if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
 				vfs_flock_release(f);
 				if (f->inode && f->inode->fops && f->inode->fops->close)
 					f->inode->fops->close(f);
@@ -761,7 +761,7 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 	for (int i = 0; i < old->cap; i++) {
 		if (old->files[i]) {
 			n->files[i] = old->files[i];
-			n->files[i]->refcount++;
+			atomic_fetch_add32((volatile uint32_t *)&n->files[i]->refcount, 1);
 		}
 	}
 	return n;
@@ -774,7 +774,7 @@ int fd_alloc(fd_table_t *t, vfs_file_t *f)
 			if (!BM_TST(t->open_bm, i)) {
 				t->files[i] = f;
 				BM_SET(t->open_bm, i);
-				f->refcount++;
+				atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
 				return i;
 			}
 		}
@@ -789,7 +789,7 @@ int fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start)
 			if (!BM_TST(t->open_bm, i)) {
 				t->files[i] = f;
 				BM_SET(t->open_bm, i);
-				f->refcount++;
+				atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
 				return i;
 			}
 		}
@@ -803,7 +803,7 @@ int fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd)
 		if (fd_table_grow(t) != 0) return -1;
 	t->files[fd] = f;
 	BM_SET(t->open_bm, fd);
-	f->refcount++;
+	atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
 	return fd;
 }
 
@@ -1062,7 +1062,7 @@ void vfs_posix_drop_pid_inode(void *in, int pid) { plock_drop(in, pid, 0); }
 void vfs_file_put(vfs_file_t *f)
 {
 	if (!f) return;
-	if (--f->refcount == 0) {
+	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
 		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
@@ -1080,7 +1080,7 @@ int vfs_close(int fd)
 
 	fd_free(p->fds, fd);
 	if (f->inode && p) vfs_posix_drop_pid_inode(f->inode, (int)p->pid);
-	if (--f->refcount == 0) {
+	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
 		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
