@@ -1043,14 +1043,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (p->fds) {
 		for (int i = 0; i < p->fds->cap; i++) {
 			if (!fd_is_cloexec(p->fds, i)) continue;
-			vfs_file_t *xf = fd_get(p->fds, i);
-			if (!xf) { fd_set_cloexec(p->fds, i, 0); continue; }
-			fd_free(p->fds, i);
-			if (--xf->refcount == 0) {
-				if (xf->inode->fops && xf->inode->fops->close)
-					xf->inode->fops->close(xf);
-				kfree(xf);
-			}
+			vfs_file_t *xf = fd_remove(p->fds, i);   /* atomic detach + clears cloexec */
+			if (xf) fput(xf);
+			else    fd_set_cloexec(p->fds, i, 0);    /* stale bit, slot not open */
 		}
 	}
 

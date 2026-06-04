@@ -726,19 +726,9 @@ void fd_table_put(fd_table_t *t)
 void fd_table_destroy(fd_table_t *t)
 {
 	if (!t) return;
-	for (int i = 0; i < t->cap; i++) {
-		if (t->files[i]) {
-			vfs_file_t *f = t->files[i];
-			if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
-				vfs_flock_release(f);
-				if (f->inode && f->inode->fops && f->inode->fops->close)
-					f->inode->fops->close(f);
-				if (f->inode && !f->inode->cached)
-					vfs_inode_free(f->inode);
-				kfree(f);
-			}
-		}
-	}
+	/* refcount hit 0: no other thread shares this table, so no lock needed. */
+	for (int i = 0; i < t->cap; i++)
+		if (t->files[i]) fput(t->files[i]);
 	kfree(t->files); kfree(t->open_bm); kfree(t->cloexec); kfree(t);
 }
 
@@ -835,6 +825,44 @@ vfs_file_t *fd_get(fd_table_t *t, int fd)
 	if (!t || fd < 0 || fd >= t->cap) return NULL;
 	uint64_t fl = spin_lock_irq(&t->lock);
 	vfs_file_t *f = BM_TST(t->open_bm, fd) ? t->files[fd] : NULL;
+	spin_unlock_irq(&t->lock, fl);
+	return f;
+}
+
+/* Drop a file reference; the last one tears the file down. Canonical teardown
+ * shared by vfs_close, fd_table_destroy and the fget() readers. */
+void fput(vfs_file_t *f)
+{
+	if (!f) return;
+	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) != 0) return;
+	vfs_flock_release(f);
+	if (f->inode && f->inode->fops && f->inode->fops->close)
+		f->inode->fops->close(f);
+	if (f->inode && !f->inode->cached)
+		vfs_inode_free(f->inode);
+	kfree(f);
+}
+
+/* fd_get + take a reference, atomically under the table lock, so a sibling
+ * close() can't free the file while a blocking read/write holds it. */
+vfs_file_t *fget(fd_table_t *t, int fd)
+{
+	if (!t) return NULL;
+	uint64_t fl = spin_lock_irq(&t->lock);
+	vfs_file_t *f = (fd >= 0 && fd < t->cap && BM_TST(t->open_bm, fd)) ? t->files[fd] : NULL;
+	if (f) atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
+	spin_unlock_irq(&t->lock, fl);
+	return f;
+}
+
+/* Atomically detach fd and return its file (the caller fputs it), so two
+ * concurrent closes can't both drop the slot's reference. */
+vfs_file_t *fd_remove(fd_table_t *t, int fd)
+{
+	if (!t || fd < 0 || fd >= t->cap) return NULL;
+	uint64_t fl = spin_lock_irq(&t->lock);
+	vfs_file_t *f = BM_TST(t->open_bm, fd) ? t->files[fd] : NULL;
+	if (f) { t->files[fd] = NULL; BM_CLR(t->open_bm, fd); BM_CLR(t->cloexec, fd); }
 	spin_unlock_irq(&t->lock, fl);
 	return f;
 }
@@ -1092,41 +1120,40 @@ void vfs_file_put(vfs_file_t *f)
 int vfs_close(int fd)
 {
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fd_remove(p->fds, fd);   /* atomic detach: only one close wins */
 	if (!f) return -1;
-
-	fd_free(p->fds, fd);
 	if (f->inode && p) vfs_posix_drop_pid_inode(f->inode, (int)p->pid);
-	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
-		vfs_flock_release(f);
-		if (f->inode && f->inode->fops && f->inode->fops->close)
-			f->inode->fops->close(f);
-		if (f->inode && !f->inode->cached)
-			vfs_inode_free(f->inode);
-		kfree(f);
-	}
+	fput(f);
 	return 0;
 }
 
 ssize_t vfs_read(int fd, void *buf, size_t len)
 {
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);   /* hold a ref so a sibling close can't free it mid-read */
 	if (!f) return -9; /* EBADF */
-	if (!f->inode->fops || !f->inode->fops->read) return -22; /* EINVAL */
-	return f->inode->fops->read(f, buf, len);
+	ssize_t r = (f->inode->fops && f->inode->fops->read)
+	          ? f->inode->fops->read(f, buf, len) : -22; /* EINVAL */
+	fput(f);
+	return r;
 }
 
 ssize_t vfs_write(int fd, const void *buf, size_t len)
 {
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);
 	if (!f) return -9; /* EBADF */
-	if (!f->inode->fops || !f->inode->fops->write) return -22; /* EINVAL */
-	/* O_APPEND: each write lands at end of file, regardless of the seek pos. */
-	if ((f->flags & O_APPEND) && S_ISREG(f->inode->mode))
-		f->pos = (off_t)f->inode->size;
-	return f->inode->fops->write(f, buf, len);
+	ssize_t r;
+	if (!f->inode->fops || !f->inode->fops->write) {
+		r = -22; /* EINVAL */
+	} else {
+		/* O_APPEND: each write lands at end of file, regardless of the seek pos. */
+		if ((f->flags & O_APPEND) && S_ISREG(f->inode->mode))
+			f->pos = (off_t)f->inode->size;
+		r = f->inode->fops->write(f, buf, len);
+	}
+	fput(f);
+	return r;
 }
 
 off_t vfs_seek(int fd, off_t off, int whence)
