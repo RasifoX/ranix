@@ -691,6 +691,44 @@ process_t *proc_find(pid_t pid)
 	return p;
 }
 
+/*
+ * get_task_struct/put_task_struct equivalent. proc_find returns a raw pointer
+ * that proc_reap can free the moment sched_lock is dropped; a caller that
+ * dereferences the result after that (procfs fills, ptrace, …) races a
+ * concurrent exit. proc_get pins the PCB under sched_lock so reap defers the
+ * free, and proc_put releases the pin (running the deferred free when it is the
+ * last one). refcount counts only outstanding pins; the PCB is freed when the
+ * count reaches 0 after proc_reap has marked it reaped.
+ */
+process_t *proc_get(pid_t pid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	if (p) p->refcount++;
+	spin_unlock_irq(&sched_lock, f);
+	return p;
+}
+
+void proc_hold(process_t *p)
+{
+	if (!p) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	p->refcount++;
+	spin_unlock_irq(&sched_lock, f);
+}
+
+void proc_put(process_t *p)
+{
+	if (!p) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int free_now = (--p->refcount == 0 && p->pcb_dead);
+	spin_unlock_irq(&sched_lock, f);
+	if (free_now) {
+		p->magic = 0;
+		buddy_free(VIRT_TO_PHYS(p), 0);
+	}
+}
+
 /* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
 int proc_thread_count(pid_t tgid)
 {
@@ -971,6 +1009,9 @@ void proc_reap(process_t *child)
 		par->cutime_ticks += child->utime_ticks + child->cutime_ticks;
 		par->cstime_ticks += child->stime_ticks + child->cstime_ticks;
 	}
+	/* defer the PCB free if a /proc reader still holds a proc_get pin */
+	child->pcb_dead = 1;
+	int free_now = (child->refcount == 0);
 	spin_unlock_irq(&sched_lock, f);
 
 	/*
@@ -981,6 +1022,8 @@ void proc_reap(process_t *child)
 	 */
 	if (child->kstack)
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
-	child->magic = 0;   /* poison before free: trips a later use-after-free */
-	buddy_free(VIRT_TO_PHYS(child), 0);
+	if (free_now) {
+		child->magic = 0;   /* poison before free: trips a later use-after-free */
+		buddy_free(VIRT_TO_PHYS(child), 0);
+	}
 }
