@@ -59,16 +59,26 @@
 
         process_t *p = task_current();
 
-        /* EL0 fault — kill the offending process with SIGSEGV status instead of
-         * panicking. (Delivering SIGSEGV to a user handler needs a nested-fault-
-         * safe signal path on both arches — a separate change.) */
-        if (elr < 0xFFFF000000000000UL) {
+        /* Classify by the faulting exception level (SPSR), NOT by the ELR value:
+         * a kernel control-flow corruption can branch to a low (user-range)
+         * address, and keying off "elr < kernel base" would misreport that EL1
+         * fault as a user segfault and kill a random process instead of panicking.
+         * EL0 fault → kill the offending process with SIGSEGV; EL1 → fall through
+         * to panic_report. (Delivering SIGSEGV to a user handler needs a nested-
+         * fault-safe signal path on both arches — a separate change.) */
+        if ((tf->spsr & 0xF) == 0) {
             kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x ISS=0x%x\n",
                     (int)p->pid, p->name, elr, far, ec, iss);
             kprintf("  x0=%lx x1=%lx x2=%lx x3=%lx\n",
                     tf->regs[0], tf->regs[1], tf->regs[2], tf->regs[3]);
             kprintf("  x20=%lx x21=%lx x29(fp)=%lx x30(lr)=%lx sp=%lx\n",
                     tf->regs[20], tf->regs[21], tf->regs[29], tf->regs[30], tf->sp);
+            { extern uint64_t arch_vm_get_paddr(uint64_t *, uint64_t);
+              uint64_t fpa = (p && p->vm) ? arch_vm_get_paddr(p->vm->root, far & ~0xFFFUL) : 0;
+              int hasvma = 0;
+              for (vma_t *v = p ? p->vmas : 0; v; v = v->next)
+                  if (far >= v->vaddr && far < v->vaddr + v->size) { hasvma = 1; break; }
+              kprintf("  FAR pte_pa=%lx vma=%d\n", fpa, hasvma); }
             /* Walk frame pointer chain to get call stack */
             uint64_t fp = tf->regs[29];
             for (int _i = 0; _i < 6 && fp && fp < 0xFFFF000000000000UL && (fp & 7) == 0; _i++) {
