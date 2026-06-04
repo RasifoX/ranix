@@ -1,0 +1,40 @@
+# Ranix default config — the full build. Reproduces every feature shipped today.
+# Generated header lives in include/generated/autoconf.h (see scripts/genconfig.sh).
+# `make defconfig` copies this to .config; `make` regenerates the header from it.
+
+#
+# Tunables
+#
+CONFIG_SCHED_QUANTUM=10
+CONFIG_KSTACK_SIZE=16384
+CONFIG_DENTRY_MAX=4096
+CONFIG_MAX_CPUS=256
+CONFIG_FD_TABLE_INIT=16
+CONFIG_FD_INIT_CAP=64
+CONFIG_FD_MAX=1024
+CONFIG_PIPE_BUF_SIZE=4096
+CONFIG_CMDLINE_MAX=512
+CONFIG_FUTEX_SLOTS=256
+CONFIG_PTY_MAX=8
+CONFIG_GSOCK_INIT_CAP=64
+CONFIG_MQ_MAX=16
+CONFIG_MQ_MSG_MAX=32
+CONFIG_MQ_MSGSIZE=512
+CONFIG_EXT2_BCACHE_N=16
+CONFIG_SKB_HEADROOM=128
+CONFIG_SKB_DATA_MAX=1536
+CONFIG_SKB_SCM_MAX=8
+
+#
+# Networking
+#
+CONFIG_NET=y
+
+#
+# Filesystems
+#
+CONFIG_FS_EXT2=y
+CONFIG_FS_FAT=y
+CONFIG_FS_ISO9660=y
+CONFIG_FS_OVERLAY=y
+CONFIG_FS_TMPFS=y

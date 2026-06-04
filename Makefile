@@ -25,6 +25,29 @@ LD  = ld.lld
 BUILD_DIR = build
 TARGET    = $(BUILD_DIR)/ranix.elf
 
+# ── build configuration (Kconfig-style) ─────────────────────────────────────
+# .config (KEY=value) is the single source of truth. genconfig.sh turns it into
+# a C header (CONFIG_* #defines, pulled in via include/kernel/config.h) and a
+# Make fragment (CONFIG_* variables, included below so SRCS_* can drop gated
+# sources). A missing .config seeds from defconfig — the full build. `make
+# defconfig` / `make tinyconfig` switch presets. Both generated files are
+# git-ignored; defconfig + tinyconfig are committed.
+DOTCONFIG   = .config
+AUTOCONF_H  = include/generated/autoconf.h
+AUTOCONF_MK = $(BUILD_DIR)/auto.conf
+
+$(DOTCONFIG):
+	@cp defconfig $@
+	@echo "[OK] seeded $@ from defconfig"
+
+$(AUTOCONF_H) $(AUTOCONF_MK) &: $(DOTCONFIG) scripts/genconfig.sh
+	@sh scripts/genconfig.sh $(DOTCONFIG) $(AUTOCONF_H) $(AUTOCONF_MK)
+
+# Housekeeping/preset goals must not pull in (and thus regenerate) the config.
+ifeq ($(filter clean defconfig tinyconfig,$(MAKECMDGOALS)),)
+-include $(AUTOCONF_MK)
+endif
+
 INCLUDES = -Iinclude -Idrivers -I. -Iarch/$(ARCH)/include -I$(BUILD_DIR)
 
 ifeq ($(ARCH),aarch64)
@@ -97,13 +120,33 @@ endif
 # Auto-discovered: every .c in kernel/net is compiled (no textual-includes here).
 SRCS_NET = $(wildcard kernel/net/*.c)
 
+# Optional filesystems: dropped from the build when CONFIG_FS_x != y (their
+# *_register() calls in vfs.c are #if IS_ENABLED(CONFIG_FS_x)-guarded so the
+# kernel still links). Anything not listed here is always built.
+FS_GATED_OFF =
+ifneq ($(CONFIG_FS_EXT2),y)
+    FS_GATED_OFF += kernel/fs/ext2.c
+endif
+ifneq ($(CONFIG_FS_FAT),y)
+    FS_GATED_OFF += kernel/fs/fat.c
+endif
+ifneq ($(CONFIG_FS_ISO9660),y)
+    FS_GATED_OFF += kernel/fs/iso9660.c
+endif
+ifneq ($(CONFIG_FS_OVERLAY),y)
+    FS_GATED_OFF += kernel/fs/overlay.c
+endif
+ifneq ($(CONFIG_FS_TMPFS),y)
+    FS_GATED_OFF += kernel/fs/tmpfs.c
+endif
+
 # Auto-discovered. proc.c + signal.c are textual-#included by sched.c, and
 # mm/mmu.c is not built standalone, so they are filtered out. kernel/sys/*.c
 # (syscall_*.c) are #included by syscall.c and live in a subdir the kernel/*.c
 # glob doesn't reach. New files under kernel/{,fs,mm,lib,tty} are picked up
 # automatically — no hand-editing this list.
 SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c)) \
-    $(wildcard kernel/fs/*.c) \
+    $(filter-out $(FS_GATED_OFF),$(wildcard kernel/fs/*.c)) \
     $(filter-out kernel/mm/mmu.c,$(wildcard kernel/mm/*.c)) \
     $(wildcard kernel/lib/*.c) \
     $(wildcard kernel/tty/*.c) \
@@ -127,7 +170,15 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static test flakehunt vdso
+.PHONY: all clean qemu image initramfs bash-static test flakehunt vdso defconfig tinyconfig
+
+# Switch the active .config to a committed preset and drop the stale generated
+# files so the next build regenerates them. defconfig = full build; tinyconfig =
+# minimal bootable core.
+defconfig tinyconfig:
+	@cp $@ $(DOTCONFIG)
+	@rm -f $(AUTOCONF_H) $(AUTOCONF_MK)
+	@echo "[OK] .config <- $@"
 
 # Run the suite N times, report any test that isn't 100% green (flake hunter).
 flakehunt:
@@ -359,16 +410,16 @@ $(TARGET): $(OBJS) $(BUILD_DIR)/ksyms.o
 	fi
 	@if [ "$(ARCH)" = "x86_64" ]; then echo "[OK] Ranix built → arch=$(ARCH)"; else echo "[OK] Ranix built → arch=$(ARCH) board=$(BOARD)"; fi
 
-$(BUILD_DIR)/%.o: %.c
+$(BUILD_DIR)/%.o: %.c $(AUTOCONF_H)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: %.S
+$(BUILD_DIR)/%.o: %.S $(AUTOCONF_H)
 	@mkdir -p $(dir $@)
 	$(AS) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) ranix.iso ranix-disk.img $(USER_CORE_BINS) $(USER_TEST_BINS) userspace/sh userspace/*_elf.h userspace/libfoo.so
+	rm -rf $(BUILD_DIR) include/generated ranix.iso ranix-disk.img $(USER_CORE_BINS) $(USER_TEST_BINS) userspace/sh userspace/*_elf.h userspace/libfoo.so
 
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio

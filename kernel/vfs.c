@@ -1566,9 +1566,6 @@ int vfs_link(const char *oldpath, const char *newpath)
 extern void ramfs_register(void);
 extern void procfs_register(void);
 extern void devfs_register(void);
-extern void ext2_register(void);
-extern void fat_register(void);
-extern void iso9660_register(void);
 
 void vfs_init(void)
 {
@@ -1582,15 +1579,28 @@ void vfs_init(void)
 		}
 	}
 	ramfs_register();
+#if IS_ENABLED(CONFIG_FS_TMPFS)
 	extern void tmpfs_register(void);
 	tmpfs_register();
+#endif
+#if IS_ENABLED(CONFIG_FS_OVERLAY)
 	extern void overlay_register(void);
 	overlay_register();
+#endif
 	procfs_register();
 	devfs_register();
+#if IS_ENABLED(CONFIG_FS_EXT2)
+	extern void ext2_register(void);
 	ext2_register();
+#endif
+#if IS_ENABLED(CONFIG_FS_FAT)
+	extern void fat_register(void);
 	fat_register();
+#endif
+#if IS_ENABLED(CONFIG_FS_ISO9660)
+	extern void iso9660_register(void);
 	iso9660_register();
+#endif
 	extern void sysfs_register(void);
 	sysfs_register();
 	extern void cgroup_register(void);

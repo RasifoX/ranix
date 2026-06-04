@@ -180,7 +180,7 @@ typedef struct __attribute__((packed)) {
 
 /* ── filesystem metadata ─────────────────────────────────────── */
 
-#define EXT2_BCACHE_N  16   /* LRU block cache entries per fs */
+#define EXT2_BCACHE_N  CONFIG_EXT2_BCACHE_N   /* LRU block cache entries per fs */
 
 typedef struct {
 	uint64_t blkno;   /* ~0ULL = empty */

@@ -7,7 +7,7 @@
 
 /* ── global socket table (dynamic) ──────────────────────── */
 
-#define GSOCK_INIT_CAP 64
+#define GSOCK_INIT_CAP CONFIG_GSOCK_INIT_CAP
 
 socket_t **gsock;
 int        gsock_cap;

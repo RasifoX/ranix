@@ -12,7 +12,7 @@
  * is a future refinement). Enough for openpty/forkpty and SSH-style relaying.
  */
 
-#define PTY_MAX   8
+#define PTY_MAX   CONFIG_PTY_MAX
 #define PTY_BUF   4096
 #define NCCS      19
 
