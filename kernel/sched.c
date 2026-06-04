@@ -104,6 +104,53 @@ void kstack_check(void)
 
 
 
+/*
+ * sched_lock is the single lock for everything scheduler-related: the per-CPU
+ * runqueues, process state machine, the global process list, proctab/pid space,
+ * pending-signal bits and the context switch. It is the scalability ceiling —
+ * the runqueues are already per-CPU (cpu->rq_head/tail) but every queue op,
+ * wakeup, signal post and switch contends this one lock.
+ *
+ * SPLITTING IT (per-rq locks) — design, deferred as too invasive to land safely:
+ *
+ *   Locks, in acquisition order (always low → high to avoid ABBA):
+ *     L1  proc_lock      — global process list (->next), proctab[], pid alloc.
+ *     L2  rq->lock       — one per CPU (cpu_context_t already reserves rq_lock):
+ *                          rq_head/tail, in_rq, sched_next. For two rqs, lock the
+ *                          lower cpu_id first.
+ *     L3  p->pi_lock     — per-task: state, on_cpu, sleeping_on_queue,
+ *                          wake_deadline, sig_pending/sig_mask, itimer fields.
+ *   A task's pi_lock nests inside its target rq->lock; rq->lock nests inside
+ *   proc_lock. Never take proc_lock while holding an rq->lock.
+ *
+ *   Field ownership:
+ *     - rq_head/tail/in_rq/sched_next  → that CPU's rq->lock.
+ *     - state/on_cpu/sig_pending/...   → p->pi_lock (today these ride sched_lock).
+ *     - ->next list + proctab + pids   → proc_lock.
+ *
+ *   wake/enqueue (task_wake, task_signal*, tick deadline): take p->pi_lock, set
+ *   state READY; if !on_cpu, pick a target CPU and enqueue. pick_cpu() today
+ *   reads every CPU's rq_len — under per-rq locks that must become a lockless
+ *   snapshot (cache an atomic rq->nr_running per CPU and read it unlocked; exact
+ *   length is only a hint) so enqueue locks just the chosen rq->lock, not all of
+ *   them. Order: pi_lock → target rq->lock.
+ *
+ *   schedule(): lock this CPU's rq->lock, pop. On empty, work-steal: snapshot
+ *   nr_running unlocked to choose a victim, then lock victim rq->lock (lower id
+ *   first vs self) and re-check before popping (the task may have left). The
+ *   prev requeue (sched_requeue_prev) takes prev->pi_lock then this rq->lock.
+ *
+ *   Cross-CPU signal/group/pgrp walks take proc_lock to traverse ->next, then
+ *   per-target pi_lock (+ that target's rq->lock only if it must be enqueued) —
+ *   so a long walk no longer blocks every other CPU's schedule().
+ *
+ *   The hard parts that make this unsafe to ship without a soak: pick_cpu/steal
+ *   reading all runqueues, the three-lock enqueue-from-walk path, and keeping
+ *   the prev-requeue / dying-kstack handoff in schedule() atomic across the new
+ *   lock boundaries. A single missed invariant is a rare runqueue corruption or
+ *   lost wakeup the suite won't deterministically catch — so until that soak
+ *   exists, the one lock stays.
+ */
 spinlock_t sched_lock = SPINLOCK_INIT;
 static int sched_quantum_val = SCHED_QUANTUM;
 
