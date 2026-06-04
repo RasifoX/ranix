@@ -3,6 +3,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/hugetlb.h>
+#include <kernel/mm/oom.h>
 #include <kernel/sync.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
@@ -11,6 +12,34 @@
 #include <kernel/vfs.h>
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
+
+/* Buddy retries under memory pressure: 0 → kill the biggest user process so its
+ * exit frees memory, then retry. Bounded so a kill that frees nothing (e.g. the
+ * faulting hog is the victim and only dies on return) can't spin forever. The
+ * caller holds the per-space fault_lock; oom_kill_alloc takes only sched_lock
+ * (fault_lock → sched_lock is the sole order — no ABBA), never fault_lock, so it
+ * cannot self-deadlock. */
+#define OOM_RETRIES 8
+
+static void *vm_alloc_page_oom(void)
+{
+	void *pg = buddy_alloc(0);
+	for (int i = 0; !pg && i < OOM_RETRIES; i++) {
+		if (oom_kill_alloc() != OOM_KILLED_OTHER) break;
+		pg = buddy_alloc(0);
+	}
+	return pg;
+}
+
+static void *vm_pmm_page_oom(void)
+{
+	void *pg = pmm_alloc();
+	for (int i = 0; !pg && i < OOM_RETRIES; i++) {
+		if (oom_kill_alloc() != OOM_KILLED_OTHER) break;
+		pg = pmm_alloc();
+	}
+	return pg;
+}
 
 static uint64_t kernel_pt_phys;
 static vm_space_t _kernel_vm_space;
@@ -79,7 +108,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	if (!paddr) {
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
 			if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
-			void *pg = buddy_alloc(0);
+			void *pg = vm_alloc_page_oom();
 			if (pg) {
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 				if (vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE) == 0) {
@@ -141,7 +170,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 
 	if (pg->refcount > 1) {
 		if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
-		void *new_p = pmm_alloc();
+		void *new_p = vm_pmm_page_oom();
 		if (!new_p) { cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); goto out; }
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
 		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE) == 0) {

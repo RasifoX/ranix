@@ -10,6 +10,21 @@
  * relies on — vma_add and the PROT_, MAP_ and VMA_ flag macros — are in scope.
  * ───────────────────────────────────────────────────────────────────────── */
 
+/* Order-0 user page with OOM fallback: on a dry buddy, kill the biggest user
+ * process and retry so a growth request can be satisfied from the reclaimed
+ * memory instead of failing outright. Bounded — a kill freeing nothing
+ * (the requester itself is the victim, dying only on syscall return) falls
+ * through to ENOMEM rather than spinning. */
+static void *mm_alloc_page_oom(void)
+{
+	void *pg = buddy_alloc(0);
+	for (int i = 0; !pg && i < 8; i++) {
+		if (oom_kill_alloc() != OOM_KILLED_OTHER) break;
+		pg = buddy_alloc(0);
+	}
+	return pg;
+}
+
 /* Grow or shrink the heap. addr==0 queries the current break. */
 static long sys_brk(uint64_t addr)
 {
@@ -28,7 +43,7 @@ static long sys_brk(uint64_t addr)
 	}
 
 	for (uint64_t va = p->brk; va < new_brk; va += PAGE_SIZE) {
-		void *page = buddy_alloc(0);
+		void *page = mm_alloc_page_oom();
 		if (!page) { kprintf("brk: ENOMEM pid=%u brk=%lx new=%lx free=%lu\n", p->pid, p->brk, new_brk, pmm_free_pages()); return (long)p->brk; }
 		memset((void *)PHYS_TO_VIRT(page), 0, PAGE_SIZE);
 		vm_map(p->vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE);
@@ -129,7 +144,14 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 	uint64_t va;
 	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
-	else { va = p->mmap_next; p->mmap_next += len; }
+	else {
+		/* The bump-allocated mmap window ends at the stack; refuse to hand out a
+		 * VA that would overlap it (Linux returns ENOMEM when no region fits)
+		 * rather than silently map over the stack. */
+		uint64_t ceil = ARCH_USER_STACK_TOP - (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE;
+		if (p->mmap_next + len > ceil || p->mmap_next + len < p->mmap_next) return -12;
+		va = p->mmap_next; p->mmap_next += len;
+	}
 
 	if (flags & MAP_ANONYMOUS) {
 		if (prot == 0) {
@@ -139,7 +161,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		} else {
 			if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; } /* over memory.max */
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-				void *pg = buddy_alloc(0);
+				void *pg = mm_alloc_page_oom();
 				if (!pg) { cgroup_uncharge_mem(p->cgroup, (long)len); kprintf("mmap: ENOMEM pid=%u va=%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 				vm_map(p->vm, v, (uint64_t)pg, vmflags);
