@@ -108,6 +108,17 @@ typedef struct socket {
     uint32_t    cwnd;           /* congestion window (bytes) */
     uint32_t    ssthresh;       /* slow-start threshold */
     uint32_t    dup_acks;       /* duplicate-ACK run, for fast retransmit */
+    uint8_t     in_recovery;    /* fast-recovery (RFC 6582 NewReno) in progress */
+    uint8_t     cc_cubic;       /* congestion algorithm: 1 = CUBIC, 0 = NewReno */
+    uint32_t    recover;        /* NewReno recovery point: snd_nxt when loss detected */
+
+    /* CUBIC state (RFC 8312); windows in bytes */
+    uint32_t    cubic_wmax;     /* window just before the last reduction (W_max) */
+    uint32_t    cubic_origin;   /* plateau the cube grows toward (origin_point) */
+    uint32_t    cubic_K;        /* ms from epoch to origin (the cube-root term) */
+    uint32_t    cubic_cnt;      /* per-ACK counter gating the 1-MSS increase */
+    uint32_t    cubic_tcp;      /* Reno-friendly window, so CUBIC never loses to Reno */
+    uint64_t    cubic_epoch;    /* tick the current congestion epoch began (0 = none) */
 
     /* OOO reassembly: segments received ahead of rcv_nxt, ordered by seq */
     struct tcp_seg *ooo_head;

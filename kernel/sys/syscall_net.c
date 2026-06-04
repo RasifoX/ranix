@@ -996,6 +996,7 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_ACCEPTCONN  30
 #define SO_IPPROTO_TCP  6
 #define SO_TCP_NODELAY  1
+#define SO_TCP_INFO    11
 
 struct k_timeval { int64_t tv_sec; int64_t tv_usec; };
 
@@ -1051,6 +1052,15 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 
 	uint32_t ulen;
 	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -14;
+
+	if (lv == SO_IPPROTO_TCP && opt == SO_TCP_INFO) {
+		if (s->type != SOCK_STREAM) return -92;
+		uint8_t info[96];
+		uint32_t n = tcp_get_info(s, info, ulen < sizeof(info) ? ulen : sizeof(info));
+		if (n && copy_to_user(val, info, n) != 0) return -14;
+		if (copy_to_user(len, &n, sizeof(n)) != 0) return -14;
+		return 0;
+	}
 
 	if (lv == SO_SOL_SOCKET && (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO)) {
 		uint32_t t = (opt == SO_RCVTIMEO) ? s->rcv_timeo : s->snd_timeo;
