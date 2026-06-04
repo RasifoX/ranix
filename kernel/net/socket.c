@@ -246,8 +246,7 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
     spin_unlock_irq(&gsock_lock, f);
     if (!found) return;
 
-    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
-    skb_t *skb = skb_alloc();
+    skb_t *skb = skb_alloc_big(len);
     if (!skb) { sock_put(found); return; }
     memcpy(skb->data, data, len);
     skb->len      = len;
@@ -287,9 +286,8 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
 
     if (!found) return;
 
-    skb_t *skb = skb_alloc();
+    skb_t *skb = skb_alloc_big(len);
     if (!skb) { sock_put(found); return; }
-    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     memcpy(skb->data, data, len);
     skb->len = len;
     skb->src_ip   = src_ip;
