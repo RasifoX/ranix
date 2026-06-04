@@ -4,6 +4,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/mm/vm.h>
 #include <kernel/proc.h>
+#include <kernel/extable.h>
 
 void exceptions_init(void)
 {
@@ -81,6 +82,12 @@ void exc_dispatch(arch_context_t *ctx)
 		p->exit_code     = SIGSEGV;
 		task_exit();
 		__builtin_unreachable();
+	}
+
+	unsigned long fixup = search_extable(ctx->rip);
+	if (fixup) {
+		ctx->rip = fixup;
+		return;
 	}
 
 	panic_report(exc_name(ctx->vector), ctx);
