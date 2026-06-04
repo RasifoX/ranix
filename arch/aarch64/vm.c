@@ -24,8 +24,9 @@ static uint64_t alloc_table(void)
 }
 
 /* 48-bit VA / 4-level: vs->root is the L0 table. User VA sits under L0[0];
- * kernel VAs (e.g. ioremap on kernel_vm_space) under L0[511]. The L1/L2/L3 walk
- * below is unchanged — only the L0 slot is selected by the address. */
+ * the kernel image + direct map under L0[256..510] and ioremap under L0[511].
+ * The L1/L2/L3 walk below is unchanged — only the L0 slot is selected by the
+ * address. */
 static uint64_t user_l1(vm_space_t *vs)
 {
 	uint64_t *l0 = (uint64_t *)PHYS_TO_VIRT((uint64_t)vs->root);
