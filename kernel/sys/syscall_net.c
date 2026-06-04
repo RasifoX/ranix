@@ -174,11 +174,39 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
     return -38;
 }
 
+#define FIONREAD 0x541B
+#define FIONBIO  0x5421
+
+static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
+{
+    socket_t *s = (socket_t *)file->inode->priv;
+    if (!s) return -9;
+    switch (cmd) {
+    case FIONBIO: {                         /* set/clear non-blocking mode */
+        int on;
+        if (copy_from_user(&on, (void *)(uintptr_t)arg, sizeof(on)) != 0) return -14;
+        if (on) file->flags |=  O_NONBLOCK;
+        else    file->flags &= ~O_NONBLOCK;
+        return 0;
+    }
+    case FIONREAD: {                        /* bytes queued for reading */
+        int navail = 0;
+        uint64_t f = spin_lock_irq(&s->recv_lock);
+        for (skb_t *skb = s->recv_head; skb; skb = skb->next) navail += skb->len;
+        spin_unlock_irq(&s->recv_lock, f);
+        return copy_to_user((void *)(uintptr_t)arg, &navail, sizeof(navail));
+    }
+    default:
+        return -25; /* ENOTTY */
+    }
+}
+
 static vfs_fops_t sock_fops = {
     .read  = sock_read_vfs,
     .write = sock_write_vfs,
     .close = sock_close_vfs,
     .poll  = sock_poll_vfs,
+    .ioctl = sock_ioctl_vfs,
 };
 
 static socket_t *fd_to_sock(int fd)
