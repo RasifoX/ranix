@@ -459,6 +459,7 @@ mnt_namespace_t *mnt_ns_clone(mnt_namespace_t *old)
 		if (!nm) continue;
 		*nm = *m;
 		nm->fstype = nm->fstype_name;   /* re-point to this copy's own buffer */
+		if (nm->get_sb) nm->get_sb(nm->priv);   /* shared sb gains a reference */
 		nm->next   = ns->mounts;
 		ns->mounts = nm;
 	}
@@ -514,6 +515,8 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 	mnt->fstype_name[_fl] = '\0';
 	mnt->fstype     = mnt->fstype_name;
 	mnt->priv       = data;
+	mnt->kill_sb    = NULL;
+	mnt->get_sb     = NULL;
 	mnt->mountpoint = NULL;
 	mnt->root       = NULL;
 	mnt->next       = NULL;
@@ -637,6 +640,22 @@ const char *vfs_path_fstype(const char *path)
 	return best;
 }
 
+/* Per-filesystem statfs: filesystems that track real block/inode usage
+ * (tmpfs, ext2/4) supply iops->statfs; returns <0 if the fs has no op, so the
+ * caller falls back to nominal counts. */
+int vfs_statfs_inode(vfs_inode_t *in, vfs_statfs_t *out)
+{
+	if (!in || !in->iops || !in->iops->statfs) return -38; /* ENOSYS */
+	return in->iops->statfs(in, out);
+}
+
+int vfs_statfs_path(const char *path, vfs_statfs_t *out)
+{
+	vfs_dentry_t *d = vfs_dentry_resolve(path);
+	if (!d || !d->inode) return -2;
+	return vfs_statfs_inode(d->inode, out);
+}
+
 int vfs_umount(const char *path)
 {
 	if (!path || path[0] != '/') return -22;
@@ -658,8 +677,11 @@ int vfs_umount(const char *path)
 
 	if (prev) prev->next = mnt->next;
 	else      mns->mounts = mnt->next;
+	void (*kill_sb)(void *) = mnt->kill_sb;
+	void *priv = mnt->priv;
 	spin_unlock_irq(&vfs_lock, f);
 
+	if (kill_sb) kill_sb(priv);
 	kfree(mnt);
 	return 0;
 }
@@ -1560,6 +1582,8 @@ void vfs_init(void)
 		}
 	}
 	ramfs_register();
+	extern void tmpfs_register(void);
+	tmpfs_register();
 	procfs_register();
 	devfs_register();
 	ext2_register();
