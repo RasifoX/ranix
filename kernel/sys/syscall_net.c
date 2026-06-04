@@ -469,8 +469,8 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
              * milliseconds (on the wire, not just loopback), so spin net_poll
              * against a wall-clock deadline rather than a fixed iteration count —
              * a tight 64-spin finishes in microseconds, long before the NA. */
-            extern volatile uint64_t kernel_ticks;
-            uint64_t deadline = kernel_ticks + 100;   /* ~1s at 100 Hz */
+            extern uint64_t mono_ns(void);
+            uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
             rr = -113;   /* EHOSTUNREACH if the neighbour never answers */
             do {
                 skb_t *skb = skb_alloc();
@@ -481,7 +481,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 if (rc >= 0) { rr = (long)len; break; }
                 if (rc != -1) { rr = rc; break; }
                 net_poll();   /* drain RX — the NDP NA may arrive */
-            } while (kernel_ticks < deadline);
+            } while (mono_ns() < deadline);
         } else if (s->type == SOCK_DGRAM) {
             if (!s->local_port) { extern uint16_t alloc_port(void); s->local_port = alloc_port(); }
             sock_register(s);
@@ -534,14 +534,14 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         /* the first send to an unresolved next-hop triggers ARP and is dropped;
          * wait (time-based, not a microsecond-fast count) for the ARP reply so
          * the datagram actually goes out — a real round-trip takes real ms */
-        extern volatile uint64_t kernel_ticks;
-        uint64_t deadline = kernel_ticks + 100;   /* ~1s */
+        extern uint64_t mono_ns(void);
+        uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
         int rc = -1;
         do {
             rc = udp_tx(txdev, dst_ip, s->local_port, dst_port, kbuf, (uint16_t)len);
             if (rc != -1) break;
             net_poll();
-        } while (kernel_ticks < deadline);
+        } while (mono_ns() < deadline);
         r = rc < 0 ? rc : (long)len;
     } else if ((s->type == SOCK_RAW || s->type == SOCK_DGRAM) && s->proto == 1 /* IPPROTO_ICMP */) {
         if (len >= sizeof(icmp_hdr_t)) {
@@ -551,8 +551,8 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             /* time-based ARP resolve (first attempt sends the ARP request; a real
              * reply takes real ms — a 64-spin count finishes in microseconds and
              * gives a spurious ENOSYS before the next-hop is ever resolved) */
-            extern volatile uint64_t kernel_ticks;
-            uint64_t deadline = kernel_ticks + 100;   /* ~1s */
+            extern uint64_t mono_ns(void);
+            uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
             r = -113;   /* EHOSTUNREACH if the next hop never resolves */
             do {
                 skb_t *skb = skb_alloc();
@@ -563,7 +563,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
                 if (rc >= 0) { r = (long)len; break; }
                 if (rc != -1) { r = rc; break; }
                 net_poll();  /* drain RX — ARP reply may arrive */
-            } while (kernel_ticks < deadline);
+            } while (mono_ns() < deadline);
         }
     }
     kfree(kbuf);
