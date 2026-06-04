@@ -243,6 +243,7 @@ process_t *proc_find(pid_t pid);           /* lookup, no reference — safe only
 process_t *proc_get(pid_t pid);            /* lookup + pin (get_task_struct); release with proc_put */
 void       proc_hold(process_t *p);        /* pin a process you already hold a live reference to */
 void       proc_put(process_t *p);         /* drop a proc_get/proc_hold pin (NULL-safe) */
+vm_space_t *proc_get_vm(pid_t pid);        /* pin a target's address space (/proc/<pid>/mem); release with vm_destroy */
 int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);

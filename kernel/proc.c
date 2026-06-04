@@ -734,6 +734,24 @@ void proc_put(process_t *p)
 	}
 }
 
+/*
+ * Pin a target process's address space for cross-process access
+ * (/proc/<pid>/mem). task_exit steals p->vm under sched_lock and only then
+ * vm_destroy()s it, so grabbing a vm_get() ref under the same lock races it
+ * safely: either we ref it before the steal (the exit's vm_destroy defers to
+ * our ref) or we already see NULL and return it. The space is walked via the
+ * direct map, never activated, so it is safe to use from another process's
+ * context. Release with vm_destroy().
+ */
+vm_space_t *proc_get_vm(pid_t pid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	vm_space_t *vm = (p && p->vm) ? vm_get(p->vm) : NULL;
+	spin_unlock_irq(&sched_lock, f);
+	return vm;
+}
+
 /* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
 int proc_thread_count(pid_t tgid)
 {
