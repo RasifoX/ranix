@@ -1,4 +1,6 @@
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
+#include <kernel/kprintf.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
@@ -92,6 +94,97 @@ static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 static vfs_fops_t urandom_fops = {
 	.read  = urandom_read,
 	.write = null_write,
+};
+
+/* ── /dev/kmsg ───────────────────────────────────────────────── */
+/* Reads drain the kernel log ring (one read() returns the whole buffer once,
+ * then EOF until more is logged), so `dmesg` shows the boot log; writes append
+ * to the same ring via kprintf (the printk(3)/logger path). */
+
+static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
+{
+	size_t total = kprintf_log_len();
+	if ((size_t)f->pos >= total) return 0;
+	char *tmp = kmalloc(total ? total : 1);
+	if (!tmp) return -12;
+	size_t got = kprintf_read_log(tmp, total);
+	size_t avail = (got > (size_t)f->pos) ? got - (size_t)f->pos : 0;
+	size_t n = avail < len ? avail : len;
+	if (n) memcpy(buf, tmp + f->pos, n);
+	kfree(tmp);
+	f->pos += (off_t)n;
+	return (ssize_t)n;
+}
+
+static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	(void)f;
+	const char *s = buf;
+	for (size_t i = 0; i < len; i++) kprintf("%c", s[i]);
+	return (ssize_t)len;
+}
+
+static vfs_fops_t kmsg_fops = {
+	.read  = kmsg_read,
+	.write = kmsg_write,
+};
+
+/* ── /dev/rtc0 ───────────────────────────────────────────────── */
+/* RTC_RD_TIME (the hwclock/dmesg-era ioctl) returns the current wall-clock
+ * time broken down into a struct rtc_time. The wall clock comes from the same
+ * RTC-seeded realtime offset the syscalls use. */
+
+#define RTC_RD_TIME 0x80247009u   /* _IOR('p', 0x09, struct rtc_time) */
+
+struct rtc_time {
+	int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+	int tm_wday, tm_yday, tm_isdst;
+};
+
+static void epoch_to_rtc(int64_t t, struct rtc_time *r)
+{
+	int64_t days = t / 86400, rem = t % 86400;
+	if (rem < 0) { rem += 86400; days--; }
+	r->tm_hour = (int)(rem / 3600);
+	r->tm_min  = (int)((rem % 3600) / 60);
+	r->tm_sec  = (int)(rem % 60);
+	r->tm_wday = (int)((days + 4) % 7);   /* 1970-01-01 was a Thursday */
+	if (r->tm_wday < 0) r->tm_wday += 7;
+	int64_t y = 1970;
+	for (;;) {
+		int leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+		int diy  = leap ? 366 : 365;
+		if (days < diy) break;
+		days -= diy; y++;
+	}
+	int leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+	static const int mdays[] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+	r->tm_yday = (int)days;
+	int mon = 0;
+	for (; mon < 12; mon++) {
+		int dim = mdays[mon] + (mon == 1 && leap ? 1 : 0);
+		if (days < dim) break;
+		days -= dim;
+	}
+	r->tm_mon  = mon;
+	r->tm_mday = (int)days + 1;
+	r->tm_year = (int)(y - 1900);
+	r->tm_isdst = 0;
+}
+
+static int rtc_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
+{
+	(void)f;
+	if (cmd != RTC_RD_TIME) return -25;
+	int64_t s, n; ranix_walltime(&s, &n);
+	struct rtc_time r;
+	memset(&r, 0, sizeof(r));
+	epoch_to_rtc(s, &r);
+	return copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r));
+}
+
+static vfs_fops_t rtc_fops = {
+	.ioctl = rtc_ioctl,
 };
 
 typedef struct devfs_entry {
@@ -484,4 +577,6 @@ void devfs_register(void)
 	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("devfs", devfs_mount);
 	vfs_register_fs("devtmpfs", devfs_mount);   /* keep the name for /proc/mounts + statfs */
+	devfs_register_device("kmsg", S_IFCHR | 0644, 0x010b, &kmsg_fops);     /* 1:11 */
+	devfs_register_device("rtc0", S_IFCHR | 0644, 0xfe00, &rtc_fops);      /* 254:0 */
 }

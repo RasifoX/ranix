@@ -179,11 +179,151 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
 #define FIONREAD 0x541B
 #define FIONBIO  0x5421
 
+#define SIOCGIFNAME    0x8910
+#define SIOCGIFCONF    0x8912
+#define SIOCGIFFLAGS   0x8913
+#define SIOCGIFADDR    0x8915
+#define SIOCGIFNETMASK 0x891b
+#define SIOCGIFMTU     0x8921
+#define SIOCGIFHWADDR  0x8927
+#define SIOCGIFINDEX   0x8933
+
+#define IFF_UP        0x1
+#define IFF_BROADCAST 0x2
+#define IFF_LOOPBACK  0x8
+#define IFF_RUNNING   0x40
+#define IFF_MULTICAST 0x1000
+
+#define IFNAMSIZ 16
+#define ARPHRD_ETHER    1
+#define ARPHRD_LOOPBACK 772
+
+struct ifreq {
+    char ifr_name[IFNAMSIZ];
+    union {
+        sockaddr_in_t  ifru_addr;
+        short          ifru_flags;
+        int            ifru_ifindex;
+        int            ifru_mtu;
+        struct { unsigned short sa_family; char sa_data[14]; } ifru_hwaddr;
+        char           ifru_pad[24];
+    } u;
+};
+
+struct ifconf {
+    int   ifc_len;
+    union { uint64_t pad; struct ifreq *ifcu_req; } u;
+};
+
+static netdev_t *ifr_dev(const struct ifreq *r)
+{
+    char name[IFNAMSIZ];
+    memcpy(name, r->ifr_name, IFNAMSIZ);
+    name[IFNAMSIZ - 1] = '\0';
+    for (int i = 0; ; i++) {
+        netdev_t *d = net_dev(i);
+        if (!d) return NULL;
+        if (strcmp(d->name, name) == 0) return d;
+    }
+}
+
+static short ifr_flags(const netdev_t *d)
+{
+    short f = IFF_UP | IFF_RUNNING;
+    if (d->ip == 0x7f000001) f |= IFF_LOOPBACK;
+    else                     f |= IFF_BROADCAST | IFF_MULTICAST;
+    return f;
+}
+
+static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
+{
+    struct ifreq r;
+    if (copy_from_user(&r, (void *)(uintptr_t)arg, sizeof(r))) return -14;
+    netdev_t *d = ifr_dev(&r);
+    if (!d) return -19;   /* ENODEV */
+    switch (cmd) {
+    case SIOCGIFADDR: {
+        memset(&r.u, 0, sizeof(r.u));
+        r.u.ifru_addr.sin_family = AF_INET;
+        r.u.ifru_addr.sin_addr   = htonl(d->ip);
+        break;
+    }
+    case SIOCGIFNETMASK: {
+        memset(&r.u, 0, sizeof(r.u));
+        r.u.ifru_addr.sin_family = AF_INET;
+        r.u.ifru_addr.sin_addr   = htonl(d->mask);
+        break;
+    }
+    case SIOCGIFFLAGS:
+        memset(&r.u, 0, sizeof(r.u));
+        r.u.ifru_flags = ifr_flags(d);
+        break;
+    case SIOCGIFMTU:
+        memset(&r.u, 0, sizeof(r.u));
+        r.u.ifru_mtu = 1500;
+        break;
+    case SIOCGIFINDEX: {
+        memset(&r.u, 0, sizeof(r.u));
+        for (int i = 0; ; i++) {
+            netdev_t *e = net_dev(i);
+            if (!e) return -19;
+            if (e == d) { r.u.ifru_ifindex = i + 1; break; }
+        }
+        break;
+    }
+    case SIOCGIFHWADDR:
+        memset(&r.u, 0, sizeof(r.u));
+        r.u.ifru_hwaddr.sa_family =
+            (d->ip == 0x7f000001) ? ARPHRD_LOOPBACK : ARPHRD_ETHER;
+        memcpy(r.u.ifru_hwaddr.sa_data, d->mac, 6);
+        break;
+    default:
+        return -25;
+    }
+    if (copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r))) return -14;
+    return 0;
+}
+
+/* SIOCGIFCONF: fill the caller's buffer with one struct ifreq (name + IPv4
+ * addr) per interface, and report the byte count actually used. */
+static int sock_ioctl_ifconf(uint64_t arg)
+{
+    struct ifconf c;
+    if (copy_from_user(&c, (void *)(uintptr_t)arg, sizeof(c))) return -14;
+    struct ifreq *ureq = c.u.ifcu_req;
+    int cap   = (int)(c.ifc_len / (int)sizeof(struct ifreq));
+    int used  = 0;
+    for (int i = 0; ; i++) {
+        netdev_t *d = net_dev(i);
+        if (!d) break;
+        if (ureq) {                       /* NULL buffer → just size the request */
+            if (used >= cap) break;
+            struct ifreq r;
+            memset(&r, 0, sizeof(r));
+            int n = (int)strlen(d->name);
+            if (n > IFNAMSIZ - 1) n = IFNAMSIZ - 1;
+            memcpy(r.ifr_name, d->name, (size_t)n);
+            r.u.ifru_addr.sin_family = AF_INET;
+            r.u.ifru_addr.sin_addr   = htonl(d->ip);
+            if (copy_to_user(&ureq[used], &r, sizeof(r))) return -14;
+        }
+        used++;
+    }
+    c.ifc_len = used * (int)sizeof(struct ifreq);
+    if (copy_to_user((void *)(uintptr_t)arg, &c, sizeof(c))) return -14;
+    return 0;
+}
+
 static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
     socket_t *s = (socket_t *)file->inode->priv;
     if (!s) return -9;
     switch (cmd) {
+    case SIOCGIFADDR: case SIOCGIFNETMASK: case SIOCGIFFLAGS:
+    case SIOCGIFMTU:  case SIOCGIFINDEX:   case SIOCGIFHWADDR:
+        return sock_ioctl_ifreq(cmd, arg);
+    case SIOCGIFCONF:
+        return sock_ioctl_ifconf(arg);
     case FIONBIO: {                         /* set/clear non-blocking mode */
         int on;
         if (copy_from_user(&on, (void *)(uintptr_t)arg, sizeof(on)) != 0) return -14;
