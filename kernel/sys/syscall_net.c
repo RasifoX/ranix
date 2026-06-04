@@ -655,7 +655,7 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
     uint64_t rcv_deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
 
     /* SOCK_STREAM has no message boundaries: one recv drains as many queued
-     * bytes as fit in buf, coalescing across writes (Linux semantics). Applies
+     * bytes as fit in buf, coalescing across writes. Applies
      * to TCP and unix stream alike. DGRAM/RAW preserve per-datagram boundaries
      * (handled below). */
     if (s->type == SOCK_STREAM) {

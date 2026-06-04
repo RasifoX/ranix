@@ -641,7 +641,7 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
     if (len < sizeof(signalfd_siginfo_t)) return -22;
     signalfd_t *sfd = (signalfd_t *)file->inode->priv;
-    /* signalfd dequeues signals pending for the *reading* task (Linux semantics),
+    /* signalfd dequeues signals pending for the *reading* task,
      * not for whoever created the fd — the creator may have exited and been reaped
      * while a fork/SCM_RIGHTS child still holds the inherited fd. */
     process_t  *p   = task_current();

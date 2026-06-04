@@ -1513,7 +1513,7 @@ int vfs_chmod(const char *path, mode_t mode)
 }
 
 /* change owner/group of an inode (uid/gid == (uid_t)-1 leaves it unchanged).
- * Only root may change the uid; clears set-user/group-ID bits like Linux. */
+ * Only root may change the uid; clears set-user/group-ID bits. */
 int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
 {
 	if (!in) return -2;
