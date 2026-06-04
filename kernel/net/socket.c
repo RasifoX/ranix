@@ -12,7 +12,7 @@
 socket_t **gsock;
 int        gsock_cap;
 int        gsock_cnt;
-static spinlock_t gsock_lock = SPINLOCK_INIT;
+spinlock_t gsock_lock = SPINLOCK_INIT;
 
 int gsock_count(void) { return gsock_cnt; }
 
@@ -58,6 +58,7 @@ socket_t *sock_alloc(int domain, int type, int proto)
     socket_t *s = kmalloc(sizeof(*s));
     if (!s) return NULL;
     memset(s, 0, sizeof(*s));
+    s->refcount = 1;
     s->domain = domain;
     s->type   = type;
     s->proto  = proto;
@@ -67,14 +68,31 @@ socket_t *sock_alloc(int domain, int type, int proto)
     return s;
 }
 
-void sock_free(socket_t *s)
+void sock_hold(socket_t *s)
+{
+    if (s) atomic_fetch_add32((volatile uint32_t *)&s->refcount, 1);
+}
+
+/* Drop a reference. The registry lookups (sock_*_deliver, tcp_sock_find*) bump
+ * the count under gsock_lock before releasing it, so a concurrent close cannot
+ * free the socket out from under an in-flight RX/tick path: the teardown only
+ * unregisters it (removing it from future lookups) and drops the "alive"
+ * reference; the last holder does the actual free. */
+void sock_put(socket_t *s)
 {
     if (!s) return;
-    sock_unregister(s);
+    if (atomic_sub_fetch32((volatile uint32_t *)&s->refcount, 1) != 0) return;
     skb_t *skb = s->recv_head;
     while (skb) { skb_t *n = skb->next; skb_free(skb); skb = n; }
     if (s->type == SOCK_STREAM) { extern void tcp_sock_free(socket_t *); tcp_sock_free(s); }
     kfree(s);
+}
+
+void sock_free(socket_t *s)
+{
+    if (!s) return;
+    sock_unregister(s);
+    sock_put(s);   /* drop the alive reference; frees once no lookup holds it */
 }
 
 /* ── AF_UNIX send ────────────────────────────────────────── */
@@ -127,6 +145,7 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
         if (s->type != SOCK_RAW && s->type != SOCK_DGRAM) continue;  /* incl. ping socket */
         if (s->proto != 1 /* IPPROTO_ICMP */) continue;
         found = s;
+        sock_hold(s);
         break;
     }
     spin_unlock_irq(&gsock_lock, f);
@@ -134,7 +153,7 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
 
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     skb_t *skb = skb_alloc();
-    if (!skb) return;
+    if (!skb) { sock_put(found); return; }
     uint16_t total;
     if (found->type == SOCK_RAW) {
         /* SOCK_RAW: deliver with a fake IP header (src net order, TTL=64) — Linux
@@ -164,6 +183,7 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
 
     if (waiter) task_wake(waiter);
     poll_notify();
+    sock_put(found);
 }
 
 void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
@@ -179,6 +199,7 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
         if (s->type != SOCK_RAW && s->type != SOCK_DGRAM) continue;  /* incl. ping socket */
         if (s->proto != IPPROTO_ICMPV6) continue;
         found = s;
+        sock_hold(s);
         break;
     }
     spin_unlock_irq(&gsock_lock, f);
@@ -186,7 +207,7 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
 
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     skb_t *skb = skb_alloc();
-    if (!skb) return;
+    if (!skb) { sock_put(found); return; }
     memcpy(skb->data, data, len);   /* raw ICMPv6 message, no IPv6 header */
     skb->len    = len;
     skb->src_ip6 = *src;
@@ -202,6 +223,7 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
 
     if (waiter) task_wake(waiter);
     poll_notify();
+    sock_put(found);
 }
 
 /* ── UDP delivery ────────────────────────────────────────── */
@@ -218,6 +240,7 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
         if (s->domain != AF_INET6 || s->type != SOCK_DGRAM) continue;
         if (s->local_port != dst_port) continue;
         found = s;
+        sock_hold(s);
         break;
     }
     spin_unlock_irq(&gsock_lock, f);
@@ -225,7 +248,7 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
 
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     skb_t *skb = skb_alloc();
-    if (!skb) return;
+    if (!skb) { sock_put(found); return; }
     memcpy(skb->data, data, len);
     skb->len      = len;
     skb->src_ip6  = *src;
@@ -242,6 +265,7 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
 
     if (waiter) task_wake(waiter);
     poll_notify();
+    sock_put(found);
 }
 
 void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_port,
@@ -256,6 +280,7 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
         if (s->type != SOCK_DGRAM) continue;
         if (s->local_port != dst_port) continue;
         found = s;
+        sock_hold(s);
         break;
     }
     spin_unlock_irq(&gsock_lock, f);
@@ -263,7 +288,7 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
     if (!found) return;
 
     skb_t *skb = skb_alloc();
-    if (!skb) return;
+    if (!skb) { sock_put(found); return; }
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     memcpy(skb->data, data, len);
     skb->len = len;
@@ -281,4 +306,5 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
 
     if (waiter) task_wake(waiter);
     poll_notify();
+    sock_put(found);
 }
