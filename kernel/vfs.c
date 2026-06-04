@@ -688,6 +688,10 @@ int vfs_umount(const char *path)
 
 /* ── fd_table ────────────────────────────────────────────── */
 
+/* The open/cloexec bitmaps are sized cap/64 words and growth doubles cap, so
+ * the seed must be a multiple of 64 or the bitmaps come up short. */
+_Static_assert(FD_INIT_CAP % 64 == 0, "CONFIG_FD_INIT_CAP must be a multiple of 64");
+
 #define BM_SET(bm, fd)  ((bm)[(fd)/64] |=  (1ULL << ((fd)%64)))
 #define BM_CLR(bm, fd)  ((bm)[(fd)/64] &= ~(1ULL << ((fd)%64)))
 #define BM_TST(bm, fd)  (!!((bm)[(fd)/64] & (1ULL << ((fd)%64))))
