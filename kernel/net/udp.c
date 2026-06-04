@@ -24,13 +24,9 @@ void udp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 int udp_tx(netdev_t *dev, uint32_t dst_ip, uint16_t src_port,
            uint16_t dst_port, const void *data, uint16_t len)
 {
-    skb_t *skb = skb_alloc();
+    skb_t *skb = skb_alloc_big((uint32_t)len + sizeof(udp_hdr_t));
     if (!skb) return -1;
 
-    /* copy payload */
-    if (len > SKB_DATA_MAX - sizeof(udp_hdr_t) - sizeof(ip_hdr_t) - 14) {
-        skb_free(skb); return -1;
-    }
     memcpy(skb->data, data, len);
     skb->len = len;
 
@@ -62,12 +58,9 @@ void udp6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
 int udp6_tx(netdev_t *dev, const in6_addr_t *dst, uint16_t src_port,
             uint16_t dst_port, const void *data, uint16_t len)
 {
-    skb_t *skb = skb_alloc();
+    skb_t *skb = skb_alloc_big((uint32_t)len + sizeof(udp_hdr_t));
     if (!skb) return -1;
 
-    if (len > SKB_DATA_MAX - sizeof(udp_hdr_t) - sizeof(ipv6_hdr_t) - 14) {
-        skb_free(skb); return -1;
-    }
     memcpy(skb->data, data, len);
     skb->len = len;
 

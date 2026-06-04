@@ -483,7 +483,9 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
             dst6      = s->remote_ip6;
             dst_port6 = s->remote_port;
         }
-        if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+        /* UDP datagrams up to the IPv6 max (65487) are fragmented by ipv6_tx;
+         * the ICMPv6 path below copies into one skb and clamps separately. */
+        if (len > 65487) len = 65487;
         uint8_t *kb = kmalloc(len);
         if (!kb) return -12;
         if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
@@ -498,6 +500,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         if (s->proto == IPPROTO_ICMPV6 &&
             (s->type == SOCK_RAW || s->type == SOCK_DGRAM) &&
             len >= sizeof(icmp6_hdr_t)) {
+            if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMPv6: single skb */
             netdev_t  *txdev = net_route_dev6(&dst6);
             in6_addr_t src6  = ipv6_src_for(txdev, &dst6);
             icmp6_hdr_t *ih = (icmp6_hdr_t *)kb;
@@ -547,7 +550,9 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         dst_ip = s->remote_ip; dst_port = s->remote_port;
     }
 
-    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    /* UDP datagrams up to the IPv4 max (65507) are fragmented by ip_tx; other
+     * paths (raw ICMP) still copy into one skb and clamp below. */
+    if (len > 65507) len = 65507;
     uint8_t *kbuf = kmalloc(len);
     if (!kbuf) return -12;
     if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -14; }
@@ -583,6 +588,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
         } while (mono_ns() < deadline);
         r = rc < 0 ? rc : (long)len;
     } else if ((s->type == SOCK_RAW || s->type == SOCK_DGRAM) && s->proto == 1 /* IPPROTO_ICMP */) {
+        if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMP: single skb */
         if (len >= sizeof(icmp_hdr_t)) {
             icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
             ih->checksum = 0;

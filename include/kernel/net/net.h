@@ -32,6 +32,10 @@ typedef struct skb {
     uint8_t     buf[SKB_HEADROOM + SKB_DATA_MAX];
     uint8_t    *data;   /* current start of packet data */
     uint16_t    len;    /* bytes from data */
+    /* large reassembled datagrams (> SKB_DATA_MAX) live in this heap buffer
+     * instead of buf[]; data points into it. NULL for ordinary skbs. */
+    uint8_t    *ext;
+    uint32_t    ext_len;
     uint32_t    src_ip;     /* datagram source — for recvfrom on a UDP socket */
     in6_addr_t  src_ip6;    /* IPv6 datagram source */
     uint16_t    src_port;
@@ -43,6 +47,9 @@ typedef struct skb {
 } skb_t;
 
 skb_t  *skb_alloc(void);
+/* skb whose data buffer holds up to cap bytes — backed by buf[] when cap fits,
+ * else by a heap allocation (skb->ext). For reassembled datagrams > SKB_DATA_MAX. */
+skb_t  *skb_alloc_big(uint32_t cap);
 void    skb_free(skb_t *skb);
 
 /* push/pull helpers */

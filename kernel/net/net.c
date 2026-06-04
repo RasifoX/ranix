@@ -19,11 +19,28 @@ skb_t *skb_alloc(void)
     s->len  = 0;
     s->next = NULL;
     s->scm_nfiles = 0;
+    s->ext = NULL;
+    s->ext_len = 0;
+    return s;
+}
+
+skb_t *skb_alloc_big(uint32_t cap)
+{
+    skb_t *s = skb_alloc();
+    if (!s) return NULL;
+    if (cap <= SKB_DATA_MAX) return s;
+    uint32_t total = SKB_HEADROOM + cap;
+    s->ext = kmalloc(total);
+    if (!s->ext) { kfree(s); return NULL; }
+    s->ext_len = total;
+    s->data = s->ext + SKB_HEADROOM;   /* same headroom semantics as buf[] */
     return s;
 }
 
 void skb_free(skb_t *skb)
 {
+    if (!skb) return;
+    if (skb->ext) kfree(skb->ext);
     kfree(skb);
 }
 

@@ -22,6 +22,16 @@ typedef struct {
     in6_addr_t dst;
 } __attribute__((packed)) ipv6_hdr_t;
 
+/* Fragment extension header (RFC 8200 §4.5) */
+typedef struct {
+    uint8_t  next_hdr;
+    uint8_t  reserved;
+    uint16_t frag_off;   /* big-endian: offset(13) | res(2) | M(1) */
+    uint32_t id;
+} __attribute__((packed)) ipv6_frag_hdr_t;
+#define IP6_FRAG_MF      0x0001
+#define IP6_FRAG_OFFMASK 0xfff8
+
 extern const in6_addr_t in6addr_loopback;   /* ::1 */
 extern const in6_addr_t in6addr_any;        /* :: */
 
