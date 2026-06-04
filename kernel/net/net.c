@@ -410,7 +410,7 @@ void net_dhcp_all(void)
     }
 }
 
-/* Carrier watcher: Linux-style hotplug. A NIC driver exposes link_check(); on a
+/* Carrier watcher: link hotplug. A NIC driver exposes link_check(); on a
  * down→up transition (cable replugged) the address config is renewed (DHCP + RS/
  * SLAAC), on up→down the carrier is marked off. NICs without link_check are
  * assumed always-up and skipped. Runs in its own blockable thread (net_dhcp_one

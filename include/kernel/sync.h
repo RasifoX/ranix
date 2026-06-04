@@ -32,7 +32,7 @@ uint64_t atomic_cmpxchg64(volatile uint64_t *p, uint64_t old, uint64_t nw);
 uint32_t atomic_or32(volatile uint32_t *p, uint32_t v);
 uint32_t atomic_and32(volatile uint32_t *p, uint32_t v);
 
-/* Linux-style atomic_t / atomic64_t built on the RMW primitives above. */
+/* atomic_t / atomic64_t built on the RMW primitives above. */
 typedef struct { volatile int32_t counter; } atomic_t;
 typedef struct { volatile int64_t counter; } atomic64_t;
 #define ATOMIC_INIT(i)   { (i) }

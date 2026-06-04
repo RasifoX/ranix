@@ -248,7 +248,7 @@ void signal_dispatch(arch_context_t *tf)
 	 * interrupted code's vector registers (same class as the aarch64 bug). */
 	uint64_t usp = (tf->rsp & ~15UL) - 680; /* 8-mod-16 entry; usp+168 is 16-aligned */
 	/* Bad/overflowed user sp: writing the frame would fault in the kernel and
-	 * panic. Force-kill with SIGSEGV like Linux instead. */
+	 * panic. Force-kill with SIGSEGV instead. */
 	if (!access_ok((void *)usp, 680) || !user_pages_mapped((void *)usp, 680)) {
 		p->exit_code = 11; p->killed_by_sig = 1;
 		arch_get_cpu_ctx()->wd_where = "sig:badframe";

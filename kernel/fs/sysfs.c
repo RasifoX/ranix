@@ -403,7 +403,7 @@ static int sysfs_pci_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	put_str(out->name, "devices"); out->name[7] = '\0';
 	return 0;
 }
-/* one entry per present PCI function, named 0000:BB:DD.F (Linux convention) */
+/* one entry per present PCI function, named 0000:BB:DD.F */
 static int sysfs_pcidev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;

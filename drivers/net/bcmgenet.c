@@ -122,7 +122,10 @@ extern void kprintf(const char *, ...);
 #define DMA_TX_APPEND_CRC       0x0040
 #define DMA_TX_QTAG_SHIFT       7
 
-#define RX_DESCS                32
+#define RX_DESCS                256   /* deep RX ring: absorb a multi-segment TCP
+                                       * burst between 10ms polls (poll-driven, no
+                                       * RX IRQ yet) so HTTP/TLS responses don't
+                                       * drop packets and stall. 256*2KB = 512KB. */
 #define TX_DESCS                32
 #define RX_BUF_LENGTH           2048
 #define RX_BUF_OFFSET           2     /* RBUF_ALIGN_2B: 2 pad bytes before the frame */
@@ -226,7 +229,7 @@ static void umac_set_speed(int speed)
     gw(UMAC_CMD, cmd | ((uint32_t)speed << CMD_SPEED_SHIFT) | CMD_TX_EN | CMD_RX_EN);
 }
 
-/* netdev carrier poll (Linux-style hotplug): the link watcher calls this ~1 Hz.
+/* netdev carrier poll: the link watcher calls this ~1 Hz.
  * On a down→up edge it re-reads the negotiated speed and re-applies it so a
  * cable replugged into a different-speed port still works. */
 static int genet_link_check(netdev_t *dev)
@@ -412,7 +415,7 @@ void bcmgenet_init(void)
 
     g_genet.tx         = genet_tx;
     g_genet.poll       = genet_poll;
-    g_genet.link_check = genet_link_check;   /* Linux-style carrier hotplug */
+    g_genet.link_check = genet_link_check;   /* carrier hotplug */
     g_genet.link_up    = 1;                  /* link is up (we just brought it up) */
     g_genet.ip         = 0;   /* configured by DHCP/SLAAC */
     net_register(&g_genet);

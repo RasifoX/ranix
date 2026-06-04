@@ -341,7 +341,7 @@ static void tcp_cc_init(socket_t *s)
     s->ssthresh    = TCP_CWND_MAX;
     s->dup_acks    = 0;
     s->in_recovery = 0;
-    s->cc_cubic    = 1;          /* CUBIC by default, like Linux */
+    s->cc_cubic    = 1;          /* CUBIC by default */
     s->cubic_wmax  = 0;
     s->cubic_epoch = 0;
     s->cubic_cnt   = 0;
@@ -988,7 +988,7 @@ void tcp6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
 
 /* TCP_INFO prefix, matching the Linux/musl struct tcp_info byte layout up to
  * snd_cwnd (the fields a getsockopt(TCP_INFO) reader cares about for cc state).
- * Windows are reported in MSS units, like Linux. */
+ * Windows are reported in MSS units. */
 typedef struct {
     uint8_t  state, ca_state, retransmits, probes, backoff, options, wscale, flags;
     uint32_t rto, ato, snd_mss, rcv_mss;

@@ -25,7 +25,7 @@ static uint16_t ip_id;
  * present. Incomplete entries are reaped after IP_REASM_TIMEOUT ticks. */
 #define IP_REASM_SLOTS    8
 #define IP_REASM_MAX      65535u
-#define IP_REASM_TIMEOUT  (30u * TIMER_HZ)   /* 30s, like Linux ipfrag_time */
+#define IP_REASM_TIMEOUT  (30u * TIMER_HZ)   /* 30s reassembly timeout */
 
 typedef struct {
     int      used;

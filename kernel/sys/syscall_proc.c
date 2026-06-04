@@ -420,7 +420,7 @@ void futex_wake_addr(uint32_t *uaddr)
 #define FUTEX_WAITERS     0x80000000u
 #define FUTEX_OWNER_DIED  0x40000000u
 #define FUTEX_TID_MASK    0x3fffffffu
-#define ROBUST_LIST_LIMIT 2048   /* matches Linux; bounds a cyclic/garbage list */
+#define ROBUST_LIST_LIMIT 2048   /* bounds a cyclic/garbage list */
 
 struct robust_list_head {
 	void   *list;             /* first robust_list node, or &head->list if empty */
