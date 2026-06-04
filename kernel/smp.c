@@ -17,11 +17,10 @@ int smp_ncpus = 1;
 cpu_context_t *all_cpus[MAX_CPUS];
 
 /*
- * Per-CPU bring-up state. Only all_cpus[] and ap_boot_sync[] stay statically
- * sized by MAX_CPUS (a few KB each); the bulky per-CPU memory below is
- * allocated in smp_init() sized to the detected CPU count, so raising MAX_CPUS
- * costs almost nothing and a 4-core box doesn't carry 1024 cores' worth of
- * kernel stacks. Non-static so arch code can reference them.
+ * Per-CPU bring-up state. all_cpus[] and ap_boot_sync[] stay statically sized by
+ * MAX_CPUS; the bulky per-CPU memory below is allocated in smp_init() sized to
+ * the detected CPU count, so a 4-core box doesn't carry MAX_CPUS worth of kernel
+ * stacks. Non-static so arch code can reference them.
  */
 cpu_context_t  *ap_cpu_ctxs;       /* contiguous (small per element) */
 uint8_t       **ap_kstacks;        /* per-CPU: each a physically-contiguous stack */
