@@ -244,6 +244,7 @@ process_t *proc_get(pid_t pid);            /* lookup + pin (get_task_struct); re
 void       proc_hold(process_t *p);        /* pin a process you already hold a live reference to */
 void       proc_put(process_t *p);         /* drop a proc_get/proc_hold pin (NULL-safe) */
 vm_space_t *proc_get_vm(pid_t pid);        /* pin a target's address space (/proc/<pid>/mem); release with vm_destroy */
+fd_table_t *proc_get_fds(pid_t pid);       /* pin a target's fd table (/proc/<pid>/fd); release with fd_table_put */
 int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);
