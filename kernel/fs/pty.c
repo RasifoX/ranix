@@ -155,11 +155,17 @@ static int master_poll(vfs_file_t *file)
 static int master_close(vfs_file_t *file)
 {
 	pty_t *p = file->priv;
-	uint64_t f = spin_lock_irq(&p->lock);
+	/* Clear master_open under p->lock (the slave's EOF read + sleep use it),
+	 * but decide slot reuse under pool_lock so it's atomic against a concurrent
+	 * pts_open / ptmx_open. Order is always pool_lock -> p->lock. */
+	uint64_t pf = spin_lock_irq(&pool_lock);
+	uint64_t f  = spin_lock_irq(&p->lock);
 	p->master_open = 0;
+	int both_closed = !p->slave_open;
 	spin_unlock_irq(&p->lock, f);
+	if (both_closed) p->in_use = 0;
+	spin_unlock_irq(&pool_lock, pf);
 	wake_up(&p->m2s_wait);   /* slave readers see EOF */
-	if (!p->slave_open) p->in_use = 0;
 	return 0;
 }
 
@@ -169,9 +175,17 @@ static int pts_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 {
 	(void)flags;
 	int idx = (int)(inode->rdev & 0xFF);
-	if (idx < 0 || idx >= PTY_MAX || !ptys[idx].in_use) return -6;   /* ENXIO */
-	ptys[idx].slave_open = 1;
-	file->priv = &ptys[idx];
+	if (idx < 0 || idx >= PTY_MAX) return -6;   /* ENXIO */
+	pty_t *p = &ptys[idx];
+	/* Check in_use and mark the slave attached under pool_lock so a concurrent
+	 * master_close + ptmx_open can't free and reuse the slot underneath us. */
+	uint64_t pf = spin_lock_irq(&pool_lock);
+	if (!p->in_use) { spin_unlock_irq(&pool_lock, pf); return -6; }
+	uint64_t f = spin_lock_irq(&p->lock);
+	p->slave_open = 1;
+	spin_unlock_irq(&p->lock, f);
+	spin_unlock_irq(&pool_lock, pf);
+	file->priv = p;
 	return 0;
 }
 static ssize_t slave_read(vfs_file_t *file, void *buf, size_t len)
@@ -197,11 +211,14 @@ static int slave_poll(vfs_file_t *file)
 static int slave_close(vfs_file_t *file)
 {
 	pty_t *p = file->priv;
-	uint64_t f = spin_lock_irq(&p->lock);
+	uint64_t pf = spin_lock_irq(&pool_lock);
+	uint64_t f  = spin_lock_irq(&p->lock);
 	p->slave_open = 0;
+	int both_closed = !p->master_open;
 	spin_unlock_irq(&p->lock, f);
+	if (both_closed) p->in_use = 0;
+	spin_unlock_irq(&pool_lock, pf);
 	wake_up(&p->s2m_wait);   /* master readers see EOF */
-	if (!p->master_open) p->in_use = 0;
 	return 0;
 }
 
