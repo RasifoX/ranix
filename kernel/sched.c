@@ -228,6 +228,10 @@ void tick_notify(void)
 		for (int i = 1; i < tick_cb_cnt; i++)
 			tick_cbs[i]();
 		sched_watchdog();
+		/* khungtaskd: sweep every 512 ticks (~5s @100Hz). The timeout it checks
+		 * is much larger (20s), so a coarse sweep loses no responsiveness. */
+		static unsigned ht;
+		if ((++ht & 0x1FF) == 0) { extern void hung_task_check(void); hung_task_check(); }
 	}
 }
 
@@ -863,6 +867,13 @@ process_t *task_get(int i)
 	process_t *p = (i < 0 || i >= proc_cnt) ? NULL : proctab[i];
 	spin_unlock_irq(&sched_lock, f);
 	return p;
+}
+
+/* proctab[i] without locking — for callers already holding sched_lock (the
+ * hung-task sweep walks every slot under one lock hold). */
+process_t *task_peek_locked(int i)
+{
+	return (i < 0 || i >= proc_cnt) ? NULL : proctab[i];
 }
 
 /* zombie reaping / wait helpers (proc_find_zombie/_or_sleep, proc_check_or_sleep, proc_reap) -> kernel/proc.c */
