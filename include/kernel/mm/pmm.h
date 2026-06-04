@@ -16,6 +16,7 @@ typedef struct page {
 } page_t;
 
 #define PG_MANAGED  (1 << 0)
+#define PG_CACHED   (1 << 1)   /* order-0 page parked in a per-CPU buddy magazine */
 
 extern page_t *mem_map;
 

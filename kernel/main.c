@@ -8,6 +8,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/buddy.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/proc.h>
 #include <kernel/block.h>
@@ -279,6 +280,8 @@ void kernel_main(void)
 	rtc_init();
 	extern void smp_init(void);
 	smp_init();
+	extern int smp_ncpus;
+	buddy_init_percpu(smp_ncpus);   /* enable per-CPU order-0 page caches */
 	board_drivers_register();
 	extern void net_dhcp_all(void);
 	net_dhcp_all();
