@@ -26,10 +26,12 @@ typedef struct {
 
 static void ptrace_do_stop(process_t *p)
 {
-	process_t *tracer = proc_find(p->tracer);
+	process_t *tracer = proc_get(p->tracer);
 	p->ptrace_in_syscall = 1;
-	if (tracer)
+	if (tracer) {
 		task_wake(tracer);
+		proc_put(tracer);
+	}
 	task_sleep_interruptible();   /* resumed by the tracer's task_wake (PTRACE_CONT) or a signal */
 	p->ptrace_in_syscall = 0;
 }
@@ -78,20 +80,8 @@ static void ptrace_stop_check(arch_context_t *ctx, int is_exit)
 	p->ptrace_stop_reported = 0;
 }
 
-static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
+static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
 {
-	process_t *p = task_current();
-
-	if (request == PTRACE_TRACEME) {
-		p->tracer    = p->ppid;
-		p->ptrace_opts = 0;
-		return 0;
-	}
-
-	process_t *tracee = proc_find(pid);
-	if (!tracee)
-		return -3; /* ESRCH */
-
 	switch (request) {
 	case PTRACE_ATTACH:
 		if (tracee->tracer != 0)
@@ -218,4 +208,25 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 	default:
 		return -38; /* ENOSYS */
 	}
+}
+
+/* tracee is looked up by user-supplied pid; pin it (proc_get) across the whole
+ * request so a concurrent exit+reap can't free it mid-operation. */
+static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
+{
+	process_t *p = task_current();
+
+	if (request == PTRACE_TRACEME) {
+		p->tracer    = p->ppid;
+		p->ptrace_opts = 0;
+		return 0;
+	}
+
+	process_t *tracee = proc_get(pid);
+	if (!tracee)
+		return -3; /* ESRCH */
+
+	long ret = ptrace_req(p, tracee, request, addr, data);
+	proc_put(tracee);
+	return ret;
 }
