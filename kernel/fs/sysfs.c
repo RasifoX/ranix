@@ -103,7 +103,7 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 
 	switch (pr->type) {
 	case SF_OSTYPE:    n = put_str(tmp, "Ranix\n");  break;
-	case SF_OSRELEASE: n = put_str(tmp, "1.0.0\n");  break;
+	case SF_OSRELEASE: n = put_str(tmp, "6.6.0-ranix\n");  break;
 	case SF_HOSTNAME:  n = put_str(tmp, current_uts()->nodename); tmp[n++] = '\n'; break;
 	case SF_NET_ADDR: {
 		netdev_t *d = net_dev(pr->dev);
