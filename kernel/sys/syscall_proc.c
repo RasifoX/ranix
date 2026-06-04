@@ -986,13 +986,19 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		mmap_base  = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 	}
 
-	/* map user stack */
+	/* map user stack; remember the phys of the top ARG_WIN_PAGES pages so the
+	 * argv/envp/auxv block can be written through their kernel direct-map address
+	 * instead of raw user VAs (see the staging note below). */
+#define ARG_WIN_PAGES 8
+	uint64_t argpg[ARG_WIN_PAGES];
 	for (int j = 0; j < USER_STACK_PAGES_; j++) {
 		void *pg = buddy_alloc(0);
 		if (!pg) { vm_destroy(new_vm); kfree(kstrs); return -12; }
 		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
 		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
+		if (j >= USER_STACK_PAGES_ - ARG_WIN_PAGES)
+			argpg[j - (USER_STACK_PAGES_ - ARG_WIN_PAGES)] = (uint64_t)pg;
 	}
 	{
 		void *guard = buddy_alloc(0);
@@ -1068,6 +1074,19 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		p->cap_effective   = p->cap_inheritable;
 	}
 
+	/* Stage the SysV initial stack (argv/envp/auxv) in a kernel buffer, then copy
+	 * it into the new stack's top pages via their kernel direct-map address rather
+	 * than storing through raw user VAs. User-VA stores into the freshly-switched
+	 * address space, with IRQs enabled in the syscall, are the execve corruption:
+	 * a nested trap re-enters mid-build with the half-initialised new vm active. The
+	 * staged copy is address-space- and IRQ-independent. The destination pages are
+	 * the already-mapped top stack pages (argpg[], captured above). */
+	uint64_t argbase = USER_STACK_TOP_ - (uint64_t)ARG_WIN_PAGES * PAGE_SIZE;
+	uint8_t *kbuf = kmalloc((size_t)ARG_WIN_PAGES * PAGE_SIZE);
+	if (!kbuf) return -12;
+	memset(kbuf, 0, (size_t)ARG_WIN_PAGES * PAGE_SIZE);
+#define KB(va) (kbuf + (((va) - argbase) & ((uint64_t)ARG_WIN_PAGES * PAGE_SIZE - 1)))
+
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);
 	vm_space_t *old_vm = p->vm;
@@ -1087,7 +1106,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		vma_add(p, interp_lo, interp_hi - interp_lo,
 		        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
 
-	/* build SysV ABI initial stack */
+	/* build SysV ABI initial stack — staged into kbuf (see ARG_WIN_PAGES above) */
 	uint64_t uargv[EXEC_MAXARGS + 1];
 	uint64_t uenvp[EXEC_MAXARGS + 1];
 	memset(uargv, 0, sizeof(uargv));
@@ -1099,13 +1118,13 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		for (int j = envc - 1; j >= 0; j--) {
 			int n = 0; while (kenvp[j][n]) n++;
 			sp -= (uint64_t)(n + 1);
-			memcpy((void *)sp, kenvp[j], (size_t)(n + 1));
+			memcpy(KB(sp), kenvp[j], (size_t)(n + 1));
 			uenvp[j] = sp;
 		}
 		for (int j = argc - 1; j >= 0; j--) {
 			int n = 0; while (kargv[j][n]) n++;
 			sp -= (uint64_t)(n + 1);
-			memcpy((void *)sp, kargv[j], (size_t)(n + 1));
+			memcpy(KB(sp), kargv[j], (size_t)(n + 1));
 			uargv[j] = sp;
 		}
 		kfree(kstrs);
@@ -1115,7 +1134,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* 16 random bytes for AT_RANDOM (used by libc for stack canary, etc.) */
 	sp -= 16;
 	{
-		uint64_t *rp = (uint64_t *)sp;
+		uint64_t *rp = (uint64_t *)KB(sp);
 		rp[0] = rng_next();
 		rp[1] = rng_next();
 	}
@@ -1125,7 +1144,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	{
 		int plen = 0; while (kpath[plen]) plen++;
 		sp -= (uint64_t)(plen + 1);
-		memcpy((void *)sp, kpath, (size_t)(plen + 1));
+		memcpy(KB(sp), kpath, (size_t)(plen + 1));
 	}
 	uint64_t at_execfn_addr = sp;
 
@@ -1135,14 +1154,14 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	   must NOT be placed between envp[] and auxv — musl would read it as AT_NULL */
 	if ((argc + envc + 3) % 2 != 0) {
 		sp -= 8;
-		*(uint64_t *)sp = 0;
+		*(uint64_t *)KB(sp) = 0;
 	}
 
 /* push one auxv key/value pair (16 bytes each, stack grows down) */
 #define PUSH_AUX(k, v) do { \
 	sp -= 16; \
-	((uint64_t *)sp)[0] = (uint64_t)(k); \
-	((uint64_t *)sp)[1] = (uint64_t)(v); \
+	((uint64_t *)KB(sp))[0] = (uint64_t)(k); \
+	((uint64_t *)KB(sp))[1] = (uint64_t)(v); \
 } while (0)
 
 	PUSH_AUX(0,  0);
@@ -1173,13 +1192,23 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #undef PUSH_AUX
 
 	/* envp[] */
-	sp -= 8; *(uint64_t *)sp = 0;
-	for (int j = envc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uenvp[j]; }
+	sp -= 8; *(uint64_t *)KB(sp) = 0;
+	for (int j = envc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)KB(sp) = uenvp[j]; }
 	/* argv[] */
-	sp -= 8; *(uint64_t *)sp = 0;
-	for (int j = argc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)sp = uargv[j]; }
+	sp -= 8; *(uint64_t *)KB(sp) = 0;
+	for (int j = argc - 1; j >= 0; j--) { sp -= 8; *(uint64_t *)KB(sp) = uargv[j]; }
 	/* argc */
-	sp -= 8; *(uint64_t *)sp = (uint64_t)argc;
+	sp -= 8; *(uint64_t *)KB(sp) = (uint64_t)argc;
+
+	/* publish the staged stack into the new address space via the pages' kernel
+	 * direct-map address — no user-VA stores, so a nested trap can't land them in
+	 * the wrong page */
+	for (int _i = 0; _i < ARG_WIN_PAGES; _i++)
+		memcpy((void *)PHYS_TO_VIRT(argpg[_i]),
+		       kbuf + (uint64_t)_i * PAGE_SIZE, PAGE_SIZE);
+	kfree(kbuf);
+#undef KB
+#undef ARG_WIN_PAGES
 
 	/* reinitialise context frame */
 	arch_context_init_user(p->ctx, jump_entry, sp);
