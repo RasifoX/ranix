@@ -97,7 +97,11 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	for (int _i = 0; _i <= 18; _i++)
 		ctx->regs[_i] = *(uint64_t *)(usp + 32 + (uint64_t)_i * 8);
 	ctx->regs[29] = *(uint64_t *)(usp + 184);
-	ctx->spsr     = *(uint64_t *)(usp + 192);
+	/* PSTATE comes from the untrusted user stack — sanitize before it reaches
+	 * `msr spsr_el1; eret`: keep only NZCV, forcing the rest to 0 (= EL0t, IRQs
+	 * enabled, IL/SS clear). Without this a crafted frame with M=EL1h would eret
+	 * straight into the kernel with user-controlled registers (local root). */
+	ctx->spsr     = *(uint64_t *)(usp + 192) & 0xF0000000UL;
 	ctx->fpsr     = *(uint32_t *)(usp + 200);
 	ctx->fpcr     = *(uint32_t *)(usp + 204);
 	for (int _i = 0; _i < 64; _i++)
@@ -110,7 +114,11 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	p->sig_mask   = *(uint64_t *)(base +   0);
 	ctx->rip      = *(uint64_t *)(base +   8);
 	ctx->rsp      = *(uint64_t *)(base +  16);
-	ctx->rflags   = *(uint64_t *)(base +  24);
+	/* RFLAGS comes from the untrusted user stack — keep only the user arithmetic
+	 * flags (CF PF AF ZF SF TF DF OF) and force IF=1 / IOPL=0 / reserved bit, so
+	 * a crafted frame can't run ring-3 with interrupts masked or grant itself I/O
+	 * privilege (CS isn't restored, so no ring change, but the flags still matter). */
+	ctx->rflags   = (*(uint64_t *)(base +  24) & 0x00000CD5UL) | 0x202UL;
 	ctx->rax      = *(uint64_t *)(base +  32);
 	ctx->rbx      = *(uint64_t *)(base +  40);
 	ctx->rcx      = *(uint64_t *)(base +  48);
