@@ -1296,6 +1296,10 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
 		if (n > sizeof(tmp)) n = sizeof(tmp);
 		uint64_t lva = (uint64_t)liov[li].iov_base + lo;
 		uint64_t rva = (uint64_t)riov[ri].iov_base + ro;
+		/* rva is memcpy'd raw at EL1 in the target's space; the kernel half is
+		 * mapped in every space, so an rva >= VIRT_OFFSET would copy kernel memory
+		 * (targeting your own pid passes the euid gate). Bound it to the user range. */
+		if (!access_ok((void *)rva, n)) break;
 		if (write) {
 			if (copy_from_user(tmp, (void *)lva, n) != 0) break;
 			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
