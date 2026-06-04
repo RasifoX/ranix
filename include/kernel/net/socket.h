@@ -120,6 +120,17 @@ typedef struct socket {
     /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
     process_t  *close_waiter;
 
+    /* socket options (setsockopt/getsockopt) */
+    uint8_t   so_reuseaddr;
+    uint8_t   so_reuseport;
+    uint8_t   so_keepalive;
+    uint8_t   tcp_nodelay;      /* disable Nagle: send small segments immediately */
+    uint32_t  so_rcvbuf;        /* advisory receive buffer size (bytes) */
+    uint32_t  so_sndbuf;        /* advisory send buffer size (bytes) */
+    uint32_t  rcv_timeo;        /* SO_RCVTIMEO in ticks, 0 = block forever */
+    uint32_t  snd_timeo;        /* SO_SNDTIMEO in ticks, 0 = block forever */
+    int       so_error;         /* pending error, read-and-cleared by SO_ERROR */
+
     /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;
     char           unix_path[108];  /* bound path; [0]=='\0' → abstract namespace */

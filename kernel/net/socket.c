@@ -65,6 +65,8 @@ socket_t *sock_alloc(int domain, int type, int proto)
     s->tcp_state = TCP_CLOSED;
     s->recv_lock = (spinlock_t)SPINLOCK_INIT;
     s->net_ns    = current_net_ns();
+    s->so_rcvbuf = 65536;
+    s->so_sndbuf = 65536;
     return s;
 }
 
