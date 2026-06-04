@@ -453,12 +453,14 @@ static long sys_read(int fd, void *buf, size_t len)
 
 static long sys_writev(int fd, const iovec_t *iov, int cnt)
 {
-	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+	if (cnt < 0 || cnt > 1024) return -22;   /* IOV_MAX */
 
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
-		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
-		long r = sys_write(fd, iov[i].iov_base, iov[i].iov_len);
+		iovec_t v;
+		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -14;
+		if (!v.iov_base || v.iov_len == 0) continue;
+		long r = sys_write(fd, v.iov_base, v.iov_len);
 		if (r < 0) return r;
 		total += r;
 	}
@@ -492,12 +494,14 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 
 static long sys_readv(int fd, const iovec_t *iov, int cnt)
 {
-	if (!access_ok(iov, sizeof(iovec_t) * cnt)) return -14;
+	if (cnt < 0 || cnt > 1024) return -22;   /* IOV_MAX */
 
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
-		if (!iov[i].iov_base || iov[i].iov_len == 0) continue;
-		long r = sys_read(fd, iov[i].iov_base, iov[i].iov_len);
+		iovec_t v;
+		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -14;
+		if (!v.iov_base || v.iov_len == 0) continue;
+		long r = sys_read(fd, v.iov_base, v.iov_len);
 		if (r < 0) return r;
 		if (r == 0) break;
 		total += r;
