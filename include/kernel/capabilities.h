@@ -22,6 +22,7 @@
 #define CAP_MKNOD            27
 #define CAP_SYS_BOOT         22
 #define CAP_SYS_NICE         23
+#define CAP_SYS_TIME         25
 #define CAP_SETFCAP          31
 
 #define CAP_FULL  (~0ULL)  /* all capabilities */
