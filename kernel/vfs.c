@@ -1607,6 +1607,8 @@ void vfs_init(void)
 #endif
 	extern void sysfs_register(void);
 	sysfs_register();
+	extern void hugetlbfs_register(void);
+	hugetlbfs_register();
 	extern void cgroup_register(void);
 	cgroup_register();
 	kprintf("VFS: initialized\n");

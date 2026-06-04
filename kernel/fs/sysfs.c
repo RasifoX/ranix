@@ -15,6 +15,7 @@
 #include <kernel/net/net.h>
 #include <kernel/block.h>
 #include <kernel/pci.h>
+#include <kernel/mm/hugetlb.h>
 #include <kernel/kprintf.h>
 
 #include <kernel/nsproxy.h>
@@ -23,7 +24,8 @@ extern int  smp_ncpus;
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
        SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
-       SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS };
+       SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
+       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -44,7 +46,8 @@ static vfs_iops_t sysfs_root_iops, sysfs_kernel_iops, sysfs_class_iops,
                   sysfs_blockdev_iops, sysfs_devices_iops, sysfs_system_iops,
                   sysfs_cpu_iops, sysfs_fs_iops, sysfs_cgroup_iops, sysfs_bus_iops,
                   sysfs_pci_iops, sysfs_pcidev_iops, sysfs_pcidev_entry_iops,
-                  sysfs_mm_iops, sysfs_thp_iops;
+                  sysfs_mm_iops, sysfs_thp_iops, sysfs_hugepages_iops,
+                  sysfs_hugepages2m_iops;
 static vfs_fops_t sysfs_file_fops;
 static vfs_fops_t sysfs_dir_fops = { 0 };
 
@@ -133,6 +136,8 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case SF_CGROUP_CTRL:  n = put_str(tmp, "cpu memory pids freezer\n"); break;
 	case SF_CGROUP_PROCS: n = put_str(tmp, "1\n"); break;
 	case SF_THP_ENABLED:  n = put_str(tmp, "always [madvise] never\n"); break;
+	case SF_NR_HUGEPAGES:  n = put_u64(tmp, (uint64_t)huge2m_nr_total()); tmp[n++] = '\n'; break;
+	case SF_FREE_HUGEPAGES: n = put_u64(tmp, (uint64_t)huge2m_nr_free()); tmp[n++] = '\n'; break;
 	case SF_PCI_VENDOR:
 	case SF_PCI_DEVICE: {
 		int bdf = pr->dev;
@@ -174,7 +179,26 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	return ret;
 }
 
-static vfs_fops_t sysfs_file_fops = { .read = sysfs_file_read };
+static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	sysfs_priv_t *pr = f->inode->priv;
+	if (!pr || pr->type != SF_NR_HUGEPAGES) return -22;
+	const char *s = buf;
+	long v = 0; size_t i = 0;
+	while (i < len && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+	huge2m_nr_set(v);
+	return (ssize_t)len;
+}
+
+static vfs_fops_t sysfs_file_fops = { .read = sysfs_file_read, .write = sysfs_file_write };
+
+/* nr_hugepages is writable; other sysfs files are read-only. */
+static vfs_inode_t *sysfs_file_rw(int type, int dev)
+{
+	vfs_inode_t *in = sysfs_file(type, dev);
+	if (in) in->mode = S_IFREG | 0644;
+	return in;
+}
 
 /* ── /sys (root): kernel/, class/ ────────────────────────────── */
 static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
@@ -223,19 +247,58 @@ static int sysfs_kernel_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 	return 0;
 }
 
-/* ── /sys/kernel/mm/transparent_hugepage/enabled ─────────────── */
+/* ── /sys/kernel/mm/{transparent_hugepage,hugepages} ─────────── */
 static vfs_inode_t *sysfs_mm_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "transparent_hugepage") == 0) return sysfs_dir(&sysfs_thp_iops, -1);
+	if (strcmp(name, "hugepages") == 0)            return sysfs_dir(&sysfs_hugepages_iops, -1);
 	return NULL;
 }
 static int sysfs_mm_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
+	const char *names[] = { "transparent_hugepage", "hugepages" };
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
+	return 0;
+}
+
+/* /sys/kernel/mm/hugepages/hugepages-2048kB — the 2 MB pool, Linux's path */
+static vfs_inode_t *sysfs_hugepages_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "hugepages-2048kB") == 0) return sysfs_dir(&sysfs_hugepages2m_iops, -1);
+	return NULL;
+}
+static int sysfs_hugepages_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
 	if (idx != 0) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
-	put_str(out->name, "transparent_hugepage"); out->name[20] = '\0';
+	put_str(out->name, "hugepages-2048kB"); out->name[16] = '\0';
+	return 0;
+}
+static const struct { const char *name; int type; } hugepages2m_files[] = {
+	{ "nr_hugepages", SF_NR_HUGEPAGES }, { "free_hugepages", SF_FREE_HUGEPAGES },
+};
+static vfs_inode_t *sysfs_hugepages2m_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (strcmp(name, "nr_hugepages") == 0)   return sysfs_file_rw(SF_NR_HUGEPAGES, -1);
+	if (strcmp(name, "free_hugepages") == 0) return sysfs_file(SF_FREE_HUGEPAGES, -1);
+	return NULL;
+}
+static int sysfs_hugepages2m_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc();
+	out->mode = (idx == 0) ? (S_IFREG | 0644) : (S_IFREG | 0444);
+	out->next_off = idx + 1;
+	put_str(out->name, hugepages2m_files[idx].name);
+	out->name[strlen(hugepages2m_files[idx].name)] = '\0';
 	return 0;
 }
 static vfs_inode_t *sysfs_thp_lookup(vfs_inode_t *dir, const char *name)
@@ -549,6 +612,8 @@ static vfs_iops_t sysfs_pcidev_iops   = { .lookup = sysfs_pcidev_lookup,   .read
 static vfs_iops_t sysfs_pcidev_entry_iops = { .lookup = sysfs_pcidev_entry_lookup, .readdir = sysfs_pcidev_entry_readdir };
 static vfs_iops_t sysfs_mm_iops       = { .lookup = sysfs_mm_lookup,       .readdir = sysfs_mm_readdir       };
 static vfs_iops_t sysfs_thp_iops      = { .lookup = sysfs_thp_lookup,      .readdir = sysfs_thp_readdir      };
+static vfs_iops_t sysfs_hugepages_iops   = { .lookup = sysfs_hugepages_lookup,   .readdir = sysfs_hugepages_readdir   };
+static vfs_iops_t sysfs_hugepages2m_iops = { .lookup = sysfs_hugepages2m_lookup, .readdir = sysfs_hugepages2m_readdir };
 
 int sysfs_mount(vfs_mount_t *mnt, void *data)
 {
