@@ -586,28 +586,29 @@ static ssize_t mqfd_read(vfs_file_t *file, void *buf, size_t len)
     while (1) {
         uint64_t f = spin_lock_irq(&mq_lock);
         if (mq->count > 0) {
-            /* find highest priority */
-            int best = mq->head;
-            int idx  = mq->head;
+            /* highest priority, oldest-first within a priority */
+            int best = mq->head, bestk = 0;
             for (int i = 0; i < mq->count; i++) {
                 int slot = (mq->head + i) % MQ_MSG_MAX;
-                if (mq->msgs[slot].prio > mq->msgs[best].prio)
-                    best = slot;
-                idx = slot;
+                if (mq->msgs[slot].prio > mq->msgs[best].prio) { best = slot; bestk = i; }
             }
-            (void)idx;
-            mq_msg_t *m = &mq->msgs[best];
-            size_t copy = m->len < len ? m->len : len;
-            spin_unlock_irq(&mq_lock, f);
-            if (copy_to_user(buf, m->buf, copy) != 0) return -14;
-            f = spin_lock_irq(&mq_lock);
-            /* remove best from ring by shifting — simple */
+            /* Copy out and remove the slot entirely under the lock, so two
+             * concurrent readers can't pop the same message (count underflow)
+             * and a re-used slot can't tear the copy. Shift the head..best run
+             * forward by one and advance head to drop the chosen entry. */
+            char tmp[MQ_MSGSIZE];
+            size_t copy = mq->msgs[best].len < len ? mq->msgs[best].len : len;
+            __builtin_memcpy(tmp, mq->msgs[best].buf, copy);
+            for (int j = bestk; j >= 1; j--)
+                mq->msgs[(mq->head + j) % MQ_MSG_MAX] = mq->msgs[(mq->head + j - 1) % MQ_MSG_MAX];
+            mq->head = (mq->head + 1) % MQ_MSG_MAX;
             mq->count--;
             if (mq->send_waiter) {
                 task_wake_no_resched(mq->send_waiter);
                 mq->send_waiter = NULL;
             }
             spin_unlock_irq(&mq_lock, f);
+            if (copy_to_user(buf, tmp, copy) != 0) return -14;
             return (ssize_t)copy;
         }
         if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -11; }
