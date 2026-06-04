@@ -609,7 +609,6 @@ static long sys_inotify_rm_watch(int ifd, int wd)
 typedef struct {
     uint64_t   mask;    /* signals monitored */
     int        flags;
-    process_t *owner;
 } signalfd_t;
 
 /* signalfd_siginfo: 128-byte struct passed to read() */
@@ -642,7 +641,10 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
     if (len < sizeof(signalfd_siginfo_t)) return -22;
     signalfd_t *sfd = (signalfd_t *)file->inode->priv;
-    process_t  *p   = sfd->owner;
+    /* signalfd dequeues signals pending for the *reading* task (Linux semantics),
+     * not for whoever created the fd — the creator may have exited and been reaped
+     * while a fork/SCM_RIGHTS child still holds the inherited fd. */
+    process_t  *p   = task_current();
 
     extern spinlock_t sched_lock;
     while (1) {
@@ -667,7 +669,7 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
         }
         if (sfd->flags & O_NONBLOCK) return -11; /* EAGAIN */
         if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
-        /* event-driven: task_signal wakes the owner when a signal is posted; the
+        /* event-driven: task_signal wakes the reader when a signal is posted; the
          * poll_block backstop re-checks otherwise. Off the per-tick blanket wake. */
         poll_block((uint64_t)-1);
     }
@@ -676,7 +678,7 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
 static int signalfd_poll_vfs(vfs_file_t *file)
 {
     signalfd_t *sfd = (signalfd_t *)file->inode->priv;
-    return (sfd->owner->sig_pending & sfd->mask) ? POLLIN : 0;
+    return (task_current()->sig_pending & sfd->mask) ? POLLIN : 0;
 }
 
 static int signalfd_close_vfs(vfs_file_t *file)
@@ -714,7 +716,6 @@ static long sys_signalfd4(int fd, const uint64_t *umask, size_t sigsetsize, int 
     if (!sfd) return -12;
     sfd->mask  = kmask;
     sfd->flags = flags;
-    sfd->owner = p;
 
     vfs_inode_t *in = kmalloc(sizeof(*in));
     if (!in) { kfree(sfd); return -12; }
