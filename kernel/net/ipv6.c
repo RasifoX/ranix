@@ -4,6 +4,7 @@
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/eth.h>
+#include <kernel/net/netfilter.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
@@ -88,6 +89,8 @@ static int ipv6_for_us(netdev_t *dev, const in6_addr_t *dst)
 /* hand an upper-layer payload (skb->data = transport header) to its protocol */
 static void ipv6_deliver(netdev_t *dev, ipv6_hdr_t *ip6, uint8_t nh, skb_t *skb)
 {
+    if (nf_in_v6(&ip6->src, &ip6->dst, nh, skb->data, skb->len) == NF_DROP)
+    { skb_free(skb); return; }
     switch (nh) {
     case IP6_NH_ICMPV6: icmpv6_rx(dev, skb, ip6); break;
     case IP6_NH_UDP:    udp6_rx(dev, skb, ip6);   break;
@@ -297,6 +300,10 @@ static int ipv6_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
 
 int ipv6_tx(netdev_t *dev, skb_t *skb, const in6_addr_t *dst, uint8_t next_hdr)
 {
+    in6_addr_t src = ipv6_src_for(dev, dst);
+    if (nf_out_v6(&src, dst, next_hdr, skb->data, skb->len) == NF_DROP)
+    { skb_free(skb); return -1; }
+
     if (sizeof(ipv6_hdr_t) + skb->len > IP6_MTU) {
         int rc = ipv6_tx_frag(dev, skb->data, skb->len, dst, next_hdr);
         skb_free(skb);

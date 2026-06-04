@@ -4,6 +4,7 @@
 #include <kernel/net/icmp.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
+#include <kernel/net/netfilter.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
@@ -76,6 +77,8 @@ static ip_reasm_t *reasm_find(uint32_t src, uint32_t dst, uint16_t id, uint8_t p
  * at the transport header, len is the reassembled payload length. */
 static void ip_deliver(netdev_t *dev, ip_hdr_t *iph, const uint8_t *payload, uint32_t len)
 {
+    if (nf_in_v4(ntohl(iph->src), ntohl(iph->dst), iph->proto, payload, len) == NF_DROP)
+        return;
     skb_t *skb = skb_alloc_big(len);
     if (!skb) return;
     memcpy(skb->data, payload, len);
@@ -146,6 +149,10 @@ void ip_rx(netdev_t *dev, skb_t *skb)
     ip_hdr_t iph_copy = *iph;    /* save before pull */
     skb_pull(skb, ihl);
 
+    if (nf_in_v4(ntohl(iph_copy.src), ntohl(iph_copy.dst), iph_copy.proto,
+                 skb->data, skb->len) == NF_DROP)
+    { skb_free(skb); return; }
+
     switch (iph->proto) {
     case IP_PROTO_ICMP: icmp_rx(dev, skb, &iph_copy); break;
     case IP_PROTO_UDP:  udp_rx(dev, skb, &iph_copy);  break;
@@ -210,6 +217,9 @@ static int ip_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
 
 int ip_tx(netdev_t *dev, skb_t *skb, uint32_t dst_ip, uint8_t proto)
 {
+    if (nf_out_v4(dev->ip, dst_ip, proto, skb->data, skb->len) == NF_DROP)
+    { skb_free(skb); return -1; }
+
     if (sizeof(ip_hdr_t) + skb->len > IP_MTU) {
         int rc = ip_tx_frag(dev, skb->data, skb->len, dst_ip, proto);
         skb_free(skb);

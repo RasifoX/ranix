@@ -998,6 +998,12 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_TCP_NODELAY  1
 #define SO_TCP_INFO    11
 
+/* Ranix-native firewall control: a setsockopt level whose option value is one
+ * filter command line ("drop tcp dport 9999", "flush"); getsockopt renders the
+ * current ruleset. Any socket fd works — the ruleset is global, not per-socket. */
+#define SOL_RANIX_FILTER 0x52414e58   /* 'RANX' */
+#define NF_RULE          1
+
 struct k_timeval { int64_t tv_sec; int64_t tv_usec; };
 
 static uint32_t tv_to_ticks(const struct k_timeval *tv)
@@ -1010,6 +1016,13 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 {
 	socket_t *s = fd_to_sock(fd);
 	if (!s) return -9; /* EBADF */
+
+	if (lv == SOL_RANIX_FILTER && opt == NF_RULE) {
+		char line[160];
+		if (!val || len == 0 || len >= sizeof(line)) return -22;
+		if (copy_from_user(line, val, len) != 0) return -14;
+		return nf_ctl_set(line, len);
+	}
 
 	int iv = 0;
 	if (val && len >= sizeof(int)) {
@@ -1059,6 +1072,16 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		uint32_t n = tcp_get_info(s, info, ulen < sizeof(info) ? ulen : sizeof(info));
 		if (n && copy_to_user(val, info, n) != 0) return -14;
 		if (copy_to_user(len, &n, sizeof(n)) != 0) return -14;
+		return 0;
+	}
+
+	if (lv == SOL_RANIX_FILTER && opt == NF_RULE) {
+		char tmp[512];
+		int n = nf_ctl_dump(tmp, sizeof(tmp));
+		uint32_t cp = ulen < (uint32_t)n ? ulen : (uint32_t)n;
+		if (cp && copy_to_user(val, tmp, cp) != 0) return -14;
+		uint32_t rn = (uint32_t)n;
+		if (copy_to_user(len, &rn, sizeof(rn)) != 0) return -14;
 		return 0;
 	}
 
