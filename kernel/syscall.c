@@ -597,6 +597,10 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETRESUID:   ret = sys_getresuid((uid_t*)arg0, (uid_t*)arg1, (uid_t*)arg2); break;
 	case SYS_ARCH_SETRESGID:   ret = sys_setresgid((gid_t)arg0, (gid_t)arg1, (gid_t)arg2); break;
 	case SYS_ARCH_GETRESGID:   ret = sys_getresgid((gid_t*)arg0, (gid_t*)arg1, (gid_t*)arg2); break;
+	case SYS_ARCH_SETFSUID:    ret = sys_setfsuid((uid_t)arg0); break;
+	case SYS_ARCH_SETFSGID:    ret = sys_setfsgid((gid_t)arg0); break;
+	case SYS_ARCH_PERSONALITY: ret = sys_personality((unsigned int)arg0); break;
+	case SYS_ARCH_GETCPU:      ret = sys_getcpu((unsigned int*)arg0, (unsigned int*)arg1, (void*)arg2); break;
 	case SYS_ARCH_RT_SIGPENDING: ret = sys_rt_sigpending((uint64_t*)arg0, (size_t)arg1); break;
 	case SYS_ARCH_RT_SIGSUSPEND: ret = sys_rt_sigsuspend((const uint64_t*)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MLOCK:       ret = sys_mlock((uint64_t)arg0, (size_t)arg1); break;

@@ -159,6 +159,10 @@ typedef struct {
 #define SYS_ARCH_GETRESUID         148
 #define SYS_ARCH_SETRESGID         149
 #define SYS_ARCH_GETRESGID         150
+#define SYS_ARCH_SETFSUID          151
+#define SYS_ARCH_SETFSGID          152
+#define SYS_ARCH_PERSONALITY       92
+#define SYS_ARCH_GETCPU            168
 #define SYS_ARCH_TIMES             153
 #define SYS_ARCH_SETPGID           154
 #define SYS_ARCH_GETPGID           155
