@@ -1,10 +1,12 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
-#define VIRT_OFFSET     0xFFFFFF8000000000UL
+/* TTBR1 (48-bit, T1SZ=16) linear map. VIRT_OFFSET sits at L0 slot 256, so the
+ * kernel image + direct map span slots 256..510 (~127 TB of RAM); slot 511 is
+ * left for ioremap. PHYS_TO_VIRT is a single linear offset over that range. */
+#define VIRT_OFFSET     0xFFFF800000000000UL
 #define PHYS_TO_VIRT(p) ((uint64_t)(p) + VIRT_OFFSET)
 #define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
-/* aarch64 VIRT_OFFSET covers all 512GB — PHYS_TO_VIRT always safe */
 #define MMIO_TO_VIRT(p) PHYS_TO_VIRT(p)
 
 /* User space layout */
