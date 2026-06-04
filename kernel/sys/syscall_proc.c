@@ -688,10 +688,17 @@ static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_
     if (new_v) {
         itimerval_t nval;
         if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -14;
-        *value    = (uint64_t)nval.it_value.tv_sec * hz +
-                    (uint64_t)nval.it_value.tv_usec * hz / 1000000;
-        *interval = (uint64_t)nval.it_interval.tv_sec * hz +
-                    (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
+        uint64_t nv = (uint64_t)nval.it_value.tv_sec * hz +
+                      (uint64_t)nval.it_value.tv_usec * hz / 1000000;
+        uint64_t ni = (uint64_t)nval.it_interval.tv_sec * hz +
+                      (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
+        /* store both fields under sched_lock so a nested timer tick (aarch64) or
+         * a cross-CPU sched_tick can't decrement against a half-updated pair. */
+        extern spinlock_t sched_lock;
+        uint64_t sf = spin_lock_irq(&sched_lock);
+        *value    = nv;
+        *interval = ni;
+        spin_unlock_irq(&sched_lock, sf);
     }
     return 0;
 }

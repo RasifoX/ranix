@@ -286,9 +286,14 @@ static long sys_pause(void)
 static long sys_alarm(unsigned int seconds)
 {
 	process_t *p = task_current();
+	/* read-and-replace under sched_lock so it can't race sched_tick's decrement
+	 * (a nested tick on aarch64, or a cross-CPU tick) and report/leave a torn value. */
+	extern spinlock_t sched_lock;
+	uint64_t sf = spin_lock_irq(&sched_lock);
 	unsigned int remaining = (unsigned int)(p->itimer_value / TIMER_HZ);
 	p->itimer_value    = (uint64_t)seconds * TIMER_HZ;
 	p->itimer_interval = 0;
+	spin_unlock_irq(&sched_lock, sf);
 	return (long)remaining;
 }
 

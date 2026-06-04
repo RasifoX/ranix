@@ -142,7 +142,14 @@ void signal_dispatch(arch_context_t *tf)
 	}
 	if (!sig) return;
 
+	/* Serialize with the lock-holding signal posters (task_signal*, and
+	 * sched_tick's SIGALRM/SIGVTALRM/SIGPROF). On aarch64 a timer tick can nest
+	 * into this IRQ-on syscall-return path; without the lock this read-modify-
+	 * write could erase a bit a poster OR'd in concurrently — a silently dropped
+	 * signal. (Cross-CPU on both arches.) */
+	uint64_t sigf = spin_lock_irq(&sched_lock);
 	p->sig_pending &= ~(1UL << (sig - 1));
+	spin_unlock_irq(&sched_lock, sigf);
 
 	sigaction_t *sa = &p->sighand->actions[sig - 1];
 	void (*handler)(int) = sa->sa_handler;
