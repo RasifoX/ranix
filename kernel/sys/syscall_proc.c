@@ -434,6 +434,17 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 	*nsec = (int64_t)((kernel_ticks % TIMER_HZ) * (1000000000 / TIMER_HZ));
 }
 
+/* Monotonic nanoseconds from the hardware counter — advances regardless of IRQ
+ * state, unlike kernel_ticks (only cpu0's timer tick bumps it). A busy-wait in a
+ * syscall runs with IRQs masked on aarch64, so a kernel_ticks deadline there can
+ * never arrive if it lands on cpu0; mono_ns() lets such loops time out. */
+uint64_t mono_ns(void)
+{
+	int64_t s, n;
+	mono_time(&s, &n);
+	return (uint64_t)s * 1000000000ULL + (uint64_t)n;
+}
+
 #define CLOCK_REALTIME   0
 #define CLOCK_MONOTONIC  1
 #define CLOCK_BOOTTIME   7
