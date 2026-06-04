@@ -6,6 +6,8 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/cmdline.h>
+#include <kernel/irq.h>
+#include <drivers/irqchip/irqchip.h>
 #include <asm/mmu.h>
 
 #if defined(__x86_64__)
@@ -171,6 +173,8 @@ typedef struct {
     vring_used_t  *tx_used;
     uint8_t        tx_buf[VNET_BUF_SZ];    /* one TX in flight at a time */
     uint16_t       tx_last;
+
+    uint32_t       irq;
 } vnet_priv_t;
 
 static int g_init_done;
@@ -323,12 +327,25 @@ static void vnet_poll(netdev_t *dev)
     }
 }
 
+/* ── RX interrupt ────────────────────────────────────────── */
+
+/* Top half: ack the device and hand off to the RX softirq thread, which drains
+ * the ring via vnet_poll (serialised by net_poll's single-runner guard — running
+ * the drain here too would race it on rx_last/rx_avail). */
+static void vnet_irq_handler(void)
+{
+    vnet_priv_t *p = &g_priv;
+    vw(p, VNET_IRQ_ACK, vr(p, VNET_IRQ_STATUS));
+    net_rx_wake();
+}
+
 /* ── probe ───────────────────────────────────────────────── */
 
-static void virtio_net_setup(volatile uint32_t *regs)
+static void virtio_net_setup(volatile uint32_t *regs, uint32_t irq)
 {
     vnet_priv_t *p = &g_priv;
     p->regs = regs;
+    p->irq  = irq;
 
     /* reset */
     vw(p, VNET_STATUS, 0);
@@ -377,11 +394,20 @@ static void virtio_net_setup(volatile uint32_t *regs)
     g_dev.mask = 0xffffff00u;
     parse_ip_cmdline(&g_dev);
     g_dev.tx   = vnet_tx;
-    g_dev.poll = vnet_poll;
+    g_dev.poll = vnet_poll;   /* also the IRQ fallback: net_rx polls every ~10ms */
     g_dev.priv = p;
     g_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
     net_register(&g_dev);
+
+    if (irq) {
+        irq_register(irq, vnet_irq_handler);
+        irqchip_enable_irq(irq);
+    }
 }
+
+/* QEMU virt: virtio_mmio @ 0x0a000000 + 0x200*n → GIC SPI 16+n → INTID 48+n. */
+#define VNET_MMIO_BASE  0x0a000000UL
+#define VNET_MMIO_IRQ0  48
 
 static void probe_mmio(uint64_t phys, uint64_t size, void *ud)
 {
@@ -399,8 +425,13 @@ static void probe_mmio(uint64_t phys, uint64_t size, void *ud)
     if (magic != VNET_MAGIC_VAL) return;
     if (devid != VNET_DEV_NET) return;
 
-    kprintf("virtio-net: found at 0x%lx\n", phys);
-    virtio_net_setup(r);
+    uint32_t irq = 0;
+    if (phys >= VNET_MMIO_BASE && phys < VNET_MMIO_BASE + 0x200 * 32 &&
+        ((phys - VNET_MMIO_BASE) % 0x200) == 0)
+        irq = VNET_MMIO_IRQ0 + (uint32_t)((phys - VNET_MMIO_BASE) / 0x200);
+
+    kprintf("virtio-net: found at 0x%lx irq=%u\n", phys, irq);
+    virtio_net_setup(r, irq);
     g_init_done = 1;
 }
 
@@ -437,6 +468,7 @@ static uint8_t g_pci_tx_buf[VNET_BUF_SZ]               __attribute__((aligned(64
 typedef struct {
     uint16_t       iobase;
     uint16_t       qsz;       /* actual device queue size */
+    uint32_t       irq;
     vring_desc_t  *rx_desc;
     vring_avail_t *rx_avail;
     vring_used_t  *rx_used;
@@ -515,6 +547,14 @@ static void vnet_pci_poll(netdev_t *dev)
 
         p->rx_last++;
     }
+}
+
+/* Top half: reading the ISR acks/clears the line; the drain runs in the RX
+ * softirq thread (vnet_pci_poll via net_poll's single-runner guard). */
+static void vnet_pci_irq_handler(void)
+{
+    inb((uint16_t)(g_pci_priv.iobase + VIO_ISR));
+    net_rx_wake();
 }
 
 static uint16_t setup_pci_queue(uint16_t iobase, int qidx,
@@ -606,10 +646,17 @@ void virtio_net_pci_init(void)
     g_pci_dev.mask = 0xffffff00u;
     parse_ip_cmdline(&g_pci_dev);
     g_pci_dev.tx   = vnet_pci_tx;
-    g_pci_dev.poll = vnet_pci_poll;
+    g_pci_dev.poll = vnet_pci_poll;   /* also the IRQ fallback: net_rx polls every ~10ms */
     g_pci_dev.priv = p;
     g_pci_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
     net_register(&g_pci_dev);
+
+    uint8_t line = (uint8_t)pci_read16(bus, devn, fn, PCI_INT_LINE);
+    if (line < 16) {
+        p->irq = 0x20 + line;
+        irq_register(p->irq, vnet_pci_irq_handler);
+        irqchip_enable_irq(p->irq);
+    }
     g_init_done = 1;
 }
 #endif /* __x86_64__ */
