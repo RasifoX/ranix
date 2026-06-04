@@ -28,6 +28,7 @@ uint8_t pci_find_cap(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t cap_id);
 #define PCI_BAR0        0x10
 #define PCI_BAR1        0x14
 #define PCI_BAR5        0x24
+#define PCI_INT_LINE    0x3C   /* IRQ line (low byte), int pin (next byte) */
 
 #define PCI_CMD_IO      0x01
 #define PCI_CMD_MEM     0x02

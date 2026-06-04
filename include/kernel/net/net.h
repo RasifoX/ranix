@@ -109,6 +109,9 @@ netdev_t *net_route_dev6(const in6_addr_t *dst);
 /* Called from scheduler tick / idle loop — drains RX queues */
 void net_poll(void);
 
+/* Wake the RX softirq thread — called from a driver's RX interrupt handler */
+void net_rx_wake(void);
+
 /* Push received skb onto dev's RX queue */
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb);
 skb_t *netdev_rx_dequeue(netdev_t *dev);
