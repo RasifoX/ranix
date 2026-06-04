@@ -705,6 +705,7 @@ fd_table_t *fd_table_create(void)
 	memset(t->open_bm, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
 	memset(t->cloexec, 0, (size_t)(FD_INIT_CAP/64) * sizeof(uint64_t));
 	t->refcount = 1;
+	t->lock     = (spinlock_t)SPINLOCK_INIT;
 	return t;
 }
 
@@ -755,71 +756,87 @@ fd_table_t *fd_table_copy(fd_table_t *old)
 		return NULL;
 	}
 	n->refcount = 1;
-	memset(n->files, 0, (size_t)old->cap * sizeof(vfs_file_t *));
-	memcpy(n->open_bm, old->open_bm, (size_t)(old->cap/64) * sizeof(uint64_t));
-	memcpy(n->cloexec, old->cloexec, (size_t)(old->cap/64) * sizeof(uint64_t));
-	for (int i = 0; i < old->cap; i++) {
+	n->lock     = (spinlock_t)SPINLOCK_INIT;
+	/* Snapshot the parent's table under its lock. n was sized to old->cap at
+	 * entry, so bound the copy by n->cap in case a CLONE_FILES sibling grows
+	 * old concurrently (the grow preserves the first n->cap entries). */
+	uint64_t fl = spin_lock_irq(&old->lock);
+	memset(n->files, 0, (size_t)n->cap * sizeof(vfs_file_t *));
+	memcpy(n->open_bm, old->open_bm, (size_t)(n->cap/64) * sizeof(uint64_t));
+	memcpy(n->cloexec, old->cloexec, (size_t)(n->cap/64) * sizeof(uint64_t));
+	for (int i = 0; i < n->cap; i++) {
 		if (old->files[i]) {
 			n->files[i] = old->files[i];
 			atomic_fetch_add32((volatile uint32_t *)&n->files[i]->refcount, 1);
 		}
 	}
+	spin_unlock_irq(&old->lock, fl);
 	return n;
 }
 
 int fd_alloc(fd_table_t *t, vfs_file_t *f)
 {
+	uint64_t fl = spin_lock_irq(&t->lock);
 	for (;;) {
 		for (int i = 0; i < t->cap; i++) {
 			if (!BM_TST(t->open_bm, i)) {
 				t->files[i] = f;
 				BM_SET(t->open_bm, i);
 				atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
+				spin_unlock_irq(&t->lock, fl);
 				return i;
 			}
 		}
-		if (fd_table_grow(t) != 0) return -1;
+		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -1; }
 	}
 }
 
 int fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start)
 {
+	uint64_t fl = spin_lock_irq(&t->lock);
 	for (;;) {
 		for (int i = start; i < t->cap; i++) {
 			if (!BM_TST(t->open_bm, i)) {
 				t->files[i] = f;
 				BM_SET(t->open_bm, i);
 				atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
+				spin_unlock_irq(&t->lock, fl);
 				return i;
 			}
 		}
-		if (fd_table_grow(t) != 0) return -1;
+		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -1; }
 	}
 }
 
 int fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd)
 {
+	uint64_t fl = spin_lock_irq(&t->lock);
 	while (fd >= t->cap)
-		if (fd_table_grow(t) != 0) return -1;
+		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -1; }
 	t->files[fd] = f;
 	BM_SET(t->open_bm, fd);
 	atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
+	spin_unlock_irq(&t->lock, fl);
 	return fd;
 }
 
 void fd_free(fd_table_t *t, int fd)
 {
 	if (!t || fd < 0 || fd >= t->cap) return;
+	uint64_t fl = spin_lock_irq(&t->lock);
 	t->files[fd] = NULL;
 	BM_CLR(t->open_bm, fd);
 	BM_CLR(t->cloexec, fd);
+	spin_unlock_irq(&t->lock, fl);
 }
 
 vfs_file_t *fd_get(fd_table_t *t, int fd)
 {
 	if (!t || fd < 0 || fd >= t->cap) return NULL;
-	if (!BM_TST(t->open_bm, fd)) return NULL;
-	return t->files[fd];
+	uint64_t fl = spin_lock_irq(&t->lock);
+	vfs_file_t *f = BM_TST(t->open_bm, fd) ? t->files[fd] : NULL;
+	spin_unlock_irq(&t->lock, fl);
+	return f;
 }
 
 /* ── file ops ────────────────────────────────────────────── */
