@@ -880,6 +880,13 @@ void task_exit(void)
 		futex_wake_addr(cctid);
 	}
 
+	/* Robust-mutex handoff: while p->vm is still live (the list and futex words
+	 * are in user memory) and outside sched_lock (futex→sched order), tag every
+	 * futex this thread still owns OWNER_DIED and wake a survivor. */
+	arch_get_cpu_ctx()->wd_where = "exit:robust";
+	futex_exit_robust(p);
+	p->robust_list = NULL;
+
 	uts_ns_put(p->uts_ns);
 	p->uts_ns = NULL;
 	ipc_ns_put(p->ipc_ns);
