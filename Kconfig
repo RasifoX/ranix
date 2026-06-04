@@ -77,7 +77,11 @@ config MQ_MSGSIZE
 
 config EXT2_BCACHE_N
 	int "ext2 LRU block-cache entries per mount"
-	default 16
+	default 256
+
+config BLOCK_READAHEAD
+	int "max sequential readahead window (fs-blocks)"
+	default 32
 
 config SKB_HEADROOM
 	int "Bytes reserved before skb data for header push"

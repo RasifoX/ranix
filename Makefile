@@ -460,6 +460,7 @@ ranix-disk.img:
 $(BUILD_DIR)/gpt-test.img:
 	@mkdir -p $(BUILD_DIR)/diskseed
 	@printf 'ranix-gpt-ok' > $(BUILD_DIR)/diskseed/hello.txt
+	@yes ranixreadaheaddata | head -c 262144 > $(BUILD_DIR)/diskseed/seq.dat
 	dd if=/dev/zero of=$(BUILD_DIR)/part.img bs=1M count=32 2>/dev/null
 	mkfs.ext4 -F -q -O has_journal,^metadata_csum,64bit -b 1024 \
 	    -d $(BUILD_DIR)/diskseed $(BUILD_DIR)/part.img >/dev/null 2>&1

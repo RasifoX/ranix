@@ -22,7 +22,7 @@
 extern int  smp_ncpus;
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
-       SF_BLK_SIZE, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
+       SF_BLK_SIZE, SF_BLK_STAT, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
        SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
        SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES };
@@ -126,6 +126,16 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case SF_BLK_SIZE: {
 		block_device_t *b = block_device_get(pr->dev);
 		if (b) { n = put_u64(tmp, b->size_blocks); tmp[n++] = '\n'; }
+		break;
+	}
+	case SF_BLK_STAT: {
+		/* "<read-transfers> <sectors-read>": sequential readahead shows up as
+		 * far fewer transfers than sectors. */
+		block_device_t *b = block_device_get(pr->dev);
+		if (b) {
+			n  = put_u64(tmp, b->nr_reads);     tmp[n++] = ' ';
+			n += put_u64(tmp + n, b->nr_read_secs); tmp[n++] = '\n';
+		}
 		break;
 	}
 	case SF_CPU_ONLINE:
@@ -534,15 +544,18 @@ static int sysfs_block_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 static vfs_inode_t *sysfs_blockdev_lookup(vfs_inode_t *dir, const char *name)
 {
 	sysfs_priv_t *pr = dir->priv;
-	if (strcmp(name, "size") == 0) return sysfs_file(SF_BLK_SIZE, pr ? pr->dev : 0);
+	int d = pr ? pr->dev : 0;
+	if (strcmp(name, "size") == 0) return sysfs_file(SF_BLK_SIZE, d);
+	if (strcmp(name, "stat") == 0) return sysfs_file(SF_BLK_STAT, d);
 	return NULL;
 }
+static const char *blockdev_files[] = { "size", "stat" };
 static int sysfs_blockdev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx != 0) return -1;
-	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = 1;
-	put_str(out->name, "size"); out->name[4] = '\0';
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	put_str(out->name, blockdev_files[idx]); out->name[strlen(blockdev_files[idx])] = '\0';
 	return 0;
 }
 
