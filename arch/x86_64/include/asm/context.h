@@ -183,6 +183,8 @@ typedef struct {
 #define SYS_ARCH_SETPRIORITY       141
 #define SYS_ARCH_MLOCK             149
 #define SYS_ARCH_MUNLOCK           150
+#define SYS_ARCH_MLOCKALL          151
+#define SYS_ARCH_MUNLOCKALL        152
 #define SYS_ARCH_PRCTL             157
 #define SYS_ARCH_ARCH_PRCTL        158
 #define SYS_ARCH_SETRLIMIT         160

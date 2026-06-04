@@ -104,14 +104,31 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	uint64_t paddr = arch_vm_get_paddr(p->vm->root, vaddr);
 	int ret = -1;
 
-	/* No mapping — check if this is a stack expansion */
+	/* No mapping — a stack expansion, or a demand fault into an anonymous VMA
+	 * whose pages were dropped (MADV_DONTNEED/FREE) and never re-touched. Both
+	 * fault in a fresh zero page; the anon case maps with the VMA's recorded
+	 * permissions so a read-only region stays read-only. A VMA without VMA_READ
+	 * (PROT_NONE) is not a candidate — leave ret=-1 for SIGSEGV. */
 	if (!paddr) {
+		uint32_t mf = 0;
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
+			mf = VM_USER | VM_READ | VM_WRITE;
+		} else {
+			for (vma_t *v = p->vmas; v; v = v->next) {
+				if (vaddr < v->vaddr || vaddr >= v->vaddr + v->size) continue;
+				if (!(v->flags & VMA_ANON) || !(v->flags & VMA_READ)) break;
+				mf = VM_USER | VM_READ;
+				if (v->flags & VMA_WRITE) mf |= VM_WRITE;
+				if (v->flags & VMA_EXEC)  mf |= VM_EXEC;
+				break;
+			}
+		}
+		if (mf) {
 			if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
 			void *pg = vm_alloc_page_oom();
 			if (pg) {
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-				if (vm_map(p->vm, vaddr, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE) == 0) {
+				if (vm_map(p->vm, vaddr, (uint64_t)pg, mf) == 0) {
 					p->mem_charged += PAGE_SIZE;
 					ret = 0;
 				} else {
