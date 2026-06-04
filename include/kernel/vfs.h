@@ -180,6 +180,7 @@ typedef struct {
 #define VMA_SHARED 0x20  /* MAP_SHARED — pages not COW'd on fork */
 #define VMA_HUGE   0x40  /* MAP_HUGETLB — backed by 2 MB blocks */
 #define VMA_HUGE_1G 0x80 /* MAP_HUGETLB | MAP_HUGE_1GB — 1 GB blocks */
+#define VMA_LOCKED 0x100 /* mlock/MAP_LOCKED — prefaulted, exempt from future reclaim */
 
 typedef struct vma {
     uint64_t    vaddr;

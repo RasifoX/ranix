@@ -547,11 +547,6 @@ static long sys_mknodat(int dirfd, const char *path, mode_t mode, uint64_t dev)
 	return do_mknod(kp, mode, dev);
 }
 
-static long sys_mlock(uint64_t addr, size_t len)   { (void)addr; (void)len; return 0; }
-static long sys_munlock(uint64_t addr, size_t len) { (void)addr; (void)len; return 0; }
-static long sys_mlock2(uint64_t addr, size_t len, int flags)
-	{ (void)addr; (void)len; (void)flags; return 0; }
-
 static long sys_sync(void) { return 0; }
 
 static long sys_mount(const char *source, const char *target, const char *fstype,
