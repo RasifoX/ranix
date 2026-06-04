@@ -311,10 +311,20 @@ static uint64_t ext4_extent_lookup(ext2_fs_t *fs, uint32_t *tree, uint32_t logic
 		ext4_eh_t *eh = (ext4_eh_t *)buf;
 		if (eh->eh_magic != 0xF30A) return 0;
 
+		/* eh_entries/eh_max are read from disk; clamp the iteration to what the
+		 * block buffer actually holds so a forged header can't walk the entry
+		 * array off the end of the page (extent and index entries are both 12
+		 * bytes, so one bound covers leaf and index nodes). */
+		int n = eh->eh_entries;
+		if (eh->eh_max && n > eh->eh_max) n = eh->eh_max;
+		int maxn = (int)((fs->block_size - sizeof(ext4_eh_t)) / sizeof(ext4_extent_t));
+		if (n > maxn) n = maxn;
+		if (n < 0) n = 0;
+
 		if (eh->eh_depth == 0) {
 			/* leaf: search extents */
 			ext4_extent_t *ext = (ext4_extent_t *)(buf + sizeof(ext4_eh_t));
-			for (int i = 0; i < eh->eh_entries; i++) {
+			for (int i = 0; i < n; i++) {
 				uint32_t start = ext[i].ee_block;
 				uint32_t len   = ext[i].ee_len & 0x7FFF;
 				if (logical_blk >= start && logical_blk < start + len) {
@@ -328,7 +338,7 @@ static uint64_t ext4_extent_lookup(ext2_fs_t *fs, uint32_t *tree, uint32_t logic
 		/* index node: find the right branch */
 		ext4_extent_idx_t *idx = (ext4_extent_idx_t *)(buf + sizeof(ext4_eh_t));
 		int best = -1;
-		for (int i = 0; i < eh->eh_entries; i++) {
+		for (int i = 0; i < n; i++) {
 			if (idx[i].ei_block <= logical_blk)
 				best = i;
 		}
@@ -1126,8 +1136,12 @@ static vfs_inode_t *ext2_lookup(vfs_inode_t *dir, const char *name)
 		uint32_t blk_off = 0;
 		while (blk_off < fs->block_size) {
 			ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
-			if (de->rec_len == 0) break;
-			if (de->inode != 0 && de->name_len == (uint8_t)strlen(name) &&
+			/* rec_len/name_len come from disk; keep the header and the name
+			 * inside the block so a corrupt directory can't read off the page. */
+			if (de->rec_len < 8 || blk_off + de->rec_len > fs->block_size) break;
+			if (de->inode != 0 &&
+			    blk_off + 8u + de->name_len <= fs->block_size &&
+			    de->name_len == (uint8_t)strlen(name) &&
 			    memcmp(de->name, name, de->name_len) == 0) {
 				ext2_inode_t raw;
 				if (read_inode(fs, de->inode, &raw) != 0) {
@@ -1174,7 +1188,9 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 		}
 
 		ext2_dirent_t *de = (ext2_dirent_t *)(blk + blk_off);
-		if (de->rec_len == 0) break;
+		/* rec_len/name_len come from disk; keep the header and the name inside
+		 * the block so a corrupt directory can't read off the page. */
+		if (de->rec_len < 8 || blk_off + de->rec_len > fs->block_size) break;
 
 		byte_off += de->rec_len;
 
@@ -1182,7 +1198,8 @@ static int ext2_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 
 		out->ino      = de->inode;
 		out->next_off = byte_off;
-		uint8_t nl = de->name_len;
+		uint32_t nl = de->name_len;
+		if (blk_off + 8u + nl > fs->block_size) nl = fs->block_size - blk_off - 8u;
 		memcpy(out->name, de->name, nl);
 		out->name[nl] = '\0';
 		switch (de->file_type) {
