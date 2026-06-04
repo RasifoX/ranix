@@ -181,6 +181,7 @@ typedef struct __attribute__((packed)) {
 /* ── filesystem metadata ─────────────────────────────────────── */
 
 #define EXT2_BCACHE_N  CONFIG_EXT2_BCACHE_N   /* LRU block cache entries per fs */
+#define EXT2_RA_MAX    CONFIG_BLOCK_READAHEAD /* max readahead window (fs-blocks) */
 
 typedef struct {
 	uint64_t blkno;   /* ~0ULL = empty */
@@ -203,6 +204,13 @@ typedef struct {
 	/* LRU block cache */
 	bcache_entry_t  cache[EXT2_BCACHE_N];
 	uint32_t        cache_clock;
+	spinlock_t      cache_lock;
+	/* sequential-readahead state, keyed on physical block number */
+	uint64_t        ra_last;     /* last block demanded */
+	uint64_t        ra_ahead;    /* highest block prefetched into the cache */
+	uint32_t        ra_window;   /* current prefetch depth, grows while sequential */
+	uint8_t        *ra_buf;      /* scratch for one multi-block transfer */
+	int             ra_order;    /* buddy order of ra_buf */
 } ext2_fs_t;
 
 static inline uint8_t *ext2_alloc_page(void)
@@ -218,45 +226,88 @@ static inline void ext2_free_page(uint8_t *p)
 
 /* ── block I/O helpers ───────────────────────────────────────── */
 
+/* copy a freshly-fetched block into the cache, evicting the LRU slot. caller
+ * holds cache_lock. */
+static void bcache_insert(ext2_fs_t *fs, uint64_t blkno, const void *src)
+{
+	for (int i = 0; i < EXT2_BCACHE_N; i++)
+		if (fs->cache[i].blkno == blkno && fs->cache[i].buf) {
+			memcpy(fs->cache[i].buf, src, fs->block_size);
+			fs->cache[i].lru_ts = ++fs->cache_clock;
+			return;
+		}
+	int victim = 0;
+	uint32_t oldest = (uint32_t)-1;
+	for (int i = 0; i < EXT2_BCACHE_N; i++) {
+		if (!fs->cache[i].buf || fs->cache[i].blkno == ~0ULL) { victim = i; break; }
+		if (fs->cache[i].lru_ts < oldest) { oldest = fs->cache[i].lru_ts; victim = i; }
+	}
+	if (!fs->cache[victim].buf) fs->cache[victim].buf = ext2_alloc_page();
+	if (fs->cache[victim].buf) {
+		memcpy(fs->cache[victim].buf, src, fs->block_size);
+		fs->cache[victim].blkno  = blkno;
+		fs->cache[victim].lru_ts = ++fs->cache_clock;
+	}
+}
+
+/* Pull `win` contiguous blocks starting at `start` into the cache with one
+ * larger device transfer. caller holds cache_lock. */
+static void readahead_fill(ext2_fs_t *fs, uint64_t start, uint32_t win)
+{
+	if (!fs->ra_buf || win < 1 || start >= fs->total_blocks) return;
+	if (start + win > fs->total_blocks) win = (uint32_t)(fs->total_blocks - start);
+
+	uint64_t lba = start * fs->sectors_per_block;
+	if (block_read(fs->bdev, lba, fs->ra_buf, (uint64_t)win * fs->sectors_per_block) != 0)
+		return;
+	for (uint32_t i = 0; i < win; i++)
+		bcache_insert(fs, start + i, fs->ra_buf + (size_t)i * fs->block_size);
+	if (start + win - 1 > fs->ra_ahead) fs->ra_ahead = start + win - 1;
+}
+
 static int read_block(ext2_fs_t *fs, uint64_t blkno, void *buf)
 {
 	if (blkno == 0) { memset(buf, 0, fs->block_size); return 0; }
 
-	/* search cache */
+	uint64_t f = spin_lock_irq(&fs->cache_lock);
+
+	/* sequential detection runs on every demand (hit or miss): a step of +1
+	 * grows the window, anything else collapses it and the prefetch frontier. */
+	if (blkno == fs->ra_last + 1) {
+		fs->ra_window = fs->ra_window ? fs->ra_window * 2 : 2;
+		if (fs->ra_window > EXT2_RA_MAX) fs->ra_window = EXT2_RA_MAX;
+	} else {
+		fs->ra_window = 0;
+		fs->ra_ahead  = blkno;
+	}
+	fs->ra_last = blkno;
+
+	int cached = 0;
 	for (int i = 0; i < EXT2_BCACHE_N; i++) {
 		if (fs->cache[i].blkno == blkno && fs->cache[i].buf) {
 			fs->cache[i].lru_ts = ++fs->cache_clock;
 			memcpy(buf, fs->cache[i].buf, fs->block_size);
-			return 0;
-		}
-	}
-
-	/* read from device */
-	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
-	if (fs->bdev->read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
-
-	/* find victim: prefer empty slot, else oldest */
-	int victim = 0;
-	uint32_t oldest = (uint32_t)-1;
-	for (int i = 0; i < EXT2_BCACHE_N; i++) {
-		if (!fs->cache[i].buf || fs->cache[i].blkno == ~0ULL) {
-			victim = i;
-			oldest = 0;
+			cached = 1;
 			break;
 		}
-		if (fs->cache[i].lru_ts < oldest) {
-			oldest = fs->cache[i].lru_ts;
-			victim = i;
-		}
 	}
 
-	if (!fs->cache[victim].buf)
-		fs->cache[victim].buf = ext2_alloc_page();
-	if (fs->cache[victim].buf) {
-		memcpy(fs->cache[victim].buf, buf, fs->block_size);
-		fs->cache[victim].blkno  = blkno;
-		fs->cache[victim].lru_ts = ++fs->cache_clock;
+	if (!cached) {
+		uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
+		if (block_read(fs->bdev, lba, buf, fs->sectors_per_block) != 0) {
+			spin_unlock_irq(&fs->cache_lock, f);
+			return -1;
+		}
+		bcache_insert(fs, blkno, buf);
+		if (blkno > fs->ra_ahead) fs->ra_ahead = blkno;
 	}
+
+	/* refill only when the reader has consumed most of the prefetched run, so a
+	 * steady stream costs one multi-block transfer per window, not per block. */
+	if (fs->ra_window >= 2 && blkno + fs->ra_window / 2 >= fs->ra_ahead)
+		readahead_fill(fs, fs->ra_ahead + 1, fs->ra_window);
+
+	spin_unlock_irq(&fs->cache_lock, f);
 	return 0;
 }
 
@@ -532,13 +583,15 @@ static uint64_t bgd_inode_bitmap(ext2_fs_t *fs, const ext2_bgd_t *b)
 static int write_block(ext2_fs_t *fs, uint64_t blkno, const void *buf)
 {
 	uint64_t lba = (uint64_t)blkno * fs->sectors_per_block;
-	if (fs->bdev->write(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
+	if (block_write(fs->bdev, lba, buf, fs->sectors_per_block) != 0) return -1;
+	uint64_t f = spin_lock_irq(&fs->cache_lock);
 	for (int i = 0; i < EXT2_BCACHE_N; i++) {
 		if (fs->cache[i].blkno == blkno && fs->cache[i].buf) {
 			memcpy(fs->cache[i].buf, buf, fs->block_size);
-			return 0;
+			break;
 		}
 	}
+	spin_unlock_irq(&fs->cache_lock, f);
 	return 0;
 }
 
@@ -1268,7 +1321,7 @@ static int ext2_statfs(vfs_inode_t *inode, vfs_statfs_t *out)
 	uint8_t *sb_buf = ext2_alloc_page();
 	if (!sb_buf) return -12;
 	uint64_t free_blocks = 0, free_inodes = 0, rsvd = 0;
-	if (fs->bdev->read(fs->bdev, 2, sb_buf, 2) == 0) {
+	if (block_read(fs->bdev, 2, sb_buf, 2) == 0) {
 		ext2_super_t *sb = (ext2_super_t *)sb_buf;
 		free_blocks = sb->s_free_blocks_count_lo;
 		rsvd        = sb->s_r_blocks_count_lo;
@@ -1315,7 +1368,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	if (!sb_buf) return -1;
 
 	/* read 2 sectors to cover byte 1024..2047 */
-	if (bdev->read(bdev, 2, sb_buf, 2) != 0) {
+	if (block_read(bdev, 2, sb_buf, 2) != 0) {
 		ext2_free_page(sb_buf);
 		return -1;
 	}
@@ -1348,11 +1401,25 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	fs->num_groups        = (uint32_t)((fs->total_blocks + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group);
 	fs->desc_size         = (sb->s_desc_size >= 32) ? sb->s_desc_size : 32;
 	fs->cache_clock = 0;
+	fs->cache_lock  = (spinlock_t)SPINLOCK_INIT;
+	fs->ra_last     = 0;
+	fs->ra_ahead    = 0;
+	fs->ra_window   = 0;
 	for (int i = 0; i < EXT2_BCACHE_N; i++) {
 		fs->cache[i].blkno  = ~0ULL;
 		fs->cache[i].buf    = NULL;
 		fs->cache[i].lru_ts = 0;
 	}
+
+	/* one contiguous scratch big enough for a full readahead window; if the
+	 * allocation fails readahead just stays off and reads fall back to 1 block. */
+	int ra_order = 0;
+	uint64_t ra_bytes = (uint64_t)EXT2_RA_MAX * fs->block_size;
+	while ((4096ULL << ra_order) < ra_bytes) ra_order++;
+	if (fs->ra_buf) buddy_free(VIRT_TO_PHYS((uint64_t)fs->ra_buf), fs->ra_order);
+	void *rp = buddy_alloc(ra_order);
+	fs->ra_buf   = rp ? (uint8_t *)PHYS_TO_VIRT((uint64_t)rp) : NULL;
+	fs->ra_order = ra_order;
 
 	kprintf("ext2: bs=%u ino_sz=%u groups=%u desc=%u %s%s\n",
 	        bs, fs->inode_size, fs->num_groups, fs->desc_size,
