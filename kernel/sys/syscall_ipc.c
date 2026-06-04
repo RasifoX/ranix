@@ -548,9 +548,9 @@ static long sys_msgctl(int msqid, int cmd, void *buf)
 
 /* ── POSIX Message Queues ─────────────────────────────────── */
 
-#define MQ_MAX      16
-#define MQ_MSG_MAX  32
-#define MQ_MSGSIZE  512
+#define MQ_MAX      CONFIG_MQ_MAX
+#define MQ_MSG_MAX  CONFIG_MQ_MSG_MAX
+#define MQ_MSGSIZE  CONFIG_MQ_MSGSIZE
 
 typedef struct {
     char    buf[MQ_MSGSIZE];

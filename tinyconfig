@@ -1,0 +1,44 @@
+# Ranix tiny-core config — smallest bootable build. Strips the optional
+# filesystems (FAT, ISO9660, overlay, tmpfs) and shrinks the tunables. Boots to
+# a shell on ramfs; ext2 stays so a disk root still works. `make tinyconfig`.
+#
+# Stripped vs defconfig: CONFIG_FS_FAT, CONFIG_FS_ISO9660, CONFIG_FS_OVERLAY,
+# CONFIG_FS_TMPFS. NET stays (too deeply wired to gate cleanly today — see
+# Kconfig). The tiny build is not expected to pass the FS/overlay tests.
+
+#
+# Tunables (trimmed for footprint)
+#
+CONFIG_SCHED_QUANTUM=10
+CONFIG_KSTACK_SIZE=16384
+CONFIG_DENTRY_MAX=512
+CONFIG_MAX_CPUS=8
+CONFIG_FD_TABLE_INIT=16
+CONFIG_FD_INIT_CAP=32
+CONFIG_FD_MAX=256
+CONFIG_PIPE_BUF_SIZE=4096
+CONFIG_CMDLINE_MAX=512
+CONFIG_FUTEX_SLOTS=64
+CONFIG_PTY_MAX=4
+CONFIG_GSOCK_INIT_CAP=16
+CONFIG_MQ_MAX=8
+CONFIG_MQ_MSG_MAX=16
+CONFIG_MQ_MSGSIZE=256
+CONFIG_EXT2_BCACHE_N=8
+CONFIG_SKB_HEADROOM=128
+CONFIG_SKB_DATA_MAX=1536
+CONFIG_SKB_SCM_MAX=8
+
+#
+# Networking
+#
+CONFIG_NET=y
+
+#
+# Filesystems
+#
+CONFIG_FS_EXT2=y
+# CONFIG_FS_FAT is not set
+# CONFIG_FS_ISO9660 is not set
+# CONFIG_FS_OVERLAY is not set
+# CONFIG_FS_TMPFS is not set
