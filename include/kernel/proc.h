@@ -194,6 +194,8 @@ typedef struct process {
 	long            mem_charged;   /* bytes charged to the cgroup memory controller */
 
 	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */
+	uint32_t        refcount;      /* outstanding proc_get pins; PCB freed once 0 and pcb_dead */
+	uint8_t         pcb_dead;      /* proc_reap tore the PCB down; the last proc_put frees it */
 } process_t;
 
 /* scheduler */
@@ -231,7 +233,10 @@ pid_t      proc_fork(uint64_t clone_flags, uint64_t newsp);
 pid_t      proc_vfork(void);
 void       proc_vfork_exec_notify(void);
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);
-process_t *proc_find(pid_t pid);
+process_t *proc_find(pid_t pid);           /* lookup, no reference — safe only under sched_lock or for an existence check */
+process_t *proc_get(pid_t pid);            /* lookup + pin (get_task_struct); release with proc_put */
+void       proc_hold(process_t *p);        /* pin a process you already hold a live reference to */
+void       proc_put(process_t *p);         /* drop a proc_get/proc_hold pin (NULL-safe) */
 int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
 void       proc_reap(process_t *child);
