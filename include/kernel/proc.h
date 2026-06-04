@@ -168,6 +168,7 @@ typedef struct process {
 	int             single_step;          /* PTRACE_SINGLESTEP: trap after each insn (TF on user return) */
 	void           *uctx;                 /* last trap frame entered from ring3 (ptrace task_pt_regs) */
 	uint32_t       *clear_child_tid;
+	void           *robust_list;          /* set_robust_list head (user ptr); walked on exit for OWNER_DIED handoff */
 
 	/* full path of the running image, for /proc/<pid>/exe */
 	char            exe_path[PROC_NAME_MAX];

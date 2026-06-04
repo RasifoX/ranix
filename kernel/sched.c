@@ -25,6 +25,7 @@
 #include <asm/mmu.h>
 
 extern void futex_wake_addr(uint32_t *uaddr);
+extern void futex_exit_robust(process_t *p);
 
 static process_t **proctab;
 static int         proc_cap = 0;

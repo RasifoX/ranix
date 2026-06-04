@@ -409,6 +409,91 @@ void futex_wake_addr(uint32_t *uaddr)
 	spin_unlock_irq(&futex_lock, f);
 }
 
+/* ── robust futexes (NPTL robust-mutex support) ──────────────────────────
+ * A thread registers a singly-linked user-space list of the futexes it owns
+ * via set_robust_list. On exit the kernel walks it and, for every futex word
+ * still tagged with this tid, sets FUTEX_OWNER_DIED and wakes one waiter so a
+ * surviving thread can recover the lock. The list is in the dying thread's own
+ * memory, so every access goes through copy_{from,to}_user: a garbage or
+ * malicious list must not fault the kernel — the walk is length-bounded and
+ * tolerates faults. PI is out of scope. */
+#define FUTEX_WAITERS     0x80000000u
+#define FUTEX_OWNER_DIED  0x40000000u
+#define FUTEX_TID_MASK    0x3fffffffu
+#define ROBUST_LIST_LIMIT 2048   /* matches Linux; bounds a cyclic/garbage list */
+
+struct robust_list_head {
+	void   *list;             /* first robust_list node, or &head->list if empty */
+	long    futex_offset;     /* signed byte offset from a node to its futex word */
+	void   *list_op_pending;  /* node mid lock/unlock; not yet on the list */
+};
+
+/* Set OWNER_DIED on a futex this dying thread still owns and wake one waiter so
+ * a survivor can take over. uaddr is a user pointer derived from the list. */
+static void robust_handle_futex(process_t *self, void *mm, uint32_t *uaddr, uint32_t tid)
+{
+	uint32_t cur;
+	for (;;) {
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return;
+		if ((cur & FUTEX_TID_MASK) != tid) return;   /* not ours (or already handed off) */
+		uint32_t new = (cur & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+		/* No userspace CAS primitive here: re-read after the store and retry if
+		 * it changed, so a racing lock attempt does not get clobbered silently. */
+		if (copy_to_user(uaddr, &new, sizeof(new)) != 0) return;
+		uint32_t check;
+		if (copy_from_user(&check, uaddr, sizeof(check)) != 0) return;
+		if (check == new) break;
+	}
+	uint64_t f = spin_lock_irq(&futex_lock);
+	futex_do_wake(mm, uaddr, 1, NULL, 0);
+	spin_unlock_irq(&futex_lock, f);
+}
+
+/* Walk this thread's robust list on exit. Called from task_exit while p->vm is
+ * still live and outside sched_lock (futex→sched lock order). */
+void futex_exit_robust(process_t *p)
+{
+	if (!p->robust_list) return;
+	void *mm = p->vm;
+	uint32_t tid = (uint32_t)p->pid & FUTEX_TID_MASK;
+
+	struct robust_list_head head;
+	if (copy_from_user(&head, p->robust_list, sizeof(head)) != 0) return;
+
+	/* list_op_pending names a futex whose lock/unlock the thread was mid-way
+	 * through (so it may own it but it is not yet linked); handle it first. */
+	if (head.list_op_pending)
+		robust_handle_futex(p, mm, (uint32_t *)((char *)head.list_op_pending + head.futex_offset), tid);
+
+	void *node = head.list;
+	for (int i = 0; node && node != p->robust_list && i < ROBUST_LIST_LIMIT; i++) {
+		if (node != head.list_op_pending)
+			robust_handle_futex(p, mm, (uint32_t *)((char *)node + head.futex_offset), tid);
+		void *next;
+		if (copy_from_user(&next, node, sizeof(next)) != 0) return;
+		node = next;
+	}
+}
+
+static long sys_set_robust_list(void *head, size_t len)
+{
+	if (len != sizeof(struct robust_list_head)) return -22;
+	task_current()->robust_list = head;
+	return 0;
+}
+
+static long sys_get_robust_list(pid_t tid, void **head_ptr, size_t *len_ptr)
+{
+	process_t *t = tid ? proc_get(tid) : task_current();
+	if (!t) return -3;
+	void  *head = t->robust_list;
+	size_t len  = sizeof(struct robust_list_head);
+	if (tid) proc_put(t);
+	if (copy_to_user(head_ptr, &head, sizeof(head)) != 0) return -14;
+	if (copy_to_user(len_ptr, &len, sizeof(len)) != 0)    return -14;
+	return 0;
+}
+
 /* Monotonic wall time. On aarch64 read the generic counter for ~ns
  * resolution (the 100Hz tick clock is only 10ms); EL1 may always read
  * cntvct_el0. Split-divide to avoid 64-bit overflow on cnt*1e9. */
