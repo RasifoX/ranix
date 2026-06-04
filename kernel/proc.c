@@ -782,6 +782,31 @@ fd_table_t *proc_get_fds(pid_t pid)
 	return fds;
 }
 
+/*
+ * Pin a target's namespace for an ns-link open (/proc/<pid>/ns/<kind>). Same
+ * race discipline as proc_get_vm: task_exit steals the ns pointer under
+ * sched_lock before xxx_ns_put()ing it, so reading it + xxx_ns_get() here under
+ * the lock either refs it first or sees NULL. Release with the matching put.
+ */
+void *proc_get_ns(pid_t pid, int kind)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	void *ns = NULL;
+	if (p) switch (kind) {
+	case PROC_NS_UTS:    ns = uts_ns_get(p->uts_ns);       break;
+	case PROC_NS_IPC:    ns = ipc_ns_get(p->ipc_ns);       break;
+	case PROC_NS_TIME:   ns = time_ns_get(p->time_ns);     break;
+	case PROC_NS_MNT:    ns = mnt_ns_get(p->mnt_ns);       break;
+	case PROC_NS_PID:    ns = pid_ns_get(p->pid_ns);       break;
+	case PROC_NS_USER:   ns = user_ns_get(p->user_ns);     break;
+	case PROC_NS_NET:    ns = net_ns_get(p->net_ns);       break;
+	case PROC_NS_CGROUP: ns = cgroup_ns_get(p->cgroup_ns); break;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return ns;
+}
+
 /* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
 int proc_thread_count(pid_t tgid)
 {
@@ -900,21 +925,6 @@ void task_exit(void)
 	futex_exit_robust(p);
 	p->robust_list = NULL;
 
-	uts_ns_put(p->uts_ns);
-	p->uts_ns = NULL;
-	ipc_ns_put(p->ipc_ns);
-	p->ipc_ns = NULL;
-	time_ns_put(p->time_ns);
-	p->time_ns = NULL;
-	if (p->time_ns_new) { time_ns_put(p->time_ns_new); p->time_ns_new = NULL; }
-	mnt_ns_put(p->mnt_ns);
-	p->mnt_ns = NULL;
-	user_ns_put(p->user_ns);
-	p->user_ns = NULL;
-	net_ns_put(p->net_ns);
-	p->net_ns = NULL;
-	cgroup_ns_put(p->cgroup_ns);
-	p->cgroup_ns = NULL;
 	if (p->mem_charged) { cgroup_uncharge_mem(p->cgroup, p->mem_charged); p->mem_charged = 0; }
 	/* If this is a pid namespace's init (nr 1), capture that before detaching
 	 * so the reparent section can tear the namespace down; hold an extra ref so
@@ -932,7 +942,27 @@ void task_exit(void)
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
 	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
 	sighand_t  *dying_sh  = p->sighand; p->sighand = NULL;
+	/* Steal the namespace pointers under the same lock as vm/fds: a pinned-PCB
+	 * /proc reader (proc_get_ns) reads ns + xxx_ns_get under sched_lock, so it
+	 * either refs before the steal or sees NULL — never a dangling ns. */
+	uts_namespace_t  *dying_uts  = p->uts_ns;     p->uts_ns     = NULL;
+	ipc_namespace_t  *dying_ipc  = p->ipc_ns;     p->ipc_ns     = NULL;
+	time_namespace_t *dying_time = p->time_ns;    p->time_ns    = NULL;
+	time_namespace_t *dying_tnew = p->time_ns_new; p->time_ns_new = NULL;
+	mnt_namespace_t  *dying_mnt  = p->mnt_ns;     p->mnt_ns     = NULL;
+	user_namespace_t *dying_user = p->user_ns;    p->user_ns    = NULL;
+	net_namespace_t  *dying_net  = p->net_ns;     p->net_ns     = NULL;
+	struct cgroup_namespace *dying_cgns = p->cgroup_ns; p->cgroup_ns = NULL;
 	spin_unlock_irq(&sched_lock, f);
+
+	uts_ns_put(dying_uts);
+	ipc_ns_put(dying_ipc);
+	time_ns_put(dying_time);
+	if (dying_tnew) time_ns_put(dying_tnew);
+	mnt_ns_put(dying_mnt);
+	user_ns_put(dying_user);
+	net_ns_put(dying_net);
+	cgroup_ns_put(dying_cgns);
 
 	/* Free resources — process is still schedulable during this. */
 	sighand_put(dying_sh);
