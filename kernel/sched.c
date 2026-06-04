@@ -16,6 +16,7 @@
 #include <kernel/irq.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/oom.h>
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
 #include <kernel/sync.h>

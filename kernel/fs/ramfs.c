@@ -390,8 +390,9 @@ static int ramfs_truncate(vfs_inode_t *inode, off_t len)
 	if (newlen > rf->capacity) {
 		int new_order = 0;
 		while (((uint64_t)4096 << new_order) < newlen) new_order++;
-		uint8_t *nb = (uint8_t *)PHYS_TO_VIRT(buddy_alloc(new_order));
-		if (!nb) return -12;
+		void *nb_phys = buddy_alloc(new_order);
+		if (!nb_phys) return -12;
+		uint8_t *nb = (uint8_t *)PHYS_TO_VIRT(nb_phys);
 		uint64_t newcap = (uint64_t)4096 << new_order;
 		memset(nb, 0, (size_t)newcap);
 		if (rf->data) {

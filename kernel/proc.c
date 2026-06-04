@@ -42,8 +42,9 @@ void sighand_put(sighand_t *sh)
 
 pid_t proc_create(const char *name, void (*fn)(void))
 {
-	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!p) return -1;
+	void *pcb_phys = buddy_alloc(0);
+	if (!pcb_phys) return -1;
+	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(p, 0, sizeof(*p));
 	p->sighand = sighand_alloc(NULL);
 	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), 0); return -1; }
@@ -99,8 +100,9 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
-	process_t *p = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!p) return -1;
+	void *pcb_phys = buddy_alloc(0);
+	if (!pcb_phys) return -1;
+	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(p, 0, sizeof(*p));
 	p->magic = PROC_MAGIC;
 	p->sighand = sighand_alloc(NULL);
@@ -301,8 +303,9 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	process_t *parent = task_current();
 	arch_save_tls(parent);
 
-	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) return -1;
+	void *pcb_phys = buddy_alloc(0);
+	if (!pcb_phys) return -1;
+	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
 
@@ -473,8 +476,9 @@ pid_t proc_vfork(void)
 	process_t *parent = task_current();
 	arch_save_tls(parent);
 
-	process_t *child = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) return -1;
+	void *pcb_phys = buddy_alloc(0);
+	if (!pcb_phys) return -1;
+	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
 
@@ -569,8 +573,9 @@ void proc_vfork_exec_notify(void)
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid)
 {
 	process_t *parent = task_current();
-	process_t *child  = (process_t *)PHYS_TO_VIRT(buddy_alloc(0));
-	if (!child) return -1;
+	void *pcb_phys = buddy_alloc(0);
+	if (!pcb_phys) return -1;
+	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
 
@@ -740,6 +745,45 @@ int proc_thread_count(pid_t tgid)
 	}
 	spin_unlock_irq(&sched_lock, f);
 	return n ? n : 1;
+}
+
+/* OOM-killer victim selection (policy in kernel/mm/oom.c). Pick the live user
+ * process with the largest charged footprint, never init (pid 1) or a kernel
+ * thread (no ->vm), nor one already condemned. Returns it pinned (proc_put to
+ * release) so the policy can read/kill it after sched_lock drops. */
+process_t *oom_select_victim(void)
+{
+	uint64_t bit = 1UL << (SIGKILL - 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *best = NULL;
+	long best_mem = -1;
+	for (int i = 2; i < proc_cnt; i++) {
+		process_t *p = proctab[i];
+		if (!p || !p->vm || p->magic != PROC_MAGIC) continue;
+		if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) continue;
+		if (p->sig_pending & bit) continue;   /* already condemned, will free soon */
+		long mem = p->mem_charged;
+		if (mem > best_mem) { best_mem = mem; best = p; }
+	}
+	if (best) best->refcount++;
+	spin_unlock_irq(&sched_lock, f);
+	return best;
+}
+
+/* SIGKILL a chosen OOM victim, lock-free (set the bit, inline-wake if asleep)
+ * exactly as cgroup_oom_kill — no cross-CPU IPI / task_signal that could
+ * deadlock against a held mm lock on the faulting path. */
+void oom_kill_victim(process_t *v)
+{
+	if (!v) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	v->sig_pending |= (1UL << (SIGKILL - 1));
+	if (v->state == PROC_SLEEPING) {
+		v->state = PROC_READY;
+		if (!v->on_cpu) runqueue_add(v);
+		arch_get_cpu_ctx()->need_resched = 1;
+	}
+	spin_unlock_irq(&sched_lock, f);
 }
 
 void proc_wait(pid_t pid)

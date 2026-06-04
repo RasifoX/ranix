@@ -14,6 +14,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <kernel/mm/hugetlb.h>
+#include <kernel/mm/oom.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
 #include <kernel/tty/fb_tty.h>
