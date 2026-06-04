@@ -279,6 +279,29 @@ void tcp_sock_free(socket_t *s)
     s->ooo_head = NULL;
 }
 
+/* Close on a LISTEN socket: detach the accept queue (the RX thread enqueues
+ * completed connections under recv_lock), then RST and free each one so they
+ * don't linger in gsock[] being driven by tcp_tick forever. */
+void tcp_listener_abort(socket_t *ls)
+{
+    uint64_t rf = spin_lock_irq(&ls->recv_lock);
+    socket_t *q = ls->accept_head;
+    ls->accept_head = ls->accept_tail = NULL;
+    spin_unlock_irq(&ls->recv_lock, rf);
+
+    while (q) {
+        socket_t *next = q->accept_head;   /* accept_head is reused as the list link */
+        uint64_t tl = spin_lock_irq(&tcp_lock);
+        if (q->tcp_state != TCP_CLOSED) {
+            tcp_tx_seg(q, TCP_RST | TCP_ACK, q->snd_nxt, q->rcv_nxt, NULL, 0);
+            q->tcp_state = TCP_CLOSED;
+        }
+        spin_unlock_irq(&tcp_lock, tl);
+        sock_free(q);                       /* unregister + free, outside tcp_lock */
+        q = next;
+    }
+}
+
 /* The app drained n bytes from the recv buffer; the advertised window grows.
  * If it reopened from (near) zero, send a window-update ACK so a sender that
  * stalled on a full window resumes. */

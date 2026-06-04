@@ -47,6 +47,11 @@ int tcp_send(socket_t *s, const void *data, uint16_t len);
 /* Called by close() — send FIN */
 int tcp_close(socket_t *s);
 
+/* Called by close() on a LISTEN socket — RST and free every queued connection
+ * that was never accept()ed (otherwise they leak in gsock[] and tcp_tick keeps
+ * driving them). */
+void tcp_listener_abort(socket_t *s);
+
 /* Called by listen() — mark LISTEN, set backlog */
 int tcp_listen(socket_t *s, int backlog);
 

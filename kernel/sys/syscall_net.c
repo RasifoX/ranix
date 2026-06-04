@@ -41,6 +41,8 @@ static int sock_close_vfs(vfs_file_t *file)
         }
         spin_unlock_irq(&s->recv_lock, cf);
     }
+    if (s->type == SOCK_STREAM && s->tcp_state == TCP_LISTEN)
+        tcp_listener_abort(s);
     sock_free(s);
     in->priv = NULL;   /* socket freed; vfs_close frees the inode (avoid double free) */
     return 0;
