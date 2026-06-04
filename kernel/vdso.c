@@ -90,10 +90,16 @@ static inline uint64_t hw_counter(void)
  * until the next tick. */
 void vdso_time_changed(void) { vdso_update(); }
 
-/* Refresh vvar under a seqlock (odd seq = update in progress). */
+/* Refresh vvar under a seqlock (odd seq = update in progress). vdso_update runs
+ * both as a timer-tick callback and from the clock-setting syscalls (via
+ * vdso_time_changed); serialize the two writers under vdso_lock so a nested
+ * (aarch64) or cross-CPU update can't drive seq back to even mid-write and let a
+ * vDSO reader validate a torn mix of two updates. */
+static spinlock_t vdso_lock = SPINLOCK_INIT;
 static void vdso_update(void)
 {
 	if (!vvar_k) return;
+	uint64_t f = spin_lock_irq(&vdso_lock);
 	uint64_t cnt = hw_counter();
 	int64_t ms, mn, rs, rn;
 	ranix_monotime(&ms, &mn);
@@ -109,4 +115,5 @@ static void vdso_update(void)
 	vvar_k->real_sec  = rs; vvar_k->real_nsec = rn;
 	__asm__ volatile("" ::: "memory");
 	vvar_k->seq++;                       /* → even */
+	spin_unlock_irq(&vdso_lock, f);
 }
