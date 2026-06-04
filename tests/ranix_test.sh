@@ -375,6 +375,9 @@ check "ext4-write"   "ranix-w64"    "$(echo -n ranix-w64 > /mnt/wtest.txt 2>/dev
 # statfs reports the real on-disk geometry (block size, total/free counts);
 # proves iops->statfs reads the live superblock instead of nominal counts.
 check "ext4-statfs"  "OK"           "$(timeout 10 /bin/test_ext4fs 2>/dev/null)"
+# sequential reads coalesce into multi-block device transfers via readahead:
+# sectors moved far outnumber transfers issued (see /sys/block/<dev>/stat).
+check "c-readahead"  "OK"           "$(timeout 15 /bin/test_readahead 2>/dev/null)"
 # two-boot persistence: prove an ext2 write reaches the disk and survives a
 # reboot. tests/persist.sh boots twice against the same image and checks the
 # FRESH→SURVIVED transition in these markers.
