@@ -34,14 +34,12 @@ void sock_register(socket_t *s)
         if (gsock[i] == s) { spin_unlock_irq(&gsock_lock, f); return; }  /* already registered */
     /* find empty slot */
     for (int i = 0; i < gsock_cap; i++) {
-        if (!gsock[i]) { gsock[i] = s; spin_unlock_irq(&gsock_lock, f); return; }
+        if (!gsock[i]) { gsock[i] = s; gsock_cnt++; spin_unlock_irq(&gsock_lock, f); return; }
     }
-    /* no empty slot — grow */
+    /* no empty slot — grow, then take the first freshly-added slot */
     gsock_ensure();
-    if (gsock_cap > gsock_cnt) {
-        for (int i = 0; i < gsock_cap; i++) {
-            if (!gsock[i]) { gsock[i] = s; gsock_cnt++; break; }
-        }
+    for (int i = 0; i < gsock_cap; i++) {
+        if (!gsock[i]) { gsock[i] = s; gsock_cnt++; break; }
     }
     spin_unlock_irq(&gsock_lock, f);
 }
