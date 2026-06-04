@@ -531,6 +531,26 @@ static long sys_close(int fd)
 	return vfs_close(fd) == 0 ? 0 : -9;
 }
 
+/* close_range(first, last, flags): close every open fd in [first,last].
+ * CLOSE_RANGE_CLOEXEC(4) marks them close-on-exec instead; CLOSE_RANGE_UNSHARE(2)
+ * is accepted but the table is not unshared (single-table semantics). */
+static long sys_close_range(unsigned int first, unsigned int last, unsigned int flags)
+{
+	if (first > last || (flags & ~6u)) return -22; /* EINVAL */
+	process_t *p = task_current();
+	if (!p->fds) return 0;
+	unsigned int cap = (unsigned int)p->fds->cap;
+	unsigned int hi  = (last >= cap) ? (cap ? cap - 1 : 0) : last;
+	for (unsigned int fd = first; fd < cap && fd <= hi; fd++) {
+		if (flags & 4u) {                       /* CLOSE_RANGE_CLOEXEC */
+			if (fd_get(p->fds, (int)fd)) fd_set_cloexec(p->fds, (int)fd, 1);
+		} else {
+			vfs_close((int)fd);                 /* already-closed fds return -1, ignored */
+		}
+	}
+	return 0;
+}
+
 static long sys_lseek(int fd, off_t off, int whence)
 {
 	return (long)vfs_seek(fd, off, whence);

@@ -485,6 +485,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EXECVEAT: ret = sys_execveat((int)arg0, (const char*)arg1, (char * const *)arg2, (char * const *)arg3, (int)arg4); break;
 	case SYS_ARCH_PIDFD_OPEN: ret = sys_pidfd_open((pid_t)arg0, (unsigned int)arg1); break;
 	case SYS_ARCH_PIDFD_SEND_SIGNAL: ret = sys_pidfd_send_signal((int)arg0, (int)arg1, (void*)arg2, (unsigned int)arg3); break;
+	case SYS_ARCH_CLOSE_RANGE: ret = sys_close_range((unsigned int)arg0, (unsigned int)arg1, (unsigned int)arg2); break;
 	case SYS_ARCH_SECCOMP: ret = sys_seccomp((unsigned int)arg0, (unsigned int)arg1, (uint64_t)arg2); break;
 	case SYS_ARCH_CLONE3: {
 		/* glibc 2.34+ thread creation. struct clone_args prefix we use: flags,
