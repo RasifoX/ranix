@@ -753,6 +753,18 @@ vm_space_t *proc_get_vm(pid_t pid)
 	return vm;
 }
 
+/* As proc_get_vm, but also samples the target's euid under the same lock — for
+ * the access check in process_vm_readv/writev. */
+vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	vm_space_t *vm = (p && p->vm) ? vm_get(p->vm) : NULL;
+	if (p && out_euid) *out_euid = p->euid;
+	spin_unlock_irq(&sched_lock, f);
+	return vm;
+}
+
 /*
  * Pin a target process's fd table for /proc/<pid>/fd readers. Same race
  * discipline as proc_get_vm: task_exit steals p->fds under sched_lock before
