@@ -752,6 +752,23 @@ vm_space_t *proc_get_vm(pid_t pid)
 	return vm;
 }
 
+/*
+ * Pin a target process's fd table for /proc/<pid>/fd readers. Same race
+ * discipline as proc_get_vm: task_exit steals p->fds under sched_lock before
+ * fd_table_put()ing it, so an fd_table_get() under the lock either refs it
+ * first or sees NULL. Reading proctab[pid] under the lock also never touches a
+ * reaped PCB (proc_reap NULLs the slot under the lock before freeing). Release
+ * with fd_table_put().
+ */
+fd_table_t *proc_get_fds(pid_t pid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
+	fd_table_t *fds = (p && p->fds) ? fd_table_get(p->fds) : NULL;
+	spin_unlock_irq(&sched_lock, f);
+	return fds;
+}
+
 /* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
 int proc_thread_count(pid_t tgid)
 {
