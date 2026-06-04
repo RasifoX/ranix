@@ -246,6 +246,9 @@ typedef struct {
 #define SYS_ARCH_PIDFD_OPEN        434
 #define SYS_ARCH_CLONE3            435
 #define SYS_ARCH_CLOSE_RANGE       436
+#define SYS_ARCH_IO_URING_SETUP    425
+#define SYS_ARCH_IO_URING_ENTER    426
+#define SYS_ARCH_IO_URING_REGISTER 427
 #define SYS_ARCH_FORK              1079 /* not a real AArch64 syscall; clone handles it */
 
 #endif
