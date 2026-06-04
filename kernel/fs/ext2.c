@@ -1256,6 +1256,40 @@ static int ext2_readlink(vfs_inode_t *vi, char *buf, size_t bufsize)
 	return 0;
 }
 
+/* statfs: report real geometry. Total counts are cached at mount; free counts
+ * are re-read from the on-disk superblock so they reflect allocations made
+ * since (statfs is infrequent, so a fresh 2-sector read is cheap). */
+static int ext2_statfs(vfs_inode_t *inode, vfs_statfs_t *out)
+{
+	ext2_inode_priv_t *priv = inode->priv;
+	if (!priv || !priv->fs) return -38;
+	ext2_fs_t *fs = priv->fs;
+
+	uint8_t *sb_buf = ext2_alloc_page();
+	if (!sb_buf) return -12;
+	uint64_t free_blocks = 0, free_inodes = 0, rsvd = 0;
+	if (fs->bdev->read(fs->bdev, 2, sb_buf, 2) == 0) {
+		ext2_super_t *sb = (ext2_super_t *)sb_buf;
+		free_blocks = sb->s_free_blocks_count_lo;
+		rsvd        = sb->s_r_blocks_count_lo;
+		if (sb->s_feature_incompat & 0x80) {   /* INCOMPAT_64BIT */
+			free_blocks |= (uint64_t)sb->s_free_blocks_count_hi << 32;
+			rsvd        |= (uint64_t)sb->s_r_blocks_count_hi << 32;
+		}
+		free_inodes = sb->s_free_inodes_count;
+	}
+	ext2_free_page(sb_buf);
+
+	out->bsize   = fs->block_size;
+	out->blocks  = fs->total_blocks;
+	out->bfree   = free_blocks;
+	out->bavail  = (free_blocks > rsvd) ? free_blocks - rsvd : 0;
+	out->files   = fs->total_inodes;
+	out->ffree   = free_inodes;
+	out->namelen = 255;
+	return 0;
+}
+
 static vfs_iops_t ext2_iops = {
 	.lookup   = ext2_lookup,
 	.readdir  = ext2_readdir,
@@ -1264,6 +1298,7 @@ static vfs_iops_t ext2_iops = {
 	.create   = ext2_create,
 	.mkdir    = ext2_mkdir,
 	.unlink   = ext2_unlink,
+	.statfs   = ext2_statfs,
 };
 
 /* ── mount ───────────────────────────────────────────────────── */
