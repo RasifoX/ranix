@@ -3,6 +3,7 @@
 
 #include <uapi/types.h>
 #include <kernel/sync.h>
+#include <kernel/config.h>
 
 /* ── mode bits ───────────────────────────────────────────── */
 #define S_IFREG  0x8000
@@ -158,8 +159,8 @@ typedef struct vfs_mount {
 } vfs_mount_t;
 
 /* ── file descriptor table ───────────────────────────────── */
-#define FD_MAX      1024   /* soft default for RLIMIT_NOFILE; table grows beyond this */
-#define FD_INIT_CAP 64
+#define FD_MAX      CONFIG_FD_MAX   /* soft default for RLIMIT_NOFILE; table grows beyond this */
+#define FD_INIT_CAP CONFIG_FD_INIT_CAP
 
 typedef struct {
     vfs_file_t **files;

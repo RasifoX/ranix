@@ -3,6 +3,7 @@
 
 #include <uapi/types.h>
 #include <kernel/sync.h>
+#include <kernel/config.h>
 
 /* ── byte-order helpers ──────────────────────────────────── */
 
@@ -25,8 +26,8 @@ typedef struct { uint8_t s6[16]; } in6_addr_t;
 /* Room to prepend the full header stack without underflowing buf[]: Ethernet
  * (14) + IP (20) + TCP with the largest option set we emit (20 + 40 = 60) = 94.
  * 128 leaves margin and keeps the buffer nicely aligned. */
-#define SKB_HEADROOM  128
-#define SKB_DATA_MAX  1536
+#define SKB_HEADROOM  CONFIG_SKB_HEADROOM
+#define SKB_DATA_MAX  CONFIG_SKB_DATA_MAX
 
 typedef struct skb {
     uint8_t     buf[SKB_HEADROOM + SKB_DATA_MAX];
@@ -41,7 +42,7 @@ typedef struct skb {
     uint16_t    src_port;
     struct skb *next;
     /* SCM_RIGHTS: in-flight passed files (AF_UNIX fd-passing) */
-#define SKB_SCM_MAX 8
+#define SKB_SCM_MAX CONFIG_SKB_SCM_MAX
     void       *scm_files[SKB_SCM_MAX];
     uint8_t     scm_nfiles;
 } skb_t;

@@ -1,0 +1,135 @@
+# Ranix configuration — the catalogue of every CONFIG_ option, its type, default
+# and meaning. This is documentation + source of truth; the build reads .config
+# (a flat KEY=value file), not this. Edit a copy of defconfig/tinyconfig as
+# .config, or run `make defconfig` / `make tinyconfig`, then `make`.
+#
+# Types: bool (y/n -> #define X 1 / undefined), int, string.
+
+menu "Tunables"
+
+config SCHED_QUANTUM
+	int "Scheduler timeslice (timer ticks)"
+	default 10
+
+config KSTACK_SIZE
+	int "Kernel stack per process (bytes)"
+	default 16384
+
+config DENTRY_MAX
+	int "Max cached dentries"
+	default 4096
+	help
+	  Overridable at boot with the vfs_dentry_max= cmdline key.
+
+config MAX_CPUS
+	int "Ceiling for statically-sized per-CPU arrays"
+	default 256
+	help
+	  Detection (FDT/MADT) is clamped to this; a larger box degrades
+	  gracefully. Each unit costs BSS (x86 GDT/TSS dominate).
+
+config FD_TABLE_INIT
+	int "Initial fd table capacity"
+	default 16
+
+config FD_INIT_CAP
+	int "Initial per-process open-file array capacity"
+	default 64
+
+config FD_MAX
+	int "Soft RLIMIT_NOFILE default (table grows beyond this)"
+	default 1024
+
+config PIPE_BUF_SIZE
+	int "Pipe ring buffer size (bytes)"
+	default 4096
+
+config CMDLINE_MAX
+	int "Kernel command line max length (bytes)"
+	default 512
+
+config FUTEX_SLOTS
+	int "Max simultaneous futex waiters"
+	default 256
+
+config PTY_MAX
+	int "Max pseudo-terminal pairs"
+	default 8
+
+config GSOCK_INIT_CAP
+	int "Initial global socket table capacity"
+	default 64
+
+config MQ_MAX
+	int "Max POSIX message queues"
+	default 16
+
+config MQ_MSG_MAX
+	int "Max messages per queue"
+	default 32
+
+config MQ_MSGSIZE
+	int "Max bytes per message"
+	default 512
+
+config EXT2_BCACHE_N
+	int "ext2 LRU block-cache entries per mount"
+	default 16
+
+config SKB_HEADROOM
+	int "Bytes reserved before skb data for header push"
+	default 128
+
+config SKB_DATA_MAX
+	int "Max skb payload (bytes)"
+	default 1536
+
+config SKB_SCM_MAX
+	int "Max fds/credentials carried in one SCM control message"
+	default 8
+
+endmenu
+
+menu "Networking"
+
+config NET
+	bool "Networking stack (eth/ip/ipv6/tcp/udp + sockets)"
+	default y
+	help
+	  Defined-only for now: the socket syscall surface is textually
+	  #included into kernel/syscall.c and net.h into kernel/sched.c, so
+	  disabling it cleanly needs the whole socket layer stubbed. Left y
+	  until that stub exists; flipping it to n does not yet shrink the
+	  build.
+
+endmenu
+
+menu "Filesystems"
+
+config FS_EXT2
+	bool "ext2/ext4 read support"
+	default y
+
+config FS_FAT
+	bool "FAT/VFAT read support"
+	default y
+	help
+	  Leaf module. When n the source is dropped and fat_register() is
+	  compiled out; mount(2) of vfat just fails.
+
+config FS_ISO9660
+	bool "ISO 9660 (CD-ROM) read support"
+	default y
+
+config FS_OVERLAY
+	bool "overlayfs"
+	default y
+
+config FS_TMPFS
+	bool "tmpfs"
+	default y
+	help
+	  Leaf module. When n, tmpfs mounts fail; anonymous shm falls back to
+	  ramfs.
+
+endmenu

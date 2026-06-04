@@ -1,5 +1,7 @@
 build/
 .cache/
+.config
+include/generated/
 ranix.iso
 ranix-disk.img
 iso/
