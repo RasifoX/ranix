@@ -421,7 +421,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 				for (int l = 0; l < 512; l++) {
 					if (!(l1_old[l] & PTE_P)) continue;
 					uint64_t entry = l1_old[l];
-					if (entry & PTE_U) {
+					if ((entry & PTE_U) && !(entry & PTE_NOFREE)) {
 						entry &= ~PTE_W;
 						l1_old[l] = entry;
 						pmm_hold((void *)(entry & ~0xFFFUL));
