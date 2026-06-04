@@ -197,6 +197,11 @@ typedef struct process {
 	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */
 	uint32_t        refcount;      /* outstanding proc_get pins; PCB freed once 0 and pcb_dead */
 	uint8_t         pcb_dead;      /* proc_reap tore the PCB down; the last proc_put frees it */
+
+	/* ── hung-task detector (khungtaskd) ──────────────────────── */
+	uint8_t         hung_watch;        /* 1 = an uninterruptible block the detector must time out */
+	uint64_t        hung_run_ticks;    /* p->ticks at the last progress check (frozen ⇒ no progress) */
+	uint64_t        hung_stall_start;  /* kernel_ticks when the current no-progress window opened (0 = none) */
 } process_t;
 
 /* scheduler */

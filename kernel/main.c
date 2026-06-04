@@ -230,6 +230,9 @@ void kernel_main(void)
 	extern void atomic_selftest(void);
 	atomic_selftest();
 
+	extern void hung_task_selftest(void);
+	hung_task_selftest();
+
 	if (fdt_ok == 0) {
 		uint32_t cl_len;
 		const void *cl_val = fdt_get_prop("chosen", "bootargs", &cl_len);

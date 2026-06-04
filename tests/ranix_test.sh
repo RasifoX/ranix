@@ -188,6 +188,11 @@ check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 check "proc-partitions"  "1"       "$(cat /proc/partitions | head -1 | grep -c name)"
 check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && echo ok)"
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
+# hung-task detector (khungtaskd): the boot self-test drives it against a
+# synthetic blocked task and emits a marker. Prove DETECTION works (the loud
+# report fired) without any task actually wedging the kernel.
+check "hungtask-selftest" "ok"     "$(dmesg 2>/dev/null | grep -q 'hungtask: selftest ok' && echo ok)"
+check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'HUNG TASK: pid=' && echo ok)"
 check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
 check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
 
