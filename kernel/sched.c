@@ -244,6 +244,37 @@ void tick_notify_local(void)
 
 volatile uint64_t kernel_ticks  = 0;
 
+/* Bounded tick: instead of scanning every process each tick, two gates tell
+ * sched_tick whether the O(n) walk can have any work.
+ *
+ *  sched_next_wake — earliest armed wake_deadline (0 = none). Arming only ever
+ *  lowers it (sched_note_wake_deadline), so it is never later than the true
+ *  earliest deadline: a deadline can't be missed. Stale-low at worst costs one
+ *  walk that recomputes it exactly. Updated lock-free (CAS-min) so poll_block,
+ *  which arms wake_deadline under poll_wq.lock rather than sched_lock, can use it.
+ *
+ *  sched_itimer_armed — count of processes with itimer_value != 0 (ITIMER_REAL).
+ *  itimer_value is a per-tick countdown, so its decrement loop must run while any
+ *  are armed; the count is maintained at every transition under sched_lock. */
+static volatile uint64_t sched_next_wake;
+static int               sched_itimer_armed;
+
+void sched_note_wake_deadline(uint64_t deadline)
+{
+	if (!deadline) return;
+	uint64_t cur;
+	do {
+		cur = sched_next_wake;
+		if (cur && cur <= deadline) return;
+	} while (atomic_cmpxchg64(&sched_next_wake, cur, deadline) != cur);
+}
+
+void sched_itimer_account(uint64_t old_val, uint64_t new_val)
+{
+	if (!old_val && new_val)      sched_itimer_armed++;
+	else if (old_val && !new_val) sched_itimer_armed--;
+}
+
 /* Per-CPU runqueue helpers — caller must hold sched_lock */
 
 static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
@@ -485,33 +516,49 @@ void sched_tick(void)
 		arch_get_cpu_ctx()->need_resched = 1;
 	}
 
-	/* Walk process list: fire interval timers and wake nanosleeping tasks */
-	process_t *sentinel = proctab[0];
-	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-		if (t->itimer_value > 0) {
-			t->itimer_value--;
-			if (t->itimer_value == 0) {
-				t->itimer_value = t->itimer_interval;
-				t->sig_pending |= (1ULL << (14 - 1));
-				if (t->state == PROC_SLEEPING) {
-					t->state = PROC_READY;
-					if (!t->on_cpu) runqueue_add(t);
-					arch_get_cpu_ctx()->need_resched = 1;
+	/* Bounded: skip the O(n) walk unless an ITIMER_REAL is counting down or a
+	 * sleeper's deadline has come due. The "wake every sleeper and re-check"
+	 * blanket is gone — every blocking primitive is event-driven (woken by its
+	 * producer) or deadline-armed. */
+	int do_itimer   = sched_itimer_armed > 0;
+	int do_deadline = sched_next_wake && kernel_ticks >= sched_next_wake;
+	if (do_itimer || do_deadline) {
+		uint64_t next_wake = 0;   /* recompute the deadline gate while we walk */
+		process_t *sentinel = proctab[0];
+		for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+			if (do_itimer && t->itimer_value > 0) {
+				t->itimer_value--;
+				if (t->itimer_value == 0) {
+					t->itimer_value = t->itimer_interval;
+					if (!t->itimer_value) sched_itimer_armed--;
+					t->sig_pending |= (1ULL << (14 - 1));
+					if (t->state == PROC_SLEEPING) {
+						t->state = PROC_READY;
+						if (!t->on_cpu) runqueue_add(t);
+						arch_get_cpu_ctx()->need_resched = 1;
+					}
+				}
+			}
+			if (t->wake_deadline) {
+				if (kernel_ticks >= t->wake_deadline) {
+					t->wake_deadline = 0;
+					if (t->state == PROC_SLEEPING) {
+						t->state = PROC_READY;
+						if (!t->on_cpu) runqueue_add(t);
+						arch_get_cpu_ctx()->need_resched = 1;
+					}
+				} else if (!next_wake || t->wake_deadline < next_wake) {
+					next_wake = t->wake_deadline;
 				}
 			}
 		}
-		if (t->wake_deadline && kernel_ticks >= t->wake_deadline) {
-			t->wake_deadline = 0;
-			if (t->state == PROC_SLEEPING) {
-				t->state = PROC_READY;
-				if (!t->on_cpu) runqueue_add(t);
-				arch_get_cpu_ctx()->need_resched = 1;
-			}
-		}
-		/* The per-tick "wake every sleeper and let it re-check" blanket is gone:
-		 * every blocking primitive is now event-driven (woken by its producer) or
-		 * deadline-armed (the wake_deadline sweep above). This loop only runs the
-		 * itimer countdown and deadline sweep now. */
+		/* Publish the recomputed gate, but never raise it above a deadline a
+		 * concurrent poll_block (arms outside sched_lock) lowered it to mid-walk. */
+		uint64_t cur;
+		do {
+			cur = sched_next_wake;
+			if (cur && (!next_wake || cur < next_wake)) break;
+		} while (atomic_cmpxchg64(&sched_next_wake, cur, next_wake) != cur);
 	}
 
 	spin_unlock_irq(&sched_lock, f);
@@ -695,6 +742,7 @@ void task_sleep_until(uint64_t deadline) {
 	c->wake_deadline      = deadline;
 	c->sleeping_on_queue  = 1;   /* deadline sweep / signal wakes us */
 	c->state              = PROC_SLEEPING;
+	sched_note_wake_deadline(deadline);
 	spin_unlock_irq(&sched_lock, f);
 	arch_yield();
 	c->wake_deadline = 0;
