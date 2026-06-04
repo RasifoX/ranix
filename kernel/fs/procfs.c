@@ -173,9 +173,10 @@ static int fill_loadavg(char *buf, size_t sz)
 
 /* ── per-process fill callbacks ──────────────────────────────── */
 
+/* Returns a pinned process (proc_get); every caller must proc_put it. */
 static process_t *find_proc(int pid)
 {
-	return proc_find((pid_t)pid);
+	return proc_get((pid_t)pid);
 }
 
 static int fill_proc_status(char *buf, size_t sz, int pid)
@@ -223,6 +224,7 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_str(&b, "CapInh:\t"); pb_hex16(&b, p->cap_inheritable); pb_char(&b, '\n');
 	pb_str(&b, "CapPrm:\t"); pb_hex16(&b, p->cap_permitted);   pb_char(&b, '\n');
 	pb_str(&b, "CapEff:\t"); pb_hex16(&b, p->cap_effective);   pb_char(&b, '\n');
+	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
@@ -244,6 +246,7 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	pb_str(&b, "0 0 0 1 0 0 0"             /* 18-24: priority..itrealvalue */
 	           " 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"  /* 25-44 */
 	           " 0 0 0 0 0 0 0 0\n");                       /* 45-52 */
+	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
@@ -257,6 +260,7 @@ static int fill_proc_statm(char *buf, size_t sz, int pid)
 	pb_u64(&b, size);                  pb_char(&b, ' ');   /* size     */
 	pb_u64(&b, res);                   pb_str(&b, " 0 1 0 ");/* resident shared text lib */
 	pb_u64(&b, size > 1 ? size - 1 : 0); pb_str(&b, " 0\n"); /* data dt */
+	if (p) proc_put(p);
 	return (int)(sz - b.rem);
 }
 
@@ -277,6 +281,7 @@ static int fill_proc_cmdline(char *buf, size_t sz, int pid)
 	pb_t b = {buf, sz};
 	pb_str(&b, p->name);
 	pb_char(&b, '\0');
+	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
@@ -287,6 +292,7 @@ static int fill_proc_comm(char *buf, size_t sz, int pid)
 	pb_t b = {buf, sz};
 	pb_str(&b, p->name);
 	pb_char(&b, '\n');
+	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
@@ -328,6 +334,7 @@ static int fill_proc_maps(char *buf, size_t sz, int pid)
 		pb_char(&b, 'p');
 		pb_str(&b, " 00000000 00:00 0\n");
 	}
+	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
