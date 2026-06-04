@@ -254,7 +254,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
 
 	p->fds = fd_table_create();
-	/* pid 1 is handed fd 0/1/2 = /dev/console by the kernel, as Linux does — a
+	/* pid 1 is handed fd 0/1/2 = /dev/console by the kernel — a
 	 * freestanding C runtime (glibc) assumes the standard descriptors already
 	 * exist and aborts otherwise. */
 	if (p->fds) {

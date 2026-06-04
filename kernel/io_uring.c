@@ -225,7 +225,7 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 }
 
 /* Post one completion. The CQ has cq_entries slots; if userspace hasn't reaped
- * and it's full, bump the overflow counter (Linux semantics) and drop. */
+ * and it's full, bump the overflow counter and drop. */
 static void cqe_post(io_ring_t *r, uint64_t user_data, int32_t res)
 {
 	uint32_t tail = *r->cq_tail;

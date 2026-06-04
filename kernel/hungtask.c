@@ -46,7 +46,7 @@ extern process_t        *task_peek_locked(int index);
 
 volatile uint64_t hung_task_count;
 
-/* Default 20s, like Linux's kernel.hung_task_timeout_secs. Overridable at boot
+/* Default 20s. Overridable at boot
  * with hung_task_timeout_secs= (0 disables). Read once, lazily. */
 static uint64_t timeout_ticks;
 static int      timeout_ready;

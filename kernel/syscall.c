@@ -41,7 +41,7 @@
 #define MAP_ANONYMOUS 0x20
 #define MAP_GROWSDOWN 0x0100   /* stack mapping — pages fault in on demand (auto-grow) */
 #define MAP_LOCKED    0x2000   /* lock+prefault the mapping (mmap-time mlock) */
-#define MAP_POPULATE  0x8000   /* prefault hint — honoured lazily (best-effort, like Linux) */
+#define MAP_POPULATE  0x8000   /* prefault hint — honoured lazily (best-effort) */
 #define MAP_HUGETLB   0x40000
 #define MAP_HUGE_SHIFT 26
 #define MAP_HUGE_1GB  (30 << MAP_HUGE_SHIFT)
