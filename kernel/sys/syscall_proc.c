@@ -570,6 +570,7 @@ static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 
 static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 {
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_TIME)) return -1; /* EPERM */
 	if (clkid != CLOCK_REALTIME || !tp) return -22;
 	linux_timespec_t k;
 	if (copy_from_user(&k, tp, sizeof(k)) != 0) return -14;
@@ -591,6 +592,7 @@ static void rtc_sync_to_hw(void)
 static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 {
 	(void)tz;
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_TIME)) return -1; /* EPERM */
 	if (!tv) return -14;
 	linux_timeval_t k;
 	if (copy_from_user(&k, tv, sizeof(k)) != 0) return -14;
@@ -624,6 +626,8 @@ static long sys_adjtimex(k_timex_t *utx)
 	if (!utx) return -14;
 	k_timex_t tx;
 	if (copy_from_user(&tx, utx, sizeof(tx)) != 0) return -14;
+	if (tx.modes != 0 && !cap_has(task_current()->cap_effective, CAP_SYS_TIME))
+		return -1; /* EPERM — read-only adjtimex (modes==0) stays unprivileged */
 
 	if (tx.modes & 0x0100) {           /* ADJ_SETOFFSET: step the clock by .time */
 		int64_t add_s = tx.time_sec;

@@ -535,6 +535,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
                       unsigned long flags, const void *data)
 {
 	(void)source; (void)flags; (void)data;
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	char ktarget[256]; char kfstype[64];
 	if (strncpy_from_user(ktarget, target, sizeof(ktarget)) < 0) return -14;
 	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
@@ -559,6 +560,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 static long sys_umount2(const char *target, int flags)
 {
 	(void)flags;
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	char kpath[256];
 	if (strncpy_from_user(kpath, target, sizeof(kpath)) < 0) return -14;
 	int r = vfs_umount(kpath);
@@ -568,6 +570,7 @@ static long sys_umount2(const char *target, int flags)
 static long sys_sethostname(const char *name, size_t len)
 {
 	uts_namespace_t *ns = current_uts();
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	if (len >= sizeof(ns->nodename)) return -22;
 	if (!access_ok(name, len)) return -14;
 	if (copy_from_user(ns->nodename, name, len) != 0) return -14;
@@ -675,6 +678,7 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
 static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 {
 	(void)arg;
+	if (!cap_has(task_current()->cap_effective, CAP_SYS_BOOT)) return -1; /* EPERM */
 	if ((uint32_t)magic1 != 0xfee1dead) return -22;
 	if ((uint32_t)magic2 != 0x28121969 &&
 	    (uint32_t)magic2 != 0x05121996 &&
