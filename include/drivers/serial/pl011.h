@@ -4,5 +4,6 @@
 #include <drivers/serial/uart.h>
 
 void pl011_register(void);
+void pl011_irq_init(void);
 
 #endif

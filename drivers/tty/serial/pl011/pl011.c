@@ -1,6 +1,9 @@
 #include <drivers/serial/pl011.h>
+#include <drivers/irqchip/irqchip.h>
 #include <kernel/board.h>
 #include <kernel/driver.h>
+#include <kernel/irq.h>
+#include <kernel/tty/tty_core.h>
 #include <kernel/lib/string.h>
 
 static uint64_t uart_base;
@@ -11,8 +14,16 @@ static uint64_t uart_base;
 #define FBRD     (*(volatile unsigned int *)(uart_base + 0x28))
 #define LCR_H    (*(volatile unsigned int *)(uart_base + 0x2C))
 #define CR       (*(volatile unsigned int *)(uart_base + 0x30))
+#define IMSC     (*(volatile unsigned int *)(uart_base + 0x38))
+#define MIS      (*(volatile unsigned int *)(uart_base + 0x40))
+#define ICR      (*(volatile unsigned int *)(uart_base + 0x44))
 #define TXFF     (1 << 5)
 #define RXFE     (1 << 4)
+#define RXI      (1 << 4)   /* RX + RX-timeout interrupt (IMSC/MIS bit 4 / 6) */
+#define RTI      (1 << 6)
+
+/* QEMU virt PL011 SPI 1 → GIC INTID 33 */
+#define PL011_IRQ  33
 
 void uart_init(void) {
     uart_base = board_get_config()->uart_base;
@@ -71,4 +82,20 @@ static driver_t pl011_driver = {
 void pl011_register(void)
 {
     driver_register(&pl011_driver);
+}
+
+static void pl011_irq_handler(void)
+{
+    ICR = RXI | RTI;
+    while (!(FR & RXFE))
+        tty_input_char((char)DR);
+}
+
+void pl011_irq_init(void)
+{
+    if (!uart_base) return;
+    ICR = 0x7FF;
+    IMSC |= RXI | RTI;
+    irq_register(PL011_IRQ, pl011_irq_handler);
+    irqchip_enable_irq(PL011_IRQ);
 }

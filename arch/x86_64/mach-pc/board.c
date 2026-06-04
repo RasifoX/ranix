@@ -43,6 +43,7 @@ void board_irq_init(void)
 	irq_register(0x20, pit_handler);
 	pit_init(TIMER_HZ);
 	ps2_kbd_init();
+	uart16550_irq_init();
 }
 
 void board_secondary_irq_init(void)
