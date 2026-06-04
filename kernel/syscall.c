@@ -29,6 +29,7 @@
 #include <kernel/net/tcp.h>
 #include <kernel/net/net.h>
 #include <kernel/net/netfilter.h>
+#include <kernel/io_uring.h>
 #include <kernel/config.h>
 
 #define AT_FDCWD     (-100)
@@ -622,6 +623,10 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_INOTIFY_RM_WATCH:   ret = sys_inotify_rm_watch((int)arg0, (int)arg1); break;
 	case SYS_ARCH_SIGNALFD4:   ret = sys_signalfd4((int)arg0, (const uint64_t*)arg1, (size_t)arg2, (int)arg3); break;
 	case SYS_ARCH_MEMFD_CREATE: ret = sys_memfd_create((const char*)arg0, (unsigned int)arg1); break;
+	/* ── io_uring ────────────────────────────────────────────── */
+	case SYS_ARCH_IO_URING_SETUP:    ret = io_uring_setup((uint32_t)arg0, (struct io_uring_params*)arg1); break;
+	case SYS_ARCH_IO_URING_ENTER:    ret = io_uring_enter((int)arg0, (uint32_t)arg1, (uint32_t)arg2, (uint32_t)arg3, (const void*)arg4, (size_t)arg5); break;
+	case SYS_ARCH_IO_URING_REGISTER: ret = io_uring_register((int)arg0, (unsigned int)arg1, (void*)arg2, (unsigned int)arg3); break;
 	/* ── arch-specific ───────────────────────────────────────── */
 #if defined(__x86_64__)
 	case SYS_ARCH_PAUSE:       ret = sys_pause(); break;
