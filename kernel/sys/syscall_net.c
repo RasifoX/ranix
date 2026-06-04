@@ -312,6 +312,29 @@ static long sys_socket(int domain, int type, int proto)
     return fd;
 }
 
+/* Is local_port already taken by another socket of the same family+type?
+ * SO_REUSEADDR (or SO_REUSEPORT on both ends) permits sharing it. */
+static int ip_port_taken(socket_t *self, int domain, int type, uint16_t port)
+{
+    if (port == 0) return 0;
+    int taken = 0;
+    uint64_t f = spin_lock_irq(&gsock_lock);
+    for (int i = 0; i < gsock_cap; i++) {
+        socket_t *o = gsock[i];
+        if (!o || o == self) continue;
+        if (o->net_ns != self->net_ns) continue;
+        if (o->domain != domain || o->type != type) continue;
+        if (o->local_port != port) continue;
+        if ((self->so_reuseaddr && o->so_reuseaddr) ||
+            (self->so_reuseport && o->so_reuseport))
+            continue;   /* both opted in — sharing allowed */
+        taken = 1;
+        break;
+    }
+    spin_unlock_irq(&gsock_lock, f);
+    return taken;
+}
+
 static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
 {
     (void)addrlen;
@@ -345,16 +368,20 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
     if (family == AF_INET6) {
         sockaddr_in6_t sa6;
         if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+        uint16_t port = ntohs(sa6.sin6_port);
+        if (ip_port_taken(s, AF_INET6, s->type, port)) return -98; /* EADDRINUSE */
         s->local_ip6  = sa6.sin6_addr;
-        s->local_port = ntohs(sa6.sin6_port);
+        s->local_port = port;
         sock_register(s);
         return 0;
     }
 
     sockaddr_in_t sa;
     if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+    uint16_t port = ntohs(sa.sin_port);
+    if (ip_port_taken(s, AF_INET, s->type, port)) return -98; /* EADDRINUSE */
     s->local_ip   = ntohl(sa.sin_addr);
-    s->local_port = ntohs(sa.sin_port);
+    s->local_port = port;
     sock_register(s);
     return 0;
 }
@@ -624,6 +651,9 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
     socket_t *s = fd_to_sock(fd);
     if (!s) return -9;
 
+    extern volatile uint64_t kernel_ticks;
+    uint64_t rcv_deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
+
     /* SOCK_STREAM has no message boundaries: one recv drains as many queued
      * bytes as fit in buf, coalescing across writes (Linux semantics). Applies
      * to TCP and unix stream alike. DGRAM/RAW preserve per-datagram boundaries
@@ -675,8 +705,13 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
             if (nonblock) return -11; /* EAGAIN */
             uint64_t f = spin_lock_irq(&s->recv_lock);
             if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f); continue; }
+            if (rcv_deadline && kernel_ticks >= rcv_deadline) {
+                spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN: SO_RCVTIMEO */
+            }
             s->recv_waiter = task_current();
+            if (rcv_deadline) task_current()->wake_deadline = rcv_deadline;
             task_sleep_unlock(&s->recv_lock, f);
+            task_current()->wake_deadline = 0;
             if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
         }
     }
@@ -730,9 +765,13 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
             return (long)n;
         }
         if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
+        if (rcv_deadline && kernel_ticks >= rcv_deadline) {
+            spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN: SO_RCVTIMEO */
+        }
         s->recv_waiter = task_current();
+        if (rcv_deadline) task_current()->wake_deadline = rcv_deadline;
         task_sleep_unlock(&s->recv_lock, f);
-        process_t *p = task_current();
+        task_current()->wake_deadline = 0;
         if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
     }
 }
@@ -951,16 +990,56 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_SNDBUF       7
 #define SO_RCVBUF       8
 #define SO_KEEPALIVE    9
+#define SO_REUSEPORT   15
+#define SO_RCVTIMEO    20
+#define SO_SNDTIMEO    21
 #define SO_ACCEPTCONN  30
 #define SO_IPPROTO_TCP  6
 #define SO_TCP_NODELAY  1
 
+struct k_timeval { int64_t tv_sec; int64_t tv_usec; };
+
+static uint32_t tv_to_ticks(const struct k_timeval *tv)
+{
+	return (uint32_t)((uint64_t)tv->tv_sec * TIMER_HZ +
+	                  (uint64_t)tv->tv_usec * TIMER_HZ / 1000000);
+}
+
 static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t len)
 {
-	(void)lv; (void)opt; (void)val; (void)len;
-	/* Accept and ignore: no tunable per-socket buffers/flags yet, but success
-	 * is what well-behaved programs expect. Reject only a bad fd. */
-	if (!fd_to_sock(fd)) return -9; /* EBADF */
+	socket_t *s = fd_to_sock(fd);
+	if (!s) return -9; /* EBADF */
+
+	int iv = 0;
+	if (val && len >= sizeof(int)) {
+		if (copy_from_user(&iv, val, sizeof(int)) != 0) return -14;
+	}
+
+	if (lv == SO_SOL_SOCKET) {
+		switch (opt) {
+		case SO_REUSEADDR:  s->so_reuseaddr = iv ? 1 : 0; return 0;
+		case SO_REUSEPORT:  s->so_reuseport = iv ? 1 : 0; return 0;
+		case SO_KEEPALIVE:  s->so_keepalive = iv ? 1 : 0; return 0;
+		case SO_RCVBUF:     s->so_rcvbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
+		case SO_SNDBUF:     s->so_sndbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
+		case SO_RCVTIMEO:
+		case SO_SNDTIMEO: {
+			struct k_timeval tv = {0, 0};
+			if (val && len >= sizeof(tv) && copy_from_user(&tv, val, sizeof(tv)) != 0)
+				return -14;
+			uint32_t t = tv_to_ticks(&tv);
+			if (opt == SO_RCVTIMEO) s->rcv_timeo = t; else s->snd_timeo = t;
+			return 0;
+		}
+		case SO_ERROR: case SO_TYPE: case SO_ACCEPTCONN:
+			return -92;   /* read-only */
+		default:
+			return 0;     /* accept-and-ignore unknown options, like a stub */
+		}
+	} else if (lv == SO_IPPROTO_TCP) {
+		if (opt == SO_TCP_NODELAY) { s->tcp_nodelay = iv ? 1 : 0; return 0; }
+		return 0;
+	}
 	return 0;
 }
 
@@ -973,20 +1052,33 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 	uint32_t ulen;
 	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -14;
 
+	if (lv == SO_SOL_SOCKET && (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO)) {
+		uint32_t t = (opt == SO_RCVTIMEO) ? s->rcv_timeo : s->snd_timeo;
+		struct k_timeval tv;
+		tv.tv_sec  = t / TIMER_HZ;
+		tv.tv_usec = (int64_t)(t % TIMER_HZ) * 1000000 / TIMER_HZ;
+		uint32_t cp = ulen < sizeof(tv) ? ulen : sizeof(tv);
+		if (cp && copy_to_user(val, &tv, cp) != 0) return -14;
+		uint32_t rl = sizeof(tv);
+		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -14;
+		return 0;
+	}
+
 	int out;
 	if (lv == SO_SOL_SOCKET) {
 		switch (opt) {
 		case SO_TYPE:       out = s->type; break;
-		case SO_ERROR:      out = 0; break;                     /* no pending error */
+		case SO_ERROR:      out = s->so_error; s->so_error = 0; break;  /* read-and-clear */
 		case SO_ACCEPTCONN: out = (s->tcp_state == TCP_LISTEN); break;
-		case SO_RCVBUF:     out = 65536; break;
-		case SO_SNDBUF:     out = 65536; break;
-		case SO_REUSEADDR:
-		case SO_KEEPALIVE:  out = 0; break;
+		case SO_RCVBUF:     out = (int)s->so_rcvbuf; break;
+		case SO_SNDBUF:     out = (int)s->so_sndbuf; break;
+		case SO_REUSEADDR:  out = s->so_reuseaddr; break;
+		case SO_REUSEPORT:  out = s->so_reuseport; break;
+		case SO_KEEPALIVE:  out = s->so_keepalive; break;
 		default:            return -92;  /* ENOPROTOOPT */
 		}
 	} else if (lv == SO_IPPROTO_TCP) {
-		if (opt == SO_TCP_NODELAY) out = 0;
+		if (opt == SO_TCP_NODELAY) out = s->tcp_nodelay;
 		else return -92;
 	} else {
 		return -92;
