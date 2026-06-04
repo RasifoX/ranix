@@ -633,8 +633,8 @@ extern void arch_vm_switch(uint64_t root, unsigned asid);
 static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 {
 	procfs_inode_priv_t *pr = (procfs_inode_priv_t *)f->inode->priv;
-	process_t *t = proc_find(pr->pid);
-	if (!t || !t->vm) return -3;   /* ESRCH */
+	vm_space_t *vm = proc_get_vm(pr->pid);   /* pinned; vm_destroy to release */
+	if (!vm) return -3;   /* ESRCH */
 	process_t *cur = task_current();
 	uint64_t vaddr = (uint64_t)f->pos;
 	char tmp[256];
@@ -643,11 +643,11 @@ static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 		size_t n = len - done; if (n > sizeof(tmp)) n = sizeof(tmp);
 		if (write) {
 			if (copy_from_user(tmp, (char *)ubuf + done, n) != 0) break;
-			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			arch_vm_switch((uint64_t)vm->root, vm->asid);
 			memcpy((void *)(vaddr + done), tmp, n);
 			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
 		} else {
-			arch_vm_switch((uint64_t)t->vm->root, t->vm->asid);
+			arch_vm_switch((uint64_t)vm->root, vm->asid);
 			memcpy(tmp, (void *)(vaddr + done), n);
 			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
 			if (copy_to_user((char *)ubuf + done, tmp, n) != 0) break;
@@ -655,6 +655,7 @@ static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 		done += n;
 	}
 	f->pos += (long)done;
+	vm_destroy(vm);   /* drop our pin */
 	return (ssize_t)done;
 }
 
