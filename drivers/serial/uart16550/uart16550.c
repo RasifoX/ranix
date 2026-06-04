@@ -1,7 +1,10 @@
 #include "uart16550.h"
 #include <drivers/serial/uart.h>
+#include <drivers/irqchip/irqchip.h>
 #include <asm/io.h>
 #include <kernel/driver.h>
+#include <kernel/irq.h>
+#include <kernel/tty/tty_core.h>
 
 #define COM1  0x3F8
 
@@ -15,6 +18,8 @@
 
 #define LSR_TX_EMPTY  0x20
 #define LSR_RX_READY  0x01
+
+#define COM1_VEC  0x24   /* PIC IRQ4 → vector 0x24 */
 
 void uart_init(void)
 {
@@ -83,4 +88,18 @@ static driver_t uart16550_driver = {
 void uart16550_register(void)
 {
 	driver_register(&uart16550_driver);
+}
+
+static void uart16550_irq_handler(void)
+{
+	while (inb(LSR) & LSR_RX_READY)
+		tty_input_char((char)inb(RBR));
+}
+
+void uart16550_irq_init(void)
+{
+	outb(MCR, 0x0B);          /* DTR + RTS + OUT2 (gate IRQ to PIC) */
+	outb(IER, 0x01);          /* enable received-data-available interrupt */
+	irq_register(COM1_VEC, uart16550_irq_handler);
+	irqchip_enable_irq(COM1_VEC);
 }
