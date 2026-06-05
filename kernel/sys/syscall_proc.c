@@ -979,6 +979,20 @@ static long sys_execveat(int dirfd, const char *path, char * const argv[],
 	return ret;
 }
 
+/* x-permission against the caller's effective ids (execve EACCES check). */
+static int exec_permitted(const vfs_stat_t *st, process_t *p)
+{
+	if (!S_ISREG(st->mode)) return 0;
+	mode_t m = st->mode;
+	if (p->euid == 0) return (m & 0111) != 0;   /* root: any x bit suffices */
+	if (st->uid == p->euid) return (m & 0100) != 0;
+	if (st->gid == p->egid) return (m & 0010) != 0;
+	return (m & 0001) != 0;
+}
+
+#define SHEBANG_MAX_DEPTH 4
+#define SHEBANG_LINE_MAX  127
+
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
 	if (!path) return -14;
@@ -996,6 +1010,66 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (path[i]) { kfree(kpath); return -36; }   /* ENAMETOOLONG */
 	kpath[i] = '\0';
 
+	/* Resolve #! interpreters and enforce execute permission before staging the
+	 * argument vector. Each script level prepends [interp, optarg?, scriptpath]
+	 * and the original argv[0] is dropped. The shebang line is truncated at 127
+	 * bytes; nested up to SHEBANG_MAX_DEPTH levels. shebang_pre[] entries are
+	 * kmalloc'd kernel strings consumed by the staging loop below. */
+	char *shebang_pre[SHEBANG_MAX_DEPTH * 3];
+	int   shebang_n = 0;
+#define SHEBANG_FAIL(code) do { \
+		for (int _k = 0; _k < shebang_n; _k++) kfree(shebang_pre[_k]); \
+		kfree(kpath); return (code); } while (0)
+	for (int depth = 0; ; depth++) {
+		vfs_stat_t st = {0};
+		if (vfs_stat(kpath, &st) != 0) SHEBANG_FAIL(-2);
+		if (!exec_permitted(&st, p)) SHEBANG_FAIL(-13);   /* EACCES */
+		char hdr[SHEBANG_LINE_MAX + 1];
+		int fd = vfs_open(kpath, O_RDONLY, 0);
+		if (fd < 0) SHEBANG_FAIL(-2);
+		long got = vfs_read(fd, hdr, sizeof(hdr) - 1);
+		vfs_close(fd);
+		if (got < 2 || hdr[0] != '#' || hdr[1] != '!') break;   /* not a script */
+		if (depth + 1 >= SHEBANG_MAX_DEPTH) SHEBANG_FAIL(-40);   /* ELOOP */
+
+		int hn = (int)got;
+		hdr[hn] = '\0';
+		for (int e = 0; e < hn; e++) if (hdr[e] == '\n') { hdr[e] = '\0'; break; }
+
+		int s2 = 2; while (hdr[s2] == ' ' || hdr[s2] == '\t') s2++;
+		int ie = s2; while (hdr[ie] && hdr[ie] != ' ' && hdr[ie] != '\t') ie++;
+		if (ie == s2) SHEBANG_FAIL(-8);   /* ENOEXEC: empty interpreter */
+
+		int as = ie, ae = ie;
+		while (hdr[as] == ' ' || hdr[as] == '\t') as++;
+		ae = as; while (hdr[ae]) ae++;
+		int has_arg = (ae > as);
+		hdr[ie] = '\0';   /* terminate interpreter (must come after scanning past it) */
+
+		char *interp = kmalloc(PATH_MAX);
+		if (!interp) SHEBANG_FAIL(-12);
+		int c = 0; for (; hdr[s2 + c]; c++) interp[c] = hdr[s2 + c];
+		interp[c] = '\0';
+		shebang_pre[shebang_n++] = interp;
+
+		if (has_arg) {
+			char *opt = kmalloc((size_t)(ae - as) + 1);
+			if (!opt) { kfree(interp); shebang_n--; SHEBANG_FAIL(-12); }
+			int oc = 0; for (; as + oc < ae; oc++) opt[oc] = hdr[as + oc];
+			opt[oc] = '\0';
+			shebang_pre[shebang_n++] = opt;
+		}
+		shebang_pre[shebang_n++] = kpath;   /* script path becomes next positional */
+
+		kpath = kmalloc(PATH_MAX);
+		if (!kpath) { /* interp string still freeable via shebang_pre */
+			for (int _k = 0; _k < shebang_n; _k++) kfree(shebang_pre[_k]);
+			return -12;
+		}
+		c = 0; for (; interp[c] && c < PATH_MAX - 1; c++) kpath[c] = interp[c];
+		kpath[c] = '\0';
+	}
+
 	/* Stage argv/envp into kernel memory before the VM switch. The strings live
 	 * in a heap budget (ARG_STR_MAX); the pointer arrays are heap-sized to the
 	 * actual count. Over-budget strings or counts return -E2BIG (Linux). The
@@ -1007,30 +1081,39 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #define ARG_WIN_BYTES ((size_t)ARG_WIN_PAGES * PAGE_SIZE)
 	int argc = 0, envc = 0;
 	char *kstrs = kmalloc(ARG_STR_MAX);
-	if (!kstrs) { kfree(kpath); return -12; }
+	if (!kstrs) { for (int k=0;k<shebang_n;k++) kfree(shebang_pre[k]); kfree(kpath); return -12; }
 
 	/* count args/env (bounded so an unterminated user array can't loop forever) */
 	int max_ptrs = (int)(ARG_WIN_BYTES / sizeof(uint64_t));
-	if (argv) while (argc < max_ptrs && argv[argc]) argc++;
+	/* a shebang prefix replaces argv[0]; skip the caller's argv[0] in that case */
+	int user_skip = shebang_n ? 1 : 0;
+	int user_argc = 0;
+	if (argv) while (user_argc < max_ptrs && argv[user_argc]) user_argc++;
+	int user_start = (user_skip && user_argc > 0) ? 1 : 0;
+	argc = shebang_n + (user_argc - user_start);
 	if (envp) while (envc < max_ptrs && envp[envc]) envc++;
 
 	char **kargv = kmalloc((size_t)(argc + 1) * sizeof(char *));
 	char **kenvp = kmalloc((size_t)(envc + 1) * sizeof(char *));
-	if (!kargv || !kenvp) { kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -12; }
+	if (!kargv || !kenvp) { for (int k=0;k<shebang_n;k++) kfree(shebang_pre[k]); kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -12; }
 
+#define EXEC_STAGE_FREE_PRE() do { for (int _k=0;_k<shebang_n;_k++) kfree(shebang_pre[_k]); } while (0)
 	int koff = 0;
 	for (int a = 0; a < argc; a++) {
-		const char *s = argv[a];
+		const char *s = (a < shebang_n) ? shebang_pre[a]
+		                                : argv[user_start + (a - shebang_n)];
 		int n = 0;
 		while (s[n]) n++;
 		if (koff + n + 1 > ARG_STR_MAX) {
-			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
+			EXEC_STAGE_FREE_PRE(); kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
 		}
 		memcpy(kstrs + koff, s, n);
 		kstrs[koff + n] = '\0';
 		kargv[a] = kstrs + koff;
 		koff += n + 1;
 	}
+	EXEC_STAGE_FREE_PRE();
+	shebang_n = 0;
 	for (int e = 0; e < envc; e++) {
 		const char *s = envp[e];
 		int n = 0;
