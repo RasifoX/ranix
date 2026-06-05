@@ -101,6 +101,9 @@ typedef struct {
     int     (*close)(struct vfs_file *file);
     int     (*poll)(struct vfs_file *file); /* 1=readable, 0=not */
     uint64_t (*mmap)(struct vfs_file *file, off_t off); /* returns physical address */
+    int      mmap_cacheable; /* 1: mmap() backing is normal write-back RAM owned by the inode
+                              *    (ramfs/tmpfs) — map cacheable + NOFREE so a per-mapping unmap
+                              *    never frees the file's buffer. 0: device/hugetlb, map NOCACHE. */
 } vfs_fops_t;
 
 /* ── inode ───────────────────────────────────────────────── */
@@ -119,6 +122,8 @@ typedef struct vfs_inode {
     uint32_t     refcount;
     uint32_t     open_refs;       /* live open file descriptions referencing this inode */
     uint32_t     deferred_unlink; /* nlink hit 0 while still open; evict at last close */
+    uint32_t     mmap_pinned; /* 1: backing buffer is live in a MAP_SHARED mapping; ramfs/tmpfs
+                               *    must not relocate it on grow (would dangle the mapping). */
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */

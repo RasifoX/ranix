@@ -3,6 +3,7 @@
 #include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
@@ -80,6 +81,7 @@ static ssize_t ramfs_write(vfs_file_t *f, const void *buf, size_t len)
 	uint64_t end = (uint64_t)f->pos + len;
 
 	if (end > rf->capacity) {
+		if (f->inode->mmap_pinned) return -12;   /* a live MAP_SHARED mapping pins the buffer in place */
 		/* grow: round up to next page boundary */
 		uint64_t newcap = (end + 4095) & ~4095ULL;
 		int new_order = 0;
@@ -110,6 +112,21 @@ static ssize_t ramfs_write(vfs_file_t *f, const void *buf, size_t len)
 	return (ssize_t)len;
 }
 
+/* Hand the generic mmap path the file's own backing page covering `off`, taking
+ * an extra reference so the mapping's unmap leaves the buffer's reference intact.
+ * The data buffer is one contiguous buddy block, so the physical page is just
+ * VIRT_TO_PHYS(rf->data + off). Offsets past the buffer return 0 (EINVAL); the
+ * mapper is expected to size the file (ftruncate/write) before mapping. */
+static uint64_t ramfs_mmap(vfs_file_t *f, off_t off)
+{
+	ramfs_file_t *rf = f->inode->priv;
+	if (!rf || off < 0 || !rf->data) return 0;
+	if ((uint64_t)off + PAGE_SIZE > rf->capacity) return 0;
+	uint64_t pa = VIRT_TO_PHYS(rf->data + off);
+	pmm_hold((void *)pa);
+	return pa;
+}
+
 static int ramfs_file_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 {
 	if ((flags & O_TRUNC) && inode->priv) {
@@ -126,6 +143,8 @@ static vfs_fops_t ramfs_fops = {
 	.open  = ramfs_file_open,
 	.read  = ramfs_read,
 	.write = ramfs_write,
+	.mmap  = ramfs_mmap,
+	.mmap_cacheable = 1,
 };
 
 static vfs_fops_t ramfs_dir_fops = { 0 };
@@ -414,6 +433,7 @@ static int ramfs_truncate(vfs_inode_t *inode, off_t len)
 	if (len < 0) return -22;
 	uint64_t newlen = (uint64_t)len;
 	if (newlen > rf->capacity) {
+		if (inode->mmap_pinned) return -12;   /* buffer pinned by a live MAP_SHARED mapping */
 		int new_order = 0;
 		while (((uint64_t)4096 << new_order) < newlen) new_order++;
 		void *nb_phys = buddy_alloc(new_order);
