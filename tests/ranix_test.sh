@@ -543,6 +543,9 @@ check "smp-threads-ok" "OK" \
 check "smp-cow-race" "OK" \
     "$(timeout 90 /bin/test_cowrace 2>/dev/null | tail -1)"
 
+# ── interactive shell over a pts (line discipline + job control) ──────────────
+check "c-ptyshell" "OK" "$(timeout 20 /bin/test_ptyshell 2>/dev/null | tail -1)"
+
 # ── SSH end-to-end (dropbear sshd + dbclient, pubkey auth over loopback) ──────
 # dropbear runs as a real unmodified program: full sshd↔dbclient loopback —
 # host + client keygen, pubkey auth, exec a command, read its output back.

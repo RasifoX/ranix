@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <termios.h>
 #include <sys/ioctl.h>
 
 #ifndef TIOCGPTN
@@ -30,6 +31,9 @@ int main(void)
 	snprintf(path, sizeof(path), "/dev/pts/%u", ptn);
 	int s = open(path, O_RDWR);
 	CHECK(s >= 0);
+
+	struct termios tio;
+	if (tcgetattr(s, &tio) == 0) { cfmakeraw(&tio); tcsetattr(s, TCSANOW, &tio); }
 
 	/* master -> slave */
 	CHECK(write(m, "hi", 2) == 2);
