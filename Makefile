@@ -172,7 +172,7 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static test flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static test persisttest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -565,3 +565,10 @@ endif
 	@grep "Results:" $(TEST_LOG) || echo "Results: (not found)"
 	@grep -q "ALL_PASS" $(TEST_LOG) && echo "[OK] All tests passed" || \
 	    { echo "[FAIL] Some tests failed"; exit 1; }
+
+# Two-boot persistence proofs (x86_64 only, ~4 boots, kept out of the single-boot
+# `test`). persist = a disk ext2 write at /mnt survives a reboot; diskroot = init
+# pivots into a full disk rootfs and / itself persists. Both must print PASS.
+persisttest:
+	@bash tests/persist.sh
+	@bash tests/diskroot.sh
