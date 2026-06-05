@@ -17,6 +17,7 @@
 #define ECHOK   0x00000020
 #define ECHOCTL 0x00000200
 #define ECHOKE  0x00000800
+#define TOSTOP  0x00000100
 #define IEXTEN  0x00008000
 
 /* c_cc indices (termios) */
@@ -177,12 +178,20 @@ static void tty_poll_uart(void)
     if (got) fb_tty_flush();
 }
 
+static vfs_fops_t tty_fops;
+
 static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
 {
     (void)f;
     tty_t *t = &tty0;
     char *b = buf;
     size_t copied = 0;
+
+    for (;;) {
+        int jc = tty_jobctl_check(t, &tty_fops, t->fg_pgrp, 21 /* SIGTTIN */);
+        if (jc < 0) return jc;
+        if (jc == 0) break;
+    }
 
     while (copied < len) {
         tty_poll_uart();
@@ -216,6 +225,14 @@ static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
     (void)f;
     tty_t *t = &tty0;
     const char *p = buf;
+
+    if (t->c_lflag & TOSTOP) {
+        for (;;) {
+            int jc = tty_jobctl_check(t, &tty_fops, t->fg_pgrp, 22 /* SIGTTOU */);
+            if (jc < 0) return jc;
+            if (jc == 0) break;
+        }
+    }
 
     for (size_t i = 0; i + 3 < len; i++) {
         if (p[i] == '\033' && p[i+1] == '[' && p[i+2] == '6' && p[i+3] == 'n') {
@@ -257,8 +274,7 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TIOCGPGRP  0x540f
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
-
-static vfs_fops_t tty_fops;
+#define TIOCNOTTY  0x5422
 
 static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
@@ -322,6 +338,11 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
             cur->ctty = t;
             cur->ctty_fops = &tty_fops;
         }
+        return 0;
+    }
+    if (cmd == TIOCNOTTY) {
+        process_t *cur = task_current();
+        if (cur && cur->ctty == t) { cur->ctty = NULL; cur->ctty_fops = NULL; }
         return 0;
     }
     return -25;

@@ -945,6 +945,30 @@ void task_exit(void)
 	cgroup_exit(p);
 	sigqueue_drop(p);
 
+	/* Controlling-terminal hangup: when a session leader exits, SIGHUP+SIGCONT
+	 * its session and detach that ctty from every member. */
+	if (p->ctty && p->sid == (pid_t)p->pid) {
+		void *dead_ctty = p->ctty;
+		pid_t dead_sid  = p->sid;
+		uint64_t hf = spin_lock_irq(&sched_lock);
+		process_t *hs = proctab[0];
+		for (process_t *t = hs->next; t && t != hs; t = t->next) {
+			if (t->ctty == dead_ctty && t->sid == dead_sid && t != p) {
+				t->sig_pending |= (1UL << (SIGHUP - 1)) | (1UL << (SIGCONT - 1));
+				t->sig_pending &= ~((1UL << (SIGTSTP - 1)) | (1UL << (SIGTTIN - 1)) |
+				                    (1UL << (SIGTTOU - 1)));
+				if (t->job_stopped) { t->job_stopped = 0; t->job_continued = 1; }
+				if (t->state == PROC_SLEEPING) {
+					t->state = PROC_READY;
+					if (!t->on_cpu) runqueue_add(t);
+					arch_get_cpu_ctx()->need_resched = 1;
+				}
+				t->ctty = NULL; t->ctty_fops = NULL;
+			}
+		}
+		spin_unlock_irq(&sched_lock, hf);
+	}
+
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
 	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
@@ -1073,11 +1097,17 @@ void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
 /* Like proc_find_zombie but, if no zombie is found and will_sleep is set,
  * atomically marks parent PROC_SLEEPING under sched_lock so that a
  * concurrent task_exit cannot sneak its wakeup between our check and sleep. */
-void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
-                               process_t **out_child, int *out_any_alive)
+#define WUNTRACED  2
+#define WCONTINUED 8
+
+/* event: 0 none, 1 zombie (reaped), 3 stopped (WUNTRACED), 4 continued
+ * (WCONTINUED). For a stop/continue *out_child is set and marked reported. */
+void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
+                               process_t **out_child, int *out_any_alive, int *out_event)
 {
 	*out_child = NULL;
 	*out_any_alive = 0;
+	*out_event = 0;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	int dead_pending = 0;
@@ -1086,6 +1116,19 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
 			if (c->state == PROC_ZOMBIE && !c->reaped) {
 				c->reaped = 1;
 				*out_child = c;
+				*out_event = 1;
+				break;
+			}
+			if ((flags & WUNTRACED) && c->job_stopped && !c->job_stop_reported) {
+				c->job_stop_reported = 1;
+				*out_child = c;
+				*out_event = 3;
+				break;
+			}
+			if ((flags & WCONTINUED) && c->job_continued) {
+				c->job_continued = 0;
+				*out_child = c;
+				*out_event = 4;
 				break;
 			}
 			if (c->state == PROC_DEAD)
@@ -1107,22 +1150,27 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
 /* Atomically check child state: zombie=1, ptrace_stop=2, else sleep (0).
  * If sleeping and will_sleep is set, marks parent PROC_SLEEPING under the
  * same lock hold that checked the child — no wakeup can slip through. */
-int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep)
+/* zombie=1, ptrace=2, job-stopped(WUNTRACED)=3, continued(WCONTINUED)=4, sleep=0 */
+int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int zombie = (child->state == PROC_ZOMBIE);
 	int ptrace = !zombie && child->ptrace_stop && !child->ptrace_stop_reported;
-	if (ptrace)
-		child->ptrace_stop_reported = 1;
+	int jstop  = !zombie && !ptrace && (flags & WUNTRACED)
+	             && child->job_stopped && !child->job_stop_reported;
+	int jcont  = !zombie && !ptrace && !jstop && (flags & WCONTINUED) && child->job_continued;
+	if (ptrace) child->ptrace_stop_reported = 1;
+	if (jstop)  child->job_stop_reported = 1;
+	if (jcont)  child->job_continued = 0;
 	/* A child in PROC_DEAD has exited and already passed its wakeup in
 	 * task_exit; it only becomes PROC_ZOMBIE later in schedule(). Sleeping now
 	 * would miss that wakeup forever — yield and retry until it is ZOMBIE. */
-	if (!zombie && !ptrace && will_sleep && child->state != PROC_DEAD) {
+	if (!zombie && !ptrace && !jstop && !jcont && will_sleep && child->state != PROC_DEAD) {
 		parent->state = PROC_SLEEPING;
 		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
 	}
 	spin_unlock_irq(&sched_lock, f);
-	return zombie ? 1 : (ptrace ? 2 : 0);
+	return zombie ? 1 : (ptrace ? 2 : (jstop ? 3 : (jcont ? 4 : 0)));
 }
 
 void proc_reap(process_t *child)
