@@ -59,11 +59,35 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 
 static long sys_kill(pid_t pid, int sig)
 {
-	/* pid is namespace-local; resolve through the caller's pid namespace */
-	process_t *p = pidns_find(current_pid_ns(), (int)pid);
-	if (!p) return -3; /* ESRCH */
-	task_signal_group(p, sig);   /* kill(2) is process-directed: any eligible thread */
-	return 0;
+	if (sig < 0 || sig > NSIG) return -22; /* EINVAL */
+	pid_namespace_t *ns = current_pid_ns();
+
+	if (pid > 0) {
+		process_t *p = pidns_find(ns, (int)pid);
+		if (!p) return -3; /* ESRCH */
+		if (sig) task_signal_group(p, sig);   /* process-directed: any eligible thread */
+		return 0;
+	}
+
+	if (pid == 0 || pid < -1) {
+		/* pid==0 → caller's group; pid<-1 → group -pid. The stored pgrp is the
+		 * global leader pid, so map the supplied ns-local number through it. */
+		pid_t pgrp;
+		if (pid == 0) {
+			pgrp = task_current()->pgrp;
+		} else {
+			process_t *leader = pidns_find(ns, (int)(-pid));
+			if (!leader) return -3;
+			pgrp = leader->pgrp;
+		}
+		if (!sig) return task_pgrp_exists(pgrp) ? 0 : -3;
+		task_signal_pgrp(pgrp, sig);
+		return 0;
+	}
+
+	/* pid == -1: broadcast to everything except self and init. */
+	if (!sig) return 0;
+	return task_signal_broadcast(task_current(), sig) ? 0 : -3;
 }
 
 /* tgkill: signal a specific thread (tid), but only if it still belongs to the
