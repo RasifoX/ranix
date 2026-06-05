@@ -85,6 +85,15 @@ int main(void)
 	long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000;
 	if (ms < 40 || ms > 3000) { printf("FAIL rcvtimeo timing ms=%ld\n", ms); return 1; }
 
+	/* a genuinely unknown SOL_SOCKET option must report ENOPROTOOPT, not lie */
+	int sx = socket(AF_INET, SOCK_STREAM, 0);
+	int bogus = 1;
+	errno = 0;
+	if (setsockopt(sx, SOL_SOCKET, 9999, &bogus, sizeof(bogus)) != -1 || errno != ENOPROTOOPT) {
+		printf("FAIL unknown-opt errno=%d\n", errno); close(sx); return 1;
+	}
+	close(sx);
+
 	puts("OK");
 	return 0;
 }

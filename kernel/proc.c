@@ -347,6 +347,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->huge1g_next = parent->huge1g_next;
 	child->mlock_future = parent->mlock_future;
 	child->cpu_affinity = parent->cpu_affinity;
+	child->no_new_privs = parent->no_new_privs;  /* sticky; pdeathsig is NOT inherited */
 	child->reaped    = 0;
 	child->vfork_parent = -1;
 

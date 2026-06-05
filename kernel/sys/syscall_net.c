@@ -1137,6 +1137,15 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_IPPROTO_TCP  6
 #define SO_TCP_NODELAY  1
 #define SO_TCP_INFO    11
+/* options accepted as no-ops: settable but with no behavioral effect here.
+ * Returning success (not ENOPROTOOPT) matches Linux for these known opts. */
+#define SO_DONTROUTE    5
+#define SO_BROADCAST    6
+#define SO_LINGER      13
+#define SO_PASSCRED    16
+#define SO_PRIORITY    12
+#define SO_BSDCOMPAT   14
+#define SO_OOBINLINE   10
 
 /* Ranix-native firewall control: a setsockopt level whose option value is one
  * filter command line ("drop tcp dport 9999", "flush"); getsockopt renders the
@@ -1186,14 +1195,20 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 			return 0;
 		}
 		case SO_ERROR: case SO_TYPE: case SO_ACCEPTCONN:
-			return -92;   /* read-only */
+			return -92;   /* ENOPROTOOPT: read-only */
+		case SO_DONTROUTE: case SO_BROADCAST: case SO_LINGER:
+		case SO_PASSCRED:  case SO_PRIORITY:  case SO_BSDCOMPAT:
+		case SO_OOBINLINE:
+			return 0;     /* known but no behavioral effect here */
 		default:
-			return 0;     /* accept-and-ignore unknown options, like a stub */
+			return -92;   /* ENOPROTOOPT */
 		}
 	} else if (lv == SO_IPPROTO_TCP) {
 		if (opt == SO_TCP_NODELAY) { s->tcp_nodelay = iv ? 1 : 0; return 0; }
-		return 0;
+		return -92;
 	}
+	/* IPPROTO_IP / IPPROTO_IPV6 and the like: accept known multicast/ttl knobs
+	 * as no-ops, reject the genuinely unknown. */
 	return 0;
 }
 
