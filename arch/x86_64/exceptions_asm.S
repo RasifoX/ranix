@@ -88,11 +88,20 @@ common_irq:
 1:	save_context
 	movq %rsp, %r15
 	call task_current
+	movq 16(%rax), %r14    /* interrupted ctx, restored for a kernel nested IRQ */
 	movq %r15, 16(%rax)    /* task->ctx = rsp */
 
 	/* get vector number from the stack (arch_context_t.vector) */
 	movq 632(%rsp), %rdi
 	call irq_dispatch
+
+	/* An IRQ that interrupted ring 0 (the kernel, e.g. mid-syscall) is
+	 * non-preemptible: restore the interrupted path's ctx (saved in r14) and
+	 * iretq, leaving need_resched set for the next user boundary. Only an IRQ
+	 * that interrupted ring 3 (user) may reschedule. Mirrors aarch64
+	 * .irq_ret_kernel — see exceptions_asm.S. */
+	testq $3, 656(%rsp)
+	jz .irq_ret_kernel
 
 	/* Check for reschedule (per-CPU need_resched at %gs:80) */
 	movl %gs:80, %eax
@@ -125,6 +134,16 @@ common_irq:
 	jz 2f
 	swapgs
 2:	iretq
+
+.irq_ret_kernel:
+	/* Restore the interrupted kernel path's ctx (r14) so a later fork copies
+	 * the syscall's frame, not this dangling IRQ frame, then iretq from our own
+	 * frame straight back to ring 0 (no swapgs, no schedule, no signals). */
+	call task_current
+	movq %r14, 16(%rax)
+	restore_context
+	addq $16, %rsp
+	iretq
 
 .macro irq_stub vec
 .global irq_stub_\vec
@@ -267,8 +286,12 @@ irq_stub_lapic:
 	save_context
 	movq %rsp, %r15
 	call task_current
+	movq 16(%rax), %r14    /* interrupted ctx, restored for a kernel nested IRQ */
 	movq %r15, 16(%rax)
 	call lapic_timer_irq
+	/* Kernel (ring 0) interruption is non-preemptible — restore and iretq. */
+	testq $3, 656(%rsp)
+	jz .lapic_ret_kernel
 	movl %gs:80, %eax
 	testl %eax, %eax
 	jz 3f
@@ -295,6 +318,13 @@ irq_stub_lapic:
 	swapgs
 2:	iretq
 
+.lapic_ret_kernel:
+	call task_current
+	movq %r14, 16(%rax)
+	restore_context
+	addq $16, %rsp
+	iretq
+
 /* IPI reschedule handler — vector 0xF0 */
 .global irq_stub_ipi
 irq_stub_ipi:
@@ -306,9 +336,13 @@ irq_stub_ipi:
 	save_context
 	movq %rsp, %r15
 	call task_current
+	movq 16(%rax), %r14    /* interrupted ctx, restored for a kernel nested IPI */
 	movq %r15, 16(%rax)
 	call smp_ipi_membarrier_ack
 	call arch_smp_ipi_ack
+	/* Kernel (ring 0) interruption is non-preemptible — restore and iretq. */
+	testq $3, 656(%rsp)
+	jz .ipi_ret_kernel
 	movl $0, %gs:80
 	call schedule
 	call vm_activate
@@ -328,3 +362,10 @@ irq_stub_ipi:
 	jz 2f
 	swapgs
 2:	iretq
+
+.ipi_ret_kernel:
+	call task_current
+	movq %r14, 16(%rax)
+	restore_context
+	addq $16, %rsp
+	iretq
