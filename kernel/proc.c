@@ -943,6 +943,7 @@ void task_exit(void)
 	pid_ns_put(p->pid_ns);
 	p->pid_ns = NULL;
 	cgroup_exit(p);
+	sigqueue_drop(p);
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;

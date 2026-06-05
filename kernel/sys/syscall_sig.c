@@ -82,6 +82,38 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 	return 0;
 }
 
+/* sigqueue(2): post an RT signal to a process carrying si_value. The siginfo
+ * the sender supplies is read from user memory; we only trust its si_code and
+ * si_value and stamp the real sender pid/uid. */
+static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
+{
+	if (sig <= 0 || sig > NSIG) return -22;
+	process_t *p = pidns_find(current_pid_ns(), (int)pid);
+	if (!p) return -3; /* ESRCH */
+	int32_t  si_code = 0;
+	uint64_t si_value = 0;
+	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -14;
+	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -14;
+	process_t *cur = task_current();
+	return task_signal_info(p, sig, si_code, (pid_t)cur->pid, cur->euid, si_value, 0);
+}
+
+static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *uinfo)
+{
+	if (tgid <= 0 || tid <= 0 || sig <= 0 || sig > NSIG) return -22;
+	pid_namespace_t *ns = current_pid_ns();
+	process_t *t = pidns_find(ns, (int)tid);
+	if (!t) return -3; /* ESRCH */
+	process_t *leader = pidns_find(ns, (int)tgid);
+	if (!leader || t->tgid != leader->pid) return -3;
+	int32_t  si_code = 0;
+	uint64_t si_value = 0;
+	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -14;
+	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -14;
+	process_t *cur = task_current();
+	return task_signal_info(t, sig, si_code, (pid_t)cur->pid, cur->euid, si_value, 1);
+}
+
 /* Return from a signal handler: restore the trap frame that signal_dispatch
  * saved on the user stack (full register set + the pre-signal mask), so the
  * interrupted code resumes exactly. Frame layout mirrors signal_dispatch. */
@@ -106,7 +138,7 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	ctx->fpcr     = *(uint32_t *)(usp + 204);
 	for (int _i = 0; _i < 64; _i++)
 		ctx->qregs[_i] = *(uint64_t *)(usp + 208 + (uint64_t)_i * 8);
-	ctx->sp       = usp + 736;
+	ctx->sp       = usp + 864;
 #elif defined(__x86_64__)
 	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
 	 * Frame layout matches signal_dispatch: offsets from frame_base+8. */

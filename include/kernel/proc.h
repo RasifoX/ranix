@@ -18,6 +18,8 @@
 #define SCHED_RR      2
 
 #define NSIG           64
+#define SIGRTMIN       34
+#define SIGRTMAX       64
 #define SIGKILL        9
 #define SIGSTOP        19    /* uncatchable + unblockable, like SIGKILL */
 #define SIGSEGV        11
@@ -43,6 +45,21 @@ typedef struct sighand {
 sighand_t *sighand_alloc(sighand_t *copy_from);   /* refcount 1; NULL src → zeroed */
 sighand_t *sighand_get(sighand_t *sh);            /* refcount++ */
 void       sighand_put(sighand_t *sh);            /* refcount--; frees at 0 */
+
+/* Kernel-side siginfo for a queued RT signal. Mirrors the userspace siginfo_t
+ * head (si_signo/errno/code) plus the sender's pid/uid and sigval payload at
+ * the offsets musl reads (si_pid@16, si_uid@20, si_value@24). */
+typedef struct sigqueue {
+	struct sigqueue *next;
+	int       si_signo;
+	int       si_errno;
+	int       si_code;
+	pid_t     si_pid;
+	uid_t     si_uid;
+	uint64_t  si_value;   /* union sigval (sival_int / sival_ptr) */
+} sigqueue_t;
+
+#define SIGQUEUE_MAX  256   /* per-process cap; overflow → -EAGAIN */
 
 typedef struct {
 	void   *ss_sp;
@@ -98,6 +115,9 @@ typedef struct process {
 	uint64_t        sig_pending;
 	uint64_t        sig_mask;             /* per-thread blocked mask */
 	struct sighand *sighand;              /* signal dispositions, shared across a thread group */
+	struct sigqueue *sigq_head;           /* queued RT siginfo, FIFO per signo, lowest signo first */
+	struct sigqueue *sigq_tail;
+	int             sigq_count;
 
 	/* ── interval timers ───────────────────────── */
 	uint64_t        itimer_value;     /* ITIMER_REAL: ticks until next SIGALRM (0 = off) */
@@ -239,6 +259,12 @@ int        task_has_actionable_signal(void);
 void       task_signal(process_t *p, int sig);
 void       task_signal_group(process_t *leader, int sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
+/* sigqueue(2)/rt_sigqueueinfo: deliver an RT signal carrying si_value.
+ * thread_directed != 0 targets the exact thread `p`; otherwise it is process-
+ * directed (any eligible thread of p's group). Returns 0 or -EAGAIN on overflow. */
+int        task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
+                            uid_t si_uid, uint64_t si_value, int thread_directed);
+void       sigqueue_drop(process_t *p);   /* free all queued siginfo (exec/exit) */
 void       signal_dispatch(arch_context_t *tf);
 void       task_exit(void);
 

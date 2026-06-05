@@ -229,6 +229,8 @@ typedef struct {
 #define SYS_ARCH_EPOLL_WAIT        232
 #define SYS_ARCH_EPOLL_CTL         233
 #define SYS_ARCH_TGKILL            234
+#define SYS_ARCH_RT_SIGQUEUEINFO   129
+#define SYS_ARCH_RT_TGSIGQUEUEINFO 297
 #define SYS_ARCH_MQ_OPEN           240
 #define SYS_ARCH_MQ_UNLINK         241
 #define SYS_ARCH_MQ_TIMEDSEND      242

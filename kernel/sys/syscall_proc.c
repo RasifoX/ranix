@@ -1161,6 +1161,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	p->sig_mask    = 0;
 	p->sig_pending = 0;
+	sigqueue_drop(p);
 
 	/* apply credentials: suid/sgid set to new euid/egid after exec */
 	p->euid = new_euid; p->suid = new_euid;
