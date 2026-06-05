@@ -390,17 +390,22 @@ static long sys_symlinkat(const char *t, int d, const char *lp)
 }
 static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
 {
-	(void)od; (void)nd; (void)f;
+	if (f & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)) return -22; /* EINVAL */
 	char *ko = kmalloc(PATH_MAX);
 	if (!ko) return -12;
 	char *kn = kmalloc(PATH_MAX);
 	if (!kn) { kfree(ko); return -12; }
 	long ret;
 	int r;
-	if ((r = copy_path_from_user(ko, o)) || (r = copy_path_from_user(kn, n)))
+	if ((r = resolve_path(ko, od, o)) || (r = resolve_path(kn, nd, n)))
 		ret = r;
-	else
-		ret = vfs_link(ko, kn);
+	else {
+		vfs_stat_t ls = {0};
+		if (!(f & AT_SYMLINK_FOLLOW) && vfs_lstat(ko, &ls) == 0 && S_ISLNK(ls.mode))
+			ret = -22;                          /* hardlink to a symlink unsupported */
+		else
+			ret = vfs_link(ko, kn);
+	}
 	kfree(ko); kfree(kn);
 	return ret;
 }
@@ -424,16 +429,15 @@ static long sys_fchmod(int fd, mode_t m)
 }
 static long sys_fchmodat(int d, const char *p, mode_t m, int f)
 {
-	(void)d; (void)f;
 	char kp[PATH_MAX];
-	int r = copy_path_from_user(kp, p);
+	int r = resolve_path(kp, d, p);
 	if (r) return r;
-	return vfs_chmod(kp, m);
+	return (f & AT_SYMLINK_NOFOLLOW) ? vfs_lchmod(kp, m) : vfs_chmod(kp, m);
 }
 static long sys_chown(const char *p, uid_t u, gid_t g)
 {
 	char kp[PATH_MAX];
-	int r = resolve_path(kp, -100 /*AT_FDCWD*/, p);
+	int r = resolve_path(kp, AT_FDCWD, p);
 	if (r) return r;
 	return vfs_chown(kp, u, g);
 }
@@ -446,14 +450,14 @@ static long sys_fchown(int fd, uid_t u, gid_t g)
 }
 static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int flags)
 {
-	if (flags & 0x1000 /*AT_EMPTY_PATH*/) {
+	if (flags & AT_EMPTY_PATH) {
 		char t[2];
 		if (strncpy_from_user(t, p, 2) >= 0 && t[0] == '\0') return sys_fchown(d, u, g);
 	}
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, d, p);
 	if (r) return r;
-	return vfs_chown(kp, u, g);
+	return (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lchown(kp, u, g) : vfs_chown(kp, u, g);
 }
 
 /* ── read / write / open / stat ──────────────────────────────────────────────

@@ -348,6 +348,7 @@ check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null
 check "c-flock"       "OK"            "$(timeout 8 /bin/test_flock 2>/dev/null)"
 check "c-chown"       "OK"            "$(timeout 8 /bin/test_chown 2>/dev/null)"
 check "c-access"      "OK"            "$(timeout 8 /bin/test_access 2>/dev/null)"
+check "c-atflags"     "OK"            "$(timeout 8 /bin/test_atflags 2>/dev/null)"
 check "c-fifo"        "OK"            "$(timeout 10 /bin/test_fifo 2>/dev/null)"
 check "c-fcntllock"   "OK"            "$(timeout 10 /bin/test_fcntllock 2>/dev/null)"
 check "c-mknoddev"    "OK"            "$(timeout 8 /bin/test_mknoddev 2>/dev/null)"

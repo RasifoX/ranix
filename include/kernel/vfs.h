@@ -42,6 +42,14 @@
 #endif
 #define O_CLOEXEC   0x80000
 
+/* *at() flags — arch-generic in the Linux uapi (asm-generic/fcntl.h) */
+#define AT_FDCWD            (-100)
+#define AT_SYMLINK_NOFOLLOW 0x0100
+#define AT_EACCESS          0x0200
+#define AT_REMOVEDIR        0x0200
+#define AT_SYMLINK_FOLLOW   0x0400
+#define AT_EMPTY_PATH       0x1000
+
 #define SEEK_SET   0
 #define SEEK_CUR   1
 #define SEEK_END   2
@@ -263,6 +271,8 @@ int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
 int        vfs_chmod(const char *path, mode_t mode);
 int        vfs_chown(const char *path, uid_t uid, gid_t gid);
+int        vfs_lchown(const char *path, uid_t uid, gid_t gid);
+int        vfs_lchmod(const char *path, mode_t mode);
 int        vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid);
 int        vfs_link(const char *oldpath, const char *newpath);
 

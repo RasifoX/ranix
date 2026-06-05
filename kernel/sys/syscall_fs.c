@@ -21,7 +21,16 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 	if (r) return r;
 	if (out[0] == '/') return 0;
 	process_t *p = task_current();
-	const char *base = (dirfd == AT_FDCWD) ? p->cwd : "/";
+	const char *base;
+	if (dirfd == AT_FDCWD) {
+		base = p->cwd;
+	} else {
+		vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
+		if (!f || !f->inode) return -9;             /* EBADF */
+		if (!S_ISDIR(f->inode->mode)) return -20;   /* ENOTDIR */
+		if (f->path[0] != '/') return -9;
+		base = f->path;
+	}
 	int blen = strlen(base), plen = strlen(out);
 	if (blen + 1 + plen >= PATH_MAX) return -36;
 	char *tmp = kmalloc(PATH_MAX);
@@ -63,10 +72,16 @@ static long sys_unlink(const char *path)
 
 static long sys_unlinkat(int dirfd, const char *path, int flags)
 {
-	(void)flags;
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
+	vfs_stat_t vs = {0};
+	if (vfs_lstat(kp, &vs) != 0) return -2;         /* ENOENT */
+	if (flags & AT_REMOVEDIR) {
+		if (!S_ISDIR(vs.mode)) return -20;          /* ENOTDIR */
+	} else {
+		if (S_ISDIR(vs.mode)) return -21;           /* EISDIR */
+	}
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
@@ -158,9 +173,6 @@ static long sys_lstat_path(const char *path, linux_stat_t *st)
 	fill_linux_stat(&ks, &vs);
 	return copy_to_user(st, &ks, sizeof(ks));
 }
-
-#define AT_EMPTY_PATH        0x1000
-#define AT_SYMLINK_NOFOLLOW  0x0100
 
 static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int flags)
 {

@@ -33,8 +33,6 @@
 #include <kernel/io_uring.h>
 #include <kernel/config.h>
 
-#define AT_FDCWD     (-100)
-
 /* mmap flags */
 #define MAP_SHARED    0x01
 #define MAP_PRIVATE   0x02
