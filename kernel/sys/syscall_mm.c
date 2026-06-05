@@ -185,27 +185,39 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	vfs_file_t *f = fd_get(p->fds, fd);
 	if (!f) return -9;
 
-	/* If it's a device mapping via mmap callback */
+	/* Mapping backed by an inode-owned page via the mmap fop. Two kinds:
+	 *  - cacheable (ramfs/tmpfs): the fop returns a page of the file's own
+	 *    write-back buffer. MAP_SHARED maps it directly so stores land in the
+	 *    file and are seen by read() and other mappers; VM_NOFREE + the fop's
+	 *    extra page ref keep the buffer alive across this mapping's unmap, and
+	 *    the inode is pinned so a later grow cannot relocate it. MAP_PRIVATE
+	 *    falls through to the copy path below for COW semantics.
+	 *  - device/hugetlb: non-cacheable, no write-back. */
 	if (f->inode->fops && f->inode->fops->mmap) {
-		uint64_t file_off = off;
-		uint32_t dev_vmflags = vmflags | VM_NOCACHE;
-		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-			uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
-			if (!phys) {
-				/* Mapping failed, cleanup is complex here, but we return error */
-				return -22; /* EINVAL */
+		int cacheable = f->inode->fops->mmap_cacheable;
+		if (!cacheable || (flags & MAP_SHARED)) {
+			uint64_t file_off = off;
+			uint32_t pte_flags = vmflags | (cacheable ? VM_NOFREE : VM_NOCACHE);
+			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+				uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
+				if (!phys) {
+					for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
+					return -22; /* EINVAL — offset past backing */
+				}
+				vm_map(p->vm, v, phys, pte_flags);
+				file_off += PAGE_SIZE;
 			}
-			vm_map(p->vm, v, phys, dev_vmflags);
-			file_off += PAGE_SIZE;
+			if (cacheable) f->inode->mmap_pinned = 1;
+			{
+				uint32_t vf = VMA_USER;
+				if (prot & PROT_READ)  vf |= VMA_READ;
+				if (prot & PROT_WRITE) vf |= VMA_WRITE;
+				if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+				if (cacheable && (flags & MAP_SHARED)) vf |= VMA_SHARED;
+				vma_clip(p, va, len); vma_add(p, va, len, vf);
+			}
+			return (long)va;
 		}
-		{
-			uint32_t vf = VMA_USER;
-			if (prot & PROT_READ)  vf |= VMA_READ;
-			if (prot & PROT_WRITE) vf |= VMA_WRITE;
-			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-			vma_clip(p, va, len); vma_add(p, va, len, vf);
-		}
-		return (long)va;
 	}
 
 	if (!f->inode->fops->read) return -9;

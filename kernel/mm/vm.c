@@ -173,7 +173,13 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 				goto out;
 			}
 			if (v->flags & VMA_SHARED) {
-				ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
+				if (!(v->flags & VMA_WRITE)) goto out;   /* read-only shared: real protection fault */
+				/* A file-backed shared page (not VMA_ANON) is the inode's own buffer,
+				 * kept off teardown's free path — preserve VM_NOFREE when remapping it
+				 * writable so vm_destroy doesn't free a page the file still owns. */
+				uint32_t wf = VM_USER | VM_READ | VM_WRITE;
+				if (!(v->flags & VMA_ANON)) wf |= VM_NOFREE;
+				ret = vm_map(p->vm, vaddr, paddr, wf);
 				goto out;
 			}
 			if (!(v->flags & VMA_WRITE)) goto out;
