@@ -1012,10 +1012,18 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 		if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
 		kfree(dir_path);
 	} else {
+		if ((flags & O_CREAT) && (flags & O_EXCL)) return -17; /* EEXIST */
 		inode = d->inode;
+		if (flags & O_NOFOLLOW) {
+			/* note: vfs_lstat re-resolves and may mutate the dentry tree, so
+			 * cache inode above before calling it. */
+			vfs_stat_t ls = {0};
+			if (vfs_lstat(path, &ls) == 0 && S_ISLNK(ls.mode)) return -40; /* ELOOP */
+		}
+		int acc = flags & 3; /* O_ACCMODE */
+		if (S_ISDIR(inode->mode) && (acc == 1 || acc == 2)) return -21; /* EISDIR */
 		/* check read/write permission on existing file */
 		int accmode = 0;
-		int acc = flags & 3; /* O_ACCMODE */
 		if (acc == 0 || acc == 2) accmode |= MAY_READ;
 		if (acc == 1 || acc == 2) accmode |= MAY_WRITE;
 		int pr = vfs_check_perm(inode, accmode, uid, gid);
@@ -1023,6 +1031,7 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	}
 
 	if (!inode) return -1;
+	if ((flags & O_DIRECTORY) && !S_ISDIR(inode->mode)) return -20; /* ENOTDIR */
 	if (!inode->fops && !S_ISDIR(inode->mode)) return -1;
 
 	vfs_file_t *f = kmalloc(sizeof(*f));
