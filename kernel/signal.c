@@ -11,6 +11,8 @@
  * (sched_lock, proctab, runqueue_add) and task_exit are already in scope.
  * ───────────────────────────────────────────────────────────────────────── */
 
+static int sig_default_stop(int sig);
+
 /* Wake a target that may be blocked so a freshly-posted signal is delivered.
  * Caller holds sched_lock. */
 static void sig_wake_locked(process_t *t)
@@ -71,11 +73,31 @@ void sigqueue_drop(process_t *p)
 	while (q) { sigqueue_t *n = q->next; kfree(q); q = n; }
 }
 
+#define STOP_SIG_MASK ((1UL << (SIGSTOP - 1)) | (1UL << (SIGTSTP - 1)) | \
+                       (1UL << (SIGTTIN - 1)) | (1UL << (SIGTTOU - 1)))
+
+/* POSIX: SIGCONT and the stop signals cancel each other when posted. SIGCONT
+ * also resumes a job-stopped task immediately so it can run to deliver. Caller
+ * holds sched_lock. */
+static void sig_cont_stop_locked(process_t *t, int sig)
+{
+	if (sig == SIGCONT) {
+		t->sig_pending &= ~STOP_SIG_MASK;
+		if (t->job_stopped) {
+			t->job_stopped = 0;
+			t->job_continued = 1;
+		}
+	} else if (sig_default_stop(sig)) {
+		t->sig_pending &= ~(1UL << (SIGCONT - 1));
+	}
+}
+
 void task_signal(process_t *p, int sig)
 {
 	if (!p || sig <= 0 || sig > NSIG) return;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	p->sig_pending |= (1UL << (sig - 1));
+	sig_cont_stop_locked(p, sig);
 	sig_wake_locked(p);
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -130,6 +152,7 @@ int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
 		sigq_append_locked(target, q);
 	}
 	target->sig_pending |= (1UL << (sig - 1));
+	sig_cont_stop_locked(target, sig);
 	sig_wake_locked(target);
 	spin_unlock_irq(&sched_lock, f);
 	return 0;
@@ -159,6 +182,7 @@ void task_signal_group(process_t *leader, int sig)
 	if (!target) target = leader;   /* nobody can take it now → pend on the leader */
 
 	target->sig_pending |= bit;
+	sig_cont_stop_locked(target, sig);
 	if (target->state == PROC_SLEEPING) {
 		target->state = PROC_READY;
 		if (!target->on_cpu) runqueue_add(target);
@@ -174,6 +198,7 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
 		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE) {
 			t->sig_pending |= (1UL << (sig - 1));
+			sig_cont_stop_locked(t, sig);
 			/* wake a blocked member so the signal is actually delivered — Ctrl-C/
 			 * Ctrl-Z to a foreground job stuck in a blocking syscall must fire.
 			 * (Linux: signal_wake_up.) */
@@ -183,6 +208,91 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 				arch_get_cpu_ctx()->need_resched = 1;
 			}
 		}
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
+/* Signals whose default action stops the process (job control) */
+static int sig_default_stop(int sig)
+{
+	return sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU;
+}
+
+/* Stop the current task on signal `sig` (SIGSTOP/TSTP/TTIN/TTOU): publish the
+ * job-control stop, wake the parent's waitpid(WUNTRACED) poll, and sleep until
+ * SIGCONT clears job_stopped (SIGKILL also breaks out, to terminate). */
+static void job_stop_self(int sig)
+{
+	process_t *p = task_current();
+	uint64_t sf = spin_lock_irq(&sched_lock);
+	p->job_stopped       = 1;
+	p->job_stop_sig      = sig;
+	p->job_stop_reported = 0;
+	spin_unlock_irq(&sched_lock, sf);
+	process_t *par = proc_find(p->ppid);
+	if (par) task_wake(par);
+	arch_get_cpu_ctx()->wd_where = "sig:stop";
+	while (p->job_stopped && !(p->sig_pending & (1UL << (SIGKILL - 1))))
+		task_sleep_interruptible();
+	p->job_stopped = 0;
+}
+
+/* A pgrp is orphaned if no member has a parent in a different pgrp of the same
+ * session. Background I/O from an orphaned pgrp returns EIO instead of stopping
+ * (there is no job-control shell that could ever continue it). Caller holds
+ * sched_lock. */
+static int pgrp_is_orphaned_locked(pid_t pgrp, pid_t sid)
+{
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->pgrp != pgrp || t->state == PROC_DEAD || t->state == PROC_ZOMBIE)
+			continue;
+		process_t *par = (t->ppid > 0 && t->ppid < proc_cnt) ? proctab[t->ppid] : NULL;
+		if (par && par->pgrp != pgrp && par->sid == sid)
+			return 0;
+	}
+	return 1;
+}
+
+/* Background-pgrp tty I/O (SIG-3): the caller's pgrp differs from the tty's
+ * foreground group. Returns -EIO when stopping is impossible (signal blocked/
+ * ignored or an orphaned pgrp), 1 when the caller stopped and was continued
+ * (retry the I/O), else 0 to proceed. `sig` is SIGTTIN or SIGTTOU. */
+int tty_jobctl_check(void *tty, vfs_fops_t *tty_fops, pid_t fg_pgrp, int sig)
+{
+	process_t *p = task_current();
+	if (!p || p->ctty != tty || p->ctty_fops != tty_fops) return 0;
+	if (fg_pgrp <= 0 || p->pgrp == fg_pgrp) return 0;
+
+	uint64_t bit = 1UL << (sig - 1);
+	void (*h)(int) = p->sighand->actions[sig - 1].sa_handler;
+	int ignored = ((uintptr_t)h == 1);
+	int blocked = (p->sig_mask & bit) != 0;
+	if (ignored || blocked) return -5;   /* EIO */
+
+	uint64_t f = spin_lock_irq(&sched_lock);
+	int orphan = pgrp_is_orphaned_locked(p->pgrp, p->sid);
+	spin_unlock_irq(&sched_lock, f);
+	if (orphan) return -5;   /* EIO */
+
+	/* Stop the whole pgrp; the others stop on their own user-return dispatch.
+	 * The current task stops here, inside the syscall, then retries the I/O when
+	 * SIGCONT resumes it (Linux's tty_check_change). */
+	task_signal_pgrp(p->pgrp, sig);
+	job_stop_self(sig);
+	return 1;
+}
+
+void tty_hangup(void *tty, pid_t fg_pgrp)
+{
+	if (fg_pgrp > 0) {
+		task_signal_pgrp(fg_pgrp, SIGHUP);
+		task_signal_pgrp(fg_pgrp, SIGCONT);
+	}
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->ctty == tty) { t->ctty = NULL; t->ctty_fops = NULL; }
 	}
 	spin_unlock_irq(&sched_lock, f);
 }
@@ -217,7 +327,9 @@ int task_has_actionable_signal(void)
 		int sig = __builtin_ctzll(mask) + 1;
 		mask &= mask - 1;
 		void (*handler)(int) = p->sighand->actions[sig - 1].sa_handler;
+		if (sig == SIGCONT) return 1;   /* always resumes a stopped task */
 		if ((uintptr_t)handler == 1) continue;   /* SIG_IGN */
+		if (!handler && sig_default_stop(sig)) return 1;
 		if (!handler && !sig_default_kill(sig)) continue; /* SIG_DFL non-fatal */
 		return 1;
 	}
@@ -283,6 +395,22 @@ void signal_dispatch(arch_context_t *tf)
 
 	sigaction_t *sa = &p->sighand->actions[sig - 1];
 	void (*handler)(int) = sa->sa_handler;
+
+	/* Job-control stop: SIG_DFL for SIGSTOP/TSTP/TTIN/TTOU stops the process.
+	 * SIGSTOP is uncatchable. We sleep here on the user-return path; SIGCONT (or
+	 * a fatal signal) resumes us via sig_cont_stop_locked clearing job_stopped. */
+	if (sig == SIGSTOP || (sig_default_stop(sig) && !handler)) {
+		job_stop_self(sig);
+		return;
+	}
+
+	/* SIGCONT: default action is continue+ignore; the resume already happened at
+	 * post time. Run a user handler if one is installed, else just return. */
+	if (sig == SIGCONT && (!handler || (uintptr_t)handler == 1)) {
+		process_t *par = proc_find(p->ppid);
+		if (par) task_wake(par);
+		return;
+	}
 
 	/* SIG_IGN = 1 */
 	if ((uintptr_t)handler == 1) return;

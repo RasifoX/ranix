@@ -25,6 +25,11 @@
 #define SIGSEGV        11
 #define SIGTERM        15
 #define SIGCHLD        17
+#define SIGCONT        18
+#define SIGTSTP        20
+#define SIGTTIN        21
+#define SIGTTOU        22
+#define SIGHUP          1
 
 typedef struct {
 	void (*sa_handler)(int);
@@ -190,6 +195,12 @@ typedef struct process {
 	/* ── signal alternate stack ───────────────── */
 	stack_t         altstack;
 
+	/* ── job control (terminal stop/cont) ─────── */
+	int             job_stopped;          /* 1 while stopped by SIGSTOP/TSTP/TTIN/TTOU */
+	int             job_stop_sig;         /* the stop signal (waitpid WIFSTOPPED status) */
+	int             job_stop_reported;    /* 1 = waitpid WUNTRACED already reported this stop */
+	int             job_continued;        /* 1 = SIGCONT pending report (waitpid WCONTINUED) */
+
 	/* ── ptrace ──────────────────────────────── */
 	pid_t           tracer;
 	int             ptrace_opts;          /* 0=none, 1=trace syscalls */
@@ -265,6 +276,14 @@ void       task_signal_pgrp(pid_t pgrp, int sig);
 int        task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
                             uid_t si_uid, uint64_t si_value, int thread_directed);
 void       sigqueue_drop(process_t *p);   /* free all queued siginfo (exec/exit) */
+/* Job-control background-I/O check for a controlling tty. `tty`/`tty_fops`
+ * identify the terminal; `pgrp` is its foreground group. Returns 0 to proceed,
+ * 1 to retry (the caller stopped and was continued), or -EIO. `sig` is SIGTTIN
+ * (read) or SIGTTOU (write). */
+int        tty_jobctl_check(void *tty, vfs_fops_t *tty_fops, pid_t fg_pgrp, int sig);
+/* SIGHUP+SIGCONT a foreground group and detach the ctty of any process whose
+ * controlling terminal is `tty`. */
+void       tty_hangup(void *tty, pid_t fg_pgrp);
 void       signal_dispatch(arch_context_t *tf);
 void       task_exit(void);
 

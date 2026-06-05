@@ -1456,9 +1456,9 @@ static long sys_pipe2(int *pipefd, int flags)
 
 #define WNOHANG 1
 
-extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep,
-                                      process_t **out_child, int *out_any_alive);
-extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep);
+extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
+                                      process_t **out_child, int *out_any_alive, int *out_event);
+extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags);
 
 /* wait4 rusage: the reaped child's CPU time, including descendants it waited
  * for (Linux folds those into the child's own ru_*). Must run before proc_reap
@@ -1484,9 +1484,9 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 	if (pid == -1) {
 		while (1) {
 			process_t *child = NULL;
-			int any_alive = 0;
-			proc_find_zombie_or_sleep(p->pid, p, !wnohang, &child, &any_alive);
-			if (child) {
+			int any_alive = 0, event = 0;
+			proc_find_zombie_or_sleep(p->pid, p, !wnohang, flags, &child, &any_alive, &event);
+			if (child && event == 1) {
 				int st = child->killed_by_sig
 				       ? (child->exit_code & 0x7F)
 				       : (child->exit_code & 0xFF) << 8;
@@ -1496,6 +1496,13 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 				proc_reap(child);
 				if (status && (uint64_t)status > 0x1000)
 					*status = st;
+				return (long)result;
+			}
+			if (child && (event == 3 || event == 4)) {   /* stopped / continued */
+				int v = task_pid_nr_ns(child, current_pid_ns());
+				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
+				if (status && (uint64_t)status > 0x1000)
+					*status = (event == 3) ? ((child->job_stop_sig << 8) | 0x7f) : 0xffff;
 				return (long)result;
 			}
 			if (!any_alive) return -10; /* ECHILD */
@@ -1508,11 +1515,21 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 	if (!child || child->ppid != p->pid) return -10;
 
 	while (1) {
-		int r = proc_check_or_sleep(child, p, !wnohang);
+		int r = proc_check_or_sleep(child, p, !wnohang, flags);
 		if (r == 1) break;  /* zombie */
 		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
 			if (status && (uint64_t)status > 0x1000)
 				*status = (5 << 8) | 0x7f; /* WIFSTOPPED | SIGTRAP */
+			return (long)pid;
+		}
+		if (r == 3) {       /* job-control stop (WUNTRACED) */
+			if (status && (uint64_t)status > 0x1000)
+				*status = (child->job_stop_sig << 8) | 0x7f;
+			return (long)pid;
+		}
+		if (r == 4) {       /* continued (WCONTINUED) */
+			if (status && (uint64_t)status > 0x1000)
+				*status = 0xffff;
 			return (long)pid;
 		}
 		if (wnohang) return 0;

@@ -372,6 +372,7 @@ check "c-thp"        "OK"  "$(timeout 15 /bin/test_thp 2>/dev/null)"
 check "c-madvise"    "OK"  "$(timeout 15 /bin/test_madvise 2>/dev/null | tail -1)"
 check "c-hugetlbfs"  "OK"  "$(timeout 20 /bin/test_hugetlbfs 2>/dev/null | tail -1)"
 check "c-pty"        "OK"  "$(timeout 8 /bin/test_pty 2>/dev/null)"
+check "c-jobctl"     "OK"  "$(timeout 25 /bin/test_jobctl 2>/dev/null | tail -1)"
 # GPT + ext4: only where a virtio-blk disk is attached (x86_64 test target)
 if ls /sys/block 2>/dev/null | grep -qE 'vblk|sata'; then
 check "gpt-ext4"     "ranix-gpt-ok" "$(cat /mnt/hello.txt 2>/dev/null)"
