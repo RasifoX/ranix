@@ -307,6 +307,7 @@ irq_stub_ipi:
 	movq %rsp, %r15
 	call task_current
 	movq %r15, 16(%rax)
+	call smp_ipi_membarrier_ack
 	call arch_smp_ipi_ack
 	movl $0, %gs:80
 	call schedule
