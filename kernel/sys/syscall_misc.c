@@ -737,10 +737,54 @@ static long sys_fallocate(int fd, int mode, off_t offset, off_t len)
 	return 0;
 }
 
+#define RENAME_NOREPLACE 1
+#define RENAME_EXCHANGE  2
+#define RENAME_WHITEOUT  4
+
 static long sys_renameat2(int odfd, const char *op, int ndfd, const char *np, unsigned int flags)
 {
-	(void)flags;
-	return sys_renameat(odfd, op, ndfd, np);
+	if (flags & ~(unsigned)(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT)) return -22;
+	if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE)) return -22;
+	if (flags & RENAME_WHITEOUT) return -95;   /* EOPNOTSUPP: no overlay whiteouts */
+	if (!flags) return sys_renameat(odfd, op, ndfd, np);
+
+	char *ko = kmalloc(PATH_MAX);
+	char *kn = kmalloc(PATH_MAX);
+	char *tmp = kmalloc(PATH_MAX);
+	long ret;
+	int r;
+	vfs_stat_t st = {0}, sst = {0};
+	int dst_exists;
+	if (!ko || !kn || !tmp) { ret = -12; goto out; }
+
+	if ((r = resolve_path(ko, odfd, op)) || (r = resolve_path(kn, ndfd, np))) {
+		ret = r; goto out;
+	}
+
+	dst_exists = (vfs_stat(kn, &st) == 0);
+
+	if (flags & RENAME_NOREPLACE) {
+		if (dst_exists) ret = -17;                  /* EEXIST */
+		else            ret = vfs_rename(ko, kn) == 0 ? 0 : -2;
+		goto out;
+	}
+
+	/* RENAME_EXCHANGE: both must exist; swap via a temporary name. Not a single
+	 * atomic step (no fs primitive), but the data of neither side is lost. */
+	if (vfs_stat(ko, &sst) != 0 || !dst_exists) { ret = -2; goto out; }
+
+	int tn = 0;
+	for (const char *c = kn; *c && tn < PATH_MAX - 16; c++) tmp[tn++] = *c;
+	for (const char *c = ".rx-exch~"; *c; c++) tmp[tn++] = *c;
+	tmp[tn] = '\0';
+
+	if (vfs_rename(kn, tmp) != 0)      { ret = -2; goto out; }
+	if (vfs_rename(ko, kn) != 0)       { vfs_rename(tmp, kn); ret = -2; goto out; }
+	if (vfs_rename(tmp, ko) != 0)      { ret = -2; goto out; }
+	ret = 0;
+out:
+	kfree(ko); kfree(kn); kfree(tmp);
+	return ret;
 }
 
 static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
