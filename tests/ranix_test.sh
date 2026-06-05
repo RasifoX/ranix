@@ -213,6 +213,7 @@ check "c-coredump"   "OK"            "$(timeout 12 /bin/test_coredump 2>/dev/nul
 check "core-pattern"  "core"          "$(cat /proc/sys/kernel/core_pattern 2>/dev/null | tr -d "\n")"
 check "c-pivot-root"  "OK"            "$(timeout 10 /bin/test_pivot 2>/dev/null)"
 check "c-pcicaps"     "OK"            "$(timeout 8 /bin/test_pcicaps 2>/dev/null)"
+check "c-execargs"    "OK"            "$(timeout 15 /bin/test_execargs 2>/dev/null)"
 
 # ── 25. statfs / df ───────────────────────────────────────────
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"

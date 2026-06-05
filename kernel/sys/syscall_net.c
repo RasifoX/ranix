@@ -1344,12 +1344,16 @@ static long sys_shutdown(int fd, int how)
 
 static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t bufsiz)
 {
-    char kp[256];
-    int r = resolve_path(kp, dirfd, upath);
-    if (r) return r;
+    char *kp = kmalloc(PATH_MAX);
+    if (!kp) return -12;
+    char *parent_path = kmalloc(PATH_MAX);
+    char *kbuf = kmalloc(PATH_MAX);
+    if (!parent_path || !kbuf) { kfree(kp); kfree(parent_path); kfree(kbuf); return -12; }
+
+    long ret = resolve_path(kp, dirfd, upath);
+    if (ret) goto out;
 
     /* Split into parent dir and filename — look up last component without following */
-    char parent_path[256];
     const char *slash = kp + strlen(kp) - 1;
     while (slash > kp && *slash != '/') slash--;
     int plen = (int)(slash - kp);
@@ -1358,29 +1362,32 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
     const char *fname = slash + 1;
 
     vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
-    if (!parent || !parent->inode) return -2;
+    if (!parent || !parent->inode) { ret = -2; goto out; }
     /* a final component of "", ".", or ".." names a directory (the parent or an
      * ancestor, already shown to exist) — never a symlink → EINVAL, not ENOENT. */
     if (fname[0] == '\0' ||
         (fname[0] == '.' && (fname[1] == '\0' ||
-                             (fname[1] == '.' && fname[2] == '\0'))))
-        return -22;
-    if (!parent->inode->iops || !parent->inode->iops->lookup) return -2;
+                             (fname[1] == '.' && fname[2] == '\0')))) {
+        ret = -22; goto out;
+    }
+    if (!parent->inode->iops || !parent->inode->iops->lookup) { ret = -2; goto out; }
 
     vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
-    if (!in) return -2;
+    if (!in) { ret = -2; goto out; }
     if (!in->iops || !in->iops->readlink) {
         if (!in->cached) kfree(in);
-        return -22;
+        ret = -22; goto out;
     }
 
-    char kbuf[256];
-    int n = in->iops->readlink(in, kbuf, sizeof(kbuf));
+    int n = in->iops->readlink(in, kbuf, PATH_MAX);
     if (!in->cached) kfree(in);
-    if (n < 0) return n;
+    if (n < 0) { ret = n; goto out; }
     size_t slen = strlen(kbuf);
     if (slen > bufsiz) slen = bufsiz;
     copy_to_user(ubuf, kbuf, slen);
-    return (long)slen;
+    ret = (long)slen;
+out:
+    kfree(kp); kfree(parent_path); kfree(kbuf);
+    return ret;
 }
 

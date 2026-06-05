@@ -2,6 +2,7 @@
 #define PROC_H
 
 #include <uapi/types.h>
+#include <uapi/limits.h>
 #include <asm/context.h>
 #include <kernel/mm/vm.h>
 #include <kernel/vfs.h>
@@ -11,6 +12,11 @@
 
 #define PROC_NAME_MAX  256
 #define PROC_MAGIC     0x52414e58u   /* "RANX" — set at PCB alloc, checked at teardown */
+
+/* The PCB is buddy-allocated as a single power-of-two block. cwd holds a full
+ * PATH_MAX path, so the struct no longer fits one page — use order 1 (2 pages).
+ * Every PCB alloc/free must pass PCB_ORDER (not a literal 0). */
+#define PCB_ORDER      1
 
 /* scheduling policies (sched_setscheduler) */
 #define SCHED_NORMAL  0
@@ -167,7 +173,7 @@ typedef struct process {
 
 	/* ── open files ──────────────────────────── */
 	fd_table_t     *fds;
-	char            cwd[256];
+	char            cwd[PATH_MAX];
 	mode_t          umask;
 	void           *root;   /* chroot dir (vfs_dentry_t*); NULL = global root "/" */
 
