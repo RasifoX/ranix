@@ -212,6 +212,44 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* sig==0 existence probe for a process group: is any live member present? */
+int task_pgrp_exists(pid_t pgrp)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	int found = 0;
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE) { found = 1; break; }
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return found;
+}
+
+/* kill(-1): signal every process except the caller and init. Returns the count
+ * of eligible targets (0 → ESRCH). */
+int task_signal_broadcast(process_t *except, int sig)
+{
+	if (sig <= 0 || sig > NSIG) return 0;
+	uint64_t bit = 1UL << (sig - 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	int n = 0;
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t == except || t->pid <= 1) continue;
+		if (t->state == PROC_DEAD || t->state == PROC_ZOMBIE) continue;
+		n++;
+		t->sig_pending |= bit;
+		sig_cont_stop_locked(t, sig);
+		if (t->state == PROC_SLEEPING) {
+			t->state = PROC_READY;
+			if (!t->on_cpu) runqueue_add(t);
+			arch_get_cpu_ctx()->need_resched = 1;
+		}
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return n;
+}
+
 /* Signals whose default action stops the process (job control) */
 static int sig_default_stop(int sig)
 {

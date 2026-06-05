@@ -350,6 +350,7 @@ check "c-mknoddev"    "OK"            "$(timeout 8 /bin/test_mknoddev 2>/dev/nul
 check "c-statfs"      "OK"            "$(timeout 8 /bin/test_statfs 2>/dev/null)"
 check "c-tgkill"      "OK"            "$(timeout 10 /bin/test_tgkill 2>/dev/null)"
 check "c-killgroup"   "OK"            "$(timeout 10 /bin/test_killgroup 2>/dev/null)"
+check "c-killpg"      "OK"            "$(timeout 10 /bin/test_killpg 2>/dev/null)"
 check "c-rtsig"       "OK"            "$(timeout 12 /bin/test_rtsig 2>/dev/null)"
 check "c-membarrier"  "OK"            "$(timeout 10 /bin/test_membarrier 2>/dev/null)"
 check "c-itimer"      "OK"            "$(timeout 18 /bin/test_itimer 2>/dev/null)"
