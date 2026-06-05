@@ -371,8 +371,15 @@ static long sys_flock(int fd, int operation)
 	}
 }
 
-static long sys_fsync(int fd)    { (void)fd; return 0; }
-static long sys_fdatasync(int fd){ (void)fd; return 0; }
+/* ram/block-backed writes are already durable; success is deliberate, but a
+ * bad fd must still report EBADF (callers branch on it). */
+static long sys_fsync(int fd)
+{
+	process_t *p = task_current();
+	vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, fd) : NULL;
+	return f ? 0 : -9;
+}
+static long sys_fdatasync(int fd) { return sys_fsync(fd); }
 
 static long sys_fchdir(int fd)
 {
@@ -1049,7 +1056,20 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return -22;
 	case PR_GET_SECCOMP:
 		return p->seccomp_mode;
-	default: return 0;
+	case 38: /* PR_SET_NO_NEW_PRIVS */
+		if (arg2 != 1 || arg3 || arg4 || arg5) return -22;
+		p->no_new_privs = 1;
+		return 0;
+	case 39: /* PR_GET_NO_NEW_PRIVS */
+		return p->no_new_privs;
+	case 1:  /* PR_SET_PDEATHSIG */
+		if (arg2 > 64) return -22;
+		p->pdeathsig = (int)arg2;
+		return 0;
+	case 2:  /* PR_GET_PDEATHSIG */
+		return copy_to_user((void *)(uintptr_t)arg2, &p->pdeathsig, sizeof(int)) == 0 ? 0 : -14;
+	default:
+		return -22; /* EINVAL: unhandled option (do not claim success) */
 	}
 }
 
