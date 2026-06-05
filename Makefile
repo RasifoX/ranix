@@ -175,7 +175,11 @@ BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 CURL_VER           = 8.11.1
 CURL_SRC_URL       = https://curl.se/download/curl-$(CURL_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static curl test persisttest flakehunt vdso defconfig tinyconfig
+PY_VER             = 3.12.3
+PY_XY              = 3.12
+PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
+
+.PHONY: all clean qemu image initramfs bash-static curl python test persisttest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -228,6 +232,9 @@ BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
 BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
 CURL_BIN           = $(CACHE_DIR)/curl-$(ARCH)/src/curl
 SSL_SERVER_BIN     = $(CACHE_DIR)/mbedtls-$(ARCH)/ssl_server
+PYTHON_HOST        = $(CACHE_DIR)/python-host/python
+PYTHON_BIN         = $(CACHE_DIR)/python-$(ARCH)/python
+PYTHON_ZIP         = $(CACHE_DIR)/python-$(ARCH)/python$(subst .,,$(PY_XY)).zip
 
 # mbedTLS — userspace TLS/HTTPS, cross-built static like bash/busybox
 MBEDTLS_VER    = 3.6.2
@@ -285,7 +292,7 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -322,6 +329,13 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@chmod +x $(BUILD_DIR)/initramfs/bin/curl
 	@cp "$(SSL_SERVER_BIN)" $(BUILD_DIR)/initramfs/bin/ssl_server
 	@chmod +x $(BUILD_DIR)/initramfs/bin/ssl_server
+	@if [ -x "$(PYTHON_BIN)" ]; then \
+		cp "$(PYTHON_BIN)" $(BUILD_DIR)/initramfs/bin/python3; \
+		chmod +x $(BUILD_DIR)/initramfs/bin/python3; \
+		ln -sf python3 $(BUILD_DIR)/initramfs/bin/python; \
+		mkdir -p $(BUILD_DIR)/initramfs/usr/lib; \
+		cp "$(PYTHON_ZIP)" $(BUILD_DIR)/initramfs/usr/lib/python$(subst .,,$(PY_XY)).zip; \
+	fi
 	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@for c in dropbear dbclient dropbearkey scp ssh; do ln -sf dropbearmulti $(BUILD_DIR)/initramfs/bin/$$c; done
@@ -423,6 +437,55 @@ $(CURL_BIN): $(MBEDTLS_A)
 	    $(MAKE) -j$$(nproc) > /dev/null 2>&1
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] curl $(CURL_VER) for $(ARCH) ready ($$(du -h $@ | cut -f1))"
+
+# CPython — a real Python 3 interpreter. The cross-build needs a host
+# interpreter of the same version to freeze modules, so build that first.
+$(PYTHON_HOST):
+	@mkdir -p $(CACHE_DIR)
+	@if [ ! -f "$(CACHE_DIR)/Python-$(PY_VER).tgz" ]; then \
+		echo "Downloading CPython $(PY_VER) source..."; \
+		wget -q "$(PY_SRC_URL)" -O "$(CACHE_DIR)/Python-$(PY_VER).tgz" || \
+		    { rm -f "$(CACHE_DIR)/Python-$(PY_VER).tgz"; echo "ERROR: python download failed"; exit 1; }; \
+	fi
+	@echo "Building host CPython $(PY_VER)..."
+	@rm -rf "$(CACHE_DIR)/python-host"
+	@mkdir -p "$(CACHE_DIR)/python-host"
+	@tar xzf "$(CACHE_DIR)/Python-$(PY_VER).tgz" -C "$(CACHE_DIR)/python-host" --strip-components=1
+	@cd "$(CACHE_DIR)/python-host" && ./configure >/dev/null 2>&1 && $(MAKE) -j$$(nproc) >/dev/null 2>&1
+	@test -x "$@" && echo "[OK] host CPython ready"
+
+# Cross-build: musl, static C extensions (no shared loader search), every
+# optional module needing an external lib (zlib/ssl/ctypes/curses/...) dropped.
+python: $(PYTHON_BIN)
+$(PYTHON_BIN): $(PYTHON_HOST)
+	@echo "Building CPython $(PY_VER) for $(ARCH)..."
+	@rm -rf "$(CACHE_DIR)/python-$(ARCH)"
+	@mkdir -p "$(CACHE_DIR)/python-$(ARCH)"
+	@tar xzf "$(CACHE_DIR)/Python-$(PY_VER).tgz" -C "$(CACHE_DIR)/python-$(ARCH)" --strip-components=1
+	@cd "$(CACHE_DIR)/python-$(ARCH)" && \
+	    CC="$(MUSL_CC)" CONFIG_SITE=/dev/null \
+	    PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH= \
+	    ./configure --host=$(ARCH)-linux-musl --build=$$(uname -m)-linux-gnu \
+	                --with-build-python=$(CURDIR)/$(PYTHON_HOST) \
+	                --disable-test-modules --without-ensurepip \
+	                --disable-shared --disable-ipv6 --prefix=/usr \
+	                ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=no \
+	                ac_cv_buggy_getaddrinfo=no ac_cv_header_zlib_h=no \
+	                py_cv_module_zlib=n/a py_cv_module__ctypes=n/a \
+	                py_cv_module__curses=n/a py_cv_module__curses_panel=n/a \
+	                py_cv_module_readline=n/a py_cv_module__tkinter=n/a \
+	                py_cv_module_nis=n/a py_cv_module_ossaudiodev=n/a \
+	                py_cv_module_spwd=n/a py_cv_module__dbm=n/a \
+	                py_cv_module__gdbm=n/a py_cv_module__lzma=n/a \
+	                py_cv_module__bz2=n/a py_cv_module__ssl=n/a \
+	                py_cv_module__hashlib=n/a py_cv_module__sqlite3=n/a \
+	                py_cv_module__uuid=n/a \
+	                >/dev/null 2>&1
+	@cd "$(CACHE_DIR)/python-$(ARCH)" && $(MAKE) python -j$$(nproc) >/dev/null 2>&1
+	@$(CURDIR)/$(PYTHON_HOST) scripts/py_stdlib_zip.py \
+	    "$(CURDIR)/$(CACHE_DIR)/python-$(ARCH)/Lib" "$(CURDIR)/$(PYTHON_ZIP)"
+	@llvm-strip "$(PYTHON_BIN)" 2>/dev/null || strip "$(PYTHON_BIN)" 2>/dev/null || true
+	@echo "[OK] CPython $(PY_VER) for $(ARCH) ready (bin $$(du -h $(PYTHON_BIN)|cut -f1), stdlib $$(du -h $(PYTHON_ZIP)|cut -f1))"
 
 # mbedTLS ssl_server — a loopback HTTPS server for the offline curl test. Uses
 # mbedTLS's built-in test cert/key, so no external PKI files are needed. Pinned
