@@ -220,6 +220,8 @@ static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldac
 static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
 static long sys_kill(pid_t pid, int sig);
 static long sys_tgkill(pid_t tgid, pid_t tid, int sig);
+static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo);
+static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *uinfo);
 
 #include "sys/syscall_fs.c"
 #include "sys/syscall_proc.c"
@@ -426,6 +428,8 @@ void syscall_handle(arch_context_t *ctx)
 		break;
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
+	case SYS_ARCH_RT_SIGQUEUEINFO:   ret = sys_rt_sigqueueinfo((pid_t)arg0, (int)arg1, (const void*)arg2); break;
+	case SYS_ARCH_RT_TGSIGQUEUEINFO: ret = sys_rt_tgsigqueueinfo((pid_t)arg0, (pid_t)arg1, (int)arg2, (const void*)arg3); break;
 	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
 #if defined(__x86_64__)
 	case SYS_ARCH_GETPGRP:    ret = (long)task_current()->pid; break;
