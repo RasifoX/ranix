@@ -224,3 +224,138 @@
 - **TTY line discipline (N_TTY subset)** — ICANON/ISIG/ECHO* + VINTR/VQUIT/VSUSP signal generation + erase handling are solid (`kernel/tty/tty_core.c`).
 - **SysV + POSIX IPC** — full shm/sem/msg/mq surface present.
 - **Syscall ABI breadth** — ~270 syscalls dispatched including statx, io_uring, pidfd, seccomp, namespaces, xattr, splice/copy_file_range, eventfd/timerfd/signalfd/inotify/memfd.
+
+---
+
+## Capability Matrix (Ranix vs Linux)
+
+Complements the divergence tables above. Here Ranix sits on one side, Linux on the other, compared **quantitatively** (limits, counts) or by **support-list** (which features exist). Every Ranix value is grounded in source (`file:line`); Linux values are the upstream defaults/ceilings as of 6.x. "Who leads" calls it honestly — several rows are a **tie** and a few are noted where Ranix is configurable in the same way Linux is.
+
+### A. Limits & Scale
+
+| Dimension | Ranix (value + file:line) | Linux | Gap / who leads |
+|---|---|---|---|
+| Max CPUs | 256, `CONFIG_MAX_CPUS=256` (`include/kernel/smp.h:14`, `defconfig:11`); **static** arrays sized to it | `CONFIG_NR_CPUS` up to 8192; dynamic `cpumask`/percpu sized to possible CPUs | Same default ballpark; Linux leads (dynamic, higher ceiling) |
+| Max PID | 32768, `PID_MAX=32768` (`kernel/sched.c:65`) | default 32768, raisable to 2^22 (4194304) via `/proc/sys/kernel/pid_max` | Same default; Linux leads (tunable to 4M) |
+| Max open FDs / proc | `RLIMIT_NOFILE = FD_MAX = 1024` soft (`defconfig`, `syscall_misc.c:847`); fd table grows beyond (`vfs.h:170`) | soft 1024, hard `NR_OPEN=1048576` | Tie on default; Linux leads on hard cap |
+| System-wide file-max | reports `65536` (`procfs.c:549`) — cosmetic, no real global cap enforced | `file-max` ~ scaled to RAM (millions) | Linux leads |
+| Max args to execve | **64 args**, `EXEC_MAXARGS=64` (`syscall_proc.c:996`) | `MAX_ARG_STRINGS = 2^31` | **Linux leads massively** |
+| Max arg+env total bytes | **16 KB**, `EXEC_MAXSTRTOTAL=16384` (`syscall_proc.c:997`) | `ARG_MAX` ≈ 1/4 of stack rlimit, typically **2 MB** | **Linux leads massively** (~128×) |
+| Path length | **256**, `PROC_NAME_MAX=256` (`proc.h:12`) used as the path buffer in syscalls | `PATH_MAX = 4096` | **Linux leads** (16×) |
+| Filename length | ext2 `name_len` u8 → 255 (`ext2.c:153`); FAT VFAT LFN | `NAME_MAX = 255` | Tie (ext2/255) |
+| Pipe buffer | 4096, `CONFIG_PIPE_BUF_SIZE=4096` (`defconfig`, `config.h:25`) | default 64 KB (16 pages), `PIPE_BUF` atomic-write unit 4096 | Linux leads (larger ring); atomic-unit ties |
+| User stack | 256 pages = **1 MB**, `ARCH_USER_STACK_PAGES=256` (`arch/*/include/asm/mmu.h`); `RLIMIT_STACK` reports 8 MB (`syscall_misc.c:846`) | 8 MB default, grows on fault to `RLIMIT_STACK` | Linux leads (auto-grow + larger) |
+| User VA span | stack top `0x80000000` = **2 GB** (`mmu.h: ARCH_USER_STACK_TOP`), mmap base `0x40000000` | x86_64 user VA 128 TB; aarch64 256 TB | **Linux leads massively** |
+| RLIMIT enforcement | only STACK + NOFILE return real values; all else `RLIM_INFINITY` (`syscall_misc.c:846-848`) | full RLIMIT_* set enforced (AS, DATA, CPU, NPROC, MEMLOCK, NICE, RTPRIO…) | **Linux leads** |
+| NSIG (signals) | 64, `NSIG=64` (`proc.h:20`) | `_NSIG = 64` | **Tie** |
+| io_uring SQ/CQ depth | 4096 entries, `IORING_MAX_ENTRIES=4096` (`io_uring.c:28`) | up to 32768 SQ / 65536 CQ | Linux leads |
+| Buddy max contiguous | 32 MB, `BUDDY_MAX_ORDER=14` (`buddy.h:6`) | `MAX_ORDER` ~4 MB default; CMA/giant separate | Comparable; neither does big CMA in Ranix |
+
+### B. Filesystems
+
+| FS | Ranix | Linux | Notes |
+|---|---|---|---|
+| ext2/3/4 | **read+write ext2; reads ext4 extents + 64-bit sizes; no jbd2 journal replay** (`ext2.c:14,158,1436`) | ext2/ext3/ext4 full incl. journaling | Linux leads (no journaling/recovery in Ranix) |
+| FAT12/16/32 (VFAT) | **read-only**, LFN (`fat.c:2`) | read-write vfat | Linux leads (RW) |
+| ISO 9660 | read-only (`iso9660.c`) | read-only + Rock Ridge/Joliet | Comparable |
+| tmpfs / ramfs | yes (`tmpfs.c`, `ramfs.c`) | yes | **Tie** |
+| procfs / sysfs / devfs(devtmpfs) | yes (`procfs.c`, `sysfs.c`, `devfs.c`) | yes | **Tie** (smaller surface) |
+| overlayfs | yes (`overlay.c`) | yes | **Tie** (container essential present) |
+| hugetlbfs | yes (`hugetlbfs.c`) | yes | **Tie** |
+| pty (devpts) / pipefs / mqueue | yes (`pty.c`, `pipe.c`, mqueue in IPC) | yes | **Tie** |
+| GPT / MBR partition parse | yes (`gpt.c`, `mbr.c`) | yes | **Tie** |
+| xfs / btrfs / f2fs / zfs / nfs / cifs / fuse | **none** | all present | **Linux leads** (breadth) |
+| Journaling / extents-write / case-folding / reflink | none / read-only extents / none / none | yes (ext4/xfs/btrfs) | **Linux leads** |
+
+### C. Architectures & Boards
+
+| Dimension | Ranix | Linux | Who leads |
+|---|---|---|---|
+| ISAs | **2**: x86_64 (`arch/x86_64`), aarch64 (`arch/aarch64`) | ~25 (x86, arm, arm64, riscv, ppc, mips, s390, loongarch…) | Linux leads (breadth) |
+| Boards | x86 PC (`mach-pc`), QEMU virt (`mach-virt`), Raspberry Pi 4 / BCM2711 (`mach-bcm2711`, `linker_raspi4.ld`) | thousands of DT/ACPI platforms | Linux leads |
+| 32-bit / compat | **none** (no ia32, no aarch32, no ILP32) | full 32-bit + compat syscall layer | **Linux leads** |
+| SMP | yes, both arches | yes | **Tie** |
+
+### D. Device Classes
+
+| Class | Ranix (driver) | Linux | Who leads |
+|---|---|---|---|
+| Block | AHCI/SATA, NVMe, virtio-blk, Pi4 SD (sdhost), USB mass-storage (`drivers/block/*`, `usb/xhci.c`) | huge set | Ranix covers the common cases; Linux leads breadth |
+| Net | virtio-net, BCM GENET (Pi4) (`drivers/net/*`) | thousands of NICs | Linux leads |
+| Input | **PS/2 only** (`drivers/input/ps2`); **no USB HID** (xhci is mass-storage-only, `xhci.c:10`) | PS/2 + full USB HID + evdev | **Linux leads** (blocks real-Pi keyboard) |
+| Serial | 16550 (x86), PL011 (aarch64) (`drivers/serial`, `drivers/tty/serial/pl011`); **no USB-CDC/FTDI** | 16550/pl011 + USB-serial zoo | Linux leads (USB-serial) |
+| Display | framebuffer console only, single **8x16 font**, no setfont/KD modes (`fb_tty.c:10-11`) | fbdev + DRM/KMS, modesetting, multiple fonts | **Linux leads** |
+| USB | xHCI host, enumeration, **bulk mass-storage only** (`xhci.c:10`); no hubs/HID/CDC | full USB stack | **Linux leads** |
+| RTC | yes, read at boot (`arch_rtc_read`, `main.c:299`) | yes + rtc class, alarms | Comparable (read-only wall clock) |
+| IRQ chips | PIC/PIT/LAPIC (x86), GIC-400/arm-timer (aarch64) | all | Tie for targets |
+| Mailbox/firmware | BCM2711 mailbox (`drivers/mailbox`) for Pi4 fb/clocks | yes | Tie for Pi4 |
+
+### E. Console / TTY
+
+| Dimension | Ranix (file:line) | Linux | Who leads |
+|---|---|---|---|
+| Virtual terminals | `/dev/tty1..tty6` nodes exist but **share one physical console; no independent VTs / no VT switch** (`tty_core.c:410-416`) | 63 real VTs, Ctrl+Alt+Fn / chvt / VT_* ioctls | **Linux leads** |
+| Fonts | single fixed 8x16 (`fb_tty.c:10-11`); no setfont, no font sizes | setfont, PSF fonts, multiple sizes | **Linux leads** |
+| Scrollback | **none** (no history buffer; scroll only advances) (`fb_tty.c:128`) | yes (fbcon scrollback) | Linux leads |
+| Colors | 256-color ANSI (16 + 256 SGR) (`fb_tty.c:186-234`) | 256/truecolor | Comparable |
+| UTF-8 | yes, decoder present (`fb_tty.c:372-419`) | yes | **Tie** |
+| Line discipline | N_TTY subset: ICANON/ISIG/ECHO/erase + signal chars (`tty_core.c`) | full N_TTY + many ldiscs | Comparable for interactive shell |
+
+### F. Networking
+
+| Dimension | Ranix (file:line) | Linux | Who leads |
+|---|---|---|---|
+| Address families | AF_UNIX, AF_INET, AF_INET6 (`socket.h:12-14`) | + AF_PACKET, AF_NETLINK, AF_XDP, … | Linux leads |
+| Socket types | STREAM, DGRAM, RAW defined (`socket.h:15-17`) | + SEQPACKET, etc. | Comparable |
+| L3/L4 protocols | IPv4, IPv6, ICMP, ICMPv6, ARP, NDP, TCP, UDP, DHCP (`kernel/net/*`) | all + SCTP/DCCP/MPTCP | Strong coverage; Linux leads breadth |
+| TCP quality | SACK, timestamps, window scaling, **CUBIC** congestion control (`tcp.c:73,82,146`) | many CC algos, full stack | Surprisingly close; Linux leads (more CC, tuning) |
+| Routing table | **none** — loopback vs single default device only (`net.c:314-325`) | full FIB, multiple tables, policy routing | **Linux leads** |
+| Netlink / rtnetlink | **none** (grep finds nothing) | yes (iproute2 backbone) | **Linux leads** |
+| Firewall | static rules, `NF_MAX_RULES=32`, no conntrack/NAT (`netfilter.c:11`) | nftables/iptables + conntrack + NAT | **Linux leads** |
+| veth / bridge / bonding / VLAN | **none** | all | **Linux leads** (blocks container networking) |
+| Per-netns isolation | yes (CLONE_NEWNET, per-ns loopback) (`net.c`, `proc.c:427`) | yes | **Tie** (isolation exists; tooling/plumbing doesn't) |
+
+### G. Namespaces & cgroups
+
+| Dimension | Ranix (file:line) | Linux | Who leads |
+|---|---|---|---|
+| Namespace types | **all 8**: MNT, UTS, IPC, PID, NET, USER, CGROUP, TIME (`nsproxy.h:16-23`) | same 8 | **Tie** |
+| cgroup version | **v2 only** (`cgroup.c:2`) | v1 + v2 | Comparable (v2 is the modern path) |
+| cgroup controllers | **pids, memory, cpu(weight), freezer** (`cgroup.c:215-218`) | + io, cpuset, hugetlb, rdma, misc, pid events | **Linux leads** (no io/cpuset) |
+| uid/gid map extents | `UIDMAP_MAX_EXTENTS=5` (`user_namespace.h:19`) | up to 340 extents | Linux leads (rarely matters) |
+
+### H. Syscalls
+
+| Dimension | Ranix (file:line) | Linux | Who leads |
+|---|---|---|---|
+| Count dispatched | ~248 distinct `SYS_*` (`kernel/syscall.c`) | ~370 on x86_64 | Linux leads (breadth) |
+| Modern present | io_uring (subset), pidfd, seccomp(cBPF), memfd, eventfd, timerfd, signalfd, inotify, statx, process_vm_readv/writev, splice/copy_file_range, all clone3 ns flags | all | Good modern coverage |
+| io_uring ops | **~14 opcodes** (NOP/READV/WRITEV/FSYNC/READ/WRITE/SEND/RECV/SENDMSG/RECVMSG/ACCEPT + fixed) (`io_uring.h:38-50`) | 50+ opcodes | Linux leads |
+| bpf | **cBPF subset for seccomp only** (`syscall.c:238-279`); no eBPF, no maps, no JIT, no `bpf()` programs | full eBPF + maps + JIT + verifier | **Linux leads massively** |
+| Notably **missing** | userfaultfd, perf_event_open, timer_create/timer_settime (POSIX per-process timers), fanotify, landlock, kcmp, membarrier-variants, io_uring registered-buffer/poll breadth | present | **Linux leads** |
+
+### I. Scheduling & Time
+
+| Dimension | Ranix (file:line) | Linux | Who leads |
+|---|---|---|---|
+| Policies | SCHED_NORMAL + SCHED_FIFO/RR (head-insert, no per-prio ordering) (`sched.c:344-351`) | NORMAL/BATCH/IDLE + FIFO/RR (100 prios) + DEADLINE | **Linux leads** |
+| Fairness algorithm | round-robin, quantum = base − nice·base/40, ×cgroup weight (`sched.c:711-716`) | EEVDF/CFS (vruntime, weighted fair, latency target) | **Linux leads** |
+| Nice range | −20..+19 (quantum scaling) (`sched.c:711`) | −20..+19 | **Tie** (range) / Linux leads (proportional share) |
+| RT throttling | **none** (runaway RT can starve) | `rt_runtime` throttling | Linux leads |
+| Tick rate | **fixed 100 Hz**, `TIMER_HZ=100` (`board.h:7`); both arches | 100/250/300/1000 Hz configurable | Linux leads (configurable) |
+| High-res timers / NOHZ | **none** — ~10 ms granularity for nanosleep/itimer/timerfd | hrtimers (ns) + tickless idle | **Linux leads** |
+| Deadline (EDF) | none | SCHED_DEADLINE | Linux leads |
+
+### Where Linux most leads (capability/scale targets — distinct from the Top-20 correctness list)
+
+These are breadth/scale gaps, ranked by how much they cap real workloads on Ranix's own targets (Pi4 + containers):
+
+1. **exec arg/env limits — 64 args, 16 KB total, 256-byte paths** (`syscall_proc.c:996-997`, `proc.h:12`). vs Linux 2 MB / 2^31 / 4096. Real builds, shells globbing many files, and long `PATH`/CLI invocations will hit this — a *correctness-class* scale wall, not just a ceiling. Highest-impact, smallest fix.
+2. **No routing table + no netlink + no veth/bridge** (`net.c:314`, no netlink, `netfilter.c`). Per-netns isolation exists but there is no plumbing — blocks iproute2 and all real container networking despite all 8 namespaces being present.
+3. **No eBPF (only cBPF/seccomp), io_uring 14 ops** (`syscall.c:238`, `io_uring.h`). Modern observability, networking, and async-I/O ecosystems assume eBPF + deep io_uring.
+4. **Filesystem breadth + no journaling** — only ext2(+ext4 reads), read-only FAT/ISO; no xfs/btrfs/f2fs/nfs/fuse; ext2 has no jbd2 replay (`ext2.c:1436`). Power-loss durability and modern FS features absent.
+5. **No USB HID + no real VTs/scrollback/fonts** (`xhci.c:10`, `tty_core.c:410`, `fb_tty.c:10`). Directly blocks the stated Pi4 "graphical terminal + keyboard" experience — there's no PS/2 on a Pi, so no input at all on real hardware.
+
+Runners-up: tiny user VA (2 GB stack-top vs 128 TB), fixed 100 Hz / no hrtimers / no NOHZ, round-robin instead of EEVDF, cgroup io/cpuset controllers missing, RLIMIT enforcement limited to STACK+NOFILE.
+
+**Where Ranix already ties Linux** (don't manufacture gaps): all 8 namespace types, overlayfs + hugetlbfs + tmpfs/ramfs/proc/sys/dev present, NSIG=64, NAME_MAX=255, nice range −20..+19, UTF-8 console, 256-color ANSI, TCP with SACK/timestamps/window-scaling/CUBIC, per-netns loopback isolation, SMP on both arches, default PID_MAX and default NOFILE soft limit.
