@@ -393,6 +393,16 @@ check "devtmpfs-blknode" "b"        "$([ -b /dev/sata0 ] || [ -b /dev/vblk0 ] &&
 check "devtmpfs-blkread" "EFI PART" "$(dd if=/dev/sata0 bs=1 skip=512 count=8 2>/dev/null || dd if=/dev/vblk0 bs=1 skip=512 count=8 2>/dev/null)"
 check "devperm-eacces"  "OK"        "$(timeout 8 /bin/test_devperm 2>/dev/null)"
 fi
+# USB mass-storage over xHCI: usb0 enumerates and its sectors read/write over
+# the bulk-only SCSI READ(10)/WRITE(10) path (x86_64 test target, qemu-xhci).
+if [ -b /dev/usb0 ]; then
+check "usb-blknode"  "b"            "$([ -b /dev/usb0 ] && echo b)"
+# marker seeded at sector 2 reads back over the bulk-only READ(10) path
+check "usb-read"     "RANIX-USB-DISK-OK" "$(dd if=/dev/usb0 bs=512 skip=2 count=1 2>/dev/null | dd bs=1 count=17 2>/dev/null)"
+# write a sector and read it back: round-trips WRITE(10)+READ(10) on the device
+printf RANIXUSBWRITE | dd of=/dev/usb0 bs=512 seek=4000 count=1 2>/dev/null
+check "usb-write"    "RANIXUSBWRITE" "$(dd if=/dev/usb0 bs=512 skip=4000 count=1 2>/dev/null | dd bs=1 count=13 2>/dev/null)"
+fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"
 check "sys-net-state" "up"  "$(cat /sys/class/net/lo/operstate 2>/dev/null)"

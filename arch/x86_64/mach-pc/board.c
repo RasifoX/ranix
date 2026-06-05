@@ -63,6 +63,8 @@ void board_drivers_register(void)
 	virtio_blk_init();
 	extern void ahci_init(void);
 	ahci_init();
+	extern void xhci_init(void);
+	xhci_init();
 	virtio_net_pci_init();
 }
 

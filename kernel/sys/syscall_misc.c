@@ -1,4 +1,5 @@
 #include <kernel/capabilities.h>
+#include <kernel/block.h>
 
 /* ── statfs ──────────────────────────────────────────────── */
 
@@ -605,7 +606,7 @@ static long sys_sync(void) { return 0; }
 static long sys_mount(const char *source, const char *target, const char *fstype,
                       unsigned long flags, const void *data)
 {
-	(void)source; (void)flags;
+	(void)flags;
 	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	char ktarget[256]; char kfstype[64];
 	if (strncpy_from_user(ktarget, target, sizeof(ktarget)) < 0) return -14;
@@ -623,6 +624,20 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	if (strcmp(kfstype, "efivarfs") == 0) return 0;
 	if (strcmp(kfstype, "securityfs") == 0) return 0;
 	if (strcmp(kfstype, "configfs") == 0) return 0;
+
+	/* block-backed filesystems take a block_device as the fill data; resolve
+	 * source ("/dev/usb0") to its registered device. */
+	if (strcmp(fsname, "ext2") == 0 || strcmp(fsname, "ext4") == 0 ||
+	    strcmp(fsname, "vfat") == 0 || strcmp(fsname, "iso9660") == 0) {
+		char ksrc[256];
+		if (!source || strncpy_from_user(ksrc, source, sizeof(ksrc)) < 0) return -14;
+		const char *name = ksrc;
+		for (const char *p = ksrc; *p; p++)
+			if (*p == '/') name = p + 1;
+		block_device_t *bd = block_device_find(name);
+		if (!bd) return -1;
+		return vfs_mount(ktarget, fsname, bd) == 0 ? 0 : -1;
+	}
 
 	/* mount options string (tmpfs size=, overlay lowerdir/upperdir/workdir).
 	 * The fill callback consumes it synchronously, so a stack copy suffices. */
