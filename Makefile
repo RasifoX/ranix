@@ -114,6 +114,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/input/ps2/ps2.c \
         drivers/block/virtio_blk.c \
         drivers/block/ahci.c \
+        drivers/usb/xhci.c \
         drivers/net/virtio_net.c
 endif
 
@@ -469,6 +470,15 @@ $(BUILD_DIR)/gpt-test.img:
 	dd if=$(BUILD_DIR)/part.img of=$@ bs=512 seek=2048 conv=notrunc 2>/dev/null
 	@echo "[OK] gpt-test.img"
 
+# Small raw image on a USB mass-storage device (xHCI), x86_64 only. A marker at
+# a known sector is read back over the BOT/SCSI READ(10) path via dd /dev/usb0
+# to prove enumeration + block I/O. Deliberately not a filesystem so the kernel
+# auto-mounter (which owns /mnt for the disk gpt-ext4 test) ignores it.
+$(BUILD_DIR)/usb-test.img:
+	dd if=/dev/zero of=$@ bs=1M count=8 2>/dev/null
+	printf 'RANIX-USB-DISK-OK' | dd of=$@ bs=512 seek=2 conv=notrunc 2>/dev/null
+	@echo "[OK] usb-test.img"
+
 # A full disk rootfs (a copy of the initramfs tree) for the switch_root /
 # disk-root path: init pivots into this and runs it as the real /. The marker
 # script replaces the suite's test.sh. tests/diskroot.sh boots twice against it.
@@ -514,12 +524,15 @@ TEST_LOG = $(BUILD_DIR)/serial-test.log
 ifeq ($(ARCH),x86_64)
 # -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
-test: iso $(BUILD_DIR)/gpt-test.img
+test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img
 	@rm -f $(TEST_LOG)
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
 	    -drive id=d0,file=$(BUILD_DIR)/gpt-test.img,format=raw,if=none \
-	    -device ich9-ahci,id=ahci -device ide-hd,drive=d0,bus=ahci.0 || true
+	    -device ich9-ahci,id=ahci -device ide-hd,drive=d0,bus=ahci.0 \
+	    -drive id=u0,file=$(BUILD_DIR)/usb-test.img,format=raw,if=none \
+	    -device qemu-xhci,id=xhci,streams=off \
+	    -device usb-storage,bus=xhci.0,drive=u0 || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)
