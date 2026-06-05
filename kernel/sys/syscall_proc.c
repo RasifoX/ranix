@@ -965,16 +965,18 @@ static long sys_sched_get_priority_min(int policy)
 static long sys_execveat(int dirfd, const char *path, char * const argv[],
                          char * const envp[], int flags)
 {
-	char kp[256];
 	if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
 		vfs_file_t *f = fd_get(task_current()->fds, dirfd);
 		if (!f || !f->path[0]) return -9;
 		return sys_execve(f->path, argv, envp);
 	}
 	if (!path) return -14;
+	char *kp = kmalloc(PATH_MAX);
+	if (!kp) return -12;
 	int r = resolve_path(kp, dirfd, path);
-	if (r != 0) return r;
-	return sys_execve(kp, argv, envp);
+	long ret = r ? r : sys_execve(kp, argv, envp);
+	kfree(kp);
+	return ret;
 }
 
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
@@ -984,51 +986,73 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	process_t *p = task_current();
 
 	/* copy path to kernel buffer */
-	char kpath[PROC_NAME_MAX];
+	char *kpath = kmalloc(PATH_MAX);
+	if (!kpath) return -12;
 	int i = 0;
-	while (i < PROC_NAME_MAX - 1 && path[i]) {
+	while (i < PATH_MAX - 1 && path[i]) {
 		kpath[i] = path[i];
 		i++;
 	}
+	if (path[i]) { kfree(kpath); return -36; }   /* ENAMETOOLONG */
 	kpath[i] = '\0';
 
-	/* copy argv/envp strings to kernel before VM switch */
-#define EXEC_MAXARGS 64
-#define EXEC_MAXSTRTOTAL 16384
+	/* Stage argv/envp into kernel memory before the VM switch. The strings live
+	 * in a heap budget (ARG_STR_MAX); the pointer arrays are heap-sized to the
+	 * actual count. Over-budget strings or counts return -E2BIG (Linux). The
+	 * staged user stack (strings + pointer arrays + auxv) is later published into
+	 * the top ARG_WIN_PAGES pages of the new stack, so the whole block must fit
+	 * that window. */
+#define ARG_STR_MAX   (128 * 1024)
+#define ARG_WIN_PAGES 64                          /* 256 KB arg window */
+#define ARG_WIN_BYTES ((size_t)ARG_WIN_PAGES * PAGE_SIZE)
 	int argc = 0, envc = 0;
-	char *kstrs = kmalloc(EXEC_MAXSTRTOTAL);
-	char *kargv[EXEC_MAXARGS + 1];
-	char *kenvp[EXEC_MAXARGS + 1];
+	char *kstrs = kmalloc(ARG_STR_MAX);
+	if (!kstrs) { kfree(kpath); return -12; }
+
+	/* count args/env (bounded so an unterminated user array can't loop forever) */
+	int max_ptrs = (int)(ARG_WIN_BYTES / sizeof(uint64_t));
+	if (argv) while (argc < max_ptrs && argv[argc]) argc++;
+	if (envp) while (envc < max_ptrs && envp[envc]) envc++;
+
+	char **kargv = kmalloc((size_t)(argc + 1) * sizeof(char *));
+	char **kenvp = kmalloc((size_t)(envc + 1) * sizeof(char *));
+	if (!kargv || !kenvp) { kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -12; }
+
 	int koff = 0;
-	if (kstrs) {
-		if (argv) {
-			for (; argc < EXEC_MAXARGS && argv[argc]; argc++) {
-				const char *s = argv[argc];
-				int n = 0;
-				while (s[n] && koff + n < EXEC_MAXSTRTOTAL - 1) n++;
-				memcpy(kstrs + koff, s, n);
-				kstrs[koff + n] = '\0';
-				kargv[argc] = kstrs + koff;
-				koff += n + 1;
-			}
+	for (int a = 0; a < argc; a++) {
+		const char *s = argv[a];
+		int n = 0;
+		while (s[n]) n++;
+		if (koff + n + 1 > ARG_STR_MAX) {
+			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
 		}
-		if (envp) {
-			for (; envc < EXEC_MAXARGS && envp[envc]; envc++) {
-				const char *s = envp[envc];
-				int n = 0;
-				while (s[n] && koff + n < EXEC_MAXSTRTOTAL - 1) n++;
-				memcpy(kstrs + koff, s, n);
-				kstrs[koff + n] = '\0';
-				kenvp[envc] = kstrs + koff;
-				koff += n + 1;
-			}
-		}
+		memcpy(kstrs + koff, s, n);
+		kstrs[koff + n] = '\0';
+		kargv[a] = kstrs + koff;
+		koff += n + 1;
 	}
+	for (int e = 0; e < envc; e++) {
+		const char *s = envp[e];
+		int n = 0;
+		while (s[n]) n++;
+		if (koff + n + 1 > ARG_STR_MAX) {
+			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
+		}
+		memcpy(kstrs + koff, s, n);
+		kstrs[koff + n] = '\0';
+		kenvp[e] = kstrs + koff;
+		koff += n + 1;
+	}
+
+	/* free the heap staging that is no longer needed once a pre-switch step fails
+	 * (kstrs/kargv/kenvp survive until the user stack is built; kpath until the
+	 * exe path is recorded). */
+#define EXEC_STAGE_FREE() do { kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); } while (0)
 
 	/* read file from VFS */
 	vfs_stat_t st = {0};
-	if (vfs_stat(kpath, &st) != 0) { kfree(kstrs); return -2; }
-	if (st.size == 0)              { kfree(kstrs); return -2; }
+	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -2; }
+	if (st.size == 0)              { EXEC_STAGE_FREE(); return -2; }
 
 	/* resolve credentials for the new image */
 	uid_t new_euid = p->euid;
@@ -1037,22 +1061,22 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (st.mode & S_ISGID) new_egid = st.gid;
 
 	uint8_t *buf = kmalloc(st.size);
-	if (!buf) { kfree(kstrs); return -12; }
+	if (!buf) { EXEC_STAGE_FREE(); return -12; }
 
 	int fd = vfs_open(kpath, O_RDONLY, 0);
-	if (fd < 0) { kfree(buf); kfree(kstrs); return -2; }
+	if (fd < 0) { kfree(buf); EXEC_STAGE_FREE(); return -2; }
 	vfs_read(fd, buf, st.size);
 	vfs_close(fd);
 
 	/* build new address space */
 	vm_space_t *new_vm = vm_create();
-	if (!new_vm) { kfree(buf); kfree(kstrs); return -12; }
+	if (!new_vm) { kfree(buf); EXEC_STAGE_FREE(); return -12; }
 
 	elf_info_t ei = {0};
 	if (elf_load(new_vm, buf, (size_t)st.size, 0, &ei) != 0) {
 		kfree(buf);
 		vm_destroy(new_vm);
-		kfree(kstrs);
+		EXEC_STAGE_FREE();
 		return -8;
 	}
 	kfree(buf);
@@ -1073,18 +1097,18 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (ei.interp[0]) {
 		vfs_stat_t ist = {0};
 		if (vfs_stat(ei.interp, &ist) != 0 || ist.size == 0) {
-			vm_destroy(new_vm); kfree(kstrs); return -8;
+			vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8;
 		}
 		uint8_t *ibuf = kmalloc(ist.size);
-		if (!ibuf) { vm_destroy(new_vm); kfree(kstrs); return -12; }
+		if (!ibuf) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12; }
 		int ifd = vfs_open(ei.interp, O_RDONLY, 0);
-		if (ifd < 0) { kfree(ibuf); vm_destroy(new_vm); kfree(kstrs); return -8; }
+		if (ifd < 0) { kfree(ibuf); vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8; }
 		vfs_read(ifd, ibuf, ist.size);
 		vfs_close(ifd);
 
 		elf_info_t ii = {0};
 		if (elf_load(new_vm, ibuf, (size_t)ist.size, mmap_base, &ii) != 0) {
-			kfree(ibuf); vm_destroy(new_vm); kfree(kstrs); return -8;
+			kfree(ibuf); vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8;
 		}
 		kfree(ibuf);
 
@@ -1099,11 +1123,10 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* map user stack; remember the phys of the top ARG_WIN_PAGES pages so the
 	 * argv/envp/auxv block can be written through their kernel direct-map address
 	 * instead of raw user VAs (see the staging note below). */
-#define ARG_WIN_PAGES 8
 	uint64_t argpg[ARG_WIN_PAGES];
 	for (int j = 0; j < USER_STACK_PAGES_; j++) {
 		void *pg = buddy_alloc(0);
-		if (!pg) { vm_destroy(new_vm); kfree(kstrs); return -12; }
+		if (!pg) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12; }
 		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
 		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
@@ -1187,11 +1210,24 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * a nested trap re-enters mid-build with the half-initialised new vm active. The
 	 * staged copy is address-space- and IRQ-independent. The destination pages are
 	 * the already-mapped top stack pages (argpg[], captured above). */
-	uint64_t argbase = USER_STACK_TOP_ - (uint64_t)ARG_WIN_PAGES * PAGE_SIZE;
-	uint8_t *kbuf = kmalloc((size_t)ARG_WIN_PAGES * PAGE_SIZE);
-	if (!kbuf) return -12;
-	memset(kbuf, 0, (size_t)ARG_WIN_PAGES * PAGE_SIZE);
-#define KB(va) (kbuf + (((va) - argbase) & ((uint64_t)ARG_WIN_PAGES * PAGE_SIZE - 1)))
+	uint64_t argbase = USER_STACK_TOP_ - ARG_WIN_BYTES;
+
+	/* Reject before the point of no return (the VM switch) if the assembled
+	 * initial stack — strings + execfn + AT_RANDOM + auxv + the argv/envp pointer
+	 * vectors — would not fit the arg window. Beyond this the KB() mask would wrap
+	 * and silently corrupt; -E2BIG matches Linux. ~512 bytes covers auxv+padding. */
+	size_t need = (size_t)koff + PATH_MAX + 16 + 512 +
+	              (size_t)(argc + envc + 3) * sizeof(uint64_t);
+	if (need >= ARG_WIN_BYTES) { EXEC_STAGE_FREE(); return -7; }
+
+	uint64_t *uargv = kmalloc((size_t)(argc + 1) * sizeof(uint64_t));
+	uint64_t *uenvp = kmalloc((size_t)(envc + 1) * sizeof(uint64_t));
+	uint8_t  *kbuf  = kmalloc(ARG_WIN_BYTES);
+	if (!uargv || !uenvp || !kbuf) {
+		kfree(uargv); kfree(uenvp); kfree(kbuf); EXEC_STAGE_FREE(); return -12;
+	}
+	memset(kbuf, 0, ARG_WIN_BYTES);
+#define KB(va) (kbuf + (((va) - argbase) & (ARG_WIN_BYTES - 1)))
 
 	/* switch to new address space, freeing the old one */
 	vma_free_all(p);
@@ -1212,29 +1248,27 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		vma_add(p, interp_lo, interp_hi - interp_lo,
 		        VMA_USER | VMA_READ | VMA_WRITE | VMA_EXEC);
 
-	/* build SysV ABI initial stack — staged into kbuf (see ARG_WIN_PAGES above) */
-	uint64_t uargv[EXEC_MAXARGS + 1];
-	uint64_t uenvp[EXEC_MAXARGS + 1];
-	memset(uargv, 0, sizeof(uargv));
-	memset(uenvp, 0, sizeof(uenvp));
+	/* build SysV ABI initial stack — staged into kbuf */
+	memset(uargv, 0, (size_t)(argc + 1) * sizeof(uint64_t));
+	memset(uenvp, 0, (size_t)(envc + 1) * sizeof(uint64_t));
 
 	/* ASLR: randomize stack top within last stack page (up to 4080 bytes) */
 	uint64_t sp = USER_STACK_TOP_ - (no_aslr ? 0 : ((rng_next() & 0xffULL) << 4));
-	if (kstrs) {
-		for (int j = envc - 1; j >= 0; j--) {
-			int n = 0; while (kenvp[j][n]) n++;
-			sp -= (uint64_t)(n + 1);
-			memcpy(KB(sp), kenvp[j], (size_t)(n + 1));
-			uenvp[j] = sp;
-		}
-		for (int j = argc - 1; j >= 0; j--) {
-			int n = 0; while (kargv[j][n]) n++;
-			sp -= (uint64_t)(n + 1);
-			memcpy(KB(sp), kargv[j], (size_t)(n + 1));
-			uargv[j] = sp;
-		}
-		kfree(kstrs);
+	for (int j = envc - 1; j >= 0; j--) {
+		int n = 0; while (kenvp[j][n]) n++;
+		sp -= (uint64_t)(n + 1);
+		memcpy(KB(sp), kenvp[j], (size_t)(n + 1));
+		uenvp[j] = sp;
 	}
+	for (int j = argc - 1; j >= 0; j--) {
+		int n = 0; while (kargv[j][n]) n++;
+		sp -= (uint64_t)(n + 1);
+		memcpy(KB(sp), kargv[j], (size_t)(n + 1));
+		uargv[j] = sp;
+	}
+	kfree(kstrs);
+	kfree(kargv);
+	kfree(kenvp);
 	sp &= ~15ULL;
 
 	/* 16 random bytes for AT_RANDOM (used by libc for stack canary, etc.) */
@@ -1308,13 +1342,21 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 
 	/* publish the staged stack into the new address space via the pages' kernel
 	 * direct-map address — no user-VA stores, so a nested trap can't land them in
-	 * the wrong page */
-	for (int _i = 0; _i < ARG_WIN_PAGES; _i++)
+	 * the wrong page. Only the pages actually written ([sp, top)) need copying. */
+	int first_pg = (int)((sp - argbase) / PAGE_SIZE);
+	if (first_pg < 0) first_pg = 0;
+	for (int _i = first_pg; _i < ARG_WIN_PAGES; _i++)
 		memcpy((void *)PHYS_TO_VIRT(argpg[_i]),
 		       kbuf + (uint64_t)_i * PAGE_SIZE, PAGE_SIZE);
 	kfree(kbuf);
+	kfree(uargv);
+	kfree(uenvp);
+	kfree(kpath);
 #undef KB
 #undef ARG_WIN_PAGES
+#undef ARG_WIN_BYTES
+#undef ARG_STR_MAX
+#undef EXEC_STAGE_FREE
 
 	/* reinitialise context frame */
 	arch_context_init_user(p->ctx, jump_entry, sp);

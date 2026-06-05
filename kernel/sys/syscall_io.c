@@ -360,35 +360,58 @@ static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevent
 
 static long sys_symlink(const char *t, const char *lp)
 {
-	char kt[512], klp[512];
-	if (strncpy_from_user(kt,  t,  sizeof(kt))  < 0) return -14;
-	if (strncpy_from_user(klp, lp, sizeof(klp)) < 0) return -14;
-	return vfs_symlink(kt, klp);
+	char *kt = kmalloc(PATH_MAX);
+	if (!kt) return -12;
+	char *klp = kmalloc(PATH_MAX);
+	if (!klp) { kfree(kt); return -12; }
+	long ret;
+	int r;
+	if ((r = copy_path_from_user(kt, t)) || (r = copy_path_from_user(klp, lp)))
+		ret = r;
+	else
+		ret = vfs_symlink(kt, klp);
+	kfree(kt); kfree(klp);
+	return ret;
 }
 static long sys_symlinkat(const char *t, int d, const char *lp)
 {
-	char kt[512];
-	if (strncpy_from_user(kt, t, sizeof(kt)) < 0) return -14;
-	char klp[512];
-	int r = resolve_path(klp, d, lp);
-	if (r) return r;
-	return vfs_symlink(kt, klp);
+	char *kt = kmalloc(PATH_MAX);
+	if (!kt) return -12;
+	char *klp = kmalloc(PATH_MAX);
+	if (!klp) { kfree(kt); return -12; }
+	long ret;
+	int r;
+	if ((r = copy_path_from_user(kt, t)) || (r = resolve_path(klp, d, lp)))
+		ret = r;
+	else
+		ret = vfs_symlink(kt, klp);
+	kfree(kt); kfree(klp);
+	return ret;
 }
 static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
 {
 	(void)od; (void)nd; (void)f;
-	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
-	if (strncpy_from_user(ko, o, PROC_NAME_MAX) < 0) return -14;
-	if (strncpy_from_user(kn, n, PROC_NAME_MAX) < 0) return -14;
-	return vfs_link(ko, kn);
+	char *ko = kmalloc(PATH_MAX);
+	if (!ko) return -12;
+	char *kn = kmalloc(PATH_MAX);
+	if (!kn) { kfree(ko); return -12; }
+	long ret;
+	int r;
+	if ((r = copy_path_from_user(ko, o)) || (r = copy_path_from_user(kn, n)))
+		ret = r;
+	else
+		ret = vfs_link(ko, kn);
+	kfree(ko); kfree(kn);
+	return ret;
 }
 
 /* ── chmod / chown ───────────────────────────────────────── */
 
 static long sys_chmod(const char *p, mode_t m)
 {
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, p, PROC_NAME_MAX) < 0) return -14;
+	char kp[PATH_MAX];
+	int r = copy_path_from_user(kp, p);
+	if (r) return r;
 	return vfs_chmod(kp, m);
 }
 static long sys_fchmod(int fd, mode_t m)
@@ -402,13 +425,14 @@ static long sys_fchmod(int fd, mode_t m)
 static long sys_fchmodat(int d, const char *p, mode_t m, int f)
 {
 	(void)d; (void)f;
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, p, PROC_NAME_MAX) < 0) return -14;
+	char kp[PATH_MAX];
+	int r = copy_path_from_user(kp, p);
+	if (r) return r;
 	return vfs_chmod(kp, m);
 }
 static long sys_chown(const char *p, uid_t u, gid_t g)
 {
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, p);
 	if (r) return r;
 	return vfs_chown(kp, u, g);
@@ -426,7 +450,7 @@ static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int flags)
 		char t[2];
 		if (strncpy_from_user(t, p, 2) >= 0 && t[0] == '\0') return sys_fchown(d, u, g);
 	}
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, d, p);
 	if (r) return r;
 	return vfs_chown(kp, u, g);
@@ -511,7 +535,7 @@ static long sys_readv(int fd, const iovec_t *iov, int cnt)
 
 static long sys_open(const char *path, int flags, mode_t mode)
 {
-	char kpath[PROC_NAME_MAX];
+	char kpath[PATH_MAX];
 	int r = resolve_path(kpath, AT_FDCWD, path);
 	if (r) return r;
 	return vfs_open(kpath, flags, mode);
@@ -519,7 +543,7 @@ static long sys_open(const char *path, int flags, mode_t mode)
 
 static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 {
-	char kpath[PROC_NAME_MAX];
+	char kpath[PATH_MAX];
 	int r = resolve_path(kpath, dirfd, path);
 	if (r) return r;
 	long fd = vfs_open(kpath, flags, mode);
