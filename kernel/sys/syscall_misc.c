@@ -393,7 +393,10 @@ static long sys_creat(const char *path, mode_t mode)
 
 static long sys_lchown(const char *path, uid_t uid, gid_t gid)
 {
-	return sys_chown(path, uid, gid);
+	char kp[PATH_MAX];
+	int r = resolve_path(kp, AT_FDCWD, path);
+	if (r) return r;
+	return vfs_lchown(kp, uid, gid);
 }
 
 static long sys_getrusage(int who, void *usage)
