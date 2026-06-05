@@ -278,6 +278,17 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			p = end; continue;
 		}
 
+		/* A path component can only be resolved against a directory. Descending
+		 * into a non-directory (e.g. "/file/x") is ENOTDIR — and crucially, a
+		 * filesystem's lookup op may reinterpret the inode's private data by type
+		 * (ramfs reads it as a dir entry list), so calling it on a regular file
+		 * walks file bytes as a pointer chain and faults. Reject here. */
+		if (d->inode && !S_ISDIR(d->inode->mode)) {
+			spin_unlock_irq(&vfs_lock, f);
+			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
+			return NULL;
+		}
+
 		/* look in dentry children first (skip if parent marks children volatile) */
 		vfs_dentry_t *child = NULL;
 		if (!d_is_volatile && (!d->inode || !d->inode->no_cache)) {

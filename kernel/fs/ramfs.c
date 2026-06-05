@@ -134,6 +134,7 @@ static vfs_fops_t ramfs_dir_fops = { 0 };
 
 static vfs_inode_t *ramfs_lookup(vfs_inode_t *dir, const char *name)
 {
+	if (!S_ISDIR(dir->mode)) return NULL;   /* priv is a file struct, not an entry list */
 	ramfs_dir_t *rd = dir->priv;
 	if (!rd) return NULL;
 	for (ramfs_entry_t *e = rd->entries; e; e = e->next)

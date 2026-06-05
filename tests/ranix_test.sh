@@ -441,6 +441,7 @@ check "c-closerange" "OK"  "$(timeout 10 /bin/test_closerange 2>/dev/null | tail
 check "c-pathsweep"  "OK"  "$(timeout 12 /bin/test_pathsweep 2>/dev/null | tail -1)"
 check "c-spairsweep" "OK"  "$(timeout 10 /bin/test_spairsweep 2>/dev/null | tail -1)"
 check "c-bigdir"     "OK"  "$(timeout 15 /bin/test_bigdir 2>/dev/null | tail -1)"
+check "c-ramchurn"   "OK"  "$(timeout 30 /bin/test_ramchurn 2>/dev/null | tail -1)"
 check "c-ptysweep"   "OK"  "$(timeout 10 /bin/test_ptysweep 2>/dev/null | tail -1)"
 check "c-envsweep"   "OK"  "$(timeout 10 /bin/test_envsweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
@@ -583,6 +584,40 @@ sleep 2
 timeout -s KILL 25 dbclient -y -y -i /tmp/id -p 2222 root@127.0.0.1 'echo SSHWORKS' >/tmp/d2 2>/dev/null
 kill -9 $DBPID 2>/dev/null
 check "c-ssh-session" "SSHWORKS" "$(grep -c SSHWORKS /tmp/d2 >/dev/null && echo SSHWORKS)"
+
+# ── CPython: real interpreter importing from the 9.4MB stdlib zip + file churn.
+# This is the load that GP-faulted the kernel: zipimport stat()s paths *into* the
+# zip (e.g. .../python312.zip/json), which made the resolver call ramfs lookup on
+# the zip's regular-file inode and walk its bytes as a dir entry list. Only runs
+# when a python3 was cross-built into the image (make python). ───────────────────
+if [ -x /bin/python3 ]; then
+	export PYTHONHOME=/usr
+	export PYTHONPATH=/usr/lib/python312.zip
+	# Run inline (-c) so the heredoc temp file isn't on the critical path. The
+	# imports drag many modules out of the 9.4MB stdlib zip — the heavy zip
+	# stat/open/read storm + per-file create/read/stat/unlink churn that used to
+	# alias a ramfs slab object onto the zip buffer and GP-fault the kernel.
+	PYPROG='import os, json, collections, re, textwrap, string
+d = "/tmp/pyout"
+os.makedirs(d, exist_ok=True)
+acc = 0
+for i in range(200):
+    rec = {"i": i, "txt": textwrap.fill("the quick brown fox " * 8, 30),
+           "tag": string.ascii_lowercase[i % 26] * (i % 7 + 1)}
+    p = os.path.join(d, "rec_%d.json" % i)
+    with open(p, "w") as fh:
+        json.dump(rec, fh)
+    with open(p) as fh:
+        back = json.load(fh)
+    assert back["i"] == i
+    assert os.stat(p).st_size > 0
+    acc += len(re.findall(r"\\w+", back["txt"]))
+    if i % 3 == 0:
+        os.remove(p)
+print("PYOK", acc, collections.Counter("mississippi")["s"])'
+	check "c-python" "1" \
+	    "$(timeout 90 python3 -c "$PYPROG" 2>/dev/null | grep -c '^PYOK')"
+fi
 
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
