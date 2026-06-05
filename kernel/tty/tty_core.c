@@ -258,6 +258,8 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
 
+static vfs_fops_t tty_fops;
+
 static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
     (void)f;
@@ -313,7 +315,15 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         t->fg_pgrp = pgrp;
         return 0;
     }
-    if (cmd == TIOCSCTTY) return 0;
+    if (cmd == TIOCSCTTY) {
+        process_t *cur = task_current();
+        if (cur) {
+            if (cur->pgrp > 0) t->fg_pgrp = cur->pgrp;
+            cur->ctty = t;
+            cur->ctty_fops = &tty_fops;
+        }
+        return 0;
+    }
     return -25;
 }
 
@@ -324,9 +334,56 @@ static vfs_fops_t tty_fops = {
     .ioctl = tty_ioctl,
 };
 
+/* /dev/tty — the calling process's controlling terminal. Routes read/write/
+ * ioctl/poll to whatever the session set via TIOCSCTTY (a pts slave or the
+ * console); with no ctty it falls back to the console line discipline. */
+static vfs_fops_t *ctty_fops(void **obj)
+{
+    process_t *cur = task_current();
+    if (cur && cur->ctty && cur->ctty_fops) { *obj = cur->ctty; return cur->ctty_fops; }
+    *obj = &tty0;
+    return &tty_fops;
+}
+
+static ssize_t ctty_read(vfs_file_t *f, void *buf, size_t len)
+{
+    void *obj; vfs_fops_t *fo = ctty_fops(&obj);
+    if (!fo->read) return -22;
+    vfs_file_t tmp = *f; tmp.priv = obj;
+    return fo->read(&tmp, buf, len);
+}
+static ssize_t ctty_write(vfs_file_t *f, const void *buf, size_t len)
+{
+    void *obj; vfs_fops_t *fo = ctty_fops(&obj);
+    if (!fo->write) return -22;
+    vfs_file_t tmp = *f; tmp.priv = obj;
+    return fo->write(&tmp, buf, len);
+}
+static int ctty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
+{
+    void *obj; vfs_fops_t *fo = ctty_fops(&obj);
+    if (!fo->ioctl) return -25;
+    vfs_file_t tmp = *f; tmp.priv = obj;
+    return fo->ioctl(&tmp, cmd, arg);
+}
+static int ctty_poll(vfs_file_t *f)
+{
+    void *obj; vfs_fops_t *fo = ctty_fops(&obj);
+    if (!fo->poll) return 1;
+    vfs_file_t tmp = *f; tmp.priv = obj;
+    return fo->poll(&tmp);
+}
+
+static vfs_fops_t ctty_dev_fops = {
+    .read  = ctty_read,
+    .write = ctty_write,
+    .poll  = ctty_poll,
+    .ioctl = ctty_ioctl,
+};
+
 void tty_core_init(void)
 {
-    devfs_register_device("tty",     S_IFCHR | 0666, 0x0500, &tty_fops);
+    devfs_register_device("tty",     S_IFCHR | 0666, 0x0500, &ctty_dev_fops);
     devfs_register_device("console", S_IFCHR | 0600, 0x0501, &tty_fops);
     devfs_register_device("tty0",    S_IFCHR | 0666, 0x0400, &tty_fops);
     /* /dev/tty1..tty6 — the virtual-console nodes Linux exposes (getty/login,

@@ -551,6 +551,8 @@ static long sys_setsid(void) {
 	process_t *p = task_current();
 	p->pgrp = (pid_t)p->pid;
 	p->sid  = (pid_t)p->pid;
+	p->ctty = NULL;
+	p->ctty_fops = NULL;
 	return (long)p->pid;
 }
 static long sys_setpgid(pid_t pid, pid_t pgid) {

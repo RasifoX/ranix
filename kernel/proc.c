@@ -362,6 +362,8 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	memcpy(child->cwd, parent->cwd, 256);
 	child->root         = parent->root;
 	child->umask = parent->umask;
+	child->ctty         = parent->ctty;
+	child->ctty_fops    = parent->ctty_fops;
 
 	{
 		vma_t **dst = &child->vmas;
@@ -503,6 +505,8 @@ pid_t proc_vfork(void)
 	memcpy(child->cwd, parent->cwd, 256);
 	child->root         = parent->root;
 	child->umask        = parent->umask;
+	child->ctty         = parent->ctty;
+	child->ctty_fops    = parent->ctty_fops;
 	child->sighand      = sighand_alloc(parent->sighand);
 	if (!child->sighand) { buddy_free(VIRT_TO_PHYS(child), 0); return -1; }
 	child->sig_mask     = parent->sig_mask;
@@ -609,6 +613,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 	child->root  = parent->root;
 	child->umask = parent->umask;
+	child->ctty      = parent->ctty;
+	child->ctty_fops = parent->ctty_fops;
 
 	/* Threads share signal dispositions (CLONE_SIGHAND) but each has its own
 	 * blocked mask, inherited from the creator. */
