@@ -552,6 +552,8 @@ echo "---"
 
 # ── 46. SMP — nproc ve affinity ───────────────────────────────
 check "smp-nproc"     "4"  "$(nproc)"
+check "c-rlimit"      "OK"            "$(timeout 10 /bin/test_rlimit 2>/dev/null)"
+check "c-affinity2"   "OK"            "$(timeout 12 /bin/test_affinity2 2>/dev/null)"
 check "smp-affinity-nproc" "4" \
     "$(timeout 5 /bin/test_affinity 2>/dev/null | grep '^nproc=' | sed 's/nproc=//')"
 check "smp-threads-ok" "OK" \

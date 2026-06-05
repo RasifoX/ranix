@@ -195,6 +195,7 @@ typedef struct {
     uint64_t    *cloexec;
     spinlock_t   lock;      /* guards files[]/open_bm/cloexec and the per-fd refcount bumps */
     int          refcount;  /* number of threads sharing this table */
+    int          rlim_nofile; /* RLIMIT_NOFILE soft cap: fd_alloc refuses fd >= this (EMFILE) */
 } fd_table_t;
 
 /* ── VMA (virtual memory area) ───────────────────────────── */

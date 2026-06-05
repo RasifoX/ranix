@@ -374,6 +374,30 @@ static process_t *cpu_rq_pop(cpu_context_t *cpu)
 	return p;
 }
 
+/* sched_setaffinity restriction: bit i of p->cpu_affinity allows CPU i; a 0
+ * mask is the default (unrestricted). */
+static inline int cpu_allowed(process_t *p, int cpu_id)
+{
+	return p->cpu_affinity == 0 || (p->cpu_affinity & (1ULL << cpu_id));
+}
+
+/* pop the first queued task allowed on self_id (work-stealing respects
+ * sched_setaffinity: a pinned task must not be dragged onto a forbidden CPU) */
+static process_t *cpu_rq_steal(cpu_context_t *cpu, int self_id)
+{
+	process_t *prev = NULL;
+	for (process_t *p = cpu->rq_head; p; prev = p, p = p->sched_next) {
+		if (!cpu_allowed(p, self_id)) continue;
+		if (prev) prev->sched_next = p->sched_next;
+		else cpu->rq_head = p->sched_next;
+		if (cpu->rq_tail == p) cpu->rq_tail = prev;
+		p->sched_next = NULL;
+		p->in_rq = 0;
+		return p;
+	}
+	return NULL;
+}
+
 /* Count processes in a CPU's runqueue */
 static int cpu_rq_len(cpu_context_t *cpu)
 {
@@ -382,20 +406,21 @@ static int cpu_rq_len(cpu_context_t *cpu)
 	return n;
 }
 
-/* Pick the least-loaded online CPU (both arches — without this, x86 piled
- * every task onto the CPU that forked it while the others sat idle). */
-static cpu_context_t *pick_cpu(void)
+/* Pick the least-loaded online CPU the task is allowed on (both arches —
+ * without this, x86 piled every task onto the CPU that forked it). */
+static cpu_context_t *pick_cpu(process_t *p)
 {
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
-	cpu_context_t *best = arch_get_cpu_ctx();
-	int best_len = cpu_rq_len(best);
+	cpu_context_t *best = NULL;
+	int best_len = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
-		if (!c || !c->online) continue;
+		if (!c || !c->online || !cpu_allowed(p, i)) continue;
 		int l = cpu_rq_len(c);
-		if (l < best_len) { best = c; best_len = l; }
+		if (!best || l < best_len) { best = c; best_len = l; }
 	}
+	if (!best) best = arch_get_cpu_ctx();   /* mask excludes all online CPUs: fall back */
 	return best;
 }
 
@@ -403,7 +428,7 @@ static cpu_context_t *pick_cpu(void)
 static void runqueue_add(process_t *p)
 {
 	if (p->pid == 0) return;
-	cpu_context_t *cpu = pick_cpu();
+	cpu_context_t *cpu = pick_cpu(p);
 	cpu_rq_add(cpu, p);
 	cpu->need_resched = 1;
 	if (cpu != arch_get_cpu_ctx()) {
@@ -418,15 +443,16 @@ static void runqueue_add(process_t *p)
 static process_t *runqueue_pop(void)
 {
 	cpu_context_t *cpu = arch_get_cpu_ctx();
+	int self_id = (int)cpu->cpu_id;
 	process_t *p = cpu_rq_pop(cpu);
 	if (p) return p;
 
-	/* work stealing: find busiest CPU */
+	/* work stealing: steal the first affinity-allowed task off the busiest CPU.
+	 * A lone runnable task on a busy CPU must not starve this idle one. */
 	extern int smp_ncpus;
 	extern cpu_context_t *all_cpus[];
 	cpu_context_t *victim = NULL;
-	int max_len = 0;  /* steal any queued task — a lone runnable task on a busy
-	                     CPU must not starve while this CPU is idle */
+	int max_len = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
 		if (!c || !c->online || c == cpu) continue;
@@ -434,7 +460,7 @@ static process_t *runqueue_pop(void)
 		if (l > max_len) { victim = c; max_len = l; }
 	}
 	if (!victim) return NULL;
-	return cpu_rq_pop(victim);
+	return cpu_rq_steal(victim, self_id);
 }
 
 

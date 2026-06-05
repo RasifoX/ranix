@@ -921,37 +921,62 @@ static long sys_utimensat(int dirfd, const char *path, const void *times, int fl
 
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
-	(void)pid; (void)new_limit;
+	if (resource < 0 || resource >= 16) return -22;
+	if (old_limit && !access_ok(old_limit, 16)) return -14;
+	if (new_limit && !access_ok(new_limit, 16)) return -14;
+	process_t *p = pid ? proc_get(pid) : task_current();
+	if (!p) return -3;
+	rlimit_seed(p);
 	if (old_limit) {
-		uint64_t limits[2];
-		switch (resource) {
-		case 3:  /* RLIMIT_STACK  */ limits[0] = limits[1] = 8UL << 20; break;
-		case 7:  /* RLIMIT_NOFILE */ limits[0] = limits[1] = FD_MAX; break;
-		default: limits[0] = limits[1] = (uint64_t)-1; break; /* RLIM_INFINITY */
-		}
-		copy_to_user(old_limit, limits, 16);
+		uint64_t cur[2] = { p->rlim_cur[resource], p->rlim_max[resource] };
+		if (copy_to_user(old_limit, cur, 16)) { if (pid) proc_put(p); return -14; }
 	}
-	return 0;
+	long rc = 0;
+	if (new_limit) {
+		uint64_t nl[2];
+		if (copy_from_user(nl, new_limit, 16)) rc = -14;
+		else rc = do_setrlimit(p, resource, nl[0], nl[1]);
+	}
+	if (pid) proc_put(p);
+	return rc;
 }
 
 static long sys_sched_yield(void) { yield(); return 0; }
 
 static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 {
-	(void)pid; (void)len; (void)mask;
+	extern int smp_ncpus;
+	if (len < 8 || !access_ok(mask, len)) return -22;
+	uint64_t m;
+	if (copy_from_user(&m, mask, 8)) return -14;
+	uint64_t online = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
+	if ((m & online) == 0) return -22;             /* mask selects no online CPU */
+	process_t *p = pid ? proc_get(pid) : task_current();
+	if (!p) return -3;
+	uint64_t aff = (m & online) == online ? 0 : (m & online);
+	p->cpu_affinity = aff;
+	int is_self = (p == task_current());
+	if (pid) proc_put(p);
+	if (is_self && aff) {
+		/* re-evaluate placement: if the current CPU is now excluded, yield so
+		 * the next enqueue reassigns us to an allowed CPU. */
+		int cid = (int)arch_get_cpu_ctx()->cpu_id;
+		if (!(aff & (1ULL << cid))) yield();
+	}
 	return 0;
 }
 
 static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 {
-	(void)pid;
-	if (len >= 8 && access_ok(mask, len)) {
-		extern int smp_ncpus;
-		uint64_t m = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
-		copy_to_user(mask, &m, 8);
-		return 8;
-	}
-	return -22; /* EINVAL */
+	if (len < 8 || !access_ok(mask, len)) return -22;
+	extern int smp_ncpus;
+	uint64_t online = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
+	process_t *p = pid ? proc_get(pid) : task_current();
+	if (!p) return -3;
+	uint64_t m = p->cpu_affinity ? p->cpu_affinity : online;
+	if (pid) proc_put(p);
+	copy_to_user(mask, &m, 8);
+	return 8;
 }
 
 #define PR_SET_NAME    15
