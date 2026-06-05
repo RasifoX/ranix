@@ -407,11 +407,20 @@ fi
 # READ/WRITE command path (x86_64 test target, qemu -device nvme).
 if [ -b /dev/nvme0n1 ]; then
 check "nvme-blknode" "b"            "$([ -b /dev/nvme0n1 ] && echo b)"
-# marker seeded at sector 2 reads back over the NVM READ command
-check "nvme-read"    "RANIX-NVME-DISK-OK" "$(dd if=/dev/nvme0n1 bs=512 skip=2 count=1 2>/dev/null | dd bs=1 count=18 2>/dev/null)"
+# marker seeded past the ext2 fs (sector 12000) reads back over the NVM READ command
+check "nvme-read"    "RANIX-NVME-DISK-OK" "$(dd if=/dev/nvme0n1 bs=512 skip=12000 count=1 2>/dev/null | dd bs=1 count=18 2>/dev/null)"
 # write a sector and read it back: round-trips NVM WRITE+READ on the namespace
-printf RANIXNVMEWRITE | dd of=/dev/nvme0n1 bs=512 seek=4000 count=1 2>/dev/null
-check "nvme-write"   "RANIXNVMEWRITE" "$(dd if=/dev/nvme0n1 bs=512 skip=4000 count=1 2>/dev/null | dd bs=1 count=14 2>/dev/null)"
+printf RANIXNVMEWRITE | dd of=/dev/nvme0n1 bs=512 seek=13000 count=1 2>/dev/null
+check "nvme-write"   "RANIXNVMEWRITE" "$(dd if=/dev/nvme0n1 bs=512 skip=13000 count=1 2>/dev/null | dd bs=1 count=14 2>/dev/null)"
+# ── ext2 multi-instance: nvme ext2 at /mnt2 coexists with the gpt-ext4 at /mnt ──
+mkdir -p /mnt2 2>/dev/null
+mount -t ext2 /dev/nvme0n1 /mnt2 2>/dev/null
+check "ext2-multi-mnt2"   "ranix-nvme-ext2-ok" "$(cat /mnt2/marker.txt 2>/dev/null)"
+check "ext2-multi-mnt"    "ranix-gpt-ok"       "$(cat /mnt/hello.txt 2>/dev/null)"
+# write into /mnt2 and confirm /mnt's marker file is untouched (separate caches)
+echo -n ranix-mnt2-w > /mnt2/w2.txt 2>/dev/null
+check "ext2-multi-iso"    "ranix-mnt2-w|ranix-gpt-ok" "$(cat /mnt2/w2.txt 2>/dev/null)|$(cat /mnt/hello.txt 2>/dev/null)"
+umount /mnt2 2>/dev/null
 fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"

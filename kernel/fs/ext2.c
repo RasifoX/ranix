@@ -1356,7 +1356,15 @@ static vfs_iops_t ext2_iops = {
 
 /* ── mount ───────────────────────────────────────────────────── */
 
-static ext2_fs_t g_ext2_fs;
+static void ext2_kill_sb(void *priv)
+{
+	ext2_fs_t *fs = priv;
+	if (!fs) return;
+	for (int i = 0; i < EXT2_BCACHE_N; i++)
+		ext2_free_page(fs->cache[i].buf);
+	if (fs->ra_buf) buddy_free(VIRT_TO_PHYS((uint64_t)fs->ra_buf), fs->ra_order);
+	kfree(fs);
+}
 
 int ext2_mount(vfs_mount_t *mnt, void *data)
 {
@@ -1386,7 +1394,9 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		return -1;
 	}
 
-	ext2_fs_t *fs = &g_ext2_fs;
+	ext2_fs_t *fs = kmalloc(sizeof(*fs));
+	if (!fs) { ext2_free_page(sb_buf); return -1; }
+	memset(fs, 0, sizeof(*fs));
 	fs->bdev              = bdev;
 	fs->block_size        = bs;
 	fs->sectors_per_block = bs / 512;
@@ -1400,23 +1410,15 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		fs->total_blocks |= (uint64_t)sb->s_blocks_count_hi << 32;
 	fs->num_groups        = (uint32_t)((fs->total_blocks + sb->s_blocks_per_group - 1) / sb->s_blocks_per_group);
 	fs->desc_size         = (sb->s_desc_size >= 32) ? sb->s_desc_size : 32;
-	fs->cache_clock = 0;
 	fs->cache_lock  = (spinlock_t)SPINLOCK_INIT;
-	fs->ra_last     = 0;
-	fs->ra_ahead    = 0;
-	fs->ra_window   = 0;
-	for (int i = 0; i < EXT2_BCACHE_N; i++) {
-		fs->cache[i].blkno  = ~0ULL;
-		fs->cache[i].buf    = NULL;
-		fs->cache[i].lru_ts = 0;
-	}
+	for (int i = 0; i < EXT2_BCACHE_N; i++)
+		fs->cache[i].blkno = ~0ULL;
 
 	/* one contiguous scratch big enough for a full readahead window; if the
 	 * allocation fails readahead just stays off and reads fall back to 1 block. */
 	int ra_order = 0;
 	uint64_t ra_bytes = (uint64_t)EXT2_RA_MAX * fs->block_size;
 	while ((4096ULL << ra_order) < ra_bytes) ra_order++;
-	if (fs->ra_buf) buddy_free(VIRT_TO_PHYS((uint64_t)fs->ra_buf), fs->ra_order);
 	void *rp = buddy_alloc(ra_order);
 	fs->ra_buf   = rp ? (uint8_t *)PHYS_TO_VIRT((uint64_t)rp) : NULL;
 	fs->ra_order = ra_order;
@@ -1439,16 +1441,19 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	ext2_inode_t root_raw;
 	if (read_inode(fs, EXT2_ROOT_INO, &root_raw) != 0) {
 		kprintf("ext2: cannot read root inode\n");
+		ext2_kill_sb(fs);
 		return -1;
 	}
 
 	vfs_inode_t *root_vi = ext2_vfs_inode(fs, EXT2_ROOT_INO, &root_raw);
-	if (!root_vi) return -1;
+	if (!root_vi) { ext2_kill_sb(fs); return -1; }
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_vi);
-	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); return -1; }
+	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); ext2_kill_sb(fs); return -1; }
 
-	mnt->root = root_dentry;
+	mnt->priv    = fs;
+	mnt->kill_sb = ext2_kill_sb;
+	mnt->root    = root_dentry;
 	kprintf("ext2: mounted (ino root=%u)\n", EXT2_ROOT_INO);
 	return 0;
 }
