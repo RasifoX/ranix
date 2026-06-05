@@ -385,3 +385,23 @@ irq_stub_ipi:
 	restore_context
 	addq $16, %rsp
 	iretq
+
+/* TLB shootdown IPI — vector 0xF2. Flushes the local TLB and acks. Never
+ * reschedules and never touches task->ctx, so it is safe to take while the
+ * kernel is mid-syscall (the CPL gate does not apply: there is nothing to
+ * preempt). */
+.global irq_stub_tlbshoot
+irq_stub_tlbshoot:
+	testq $3, 8(%rsp)
+	jz 1f
+	swapgs
+1:	pushq $0
+	pushq $0xF2
+	save_context
+	call tlb_shootdown_handler
+	restore_context
+	addq $16, %rsp
+	testq $3, 8(%rsp)
+	jz 2f
+	swapgs
+2:	iretq

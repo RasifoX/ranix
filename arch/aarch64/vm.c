@@ -386,6 +386,14 @@ uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
 	return (l3[l3i] & ~0xFFFUL);
 }
 
+/* The PTE-downgrade paths in this file already broadcast `tlbi ...is`
+ * (inner-shareable), which the hardware propagates to every core, so a
+ * software cross-CPU shootdown is unnecessary here. */
+void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end)
+{
+	(void)vs; (void)start; (void)end;
+}
+
 void arch_vm_switch(uint64_t root_phys, uint32_t asid)
 {
 	/* Load TTBR0 with the space's ASID in [63:48]. User PTEs are non-global
