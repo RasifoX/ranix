@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <termios.h>
 #include <sys/ioctl.h>
 
 #ifndef TIOCGPTN
@@ -27,6 +28,10 @@ int main(void)
 	snprintf(path, sizeof(path), "/dev/pts/%d", n);
 	int s = open(path, O_RDWR);
 	if (s < 0) { puts("FAIL pts-open"); return 0; }
+
+	/* raw byte-stream pty (no canonical buffering / echo), as openpty users do */
+	struct termios tio;
+	if (tcgetattr(s, &tio) == 0) { cfmakeraw(&tio); tcsetattr(s, TCSANOW, &tio); }
 
 	char buf[16];
 	if (write(m, "hi", 2) != 2) { puts("FAIL m-write"); return 0; }

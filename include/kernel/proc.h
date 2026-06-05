@@ -146,6 +146,11 @@ typedef struct process {
 	mode_t          umask;
 	void           *root;   /* chroot dir (vfs_dentry_t*); NULL = global root "/" */
 
+	/* controlling terminal: object + its fops, set on TIOCSCTTY, cleared on
+	 * exit/hangup. /dev/tty routes a session leader's I/O here. */
+	void           *ctty;
+	vfs_fops_t     *ctty_fops;
+
 	/* ── virtual memory regions ──────────────── */
 	vma_t          *vmas;
 

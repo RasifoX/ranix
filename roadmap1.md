@@ -624,8 +624,11 @@ Doğrulama: iki Ranix guest `-netdev socket` ile L2'de → `ping6` A→B **3/3 %
 - [x] PCIe capability walk ✅ (pci_cap_ids/pci_find_cap: status bit-4→0x34→next zincir; /sys/bus/pci/devices/<addr>/capabilities cap-ID listesi; MSI/MSI-X/PCIe/PM keşfi; test_pcicaps)
 
 ### Terminal (pseudo-terminal)
-- [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN; raw mode)
+- [x] ptmx / pts — pseudo-terminal ✅ (/dev/ptmx + /dev/pts/N, çift yönlü, TIOCGPTN)
 - [x] proper TTY line discipline (canonical mod, erase, kill, intr) ✅ (canonical/erase/intr vardı; VKILL satır-silme + VERASE eklendi)
+- [x] **pts N_TTY line discipline** ✅ (2026-06-05: pts artık ICANON satır-tampon + ECHO + ERASE/^U + ^D EOF + ISIG ^C/^Z/^\ → fg_pgrp + ICRNL/OPOST/ONLCR; default canonical, cfmakeraw ile raw; pty read'leri sinyalle kesilebilir EINTR)
+- [x] **controlling terminal + /dev/tty routing** ✅ (2026-06-05: process_t.ctty TIOCSCTTY'de set, setsid'de temizlenir, fork'ta miras; /dev/tty oturumun ctty'sine yönlendiriyor — pts slave veya konsol)
+- [x] **interaktif shell pts üzerinde** ✅ (2026-06-05: test_ptyshell — -sh pts'te prompt+echo+komut çalıştırma; c-ptyshell PASS iki arch)
 - [x] TIOCSWINSZ window resize ✅ (2026-06-03: tty_core stored winsize + SIGWINCH; pty'de zaten vardı)
 - [x] openpty / forkpty ✅ (2026-06-03: musl openpty+forkpty PASS — kernel ptmx/pts/TIOCGPTN/TIOCSCTTY yeterli)
 
