@@ -1562,6 +1562,45 @@ int vfs_chown(const char *path, uid_t uid, gid_t gid)
 	return vfs_chown_inode(d->inode, uid, gid);
 }
 
+/* resolve the final path component WITHOUT following a terminal symlink and
+ * return its (cached) inode, so chmod/chown can act on the link itself. */
+static vfs_inode_t *vfs_lresolve(const char *path)
+{
+	int len = (int)strlen(path);
+	const char *slash = path + (len > 0 ? len - 1 : 0);
+	while (slash > path && *slash != '/') slash--;
+	if (slash[1] == '\0') {                              /* trailing slash / root */
+		vfs_dentry_t *d = vfs_dentry_resolve(path);
+		return d ? d->inode : NULL;
+	}
+	const char *fname;
+	char *parent_path = vfs_parent_alloc(path, &fname);
+	if (!parent_path) return NULL;
+	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
+	kfree(parent_path);
+	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->lookup)
+		return NULL;
+	return parent->inode->iops->lookup(parent->inode, fname);
+}
+
+int vfs_lchown(const char *path, uid_t uid, gid_t gid)
+{
+	vfs_inode_t *in = vfs_lresolve(path);
+	if (!in) return -2;
+	int rc = vfs_chown_inode(in, uid, gid);
+	if (!in->cached) kfree(in);
+	return rc;
+}
+
+int vfs_lchmod(const char *path, mode_t mode)
+{
+	vfs_inode_t *in = vfs_lresolve(path);
+	if (!in) return -2;
+	in->mode = (in->mode & 0xF000) | (mode & 07777);
+	if (!in->cached) kfree(in);
+	return 0;
+}
+
 int vfs_link(const char *oldpath, const char *newpath)
 {
 	vfs_dentry_t *od = vfs_dentry_resolve(oldpath);
