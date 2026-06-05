@@ -573,6 +573,19 @@ static long sys_munlockall(void)
 
 static long sys_msync(uint64_t addr, size_t len, int flags)
 {
-	(void)addr; (void)len; (void)flags;
+	/* MS_ASYNC=1 MS_INVALIDATE=2 MS_SYNC=4; SYNC and ASYNC are mutually exclusive */
+	if (flags & ~0x7) return -22;
+	if ((flags & 1) && (flags & 4)) return -22;
+	if (addr & 0xFFF) return -22;                      /* EINVAL: must be page-aligned */
+	process_t *p = task_current();
+	uint64_t end = addr + ((len + 0xFFF) & ~0xFFFULL);
+	/* the whole range must be mapped, else ENOMEM */
+	for (uint64_t va = addr; va < end; va += 0x1000) {
+		int found = 0;
+		for (vma_t *v = p->vmas; v; v = v->next)
+			if (va >= v->vaddr && va < v->vaddr + v->size) { found = 1; break; }
+		if (!found) return -12;                        /* ENOMEM */
+	}
+	/* pages are write-through to the ram-backed store: nothing to flush. */
 	return 0;
 }

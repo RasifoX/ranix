@@ -164,6 +164,8 @@ typedef struct process {
 	gid_t           groups[32]; /* supplementary groups */
 	int             ngroups;
 	int             dumpable;  /* 0=not dumpable, 1=dumpable (default) */
+	int             no_new_privs; /* prctl(PR_SET_NO_NEW_PRIVS): sticky, inherited */
+	int             pdeathsig;    /* prctl(PR_SET_PDEATHSIG): signal on parent death */
 	uid_t           fsuid;     /* filesystem uid; fs_uid_set==0 → follows euid */
 	gid_t           fsgid;
 	uint8_t         fs_uid_set;
