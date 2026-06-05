@@ -172,7 +172,10 @@ BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/bu
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
-.PHONY: all clean qemu image initramfs bash-static test persisttest flakehunt vdso defconfig tinyconfig
+CURL_VER           = 8.11.1
+CURL_SRC_URL       = https://curl.se/download/curl-$(CURL_VER).tar.gz
+
+.PHONY: all clean qemu image initramfs bash-static curl test persisttest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -211,7 +214,7 @@ $(BUILD_DIR)/kernel/vdso.o: $(BUILD_DIR)/vdso_image.h
 all: initramfs $(TARGET)
 
 # Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
-USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server
+USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test
 # Auto-discovered: the bench harness plus every userspace/test_*.c. Adding a
 # test_*.c is enough — no hand-editing this list (and no more merge conflicts
 # from everyone appending to it).
@@ -223,6 +226,8 @@ CACHE_DIR          = .cache
 BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
 BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
 BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
+CURL_BIN           = $(CACHE_DIR)/curl-$(ARCH)/src/curl
+SSL_SERVER_BIN     = $(CACHE_DIR)/mbedtls-$(ARCH)/ssl_server
 
 # mbedTLS — userspace TLS/HTTPS, cross-built static like bash/busybox
 MBEDTLS_VER    = 3.6.2
@@ -280,7 +285,7 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -313,6 +318,10 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@chmod u+s $(BUILD_DIR)/initramfs/bin/su
 	@cp "$(BASH_CACHED)" $(BUILD_DIR)/initramfs/bin/bash
 	@chmod +x $(BUILD_DIR)/initramfs/bin/bash
+	@cp "$(CURL_BIN)" $(BUILD_DIR)/initramfs/bin/curl
+	@chmod +x $(BUILD_DIR)/initramfs/bin/curl
+	@cp "$(SSL_SERVER_BIN)" $(BUILD_DIR)/initramfs/bin/ssl_server
+	@chmod +x $(BUILD_DIR)/initramfs/bin/ssl_server
 	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@for c in dropbear dbclient dropbearkey scp ssh; do ln -sf dropbearmulti $(BUILD_DIR)/initramfs/bin/$$c; done
@@ -385,6 +394,50 @@ $(MBEDTLS_A):
 	@mv $(CACHE_DIR)/mbedtls-$(MBEDTLS_VER) $(MBEDTLS_DIR)
 	@$(MAKE) -C $(MBEDTLS_DIR) lib CC=$(MUSL_CC) AR=$(MUSL_AR) >/dev/null 2>&1
 	@echo "[OK] mbedTLS built ($(ARCH))"
+
+# curl — real command-line HTTP/HTTPS client, cross-built against musl + mbedTLS.
+curl: $(CURL_BIN)
+$(CURL_BIN): $(MBEDTLS_A)
+	@mkdir -p $(CACHE_DIR)
+	@if [ ! -f "$(CACHE_DIR)/curl-$(CURL_VER).tar.gz" ]; then \
+		echo "Downloading curl $(CURL_VER) source..."; \
+		wget -q "$(CURL_SRC_URL)" -O "$(CACHE_DIR)/curl-$(CURL_VER).tar.gz" || \
+		    { rm -f "$(CACHE_DIR)/curl-$(CURL_VER).tar.gz"; echo "ERROR: curl download failed"; exit 1; }; \
+	fi
+	@echo "Building curl for $(ARCH)..."
+	@rm -rf "$(CACHE_DIR)/curl-$(ARCH)"
+	@mkdir -p "$(CACHE_DIR)/curl-$(ARCH)"
+	@tar xzf "$(CACHE_DIR)/curl-$(CURL_VER).tar.gz" -C "$(CACHE_DIR)/curl-$(ARCH)" --strip-components=1
+	@cd "$(CACHE_DIR)/curl-$(ARCH)" && \
+	    CC="$(MUSL_CC)" \
+	    CPPFLAGS="-I$(CURDIR)/$(MBEDTLS_DIR)/include" \
+	    LDFLAGS="-L$(CURDIR)/$(MBEDTLS_DIR)/library" \
+	    LIBS="-lmbedtls -lmbedx509 -lmbedcrypto" \
+	    ./configure --host=$(ARCH)-linux-musl \
+	                --with-mbedtls \
+	                --disable-shared --enable-static \
+	                --without-libpsl --without-zlib --without-nghttp2 --disable-ldap \
+	                --without-brotli --without-zstd --without-libidn2 \
+	                --disable-docs --disable-manual \
+	                > /dev/null 2>&1 && \
+	    $(MAKE) -j$$(nproc) > /dev/null 2>&1
+	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
+	@echo "[OK] curl $(CURL_VER) for $(ARCH) ready ($$(du -h $@ | cut -f1))"
+
+# mbedTLS ssl_server — a loopback HTTPS server for the offline curl test. Uses
+# mbedTLS's built-in test cert/key, so no external PKI files are needed. Pinned
+# to 127.0.0.1 so it doesn't bind IPv6-only (AI_PASSIVE picks :: first) and leave
+# curl's IPv4 connect refused.
+$(SSL_SERVER_BIN): $(MBEDTLS_A)
+	@sed -i 's/mbedtls_net_bind(&listen_fd, NULL, "4433"/mbedtls_net_bind(\&listen_fd, "127.0.0.1", "4433"/' \
+	    $(MBEDTLS_DIR)/programs/ssl/ssl_server.c
+	$(MUSL_CC) -static -O2 -I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/tests/include \
+	    -I$(MBEDTLS_DIR)/library -o $@ \
+	    $(MBEDTLS_DIR)/programs/ssl/ssl_server.c $(MBEDTLS_DIR)/tests/src/certs.c \
+	    $(MBEDTLS_DIR)/library/libmbedtls.a \
+	    $(MBEDTLS_DIR)/library/libmbedx509.a \
+	    $(MBEDTLS_DIR)/library/libmbedcrypto.a
+	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 
 # HTTPS client diagnostic — statically links mbedTLS
 userspace/test_tls: userspace/test_tls.c $(MBEDTLS_A)
