@@ -216,8 +216,16 @@ syscall_entry:
 	call task_current
 	movq %r15, 16(%rax)            /* task->ctx = rsp */
 
+	/* The syscall body runs IRQ-on (Linux model): the trapframe and task->ctx
+	 * are now published, the kstack switch is done, and %gs:48 scratch is no
+	 * longer live, so an IRQ taken here lands on a fully-built kernel state and
+	 * the IRQ stub's CS gate keeps it non-preemptible. Re-mask before the
+	 * signal/resched/exit tail (which the timer must not land in). Mirrors
+	 * aarch64 daifclr/daifset around syscall_handle. */
+	sti
 	movq %rsp, %rdi
 	call syscall_handle
+	cli
 
 	movq %rsp, %r15
 	call task_current
