@@ -4,7 +4,7 @@
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
-#include <kernel/mm/buddy.h>
+#include <kernel/mm/pmm.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
@@ -133,6 +133,7 @@ static ssize_t tmpfs_write(vfs_file_t *f, const void *buf, size_t len)
 
 	uint64_t end = (uint64_t)f->pos + len;
 	if (end > rf->capacity) {
+		if (f->inode->mmap_pinned) return -12;   /* a live MAP_SHARED mapping pins the buffer in place */
 		/* buddy gives power-of-2 page runs; charge the real allocation so the
 		 * limit reflects memory actually consumed, and reject atomically. */
 		int new_order = order_for(end);
@@ -159,6 +160,18 @@ static ssize_t tmpfs_write(vfs_file_t *f, const void *buf, size_t len)
 	return (ssize_t)len;
 }
 
+/* See ramfs_mmap: hand back the file's own backing page for a shared mapping,
+ * holding an extra reference so unmap leaves the buffer intact. */
+static uint64_t tmpfs_mmap(vfs_file_t *f, off_t off)
+{
+	tmpfs_file_t *rf = f->inode->priv;
+	if (!rf || off < 0 || !rf->data) return 0;
+	if ((uint64_t)off + PAGE_SIZE > rf->capacity) return 0;
+	uint64_t pa = VIRT_TO_PHYS(rf->data + off);
+	pmm_hold((void *)pa);
+	return pa;
+}
+
 static int tmpfs_file_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 {
 	if ((flags & O_TRUNC) && inode->priv) {
@@ -174,6 +187,8 @@ static vfs_fops_t tmpfs_fops = {
 	.open  = tmpfs_file_open,
 	.read  = tmpfs_read,
 	.write = tmpfs_write,
+	.mmap  = tmpfs_mmap,
+	.mmap_cacheable = 1,
 };
 
 static vfs_fops_t tmpfs_dir_fops = { 0 };
@@ -425,6 +440,7 @@ static int tmpfs_truncate(vfs_inode_t *inode, off_t len)
 	tmpfs_sb_t *sb = inode->i_sb;
 	uint64_t newlen = (uint64_t)len;
 	if (newlen > rf->capacity) {
+		if (inode->mmap_pinned) return -12;   /* buffer pinned by a live MAP_SHARED mapping */
 		uint64_t newcap = (newlen + PAGE_SIZE - 1) & ~((uint64_t)PAGE_SIZE - 1);
 		int new_order = order_for(newcap);
 		uint64_t real = (uint64_t)PAGE_SIZE << new_order;
