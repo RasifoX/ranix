@@ -326,12 +326,20 @@ void kernel_main(void)
 			if (gpt_probe(bd) != 0)
 				mbr_probe(bd);
 		}
-		/* try mounting first block device or partition as ext2/ext4 */
+		/* Try mounting the first filesystem at /mnt. Partition slices
+		 * (named "<disk>pN" by gpt/mbr) are preferred over whole-disk
+		 * devices so a partitioned boot disk wins /mnt over a bare
+		 * secondary disk that also carries a filesystem. */
 		int total = block_device_count();
+		int mounted = 0;
+		for (int pass = 0; pass < 2 && !mounted; pass++)
 		for (int bi = 0; bi < total; bi++) {
 			block_device_t *bd = block_device_get(bi);
 			if (!bd) continue;
-			
+			int is_part = 0;
+			for (const char *p = bd->name; *p; p++) if (*p == 'p') { is_part = 1; break; }
+			if ((pass == 0) != (is_part != 0)) continue;
+
 			/* probe for ext2 magic before attempting mount */
 			uint8_t sb_buf[1024];
 			if (bd->read(bd, 2, sb_buf, 2) == 0) {
@@ -339,7 +347,7 @@ void kernel_main(void)
 				if (magic == 0xEF53) {
 					if (vfs_mount("/mnt", "ext2", bd) == 0) {
 						kprintf("ext2: mounted /mnt (%s)\n", bd->name);
-						break;
+						mounted = 1; break;
 					}
 				}
 			}
@@ -350,7 +358,7 @@ void kernel_main(void)
 				    (uint16_t)(bpb[11] | (bpb[12] << 8)) == 512) {
 					if (vfs_mount("/mnt", "vfat", bd) == 0) {
 						kprintf("fat: mounted /mnt (%s)\n", bd->name);
-						break;
+						mounted = 1; break;
 					}
 				}
 			}
@@ -361,7 +369,7 @@ void kernel_main(void)
 				    pvd[1]=='C' && pvd[2]=='D' && pvd[3]=='0' && pvd[4]=='0' && pvd[5]=='1') {
 					if (vfs_mount("/mnt", "iso9660", bd) == 0) {
 						kprintf("iso9660: mounted /mnt (%s)\n", bd->name);
-						break;
+						mounted = 1; break;
 					}
 				}
 			}
