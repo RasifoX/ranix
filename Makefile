@@ -114,6 +114,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/input/ps2/ps2.c \
         drivers/block/virtio_blk.c \
         drivers/block/ahci.c \
+        drivers/block/nvme.c \
         drivers/usb/xhci.c \
         drivers/net/virtio_net.c
 endif
@@ -479,6 +480,14 @@ $(BUILD_DIR)/usb-test.img:
 	printf 'RANIX-USB-DISK-OK' | dd of=$@ bs=512 seek=2 conv=notrunc 2>/dev/null
 	@echo "[OK] usb-test.img"
 
+# Small raw image on an NVMe namespace (x86_64 only). A marker at a known sector
+# is read back over the NVM READ command via dd /dev/nvme0n1 to prove the admin
+# IDENTIFY + I/O queue path. Not a filesystem so the auto-mounter ignores it.
+$(BUILD_DIR)/nvme-test.img:
+	dd if=/dev/zero of=$@ bs=1M count=8 2>/dev/null
+	printf 'RANIX-NVME-DISK-OK' | dd of=$@ bs=512 seek=2 conv=notrunc 2>/dev/null
+	@echo "[OK] nvme-test.img"
+
 # A full disk rootfs (a copy of the initramfs tree) for the switch_root /
 # disk-root path: init pivots into this and runs it as the real /. The marker
 # script replaces the suite's test.sh. tests/diskroot.sh boots twice against it.
@@ -524,7 +533,7 @@ TEST_LOG = $(BUILD_DIR)/serial-test.log
 ifeq ($(ARCH),x86_64)
 # -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
-test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img
+test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
 	@rm -f $(TEST_LOG)
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
@@ -532,7 +541,9 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img
 	    -device ich9-ahci,id=ahci -device ide-hd,drive=d0,bus=ahci.0 \
 	    -drive id=u0,file=$(BUILD_DIR)/usb-test.img,format=raw,if=none \
 	    -device qemu-xhci,id=xhci,streams=off \
-	    -device usb-storage,bus=xhci.0,drive=u0 || true
+	    -device usb-storage,bus=xhci.0,drive=u0 \
+	    -drive file=$(BUILD_DIR)/nvme-test.img,if=none,id=nvm0,format=raw \
+	    -device nvme,drive=nvm0,serial=ranix0 || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)
