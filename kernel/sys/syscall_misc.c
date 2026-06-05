@@ -731,10 +731,30 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 	return (long)done;
 }
 
+#define FALLOC_FL_KEEP_SIZE  1
+#define FALLOC_FL_PUNCH_HOLE 2
+
 static long sys_fallocate(int fd, int mode, off_t offset, off_t len)
 {
-	(void)fd; (void)mode; (void)offset; (void)len;
-	return 0;
+	if (offset < 0 || len <= 0) return -22;        /* EINVAL */
+	/* hole-punch / collapse / zero / insert: no block-level support */
+	if (mode & ~FALLOC_FL_KEEP_SIZE) return -95;   /* EOPNOTSUPP */
+
+	process_t  *p = task_current();
+	vfs_file_t *f = fd_get(p->fds, fd);
+	if (!f || !f->inode) return -9;                /* EBADF */
+	if ((f->flags & 3) == O_RDONLY) return -9;     /* EBADF: not open for writing */
+	vfs_inode_t *in = f->inode;
+	if (S_ISDIR(in->mode)) return -21;             /* EISDIR */
+	if (!S_ISREG(in->mode)) return -9;             /* ESPIPE-ish; Linux: EBADF/ENODEV */
+	if (!in->iops || !in->iops->truncate) return -95;
+
+	/* KEEP_SIZE only reserves blocks (no ramfs concept) → honest success. */
+	if (mode & FALLOC_FL_KEEP_SIZE) return 0;
+
+	uint64_t need = (uint64_t)offset + (uint64_t)len;
+	if (need <= in->size) return 0;                /* already covered */
+	return in->iops->truncate(in, (off_t)need);    /* grows + zero-fills */
 }
 
 #define RENAME_NOREPLACE 1
@@ -790,17 +810,32 @@ out:
 static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
                                 size_t len, unsigned int flags)
 {
-	(void)off_in; (void)off_out; (void)flags;
+	if (flags) return -22;   /* EINVAL: no flags defined */
 	char buf[4096];
+	/* When an offset pointer is given, read/write at that offset and advance the
+	 * caller's copy without disturbing the fd's own position; otherwise use the
+	 * fd position (and let vfs_read/write advance it). */
+	off_t in_off = 0, out_off = 0;
+	if (off_in  && copy_from_user(&in_off,  off_in,  sizeof(in_off))  != 0) return -14;
+	if (off_out && copy_from_user(&out_off, off_out, sizeof(out_off)) != 0) return -14;
+
 	size_t done = 0;
 	while (done < len) {
 		size_t chunk = len - done; if (chunk > sizeof(buf)) chunk = sizeof(buf);
+		if (off_in) vfs_seek(fd_in, in_off, SEEK_SET);
 		long r = vfs_read(fd_in, buf, chunk);
-		if (r <= 0) break;
+		if (r <= 0) { if (done == 0 && r < 0) return r; break; }
+		if (off_out) vfs_seek(fd_out, out_off, SEEK_SET);
 		long w = vfs_write(fd_out, buf, (size_t)r);
 		if (w < 0) { if (done == 0) return w; break; }
-		done += (size_t)w;
+		in_off  += w;
+		out_off += w;
+		done    += (size_t)w;
+		if (w < r) break;
 	}
+
+	if (off_in  && copy_to_user(off_in,  &in_off,  sizeof(in_off))  != 0) return -14;
+	if (off_out && copy_to_user(off_out, &out_off, sizeof(out_off)) != 0) return -14;
 	return (long)done;
 }
 
