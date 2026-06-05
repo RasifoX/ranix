@@ -245,10 +245,14 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		return NULL;
 	}
 
-	/* mutable work buffer so symlink splicing can rewrite the path */
-	char work[512];
+	/* mutable work buffer so symlink splicing can rewrite the path. Heap-backed
+	 * (PATH_MAX): a stack array this large would blow the kernel stack once
+	 * overlayfs lookup re-enters this resolver. */
+	char *work = kmalloc(PATH_MAX);
+	if (!work) { spin_unlock_irq(&vfs_lock, f); return NULL; }
 	int wi = 0;
-	while (wi < 511 && path[wi]) { work[wi] = path[wi]; wi++; }
+	while (wi < PATH_MAX - 1 && path[wi]) { work[wi] = path[wi]; wi++; }
+	if (path[wi]) { kfree(work); spin_unlock_irq(&vfs_lock, f); return NULL; }
 	work[wi] = '\0';
 
 	/* chroot: an absolute path is relative to the process's own root, not the
@@ -300,7 +304,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 		if (d->inode && !S_ISDIR(d->inode->mode)) {
 			spin_unlock_irq(&vfs_lock, f);
 			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			return NULL;
+			d = NULL; goto out;
 		}
 
 		/* look in dentry children first (skip if parent marks children volatile) */
@@ -317,7 +321,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
 				spin_unlock_irq(&vfs_lock, f);
 				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-				return NULL;
+				d = NULL; goto out;
 			}
 			vfs_inode_t *dir_inode = d->inode;
 			int parent_was_volatile = d_is_volatile;
@@ -329,7 +333,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			f = spin_lock_irq(&vfs_lock);
 			if (!in) {
 				spin_unlock_irq(&vfs_lock, f);
-				return NULL;
+				d = NULL; goto out;
 			}
 			/* Cache only if parent is real (in dentry tree) and caching is allowed */
 			if (!parent_was_volatile && !dir_inode->no_cache && dentry_count < dentry_max_val) {
@@ -344,7 +348,7 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 					if (!child) {
 						vfs_inode_free(in);
 						spin_unlock_irq(&vfs_lock, f);
-						return NULL;
+						d = NULL; goto out;
 					}
 				} else {
 					vfs_inode_free(in);
@@ -376,19 +380,19 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 			if (++symlink_depth > 8 ||
 			    !child->inode->iops || !child->inode->iops->readlink) {
 				spin_unlock_irq(&vfs_lock, f);
-				return NULL;
+				d = NULL; goto out;
 			}
 			char target[256];
 			if (child->inode->iops->readlink(child->inode, target, sizeof(target)) != 0) {
 				spin_unlock_irq(&vfs_lock, f);
-				return NULL;
+				d = NULL; goto out;
 			}
 			/* splice: work = target + remaining(end) */
 			int tlen = strlen(target);
 			int rlen = strlen(end);
-			if (tlen + rlen + 2 >= (int)sizeof(work)) {
+			if (tlen + rlen + 2 >= PATH_MAX) {
 				spin_unlock_irq(&vfs_lock, f);
-				return NULL;
+				d = NULL; goto out;
 			}
 			memcpy(work, target, tlen);
 			if (rlen > 0) {
@@ -415,7 +419,27 @@ vfs_dentry_t *vfs_dentry_resolve(const char *path)
 
 	/* prev_volatile (if set) is the FINAL component's inode — freed by vfs_close */
 	spin_unlock_irq(&vfs_lock, f);
+out:
+	kfree(work);
 	return d;
+}
+
+/* Split an absolute path into its parent directory and final component. Returns
+ * a kmalloc'd copy of the parent dir (caller frees) and points *name at the last
+ * component within the original path. NULL on OOM. The parent can be up to
+ * PATH_MAX, so it cannot live in a fixed stack buffer (kernel-stack overflow). */
+static char *vfs_parent_alloc(const char *path, const char **name)
+{
+	int len = (int)strlen(path);
+	const char *slash = path + (len > 0 ? len - 1 : 0);
+	while (slash > path && *slash != '/') slash--;
+	int dlen = (int)(slash - path);
+	char *dir = kmalloc(PATH_MAX);
+	if (!dir) return NULL;
+	if (dlen == 0) { dir[0] = '/'; dir[1] = '\0'; }
+	else           { memcpy(dir, path, (size_t)dlen); dir[dlen] = '\0'; }
+	if (name) *name = slash + 1;
+	return dir;
 }
 
 /* ── filesystem type registry ────────────────────────────── */
@@ -967,34 +991,26 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 		if (!(flags & O_CREAT)) return -2; /* ENOENT */
 
 		/* find parent directory */
-		const char *slash = path + strlen(path) - 1;
-		while (slash > path && *slash != '/') slash--;
-
-		char dir_path[256];
-		int dlen = (int)(slash - path);
-		if (dlen == 0) {
-			dir_path[0] = '/';
-			dir_path[1] = '\0';
-		} else {
-			memcpy(dir_path, path, dlen);
-			dir_path[dlen] = '\0';
-		}
+		const char *fname;
+		char *dir_path = vfs_parent_alloc(path, &fname);
+		if (!dir_path) return -12;
 
 		vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-		if (!parent || !parent->inode || !parent->inode->iops) return -2;
+		if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
 
 		int pr = vfs_check_perm(parent->inode, MAY_WRITE, uid, gid);
-		if (pr) return pr;
+		if (pr) { kfree(dir_path); return pr; }
 
-		const char *fname = slash + 1;
 		mode_t cmode = mode & ~umask;
-		if (parent->inode->iops->create(parent->inode, fname, cmode) != 0)
-			return -1;
+		if (parent->inode->iops->create(parent->inode, fname, cmode) != 0) {
+			kfree(dir_path); return -1;
+		}
 
 		inode = parent->inode->iops->lookup(parent->inode, fname);
-		if (!inode) return -1;
+		if (!inode) { kfree(dir_path); return -1; }
 		d = vfs_dentry_create(parent, fname, inode);
 		if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
+		kfree(dir_path);
 	} else {
 		inode = d->inode;
 		/* check read/write permission on existing file */
@@ -1237,53 +1253,46 @@ int vfs_mkdir(const char *path, mode_t mode)
 {
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
 
-	const char *slash = path + strlen(path) - 1;
-	while (slash > path && *slash != '/') slash--;
-
-	char dir_path[256];
-	int dlen = (int)(slash - path);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+	const char *dname;
+	char *dir_path = vfs_parent_alloc(path, &dname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) return -1;
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -1; }
 
 	process_t *p = task_current();
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
-	if (pr) return pr;
+	if (pr) { kfree(dir_path); return pr; }
 
-	const char *dname = slash + 1;
 	mode_t cmode = mode & ~(p ? p->umask : 022);
-	if (parent->inode->iops->mkdir(parent->inode, dname, cmode) != 0) return -1;
+	if (parent->inode->iops->mkdir(parent->inode, dname, cmode) != 0) { kfree(dir_path); return -1; }
 
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, dname);
 	if (in) vfs_dentry_create(parent, dname, in);
+	kfree(dir_path);
 	return 0;
 }
 
 int vfs_mkfifo(const char *path, mode_t mode)
 {
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
-	const char *slash = path + strlen(path) - 1;
-	while (slash > path && *slash != '/') slash--;
-	char dir_path[256];
-	int dlen = (int)(slash - path);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(path, &fname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) return -2;
-	if (!parent->inode->iops->mknod) return -1; /* fs doesn't support mknod */
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
+	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; } /* fs doesn't support mknod */
 	process_t *p = task_current();
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
-	if (pr) return pr;
+	if (pr) { kfree(dir_path); return pr; }
 
-	const char *fname = slash + 1;
 	mode_t cmode = (mode & 07777 & ~(p ? p->umask : 022)) | S_IFIFO;
 	int r = parent->inode->iops->mknod(parent->inode, fname, cmode, 0);
-	if (r != 0) return r;
+	if (r != 0) { kfree(dir_path); return r; }
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
 	if (in) vfs_dentry_create(parent, fname, in);
+	kfree(dir_path);
 	return 0;
 }
 
@@ -1292,61 +1301,54 @@ int vfs_mkfifo(const char *path, mode_t mode)
 int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 {
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
-	const char *slash = path + strlen(path) - 1;
-	while (slash > path && *slash != '/') slash--;
-	char dir_path[256];
-	int dlen = (int)(slash - path);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(path, &fname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) return -2;
-	if (!parent->inode->iops->mknod) return -1;
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
+	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; }
 	process_t *p = task_current();
-	if (p && p->euid != 0) return -1; /* EPERM: only root may create device nodes */
+	if (p && p->euid != 0) { kfree(dir_path); return -1; } /* EPERM: only root may create device nodes */
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
-	if (pr) return pr;
+	if (pr) { kfree(dir_path); return pr; }
 
-	const char *fname = slash + 1;
 	int r = parent->inode->iops->mknod(parent->inode, fname, mode, dev);
-	if (r != 0) return r;
+	if (r != 0) { kfree(dir_path); return r; }
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
 	if (in) vfs_dentry_create(parent, fname, in);
+	kfree(dir_path);
 	return 0;
 }
 
 int vfs_unlink(const char *path)
 {
-	const char *slash = path + strlen(path) - 1;
-	while (slash > path && *slash != '/') slash--;
-
-	char dir_path[256];
-	int dlen = (int)(slash - path);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(path, &fname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink)
-		return -1;
+	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink) {
+		kfree(dir_path); return -1;
+	}
 
 	process_t *p = task_current();
 	uid_t uid = p ? p->euid : 0;
 	gid_t gid = p ? p->egid : 0;
 
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE, uid, gid);
-	if (pr) return pr;
+	if (pr) { kfree(dir_path); return pr; }
 
 	/* sticky bit: only file owner or dir owner can unlink */
 	if (parent->inode->mode & 01000) { /* S_ISVTX */
-		const char *fname2 = slash + 1;
 		vfs_dentry_t *target = NULL;
 		vfs_dentry_t *ch = parent->child;
-		while (ch) { if (strcmp(ch->name, fname2) == 0) { target = ch; break; } ch = ch->next; }
-		if (target && target->inode && target->inode->uid != uid && parent->inode->uid != uid)
-			return -13; /* EACCES */
+		while (ch) { if (strcmp(ch->name, fname) == 0) { target = ch; break; } ch = ch->next; }
+		if (target && target->inode && target->inode->uid != uid && parent->inode->uid != uid) {
+			kfree(dir_path); return -13; /* EACCES */
+		}
 	}
 
-	const char *fname = slash + 1;
 	int r = parent->inode->iops->unlink(parent->inode, fname);
 	if (r == 0 && vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000200 /*IN_DELETE*/, fname);
 	if (r == 0) {
@@ -1363,24 +1365,21 @@ int vfs_unlink(const char *path)
 		}
 		spin_unlock_irq(&vfs_lock, lf);
 	}
+	kfree(dir_path);
 	return r;
 }
 
 /* write a file from kernel data without going through the fd table */
 int vfs_kernel_install(const char *path, const void *data, size_t len)
 {
-	const char *slash = path + strlen(path) - 1;
-	while (slash > path && *slash != '/') slash--;
-
-	char dir_path[256];
-	int dlen = (int)(slash - path);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, path, dlen); dir_path[dlen] = '\0'; }
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(path, &fname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	kfree(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
 
-	const char *fname = slash + 1;
 	if (parent->inode->iops->create(parent->inode, fname, 0755) != 0) return -1;
 
 	vfs_inode_t *inode = parent->inode->iops->lookup(parent->inode, fname);
@@ -1399,19 +1398,15 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 
 int vfs_symlink(const char *target, const char *linkpath)
 {
-	const char *slash = linkpath + strlen(linkpath) - 1;
-	while (slash > linkpath && *slash != '/') slash--;
-
-	char dir_path[256];
-	int dlen = (int)(slash - linkpath);
-	if (dlen == 0) { dir_path[0] = '/'; dir_path[1] = '\0'; }
-	else           { memcpy(dir_path, linkpath, dlen); dir_path[dlen] = '\0'; }
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(linkpath, &fname);
+	if (!dir_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	kfree(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
 	if (!parent->inode->iops->symlink) return -38;
 
-	const char *fname = slash + 1;
 	if (parent->inode->iops->symlink(parent->inode, fname, target) != 0) return -1;
 
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
@@ -1445,13 +1440,12 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 	while (slash > path && *slash != '/') slash--;
 	if (slash[1] == '\0') return vfs_stat(path, out);   /* trailing slash / root */
 
-	char parent_path[256];
-	int plen = (int)(slash - path);
-	if (plen == 0) { parent_path[0] = '/'; parent_path[1] = '\0'; }
-	else           { memcpy(parent_path, path, (size_t)plen); parent_path[plen] = '\0'; }
-	const char *fname = slash + 1;
+	const char *fname;
+	char *parent_path = vfs_parent_alloc(path, &fname);
+	if (!parent_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
+	kfree(parent_path);
 	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->lookup)
 		return -1;
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
@@ -1470,31 +1464,19 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 
 int vfs_rename(const char *old_path, const char *new_path)
 {
-	/* parse old path */
-	const char *s = old_path + strlen(old_path) - 1;
-	while (s > old_path && *s != '/') s--;
-	char old_dir[256];
-	int dlen = (int)(s - old_path);
-	if (dlen == 0) { old_dir[0] = '/'; old_dir[1] = '\0'; }
-	else           { memcpy(old_dir, old_path, dlen); old_dir[dlen] = '\0'; }
-	const char *old_name = s + 1;
-
-	/* parse new path */
-	const char *s2 = new_path + strlen(new_path) - 1;
-	while (s2 > new_path && *s2 != '/') s2--;
-	char new_dir[256];
-	int dlen2 = (int)(s2 - new_path);
-	if (dlen2 == 0) { new_dir[0] = '/'; new_dir[1] = '\0'; }
-	else            { memcpy(new_dir, new_path, dlen2); new_dir[dlen2] = '\0'; }
-	const char *new_name = s2 + 1;
+	const char *old_name, *new_name;
+	char *old_dir = vfs_parent_alloc(old_path, &old_name);
+	char *new_dir = vfs_parent_alloc(new_path, &new_name);
+	if (!old_dir || !new_dir) { kfree(old_dir); kfree(new_dir); return -12; }
 
 	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
-	if (!old_parent || !old_parent->inode) return -2;
+	if (!old_parent || !old_parent->inode) { kfree(old_dir); kfree(new_dir); return -2; }
 	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
-	if (!new_parent || !new_parent->inode) return -2;
+	if (!new_parent || !new_parent->inode) { kfree(old_dir); kfree(new_dir); return -2; }
 
-	if (!old_parent->inode->iops || !old_parent->inode->iops->rename)
-		return -38;
+	if (!old_parent->inode->iops || !old_parent->inode->iops->rename) {
+		kfree(old_dir); kfree(new_dir); return -38;
+	}
 
 	int ret = old_parent->inode->iops->rename(
 		old_parent->inode, old_name, new_parent->inode, new_name);
@@ -1518,6 +1500,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 		}
 		spin_unlock_irq(&vfs_lock, f);
 	}
+	kfree(old_dir); kfree(new_dir);
 	return ret;
 }
 
@@ -1576,15 +1559,12 @@ int vfs_link(const char *oldpath, const char *newpath)
 	if (!od || !od->inode) return -2;
 	if (S_ISDIR(od->inode->mode)) return -21;
 
-	const char *s = newpath + strlen(newpath) - 1;
-	while (s > newpath && *s != '/') s--;
-	char new_dir[256];
-	int dlen = (int)(s - newpath);
-	if (dlen == 0) { new_dir[0] = '/'; new_dir[1] = '\0'; }
-	else           { memcpy(new_dir, newpath, dlen); new_dir[dlen] = '\0'; }
-	const char *new_name = s + 1;
+	const char *new_name;
+	char *new_dir = vfs_parent_alloc(newpath, &new_name);
+	if (!new_dir) return -12;
 
 	vfs_dentry_t *nd = vfs_dentry_resolve(new_dir);
+	kfree(new_dir);
 	if (!nd || !nd->inode) return -2;
 	if (!nd->inode->iops || !nd->inode->iops->link) return -1;
 

@@ -9,6 +9,9 @@
  * (proctab, sched_lock, alloc_pid, runqueue_add, kstack_order_val) are in scope.
  * ───────────────────────────────────────────────────────────────────────── */
 
+_Static_assert(sizeof(process_t) <= (PAGE_SIZE << PCB_ORDER),
+               "process_t exceeds its PCB allocation (raise PCB_ORDER)");
+
 static spinlock_t sighand_lock;
 
 sighand_t *sighand_alloc(sighand_t *copy_from)
@@ -42,12 +45,12 @@ void sighand_put(sighand_t *sh)
 
 pid_t proc_create(const char *name, void (*fn)(void))
 {
-	void *pcb_phys = buddy_alloc(0);
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(p, 0, sizeof(*p));
 	p->sighand = sighand_alloc(NULL);
-	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), 0); return -1; }
+	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
 	p->magic = PROC_MAGIC;
 
 	process_t *current = task_current();
@@ -65,7 +68,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 	p->kstack = kstack_alloc();
 	if (!p->kstack) {
-		buddy_free(VIRT_TO_PHYS(p), 0);
+		buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 		return -1;
 	}
 
@@ -83,7 +86,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	if (pid < 0) {
 		spin_unlock_irq(&sched_lock, f);
 		buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
-		buddy_free(VIRT_TO_PHYS(p), 0);
+		buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 		return -1;
 	}
 	p->pid  = pid;
@@ -100,13 +103,13 @@ pid_t proc_create(const char *name, void (*fn)(void))
 
 pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 {
-	void *pcb_phys = buddy_alloc(0);
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(p, 0, sizeof(*p));
 	p->magic = PROC_MAGIC;
 	p->sighand = sighand_alloc(NULL);
-	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), 0); return -1; }
+	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
 
 	process_t *current = task_current();
 	p->ppid  = current->pid;
@@ -265,7 +268,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	/* Inherit the cwd, but guarantee it is absolute: init's parent is the boot
 	 * task, whose cwd was never set — an empty/relative cwd makes getcwd(2) fail
 	 * (musl rejects a non-'/' result), which then propagates to every process. */
-	if (current->cwd[0] == '/') memcpy(p->cwd, current->cwd, 256);
+	if (current->cwd[0] == '/') memcpy(p->cwd, current->cwd, sizeof(p->cwd));
 	else { p->cwd[0] = '/'; p->cwd[1] = '\0'; }
 	p->umask = current->umask;
 	p->root  = current->root;   /* chroot survives exec */
@@ -294,7 +297,7 @@ fail:
 	if (p->fds) fd_table_destroy(p->fds);
 	sighand_put(p->sighand);
 	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
-	buddy_free(VIRT_TO_PHYS(p), 0);
+	buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 	return -1;
 }
 
@@ -303,7 +306,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	process_t *parent = task_current();
 	arch_save_tls(parent);
 
-	void *pcb_phys = buddy_alloc(0);
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
@@ -312,7 +315,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	/* cgroup pids limit: reject the fork if it would exceed pids.max. Charged
 	 * here; released by cgroup_cancel_fork on a later failure, or by
 	 * cgroup_exit when the child eventually exits. */
-	if (cgroup_can_fork(parent) != 0) { buddy_free(VIRT_TO_PHYS(child), 0); return -11; }
+	if (cgroup_can_fork(parent) != 0) { buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -11; }
 	cgroup_fork_attach(child, parent);
 
 	/* pick the child's pid namespace: a fresh one for clone(CLONE_NEWPID), the
@@ -321,7 +324,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	int owns_pidns = 0;
 	if (clone_flags & CLONE_NEWPID) {
 		target_pidns = pid_ns_create_child(parent->pid_ns ? parent->pid_ns : &init_pid_ns);
-		if (!target_pidns) { cgroup_cancel_fork(parent); buddy_free(VIRT_TO_PHYS(child), 0); return -12; }
+		if (!target_pidns) { cgroup_cancel_fork(parent); buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -12; }
 		owns_pidns = 1;
 	} else {
 		target_pidns = parent->pid_ns_new ? parent->pid_ns_new
@@ -359,7 +362,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail_early;
-	memcpy(child->cwd, parent->cwd, 256);
+	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 	child->root         = parent->root;
 	child->umask = parent->umask;
 	child->ctty         = parent->ctty;
@@ -470,7 +473,7 @@ fail_early:
 	if (owns_pidns) pid_ns_put(target_pidns);
 	cgroup_cancel_fork(parent);
 	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
-	buddy_free(VIRT_TO_PHYS(child), 0);
+	buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	return -1;
 }
 
@@ -479,7 +482,7 @@ pid_t proc_vfork(void)
 	process_t *parent = task_current();
 	arch_save_tls(parent);
 
-	void *pcb_phys = buddy_alloc(0);
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
@@ -502,19 +505,19 @@ pid_t proc_vfork(void)
 	child->reaped       = 0;
 	child->fds          = fd_table_copy(parent->fds);
 	memcpy(child->name, parent->name, PROC_NAME_MAX);
-	memcpy(child->cwd, parent->cwd, 256);
+	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
 	child->root         = parent->root;
 	child->umask        = parent->umask;
 	child->ctty         = parent->ctty;
 	child->ctty_fops    = parent->ctty_fops;
 	child->sighand      = sighand_alloc(parent->sighand);
-	if (!child->sighand) { buddy_free(VIRT_TO_PHYS(child), 0); return -1; }
+	if (!child->sighand) { buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -1; }
 	child->sig_mask     = parent->sig_mask;
 
 	child->kstack = kstack_alloc();
 	if (!child->kstack) {
 		sighand_put(child->sighand);
-		buddy_free(VIRT_TO_PHYS(child), 0);
+		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 		return -1;
 	}
 
@@ -537,7 +540,7 @@ pid_t proc_vfork(void)
 	if (pid < 0) {
 		spin_unlock_irq(&sched_lock, f);
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
-		buddy_free(VIRT_TO_PHYS(child), 0);
+		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 		return -1;
 	}
 	child->pid  = pid;
@@ -578,7 +581,7 @@ void proc_vfork_exec_notify(void)
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid)
 {
 	process_t *parent = task_current();
-	void *pcb_phys = buddy_alloc(0);
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
@@ -691,7 +694,7 @@ fail:
 	if (child->vm) vm_destroy(child->vm);
 	sighand_put(child->sighand);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
-	buddy_free(VIRT_TO_PHYS(child), 0);
+	buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	return -1;
 }
 
@@ -737,7 +740,7 @@ void proc_put(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 	if (free_now) {
 		p->magic = 0;
-		buddy_free(VIRT_TO_PHYS(p), 0);
+		buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 	}
 }
 
@@ -1209,6 +1212,6 @@ void proc_reap(process_t *child)
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	if (free_now) {
 		child->magic = 0;   /* poison before free: trips a later use-after-free */
-		buddy_free(VIRT_TO_PHYS(child), 0);
+		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	}
 }

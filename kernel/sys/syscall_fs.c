@@ -2,19 +2,36 @@
 
 extern volatile uint64_t kernel_ticks;
 
+/* Copy a user path into a PATH_MAX kernel buffer. -EFAULT on a bad pointer,
+ * -ENAMETOOLONG if it does not fit (no NUL within PATH_MAX). */
+static int copy_path_from_user(char *dst, const char *upath)
+{
+	long r = strncpy_from_user(dst, upath, PATH_MAX);
+	if (r < 0) return -14;
+	if (r >= PATH_MAX) return -36;
+	return 0;
+}
+
+/* resolve a (possibly dirfd-relative) user path to an absolute kernel path.
+ * `out` must hold PATH_MAX bytes. A relative path is joined onto cwd in a heap
+ * scratch buffer so this stays a single PATH_MAX stack frame. */
 static int resolve_path(char *out, int dirfd, const char *upath)
 {
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, upath, PROC_NAME_MAX) < 0) return -14;
-	if (kp[0] == '/') { memcpy(out, kp, PROC_NAME_MAX); return 0; }
+	int r = copy_path_from_user(out, upath);
+	if (r) return r;
+	if (out[0] == '/') return 0;
 	process_t *p = task_current();
 	const char *base = (dirfd == AT_FDCWD) ? p->cwd : "/";
-	int blen = strlen(base), plen = strlen(kp);
-	if (blen + 1 + plen >= PROC_NAME_MAX) return -36;
-	memcpy(out, base, blen);
-	if (blen == 0 || out[blen - 1] != '/') out[blen++] = '/';
-	memcpy(out + blen, kp, plen);
-	out[blen + plen] = '\0';
+	int blen = strlen(base), plen = strlen(out);
+	if (blen + 1 + plen >= PATH_MAX) return -36;
+	char *tmp = kmalloc(PATH_MAX);
+	if (!tmp) return -12;
+	memcpy(tmp, base, blen);
+	if (blen == 0 || tmp[blen - 1] != '/') tmp[blen++] = '/';
+	memcpy(tmp + blen, out, plen);
+	tmp[blen + plen] = '\0';
+	memcpy(out, tmp, blen + plen + 1);
+	kfree(tmp);
 	return 0;
 }
 
@@ -22,14 +39,15 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 
 static long sys_mkdir(const char *path, mode_t mode)
 {
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
+	char kp[PATH_MAX];
+	int r = copy_path_from_user(kp, path);
+	if (r) return r;
 	return vfs_mkdir(kp, mode);
 }
 
 static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 {
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
 	return vfs_mkdir(kp, mode);
@@ -37,40 +55,60 @@ static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 
 static long sys_unlink(const char *path)
 {
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
+	char kp[PATH_MAX];
+	int r = copy_path_from_user(kp, path);
+	if (r) return r;
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
 static long sys_unlinkat(int dirfd, const char *path, int flags)
 {
 	(void)flags;
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
+/* rename takes two paths; stage them on the heap so the kernel-stack frame
+ * stays a single pointer pair, not 2×PATH_MAX. */
 static long sys_rename(const char *old, const char *new)
 {
-	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
-	if (strncpy_from_user(ko, old, PROC_NAME_MAX) < 0) return -14;
-	if (strncpy_from_user(kn, new, PROC_NAME_MAX) < 0) return -14;
-	return vfs_rename(ko, kn) == 0 ? 0 : -2;
+	char *ko = kmalloc(PATH_MAX);
+	if (!ko) return -12;
+	char *kn = kmalloc(PATH_MAX);
+	if (!kn) { kfree(ko); return -12; }
+	long ret;
+	int r;
+	if ((r = copy_path_from_user(ko, old)) || (r = copy_path_from_user(kn, new)))
+		ret = r;
+	else
+		ret = vfs_rename(ko, kn) == 0 ? 0 : -2;
+	kfree(ko); kfree(kn);
+	return ret;
 }
 
 static long sys_renameat(int olddirfd, const char *old, int newdirfd, const char *newp)
 {
-	char ko[PROC_NAME_MAX], kn[PROC_NAME_MAX];
-	int r = resolve_path(ko, olddirfd, old);  if (r) return r;
-	    r = resolve_path(kn, newdirfd, newp); if (r) return r;
-	return vfs_rename(ko, kn) == 0 ? 0 : -2;
+	char *ko = kmalloc(PATH_MAX);
+	if (!ko) return -12;
+	char *kn = kmalloc(PATH_MAX);
+	if (!kn) { kfree(ko); return -12; }
+	long ret;
+	int r;
+	if ((r = resolve_path(ko, olddirfd, old)) || (r = resolve_path(kn, newdirfd, newp)))
+		ret = r;
+	else
+		ret = vfs_rename(ko, kn) == 0 ? 0 : -2;
+	kfree(ko); kfree(kn);
+	return ret;
 }
 
 static long sys_rmdir(const char *path)
 {
-	char kp[PROC_NAME_MAX];
-	if (strncpy_from_user(kp, path, PROC_NAME_MAX) < 0) return -14;
+	char kp[PATH_MAX];
+	int r = copy_path_from_user(kp, path);
+	if (r) return r;
 	return vfs_unlink(kp) == 0 ? 0 : -2;
 }
 
@@ -97,7 +135,7 @@ static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
 static long sys_stat_path(const char *path, linux_stat_t *st)
 {
 	if (!st) return -14;
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	vfs_stat_t vs = {0};
@@ -111,7 +149,7 @@ static long sys_stat_path(const char *path, linux_stat_t *st)
 static long sys_lstat_path(const char *path, linux_stat_t *st)
 {
 	if (!st) return -14;
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	vfs_stat_t vs = {0};
@@ -127,7 +165,7 @@ static long sys_lstat_path(const char *path, linux_stat_t *st)
 static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int flags)
 {
 	if (!st) return -14;
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	if (flags & AT_EMPTY_PATH) {
 		/* stat the fd itself */
 		if (strncpy_from_user(kp, path, 2) >= 0 && kp[0] == '\0')
@@ -171,7 +209,7 @@ static long access_check(const char *kp, int mode, int use_eff)
 
 static long sys_access(const char *path, int mode)
 {
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	return access_check(kp, mode, 0);
@@ -179,7 +217,7 @@ static long sys_access(const char *path, int mode)
 
 static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 {
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
 	return access_check(kp, mode, flags & 0x200 /*AT_EACCESS*/);
@@ -187,7 +225,7 @@ static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 
 static long sys_truncate(const char *path, off_t len)
 {
-	char kp[256];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	vfs_dentry_t *de = vfs_dentry_resolve(kp);
@@ -393,7 +431,8 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
  * always have, so chdir into a plain dir could leave cwd at "/"). */
 static void path_normalize(char *path)
 {
-	char buf[PROC_NAME_MAX];
+	char *buf = kmalloc(PATH_MAX);
+	if (!buf) return;
 	int n = 0;
 	const char *s = path;
 	while (*s) {
@@ -408,7 +447,7 @@ static void path_normalize(char *path)
 			if (n > 0) n--;                            /* drop its leading slash */
 			continue;
 		}
-		if (n + 1 + len >= PROC_NAME_MAX) break;
+		if (n + 1 + len >= PATH_MAX) break;
 		buf[n++] = '/';
 		memcpy(buf + n, comp, (size_t)len);
 		n += len;
@@ -416,11 +455,12 @@ static void path_normalize(char *path)
 	if (n == 0) buf[n++] = '/';
 	buf[n] = '\0';
 	memcpy(path, buf, (size_t)(n + 1));
+	kfree(buf);
 }
 
 static long sys_chdir(const char *path)
 {
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
 	if (r) return r;
 	vfs_stat_t st;
@@ -429,7 +469,7 @@ static long sys_chdir(const char *path)
 	path_normalize(kp);
 	process_t *p = task_current();
 	int n = strlen(kp);
-	if (n >= 256) return -36;
+	if ((size_t)(n + 1) > sizeof(p->cwd)) return -36;
 	memcpy(p->cwd, kp, (size_t)(n + 1));
 	return 0;
 }
@@ -438,7 +478,7 @@ static long sys_chroot(const char *path)
 {
 	process_t *p = task_current();
 	if (p->euid != 0) return -1;                /* EPERM (CAP_SYS_CHROOT) */
-	char kp[PROC_NAME_MAX];
+	char kp[PATH_MAX];
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
 	if (r) return r;
 	vfs_dentry_t *d = vfs_dentry_resolve(kp);
@@ -455,24 +495,33 @@ static long sys_pivot_root(const char *new_root, const char *put_old)
 {
 	process_t *p = task_current();
 	if (p->euid != 0) return -1;                       /* EPERM */
-	char knew[PROC_NAME_MAX], kold[PROC_NAME_MAX];
-	if (resolve_path(knew, -100, new_root)) return -14;
-	if (resolve_path(kold, -100, put_old))  return -14;
+	char *knew = kmalloc(PATH_MAX);
+	if (!knew) return -12;
+	char *kold = kmalloc(PATH_MAX);
+	if (!kold) { kfree(knew); return -12; }
+	long ret = 0;
+	int rr;
+	if ((rr = resolve_path(knew, -100, new_root)) || (rr = resolve_path(kold, -100, put_old))) {
+		ret = rr; goto pr_out;
+	}
 	vfs_dentry_t *dn = vfs_dentry_resolve(knew);
-	if (!dn || !dn->inode) return -2;                  /* ENOENT */
-	if (!S_ISDIR(dn->inode->mode)) return -20;         /* ENOTDIR */
+	if (!dn || !dn->inode) { ret = -2; goto pr_out; }          /* ENOENT */
+	if (!S_ISDIR(dn->inode->mode)) { ret = -20; goto pr_out; } /* ENOTDIR */
 	vfs_dentry_t *dold = vfs_dentry_resolve(kold);
-	if (!dold || !dold->inode || !S_ISDIR(dold->inode->mode)) return -22; /* EINVAL */
+	if (!dold || !dold->inode || !S_ISDIR(dold->inode->mode)) { ret = -22; goto pr_out; }
 	/* put_old must lie at or under new_root (as Linux requires) */
 	size_t nl = strlen(knew);
-	if (strncmp(kold, knew, nl) != 0 || (kold[nl] != '/' && kold[nl] != '\0'))
-		return -22;
+	if (strncmp(kold, knew, nl) != 0 || (kold[nl] != '/' && kold[nl] != '\0')) {
+		ret = -22; goto pr_out;
+	}
 	/* Switch the caller's root to new_root. Children inherit it, so an init that
 	 * pivot_roots and then execs the real init moves the whole process tree to
 	 * the new root without global mount-tree surgery (initramfs→disk switch). */
 	p->root = dn;
 	p->cwd[0] = '/'; p->cwd[1] = '\0';
-	return 0;
+pr_out:
+	kfree(knew); kfree(kold);
+	return ret;
 }
 
 static long sys_getcwd(char *buf, size_t size)
