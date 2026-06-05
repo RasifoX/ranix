@@ -549,6 +549,24 @@ check "smp-cow-race" "OK" \
 # ── interactive shell over a pts (line discipline + job control) ──────────────
 check "c-ptyshell" "OK" "$(timeout 20 /bin/test_ptyshell 2>/dev/null | tail -1)"
 
+# ── curl over loopback (real curl binary, mbedTLS backend) ────────────────────
+# HTTP: a tiny loopback server (httpd_test) serves a known body; curl fetches it.
+# HTTPS: mbedTLS ssl_server serves the same path over TLS with its built-in test
+# cert; curl -k completes the handshake and reads the body. Together they prove
+# curl links and runs and that both the plain and TLS transfer paths work.
+/bin/httpd_test 18080 >/dev/null 2>&1 &
+HTTPDPID=$!
+/bin/ssl_server >/dev/null 2>&1 &
+SSLPID=$!
+sleep 2
+check "c-curl-version" "1" \
+    "$(timeout 8 curl --version 2>/dev/null | grep -c '^curl ')"
+check "c-curl-http" "RANIX-HTTP-OK" \
+    "$(timeout 10 curl -s http://127.0.0.1:18080/ 2>/dev/null)"
+check "c-curl-https" "1" \
+    "$(timeout 12 curl -sk https://127.0.0.1:4433/ 2>/dev/null | grep -c 'Mbed TLS Test Server')"
+kill -9 $HTTPDPID $SSLPID 2>/dev/null
+
 # ── SSH end-to-end (dropbear sshd + dbclient, pubkey auth over loopback) ──────
 # dropbear runs as a real unmodified program: full sshd↔dbclient loopback —
 # host + client keygen, pubkey auth, exec a command, read its output back.
