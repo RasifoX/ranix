@@ -334,7 +334,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	    > $(BUILD_DIR)/initramfs/etc/passwd
 	@printf '/bin/sh\n/bin/bash\n' > $(BUILD_DIR)/initramfs/etc/shells
 	@rm -f $(BUILD_DIR)/initramfs/etc/shadow
-	@printf 'root:$$6$$ranixsalt$$.hGbivmRHVhZxfxORfv1MD0sy40LgabzFqZTIyXG4KhrIN/YF.rMrSGyJrMMXSi8loXADZl.uX7/8UWcfZA2q1:19900:0:99999:7:::\ntest:$$6$$testsalt1$$6cTOkKTn8ZS0yaLedMWewUyP2wRoYelzbeIvjGKJ4GsHcHnp0m2DU87odsL9e90OCGfvadlarpnMVWZoOMysH0:19900:0:99999:7:::\n' \
+	@printf 'root:$$6$$ranixsalt$$.hGbivmRHVhZxfxORfv1MD0sy40LgabzFqZTIyXG4KhrIN/YF.rMrSGyJrMMXSi8loXADZl.uX7/8UWcfZA2q1:19900:0:99999:7:::\ntest:$$6$$testsalt1$$lXcMUCMFONojgODTdrEnx7EPsgOI/v0k3TnAx/ahXxEkWgqhD/FFSAdlwaBXL3Ofgj/mPWy5.k8RlqZTAGA1T1:19900:0:99999:7:::\n' \
 	    > $(BUILD_DIR)/initramfs/etc/shadow
 	@chmod 640 $(BUILD_DIR)/initramfs/etc/shadow
 	@printf 'root:x:0:\ntest:x:1000:\n' > $(BUILD_DIR)/initramfs/etc/group

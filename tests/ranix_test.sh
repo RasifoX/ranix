@@ -531,6 +531,9 @@ check "su-switches-gid"  "1000" \
     "$(timeout 5 su test -c 'id -g' 2>/dev/null)"
 check "shadow-no-read" "1" \
     "$(timeout 5 su test -c 'cat /etc/shadow 2>/dev/null' 2>/dev/null | wc -c | awk '{print ($1==0)?1:0}')"
+# full login over a pty: answer the password prompt (test/ranixpw vs /etc/shadow
+# $6$ crypt) and land in a uid-1000 session shell — the whole getty/login chain.
+check "c-login"          "OK"  "$(timeout 20 /bin/test_login 2>/dev/null)"
 
 echo "---"
 
