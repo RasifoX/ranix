@@ -33,6 +33,12 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TIOCSWINSZ 0x5414
 #define TIOCGPTN   0x80045430
 #define TIOCSPTLCK 0x40045431
+#define TIOCNOTTY  0x5422
+
+#define SIGTTIN    21
+#define SIGTTOU    22
+/* c_lflag */
+#define TOSTOP     0x0100
 
 /* c_iflag */
 #define ICRNL   0x0100
@@ -78,6 +84,7 @@ typedef struct {
 
 static pty_t      ptys[PTY_MAX];
 static spinlock_t pool_lock = SPINLOCK_INIT;
+static vfs_fops_t pts_fops;
 
 static uint32_t r_avail(uint32_t h, uint32_t t) { return (h - t) % PTY_BUF; }
 static uint32_t r_free(uint32_t h, uint32_t t)  { return PTY_BUF - 1 - r_avail(h, t); }
@@ -334,6 +341,11 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 		p->fg_pgrp = pgrp;
 		return 0;
 	}
+	case TIOCNOTTY: {
+		process_t *cur = task_current();
+		if (cur && cur->ctty == p) { cur->ctty = NULL; cur->ctty_fops = NULL; }
+		return 0;
+	}
 	}
 	return 0;   /* lenient: unknown tty ioctls succeed as no-ops */
 }
@@ -406,11 +418,15 @@ static int master_close(vfs_file_t *file)
 	uint64_t pf = spin_lock_irq(&pool_lock);
 	uint64_t f  = spin_lock_irq(&p->lock);
 	p->master_open = 0;
+	pid_t fg = p->fg_pgrp;
 	int both_closed = !p->slave_open;
 	spin_unlock_irq(&p->lock, f);
 	if (both_closed) p->in_use = 0;
 	spin_unlock_irq(&pool_lock, pf);
 	wake_up(&p->m2s_wait);   /* slave readers see EOF */
+	/* Terminal hangup: SIGHUP+SIGCONT the foreground group and detach the ctty
+	 * from every process that had this pty as its controlling terminal. */
+	tty_hangup(p, fg);
 	return 0;
 }
 
@@ -436,11 +452,23 @@ static int pts_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 static ssize_t slave_read(vfs_file_t *file, void *buf, size_t len)
 {
 	pty_t *p = file->priv;
+	for (;;) {
+		int jc = tty_jobctl_check(p, &pts_fops, p->fg_pgrp, SIGTTIN);
+		if (jc < 0) return jc;
+		if (jc == 0) break;
+	}
 	return slave_cooked_read(p, buf, len, file->flags & O_NONBLOCK);
 }
 static ssize_t slave_write(vfs_file_t *file, const void *buf, size_t len)
 {
 	pty_t *p = file->priv;
+	if (p->c_lflag & TOSTOP) {
+		for (;;) {
+			int jc = tty_jobctl_check(p, &pts_fops, p->fg_pgrp, SIGTTOU);
+			if (jc < 0) return jc;
+			if (jc == 0) break;
+		}
+	}
 	return ldisc_output(p, buf, len);
 }
 static int slave_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
