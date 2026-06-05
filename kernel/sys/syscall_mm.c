@@ -312,6 +312,11 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 		}
 	}
 
+	/* vm_map only flushed the local TLB; a sibling thread on another CPU keeps a
+	 * stale (e.g. still-writable) entry for the reprotected range. Shoot them
+	 * down so the new protection takes effect everywhere. */
+	arch_tlb_flush_range(p->vm, addr, addr + len);
+
 	/* Keep VMA permissions in sync so the fault handler enforces the new prot.
 	 * Split any VMA that the range only partially covers, so the new prot
 	 * applies to exactly [addr, addr+len) — applying it to the whole VMA would

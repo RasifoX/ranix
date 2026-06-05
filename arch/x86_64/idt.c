@@ -53,6 +53,7 @@ extern void irq_stub_yield(void);
 extern void irq_stub_syscall(void);
 extern void irq_stub_ipi(void);
 extern void irq_stub_lapic(void);
+extern void irq_stub_tlbshoot(void);
 
 void idt_init(void)
 {
@@ -81,8 +82,9 @@ void idt_init(void)
 
 	idt_set_gate(VEC_YIELD,   irq_stub_yield,   0xEE);
 	idt_set_gate(VEC_SYSCALL, irq_stub_syscall, 0xEE);
-	idt_set_gate(0xF0,        irq_stub_ipi,     0x8E);  /* SMP reschedule IPI */
-	idt_set_gate(0xF1,        irq_stub_lapic,   0x8E);  /* per-CPU LAPIC timer */
+	idt_set_gate(0xF0,        irq_stub_ipi,       0x8E);  /* SMP reschedule IPI */
+	idt_set_gate(0xF1,        irq_stub_lapic,     0x8E);  /* per-CPU LAPIC timer */
+	idt_set_gate(0xF2,        irq_stub_tlbshoot,  0x8E);  /* cross-CPU TLB shootdown */
 
 	struct idtr idtr = {
 		.limit = sizeof(idt) - 1,

@@ -51,4 +51,10 @@ int         vm_handle_fault(uint64_t vaddr, int is_write);
  * TLB tag on aarch64 (0 forces a flush); ignored on x86_64. */
 void arch_vm_switch(uint64_t root_phys, uint32_t asid);
 
+/* Cross-CPU TLB shootdown after a PTE downgrade (unmap / COW write-protect /
+ * mprotect). On x86_64 a software IPI flushes the other online CPUs; on
+ * aarch64 the broadcast TLBI in vm.c already covers all cores, so this is a
+ * no-op. Must NOT be called while holding vs->fault_lock. */
+void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end);
+
 #endif

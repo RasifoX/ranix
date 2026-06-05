@@ -221,3 +221,95 @@ void arch_smp_ipi_ack(void)
 {
 	if (lapic) lapic_write(LAPIC_EOI, 0);
 }
+
+/*
+ * Cross-CPU TLB shootdown (vector 0xF2). x86 invlpg/CR3 are CPU-local, so a
+ * PTE downgrade (unmap, COW write-protect, mprotect) leaves sibling CPUs
+ * running in the same address space with stale TLB entries until they happen
+ * to reload CR3. A sibling thread on another CPU never does (arch_vm_switch
+ * skips the reload for an unchanged root), so it can keep writing through a
+ * stale writable entry. The shootdown forces every other online CPU to flush.
+ *
+ * Deadlock-safety mirrors the aarch64 IRQ-on model: the body runs IRQ-on, so a
+ * sibling sitting in its own syscall takes the IPI and acks promptly; the only
+ * IRQ-off windows are short spin_lock_irq sections, so an ack is always bounded.
+ * The single shootdown lock keeps one broadcast in flight, so the waiter never
+ * has to ack a peer while waiting. Callers MUST NOT hold vs->fault_lock here: a
+ * sibling spinning IRQ-off on that lock could not ack — issue the shootdown only
+ * after the lock is dropped.
+ */
+#define VEC_TLB_SHOOTDOWN 0xF2
+
+static spinlock_t tlb_shoot_lock;
+static volatile uint32_t tlb_ack_mask;
+
+/* Vector 0xF2 handler: flush the whole non-global TLB (CR3 reload) and ack. */
+void tlb_shootdown_handler(void)
+{
+	uint64_t cr3;
+	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+	int self = (int)arch_get_cpu_ctx()->cpu_id;
+	atomic_and32(&tlb_ack_mask, ~((uint32_t)1 << self));
+	if (lapic) lapic_write(LAPIC_EOI, 0);
+}
+
+static void tlb_ipi_send(int cpu_id)
+{
+	/* Wait for any prior IPI to leave the ICR (delivery-status, bit 12) so we
+	 * don't overwrite an in-flight command. */
+	while (lapic_read(LAPIC_ICR_LO) & (1u << 12))
+		__asm__ volatile("pause" ::: "memory");
+	lapic_write(LAPIC_ICR_HI, cpu_apic_id[cpu_id] << 24);
+	lapic_write(LAPIC_ICR_LO, ICR_FIXED | VEC_TLB_SHOOTDOWN);
+}
+
+void arch_tlb_shootdown_all(void)
+{
+	if (!lapic || smp_ncpus <= 1) return;
+
+	/* Hold the shootdown lock with IRQs ENABLED: while another CPU holds it and
+	 * waits for our ack, we must keep taking its 0xF2 IPI. spin_lock spins with
+	 * the caller's IRQ state, so enabling them first means a contending shootdown
+	 * cannot deadlock us (each would otherwise spin IRQ-off, neither able to ack
+	 * the other). The 0xF2 handler is lock-free, so taking it mid-spin is safe. */
+	uint64_t f = irq_save();
+	irq_enable();
+	spin_lock(&tlb_shoot_lock);
+
+	int self = (int)arch_get_cpu_ctx()->cpu_id;
+	uint32_t mask = 0;
+	for (int i = 0; i < MAX_CPUS; i++) {
+		if (i == self || !all_cpus[i] || !all_cpus[i]->online) continue;
+		mask |= (uint32_t)1 << i;
+	}
+	if (!mask) { spin_unlock(&tlb_shoot_lock); irq_restore(f); return; }
+
+	tlb_ack_mask = mask;
+	smp_mb();
+	/* The ICR is a single per-LAPIC register written as a HI+LO pair. Send with
+	 * IRQs masked so a nested IPI send (e.g. a timer-driven resched IPI) can't
+	 * clobber the dest/vector between our two writes and misdeliver — or drop —
+	 * the shootdown. The send is a handful of writes; a target waiting for our
+	 * ack just spins those few cycles. */
+	uint64_t sf = irq_save();
+	for (int i = 0; i < MAX_CPUS; i++)
+		if (mask & ((uint32_t)1 << i))
+			tlb_ipi_send(i);
+	irq_restore(sf);
+
+	/* We hold the only shootdown lock, so no peer broadcast can be in flight and
+	 * we owe no ack while waiting. A target re-enables IRQs within a bounded
+	 * spin_lock_irq window (or is already IRQ-on in its syscall body / idle
+	 * halt), so this always completes; the large guard only avoids a hard wedge
+	 * during bring-up. */
+	uint64_t t = 0;
+	while (tlb_ack_mask) {
+		__asm__ volatile("pause" ::: "memory");
+		if (++t > 5000000000UL) {
+			kprintf("tlb shootdown: stuck ack_mask=0x%x\n", tlb_ack_mask);
+			break;
+		}
+	}
+	spin_unlock(&tlb_shoot_lock);
+	irq_restore(f);
+}
