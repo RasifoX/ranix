@@ -546,8 +546,7 @@ static long sys_openat(int dirfd, const char *path, int flags, mode_t mode)
 	char kpath[PATH_MAX];
 	int r = resolve_path(kpath, dirfd, path);
 	if (r) return r;
-	long fd = vfs_open(kpath, flags, mode);
-	return fd < 0 ? -2 : fd;
+	return vfs_open(kpath, flags, mode);
 }
 
 static long sys_close(int fd)
