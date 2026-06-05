@@ -2,6 +2,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/proc.h>
 #include <kernel/config.h>
 
 /*
@@ -24,6 +25,8 @@ extern int copy_from_user(void *dst, const void *src, size_t size);
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
 #define TIOCSCTTY  0x540E
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
 #define TIOCGPTN   0x80045430
@@ -39,6 +42,7 @@ typedef struct {
 	wait_queue_t s2m_wait;   /* master readers / slave writers */
 	uint8_t      termios[36];
 	uint16_t     win[4];     /* rows, cols, xpix, ypix */
+	pid_t        fg_pgrp;    /* foreground process group (job control) */
 } pty_t;
 
 static pty_t      ptys[PTY_MAX];
@@ -97,8 +101,22 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 		return copy_to_user((void *)(uintptr_t)arg, p->win, sizeof(p->win)) ? -14 : 0;
 	case TIOCSWINSZ:
 		return copy_from_user(p->win, (const void *)(uintptr_t)arg, sizeof(p->win)) ? -14 : 0;
-	case TIOCSCTTY:
+	case TIOCSCTTY: {
+		/* Acquiring the controlling terminal makes the caller's process group
+		 * the foreground group, so an interactive shell's tcgetpgrp() matches
+		 * its own pgrp and it skips the SIGTTIN job-control wait. */
+		process_t *cur = task_current();
+		if (cur && cur->pgrp > 0) p->fg_pgrp = cur->pgrp;
 		return 0;
+	}
+	case TIOCGPGRP:
+		return copy_to_user((void *)(uintptr_t)arg, &p->fg_pgrp, sizeof(p->fg_pgrp)) ? -14 : 0;
+	case TIOCSPGRP: {
+		pid_t pgrp;
+		if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
+		p->fg_pgrp = pgrp;
+		return 0;
+	}
 	}
 	return 0;   /* lenient: unknown tty ioctls succeed as no-ops */
 }
@@ -115,6 +133,7 @@ static int ptmx_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 			p->in_use = 1; p->master_open = 1; p->slave_open = 0;
 			p->m2s_h = p->m2s_t = p->s2m_h = p->s2m_t = 0;
 			p->index = i;
+			p->fg_pgrp = 0;
 			memset(p->termios, 0, sizeof(p->termios));
 			p->win[0] = 24; p->win[1] = 80; p->win[2] = p->win[3] = 0;
 			spin_unlock_irq(&pool_lock, f);
