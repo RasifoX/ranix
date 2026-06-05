@@ -61,6 +61,15 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	if (len == 0) return -22;
 	process_t *p = task_current();
 
+	/* RLIMIT_AS: refuse a mapping that would push the address space over the
+	 * soft limit (rlim_set==0 means uninitialized → unlimited). */
+	if (p->rlim_set && p->rlim_cur[9 /*RLIMIT_AS*/] != (uint64_t)-1) {
+		uint64_t used = 0;
+		for (vma_t *v = p->vmas; v; v = v->next) used += v->size;
+		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
+		if (used + req > p->rlim_cur[9]) return -12; /* ENOMEM */
+	}
+
 	/* MAP_FIXED maps at a user-chosen address; reject a kernel-range target so it
 	 * cannot write a PTE over the (shared) kernel half of the page tables. */
 	if ((flags & MAP_FIXED) && addr && !access_ok((void *)addr, len)) return -22;

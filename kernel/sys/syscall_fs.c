@@ -587,14 +587,55 @@ static long sys_setgroups(int size, const gid_t *list) {
 	p->ngroups = size;
 	return 0;
 }
+/* RLIMIT_* indices we treat specially */
+#define RLIMIT_NOFILE 7
+#define RLIMIT_AS     9
+#define RLIM_INFINITY ((uint64_t)-1)
+
+/* seed per-process rlimits on first use: infinite except NOFILE (FD_MAX) */
+static void rlimit_seed(process_t *p)
+{
+	if (p->rlim_set) return;
+	for (int i = 0; i < 16; i++) { p->rlim_cur[i] = RLIM_INFINITY; p->rlim_max[i] = RLIM_INFINITY; }
+	p->rlim_cur[RLIMIT_NOFILE] = FD_MAX;
+	p->rlim_max[RLIMIT_NOFILE] = FD_MAX;
+	if (p->fds) p->rlim_cur[RLIMIT_NOFILE] = p->fds->rlim_nofile;
+	p->rlim_set = 1;
+}
+
+static long do_setrlimit(process_t *p, int res, uint64_t cur, uint64_t max)
+{
+	if (res < 0 || res >= 16) return -22;            /* EINVAL */
+	rlimit_seed(p);
+	if (cur != RLIM_INFINITY && max != RLIM_INFINITY && cur > max) return -22;
+	/* raising the hard limit needs privilege */
+	if (max != p->rlim_max[res] &&
+	    (p->rlim_max[res] == RLIM_INFINITY || (max != RLIM_INFINITY && max > p->rlim_max[res])) &&
+	    p->euid != 0)
+		return -1;                                   /* EPERM */
+	p->rlim_cur[res] = cur;
+	p->rlim_max[res] = max;
+	if (res == RLIMIT_NOFILE && p->fds) {
+		int n = (cur == RLIM_INFINITY || cur > 0x7FFFFFFFULL) ? 0x7FFFFFFF : (int)cur;
+		p->fds->rlim_nofile = n;
+	}
+	return 0;
+}
+
 static long sys_getrlimit(int res, void *rlim) {
 	if (!access_ok(rlim, 16)) return -14;
-	uint64_t inf = (uint64_t)-1;
-	if (res == 7) { uint64_t pair[2] = {FD_MAX, FD_MAX}; return copy_to_user(rlim, pair, 16) == 0 ? 0 : -14; }
-	uint64_t pair[2] = {inf, inf};
+	if (res < 0 || res >= 16) return -22;
+	process_t *p = task_current();
+	rlimit_seed(p);
+	uint64_t pair[2] = { p->rlim_cur[res], p->rlim_max[res] };
 	return copy_to_user(rlim, pair, 16) == 0 ? 0 : -14;
 }
-static long sys_setrlimit(int res, const void *rlim) { (void)res; (void)rlim; return 0; }
+static long sys_setrlimit(int res, const void *rlim) {
+	if (!access_ok(rlim, 16)) return -14;
+	uint64_t pair[2];
+	if (copy_from_user(pair, rlim, 16)) return -14;
+	return do_setrlimit(task_current(), res, pair[0], pair[1]);
+}
 static long sys_getpgrp(void) { return (long)task_current()->pgrp; }
 static long sys_getpgid(pid_t pid) {
 	process_t *p = pid ? proc_get(pid) : task_current();

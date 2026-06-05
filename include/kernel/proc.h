@@ -116,6 +116,7 @@ typedef struct process {
 	uint64_t        cutime_ticks;   /* reaped children's user time (times(2)) */
 	uint64_t        cstime_ticks;   /* reaped children's system time */
 	int             nice;          /* -20..19, default 0 */
+	uint64_t        cpu_affinity;  /* sched_setaffinity mask (bit i = CPU i); 0 = all */
 	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
 	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
 	int             seccomp_mode;  /* 0 off, 1 strict, 2 filter */
@@ -142,6 +143,11 @@ typedef struct process {
 
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
+	/* RLIMIT_* soft/hard pairs (RLIM_NLIMITS=16). NOFILE is enforced via
+	 * fds->rlim_nofile and AS via the mmap path; the rest are store-and-report. */
+	uint64_t        rlim_cur[16];
+	uint64_t        rlim_max[16];
+	uint8_t         rlim_set;      /* 0 until first getrlimit/setrlimit seeds defaults */
 	uint64_t        mmap_next;
 	uint64_t        huge1g_next;   /* next VA for 1 GB hugepage mmaps (own window) */
 	int             mlock_future;  /* mlockall(MCL_FUTURE): lock+prefault later mmaps */
