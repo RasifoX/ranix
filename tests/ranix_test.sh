@@ -224,6 +224,7 @@ check "c-overlay"    "OK"   "$(timeout 10 /bin/test_overlay 2>/dev/null)"
 check "c-unlinkopen" "OK"   "$(timeout 10 /bin/test_unlinkopen 2>/dev/null)"
 check "c-openflags"  "OK"   "$(timeout 10 /bin/test_openflags 2>/dev/null)"
 check "c-rename2"    "OK"   "$(timeout 10 /bin/test_rename2 2>/dev/null)"
+check "c-fallocate"  "OK"   "$(timeout 10 /bin/test_fallocate 2>/dev/null)"
 check "c-mmapshared" "OK"   "$(timeout 10 /bin/test_mmapshared 2>/dev/null)"
 
 
