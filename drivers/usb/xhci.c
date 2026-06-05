@@ -106,7 +106,7 @@ typedef struct {
 
 	ring_t   cmd;
 
-	trb_t    *erst_seg;        /* event ring segment */
+	volatile trb_t *erst_seg;  /* event ring segment (HC writes via DMA) */
 	uint64_t  erst_seg_phys;
 	uint64_t *erst;            /* event ring segment table (1 entry) */
 	uint64_t  erst_phys;
@@ -192,10 +192,12 @@ static trb_t *ring_push(ring_t *r, uint64_t param, uint32_t status, uint32_t ctr
 static int evt_wait(xhci_t *x, uint64_t *out_ptr, uint8_t *out_type)
 {
 	for (uint64_t g = 0; g < 2000000UL; g++) {
-		trb_t *e = &x->erst_seg[x->evt_idx];
-		if ((e->control & TRB_C) != x->evt_cycle) { delay_loops(64); continue; }
+		volatile trb_t *e = &x->erst_seg[x->evt_idx];   /* DMA-written */
+		uint32_t ctrl = e->control;
+		if ((ctrl & TRB_C) != x->evt_cycle) { delay_loops(64); continue; }
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);   /* order body reads after C */
 
-		uint8_t type = TRB_GET_TYPE(e->control);
+		uint8_t type = TRB_GET_TYPE(ctrl);
 		uint8_t cc = TRB_GET_CC(e->status);
 		uint64_t ptr = e->lo | ((uint64_t)e->hi << 32);
 
@@ -229,7 +231,7 @@ static int cmd_exec(xhci_t *x, uint64_t param, uint32_t ctrl, uint8_t *out_slot)
 		if (type == TRB_EVT_CMD_COMP) {
 			if (out_slot) {
 				/* slot id is bits 31:24 of event's control dword */
-				trb_t *e = &x->erst_seg[x->evt_idx ? x->evt_idx - 1 : EVT_TRBS - 1];
+				volatile trb_t *e = &x->erst_seg[x->evt_idx ? x->evt_idx - 1 : EVT_TRBS - 1];
 				*out_slot = e->control >> 24;
 			}
 			return cc;
