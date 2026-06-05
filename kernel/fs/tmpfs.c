@@ -268,6 +268,23 @@ static int tmpfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	return 0;
 }
 
+/* free a regular file's data + inode charge after its last name and fd are gone */
+static void tmpfs_evict(vfs_inode_t *in)
+{
+	if (S_ISREG(in->mode) && in->priv) {
+		tmpfs_file_t *rf = in->priv;
+		if (rf->data) buddy_free(VIRT_TO_PHYS(rf->data), order_for(rf->capacity));
+		sb_uncharge(in->i_sb, rf->capacity);
+		kfree(rf);
+	} else if (S_ISLNK(in->mode) && in->priv) {
+		kfree(in->priv);   /* symlink target string */
+	}
+	in->priv = NULL;
+	sb_uncharge_inode(in->i_sb);
+	vfs_inode_free_xattrs(in);
+	kfree(in);
+}
+
 static int tmpfs_unlink(vfs_inode_t *dir, const char *name)
 {
 	tmpfs_dir_t *rd = dir->priv;
@@ -284,14 +301,10 @@ static int tmpfs_unlink(vfs_inode_t *dir, const char *name)
 			} else if (in->nlink > 0) {
 				in->nlink--;
 			}
-			/* last link to a regular file: free its data + inode charge */
+			/* last link gone: free now, or defer past still-open fds */
 			if (!S_ISDIR(in->mode) && in->nlink == 0) {
-				if (S_ISREG(in->mode) && in->priv) {
-					tmpfs_file_t *rf = in->priv;
-					if (rf->data) buddy_free(VIRT_TO_PHYS(rf->data), order_for(rf->capacity));
-					sb_uncharge(in->i_sb, rf->capacity);
-				}
-				sb_uncharge_inode(in->i_sb);
+				if (in->open_refs > 0) in->deferred_unlink = 1;
+				else                   tmpfs_evict(in);
 			} else if (S_ISDIR(in->mode)) {
 				sb_uncharge_inode(in->i_sb);
 			}
@@ -465,6 +478,7 @@ static vfs_iops_t tmpfs_iops = {
 	.truncate = tmpfs_truncate,
 	.link     = tmpfs_link,
 	.statfs   = tmpfs_statfs,
+	.evict    = tmpfs_evict,
 };
 
 /* ── mount ───────────────────────────────────────────────── */

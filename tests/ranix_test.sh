@@ -219,6 +219,7 @@ check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
 check "df-nonzero"   "1"    "$(df / 2>/dev/null | awk 'NR==2{print ($2>0)?1:0}')"
 check "c-tmpfs"      "OK"   "$(timeout 10 /bin/test_tmpfs 2>/dev/null)"
 check "c-overlay"    "OK"   "$(timeout 10 /bin/test_overlay 2>/dev/null)"
+check "c-unlinkopen" "OK"   "$(timeout 10 /bin/test_unlinkopen 2>/dev/null)"
 
 
 # ── 26. umount ────────────────────────────────────────────────

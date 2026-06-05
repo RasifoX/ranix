@@ -145,6 +145,20 @@ static void vfs_inode_free(vfs_inode_t *in)
 	kfree(in);
 }
 
+/* Drop one open file description's hold on an inode. Filesystems supporting
+ * open-unlinked semantics (evict hook) defer freeing a name-less inode until
+ * its last fd closes here. Returns 1 if the inode was freed (caller must not
+ * touch it again), 0 otherwise. */
+static int vfs_inode_drop_open(vfs_inode_t *in)
+{
+	if (!in || !in->iops || !in->iops->evict) return 0;
+	if (in->open_refs == 0) return 0;
+	if (atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1) != 0) return 0;
+	if (!in->deferred_unlink) return 0;
+	in->iops->evict(in);
+	return 1;
+}
+
 /* ── permission check ────────────────────────────────────── */
 /* accmode: bitmask of MAY_READ=4, MAY_WRITE=2, MAY_EXEC=1   */
 #define MAY_READ  4
@@ -875,7 +889,7 @@ void fput(vfs_file_t *f)
 	vfs_flock_release(f);
 	if (f->inode && f->inode->fops && f->inode->fops->close)
 		f->inode->fops->close(f);
-	if (f->inode && !f->inode->cached)
+	if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
 		vfs_inode_free(f->inode);
 	kfree(f);
 }
@@ -1011,6 +1025,7 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 
 	int fd = fd_alloc(fds, f);
 	if (fd < 0) { kfree(f); return -1; }
+	atomic_fetch_add32((volatile uint32_t *)&inode->open_refs, 1);
 	if (flags & O_CLOEXEC) BM_SET(fds->cloexec, fd);
 	return fd;
 }
@@ -1148,7 +1163,7 @@ void vfs_file_put(vfs_file_t *f)
 		vfs_flock_release(f);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
-		if (f->inode && !f->inode->cached)
+		if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
 			vfs_inode_free(f->inode);
 		kfree(f);
 	}

@@ -88,6 +88,7 @@ typedef struct {
     int               (*truncate)(struct vfs_inode *inode, off_t len);
     int               (*link)(struct vfs_inode *dir, const char *name, struct vfs_inode *target);
     int               (*statfs)(struct vfs_inode *inode, vfs_statfs_t *out);
+    void              (*evict)(struct vfs_inode *inode); /* free a deferred-unlink inode at last close */
 } vfs_iops_t;
 
 /* ── file operations (open fd) ───────────────────────────── */
@@ -116,6 +117,8 @@ typedef struct vfs_inode {
     void        *priv;      /* filesystem-private data */
     void        *i_sb;      /* per-mount superblock (tmpfs/overlay); NULL otherwise */
     uint32_t     refcount;
+    uint32_t     open_refs;       /* live open file descriptions referencing this inode */
+    uint32_t     deferred_unlink; /* nlink hit 0 while still open; evict at last close */
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
