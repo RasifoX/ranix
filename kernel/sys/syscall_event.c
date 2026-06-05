@@ -374,6 +374,7 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
     if (fd < 0) { kfree(f); return -12; }
+    atomic_fetch_add32((volatile uint32_t *)&in->open_refs, 1);
     return fd;
 }
 
