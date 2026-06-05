@@ -65,13 +65,21 @@ common_exc:
 	jz 1f
 	swapgs
 1:	save_context
-	/* Publish this frame as task->ctx so ptrace GETREGS/single-step act on the
-	 * trapping registers (and the TF re-arm lands on the frame we iret with). */
+	/* A fault can nest a syscall/IRQ return path that is mid-flight once syscall
+	 * bodies run IRQ-on (e.g. signal_dispatch growing the user stack). That outer
+	 * path relies on task->ctx pointing at ITS frame. Save the caller's ctx (r14,
+	 * callee-saved, preserved across exc_dispatch), publish the fault frame for
+	 * the duration of dispatch — so ptrace GETREGS/single-step and a fatal fault's
+	 * coredump act on the trapping registers — then restore the caller's ctx
+	 * before returning to our own frame. Mirrors aarch64 .sync_fault. */
 	movq %rsp, %r15
 	call task_current
+	movq 16(%rax), %r14
 	movq %r15, 16(%rax)
 	movq %rsp, %rdi
 	call exc_dispatch
+	call task_current
+	movq %r14, 16(%rax)
 	restore_context
 	addq $16, %rsp
 	testq $3, 8(%rsp)           /* returning to user? */
