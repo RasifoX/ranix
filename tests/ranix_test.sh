@@ -403,6 +403,16 @@ check "usb-read"     "RANIX-USB-DISK-OK" "$(dd if=/dev/usb0 bs=512 skip=2 count=
 printf RANIXUSBWRITE | dd of=/dev/usb0 bs=512 seek=4000 count=1 2>/dev/null
 check "usb-write"    "RANIXUSBWRITE" "$(dd if=/dev/usb0 bs=512 skip=4000 count=1 2>/dev/null | dd bs=1 count=13 2>/dev/null)"
 fi
+# NVMe: namespace 1 enumerates and its sectors read/write over the NVM
+# READ/WRITE command path (x86_64 test target, qemu -device nvme).
+if [ -b /dev/nvme0n1 ]; then
+check "nvme-blknode" "b"            "$([ -b /dev/nvme0n1 ] && echo b)"
+# marker seeded at sector 2 reads back over the NVM READ command
+check "nvme-read"    "RANIX-NVME-DISK-OK" "$(dd if=/dev/nvme0n1 bs=512 skip=2 count=1 2>/dev/null | dd bs=1 count=18 2>/dev/null)"
+# write a sector and read it back: round-trips NVM WRITE+READ on the namespace
+printf RANIXNVMEWRITE | dd of=/dev/nvme0n1 bs=512 seek=4000 count=1 2>/dev/null
+check "nvme-write"   "RANIXNVMEWRITE" "$(dd if=/dev/nvme0n1 bs=512 skip=4000 count=1 2>/dev/null | dd bs=1 count=14 2>/dev/null)"
+fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"
 check "sys-net-state" "up"  "$(cat /sys/class/net/lo/operstate 2>/dev/null)"
