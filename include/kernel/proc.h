@@ -276,6 +276,8 @@ int        task_has_actionable_signal(void);
 void       task_signal(process_t *p, int sig);
 void       task_signal_group(process_t *leader, int sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
+int        task_pgrp_exists(pid_t pgrp);
+int        task_signal_broadcast(process_t *except, int sig);
 /* sigqueue(2)/rt_sigqueueinfo: deliver an RT signal carrying si_value.
  * thread_directed != 0 targets the exact thread `p`; otherwise it is process-
  * directed (any eligible thread of p's group). Returns 0 or -EAGAIN on overflow. */
