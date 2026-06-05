@@ -480,12 +480,20 @@ $(BUILD_DIR)/usb-test.img:
 	printf 'RANIX-USB-DISK-OK' | dd of=$@ bs=512 seek=2 conv=notrunc 2>/dev/null
 	@echo "[OK] usb-test.img"
 
-# Small raw image on an NVMe namespace (x86_64 only). A marker at a known sector
-# is read back over the NVM READ command via dd /dev/nvme0n1 to prove the admin
-# IDENTIFY + I/O queue path. Not a filesystem so the auto-mounter ignores it.
+# NVMe namespace image (x86_64 only), a second ext2 filesystem proving the ext2
+# driver is multi-instance: the AHCI gpt-ext4 disk stays auto-mounted at /mnt
+# while the suite mounts this one at /mnt2 (mount -t ext2 /dev/nvme0n1 /mnt2) and
+# read/writes both independently. The ext2 fs occupies the first 4 MB; raw block
+# markers for the NVM READ/WRITE round-trip test live past the fs at high sectors.
 $(BUILD_DIR)/nvme-test.img:
+	@rm -rf $(BUILD_DIR)/nvmeseed
+	@mkdir -p $(BUILD_DIR)/nvmeseed
+	@printf 'ranix-nvme-ext2-ok' > $(BUILD_DIR)/nvmeseed/marker.txt
+	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs.img bs=1M count=4 2>/dev/null
+	mkfs.ext2 -F -q -b 1024 -d $(BUILD_DIR)/nvmeseed $(BUILD_DIR)/nvme-fs.img >/dev/null 2>&1
 	dd if=/dev/zero of=$@ bs=1M count=8 2>/dev/null
-	printf 'RANIX-NVME-DISK-OK' | dd of=$@ bs=512 seek=2 conv=notrunc 2>/dev/null
+	dd if=$(BUILD_DIR)/nvme-fs.img of=$@ bs=512 conv=notrunc 2>/dev/null
+	printf 'RANIX-NVME-DISK-OK' | dd of=$@ bs=512 seek=12000 conv=notrunc 2>/dev/null
 	@echo "[OK] nvme-test.img"
 
 # A full disk rootfs (a copy of the initramfs tree) for the switch_root /
