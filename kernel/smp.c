@@ -3,6 +3,7 @@
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/irq.h>
+#include <kernel/sync.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/buddy.h>
@@ -164,9 +165,54 @@ void smp_ipi_resched(int cpu_id)
 	arch_smp_ipi_send(cpu_id);
 }
 
-/* SGI #0 handler — aarch64 IPI */
+/* membarrier(2): the reschedule IPI is reused as the barrier vehicle. The
+ * broadcaster raises membarrier_req, sends an IPI to every other online CPU,
+ * and waits for each handler to run a full barrier and bump membarrier_acks.
+ * One in-flight broadcast at a time (membarrier_lock). */
+static spinlock_t membarrier_lock;
+static volatile uint32_t membarrier_req;
+static volatile uint32_t membarrier_acks;
+
+void smp_membarrier(void)
+{
+	if (smp_ncpus <= 1) { smp_mb(); return; }
+
+	uint64_t f = spin_lock_irq(&membarrier_lock);
+	int self = (int)arch_get_cpu_ctx()->cpu_id;
+	uint32_t expect = 0;
+	membarrier_acks = 0;
+	smp_mb();
+	membarrier_req = 1;
+	smp_mb();
+	for (int i = 0; i < MAX_CPUS; i++) {
+		if (i == self || !all_cpus[i] || !all_cpus[i]->online) continue;
+		expect++;
+		arch_smp_ipi_send(i);
+	}
+	/* Bounded wait so a wedged CPU never hangs the caller; the local barrier
+	 * below still orders this CPU's accesses regardless. */
+	for (uint64_t t = 0; membarrier_acks < expect && t < 100000000UL; t++)
+		__asm__ volatile("" ::: "memory");
+	membarrier_req = 0;
+	smp_mb();
+	spin_unlock_irq(&membarrier_lock, f);
+	smp_mb();
+}
+
+/* If a membarrier broadcast is in flight, run a full barrier and ack it. Called
+ * from every IPI entry — the SGI handler below (aarch64) and the x86 IPI stub. */
+void smp_ipi_membarrier_ack(void)
+{
+	if (membarrier_req) {
+		smp_mb();
+		atomic_fetch_add32(&membarrier_acks, 1);
+	}
+}
+
+/* SGI #0 handler — aarch64 IPI. Shared between resched and membarrier. */
 void smp_ipi_handler(void)
 {
+	smp_ipi_membarrier_ack();
 	arch_get_cpu_ctx()->need_resched = 1;
 	arch_smp_ipi_ack();
 }

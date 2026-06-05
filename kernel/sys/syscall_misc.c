@@ -946,6 +946,38 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 	}
 }
 
+/* membarrier(2). QUERY returns the supported-command bitmask; GLOBAL and the
+ * PRIVATE/GLOBAL _EXPEDITED commands run a real cross-CPU full barrier via the
+ * IPI broadcast. The REGISTER_* variants are no-op success (no per-process
+ * registration state needed for our unconditional barrier). */
+#define MEMBARRIER_CMD_QUERY                       0
+#define MEMBARRIER_CMD_GLOBAL                      (1 << 0)
+#define MEMBARRIER_CMD_GLOBAL_EXPEDITED            (1 << 1)
+#define MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED   (1 << 2)
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED           (1 << 3)
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED  (1 << 4)
+static long sys_membarrier(int cmd, unsigned int flags)
+{
+	if (flags) return -22;
+	switch (cmd) {
+	case MEMBARRIER_CMD_QUERY:
+		return MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED |
+		       MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED |
+		       MEMBARRIER_CMD_PRIVATE_EXPEDITED |
+		       MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+	case MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED:
+	case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED:
+		return 0;
+	case MEMBARRIER_CMD_GLOBAL:
+	case MEMBARRIER_CMD_GLOBAL_EXPEDITED:
+	case MEMBARRIER_CMD_PRIVATE_EXPEDITED:
+		smp_membarrier();
+		return 0;
+	default:
+		return -22;
+	}
+}
+
 static long sys_getrandom(void *buf, size_t len, unsigned int flags)
 {
 	(void)flags;

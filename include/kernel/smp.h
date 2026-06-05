@@ -24,4 +24,9 @@ void secondary_cpu_main(int cpu_id);
 /* Send reschedule IPI to the given CPU (no-op if cpu_id == current cpu) */
 void smp_ipi_resched(int cpu_id);
 
+/* Run a full memory barrier on every other online CPU and wait for completion
+ * (membarrier(2) MEMBARRIER_CMD_GLOBAL / *_EXPEDITED). The local barrier is the
+ * caller's responsibility / implied by the IPI round-trip. */
+void smp_membarrier(void);
+
 #endif
