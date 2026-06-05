@@ -281,6 +281,13 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 	spin_unlock_irq(&vs->fault_lock, lf);
 
+	/* Force the other CPUs to drop their stale entry for this page BEFORE the
+	 * page is freed/reused — a sibling thread in the same address space may
+	 * still have a writable TLB entry. Done outside fault_lock so a sibling
+	 * spinning on it (IRQ-off) can still ack the shootdown IPI. */
+	if (pte || huge_base || huge1g)
+		arch_tlb_flush_range(vs, vaddr, vaddr + PAGE_SIZE);
+
 	if (huge1g) {
 		huge1g_put(huge1g);
 	} else if (huge_base) {
@@ -315,6 +322,17 @@ uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 	uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[p2i] & ~0xFFFUL);
 	if (!(pt[p1i] & PTE_P)) return 0;
 	return (pt[p1i] & ~0xFFFUL);
+}
+
+/* Shoot down the other CPUs after a PTE downgrade. invlpg/CR3 are CPU-local,
+ * so a sibling thread on another CPU in the same address space keeps a stale
+ * TLB entry until forced to flush. range is currently flush-everything (a CR3
+ * reload on each target); per-page invlpg can come later if it matters. */
+void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end)
+{
+	(void)vs; (void)start; (void)end;
+	extern void arch_tlb_shootdown_all(void);
+	arch_tlb_shootdown_all();
 }
 
 void arch_vm_switch(uint64_t root_phys, uint32_t asid)
@@ -436,6 +454,12 @@ vm_space_t *vm_copy(vm_space_t *vs)
 
 	uint64_t cr3;
 	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
+
+	/* The parent's leaf PTEs were write-protected for COW. A sibling thread of
+	 * the parent on another CPU still holds writable TLB entries and would write
+	 * straight through, breaking copy-on-write. Shoot them down (outside
+	 * fault_lock). */
+	arch_tlb_flush_range(vs, 0, 0);
 
 	return new_vs;
 
