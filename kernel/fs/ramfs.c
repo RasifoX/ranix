@@ -233,6 +233,25 @@ static int ramfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	return 0;
 }
 
+/* free a file's data buffer + inode after its last name and fd are gone */
+static void ramfs_evict(vfs_inode_t *in)
+{
+	if (S_ISREG(in->mode) && in->priv) {
+		ramfs_file_t *rf = in->priv;
+		if (rf->data) {
+			int order = 0;
+			while (((uint64_t)4096 << order) < rf->capacity) order++;
+			buddy_free(VIRT_TO_PHYS(rf->data), order);
+		}
+		kfree(rf);
+	} else if (S_ISLNK(in->mode) && in->priv) {
+		kfree(in->priv);
+	}
+	in->priv = NULL;
+	vfs_inode_free_xattrs(in);
+	kfree(in);
+}
+
 static int ramfs_unlink(vfs_inode_t *dir, const char *name)
 {
 	ramfs_dir_t   *rd   = dir->priv;
@@ -243,10 +262,16 @@ static int ramfs_unlink(vfs_inode_t *dir, const char *name)
 			ramfs_entry_t *e = *pp;
 			*pp = e->next;
 			rd->count--;
+			vfs_inode_t *in = e->inode;
 			/* Removing a subdirectory drops the parent's '..' backlink; removing
 			 * a file drops one of that file's hard links. */
-			if (S_ISDIR(e->inode->mode)) dir->nlink--;
-			else if (e->inode->nlink > 0) e->inode->nlink--;
+			if (S_ISDIR(in->mode)) dir->nlink--;
+			else if (in->nlink > 0) in->nlink--;
+			/* last link gone: free now, or defer past still-open fds */
+			if (!S_ISDIR(in->mode) && in->nlink == 0) {
+				if (in->open_refs > 0) in->deferred_unlink = 1;
+				else                   ramfs_evict(in);
+			}
 			kfree(e);
 			return 0;
 		}
@@ -425,6 +450,7 @@ static vfs_iops_t ramfs_iops = {
 	.symlink  = ramfs_symlink,
 	.truncate = ramfs_truncate,
 	.link     = ramfs_link,
+	.evict    = ramfs_evict,
 };
 
 /* ── mount ───────────────────────────────────────────────── */
