@@ -279,8 +279,10 @@ void kernel_main(void)
 	vfs_mkdir("/sys",  0555);
 	vfs_mount("/sys",  "sysfs", NULL);
 	vfs_mkdir("/run",  0755);
+	/* POSIX shared memory: /dev/shm is a symlink to /run/shm, which must be a
+	 * real tmpfs for shm_open/Python-multiprocessing/Chrome. */
 	vfs_mkdir("/run/shm", 0777);
-	vfs_mount("/run/shm", "ramfs", NULL);
+	vfs_mount("/run/shm", "tmpfs", NULL);
 	/* cgroup2 hierarchy (pids controller). Canonical path is /sys/fs/cgroup;
 	 * mounted here until sysfs exposes that mountpoint. */
 	vfs_mkdir("/cgroup", 0755);
