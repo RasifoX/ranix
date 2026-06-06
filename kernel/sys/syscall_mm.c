@@ -127,9 +127,9 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
 		else {
-			uint64_t ceil = ARCH_USER_STACK_TOP - (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE;
+			uint64_t ceil = HUGE1G_VA_BASE;   /* mmap window ends below the 1 GB-hugepage window, itself below the stack */
 			uint64_t next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-			if (next + len > ceil || next + len < next) return -12;   /* over stack / wrap */
+			if (next + len > ceil || next + len < next) return -12;   /* over window / wrap */
 			va = next; p->mmap_next = next + len;
 		}
 		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
@@ -163,10 +163,10 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	uint64_t va;
 	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	else {
-		/* The bump-allocated mmap window ends at the stack; refuse to hand out a
-		 * VA that would overlap it (Linux returns ENOMEM when no region fits)
-		 * rather than silently map over the stack. */
-		uint64_t ceil = ARCH_USER_STACK_TOP - (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE;
+		/* The bump-allocated mmap window ends below the 1 GB-hugepage window
+		 * (itself below the stack); refuse a VA that would overrun it (Linux
+		 * returns ENOMEM when no region fits) rather than colliding. */
+		uint64_t ceil = HUGE1G_VA_BASE;
 		if (p->mmap_next + len > ceil || p->mmap_next + len < p->mmap_next) return -12;
 		va = p->mmap_next; p->mmap_next += len;
 	}
