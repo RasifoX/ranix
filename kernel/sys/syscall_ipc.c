@@ -120,8 +120,8 @@ static long sys_shmat(int shmid, const void *shmaddr, int shmflg)
         vma->vaddr  = va;
         vma->size  = size;
         vma->flags = vmflags;
-        vma->next  = p->vmas;
-        p->vmas    = vma;
+        vma->next  = p->vm->vmas;
+        p->vm->vmas    = vma;
     }
 
     return (long)va;
@@ -138,7 +138,7 @@ static long sys_shmdt(const void *shmaddr)
     for (int i = 0; i < SHM_MAX; i++) {
         if (!shm_segs[i].valid || shm_segs[i].ipc_ns != cur) continue;
         /* check if any VMA at va matches this segment's size */
-        vma_t *v = p->vmas;
+        vma_t *v = p->vm->vmas;
         while (v) {
             if (v->vaddr == va && v->size == shm_segs[i].size) {
                 shm_segs[i].refs--;
@@ -151,13 +151,13 @@ static long sys_shmdt(const void *shmaddr)
 
     /* unmap pages from user VA space */
     vma_t *prev = NULL;
-    vma_t *vma  = p->vmas;
+    vma_t *vma  = p->vm->vmas;
     while (vma) {
         if (vma->vaddr == va) {
             for (size_t off = 0; off < vma->size; off += PAGE_SIZE)
                 vm_unmap(p->vm, va + off);
             if (prev) prev->next = vma->next;
-            else      p->vmas   = vma->next;
+            else      p->vm->vmas   = vma->next;
             kfree(vma);
             return 0;
         }

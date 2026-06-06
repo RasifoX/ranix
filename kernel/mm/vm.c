@@ -124,7 +124,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
 			mf = VM_USER | VM_READ | VM_WRITE;
 		} else {
-			for (vma_t *v = p->vmas; v; v = v->next) {
+			for (vma_t *v = p->vm->vmas; v; v = v->next) {
 				if (vaddr < v->vaddr || vaddr >= v->vaddr + v->size) continue;
 				if (!(v->flags & VMA_ANON) || !(v->flags & VMA_READ)) break;
 				mf = VM_USER | VM_READ;
@@ -160,7 +160,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	 * ret = -1 and let the caller raise SIGSEGV. Pages with no VMA (heap/brk)
 	 * fall through to the COW path below. */
 	uint32_t cow_exec = 0;   /* preserve executability across the COW remap */
-	for (vma_t *v = p->vmas; v; v = v->next) {
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_EXEC) cow_exec = VM_EXEC;
 			if (v->flags & VMA_HUGE_1G) {

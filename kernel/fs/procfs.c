@@ -185,7 +185,8 @@ static process_t *find_proc(int pid)
 static uint64_t proc_vm_bytes(process_t *p)
 {
 	uint64_t total = 0;
-	for (vma_t *v = p->vmas; v; v = v->next) total += v->size;
+	if (!p->vm) return 0;
+	for (vma_t *v = p->vm->vmas; v; v = v->next) total += v->size;
 	return total;
 }
 
@@ -351,9 +352,9 @@ static int fill_proc_maps(char *buf, size_t sz, int pid)
 	pb_t b = {buf, sz};
 	if (!proc_may_access(pid)) return (int)(sz - b.rem);   /* ptrace gate; empty on denial */
 	process_t *p = find_proc(pid);
-	if (!p) return (int)(sz - b.rem);
+	if (!p || !p->vm) return (int)(sz - b.rem);
 	/* iterate VMAs */
-	for (vma_t *v = p->vmas; v; v = v->next) {
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		/* start-end perms offset dev:ino path */
 		uint64_t end = v->vaddr + v->size;
 		/* print hex addr */
