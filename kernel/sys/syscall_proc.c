@@ -1354,12 +1354,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	kfree(kenvp);
 	sp &= ~15ULL;
 
-	/* 16 random bytes for AT_RANDOM (used by libc for stack canary, etc.) */
+	/* 16 random bytes for AT_RANDOM (libc stack canary / pointer guard): must be
+	 * cryptographic, so draw from the CSPRNG rather than the ASLR PRNG. */
 	sp -= 16;
 	{
-		uint64_t *rp = (uint64_t *)KB(sp);
-		rp[0] = rng_next();
-		rp[1] = rng_next();
+		extern void csprng_bytes(void *, size_t);
+		csprng_bytes((void *)KB(sp), 16);
 	}
 	uint64_t at_random_addr = sp;
 
