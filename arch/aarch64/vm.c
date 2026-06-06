@@ -13,6 +13,22 @@
 #define L12_TABLE   (PTE_VALID | PTE_TABLE)
 #define L3_PAGE     (PTE_VALID | (1UL << 1) | PTE_AF)
 
+/* Output-address field of a descriptor (bits 47:12). Masks off the low bits
+ * and the upper attributes — PXN/UXN/NOFREE at bits 53/54/55 — so a leaf
+ * entry's address survives extraction. */
+#define PA_MASK     0x0000FFFFFFFFF000UL
+#define PA_2M_MASK  0x0000FFFFFFE00000UL
+#define PA_1G_MASK  0x0000FFFFC0000000UL
+
+/* Execute-never bits for a leaf. User pages are never privileged-executable
+ * (PXN: no ret2usr), and unprivileged-executable only when VM_EXEC. Kernel
+ * mappings (ioremap/device) are never executable from either level. */
+static inline uint64_t pte_xn(uint32_t flags)
+{
+	if (!(flags & VM_USER)) return PTE_UXN | PTE_PXN;
+	return PTE_PXN | ((flags & VM_EXEC) ? 0 : PTE_UXN);
+}
+
 extern uint64_t kernel_l1[];
 
 static uint64_t alloc_table(void)
@@ -134,7 +150,7 @@ void vm_destroy(vm_space_t *vs)
 		if (!(l1[i] & PTE_VALID)) continue;
 		if ((l1[i] & 3) != 3) {
 			/* 1 GB L1 block */
-			if (l1[i] & PTE_USER) huge1g_put(l1[i] & ~0x3FFFFFFFUL);
+			if (l1[i] & PTE_USER) huge1g_put(l1[i] & PA_1G_MASK);
 			continue;
 		}
 
@@ -146,7 +162,7 @@ void vm_destroy(vm_space_t *vs)
 				/* 2MB block */
 				if (l2[j] & PTE_USER) {
 					huge2m_account(-1);
-					uint64_t pa = l2[j] & ~0x1FFFFFUL;
+					uint64_t pa = l2[j] & PA_2M_MASK;
 					for (int k = 0; k < 512; k++)
 						pmm_free((void *)(pa + (uint64_t)k * PAGE_SIZE));
 				}
@@ -161,7 +177,7 @@ void vm_destroy(vm_space_t *vs)
 				if (l3[k] & PTE_USER) {
 					is_user_l3 = 1;
 					if (!(l3[k] & PTE_NOFREE))
-						pmm_free((void *)(l3[k] & ~0xFFFUL));
+						pmm_free((void *)(l3[k] & PA_MASK));
 				}
 			}
 			/* Don't free kernel-inherited L3 tables (e.g. framebuffer split).
@@ -202,8 +218,9 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 		if ((l2[l2i] & 3) != 3) {
 			/* 2MB L2 block — split into 512 4KB L3 pages */
 			uint64_t blk  = l2[l2i];
-			uint64_t base = blk & ~0x1FFFFFUL;
-			uint64_t attr = (blk & 0xFFCUL) | PTE_VALID | (1UL << 1);
+			uint64_t base = blk & PA_2M_MASK;
+			uint64_t attr = (blk & 0xFFCUL) | (blk & (PTE_PXN | PTE_UXN | PTE_NOFREE))
+			              | PTE_VALID | (1UL << 1);
 			l3_phys = alloc_table();
 			if (!l3_phys) return -1;
 			uint64_t *l3_virt = (uint64_t *)PHYS_TO_VIRT(l3_phys);
@@ -230,6 +247,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (flags & VM_USER)        attr |= PTE_USER | PTE_NG;
 	if (!(flags & VM_WRITE))    attr |= PTE_RO;
 	if (flags & VM_NOFREE)      attr |= PTE_NOFREE;   /* shared page: don't free on teardown */
+	attr |= pte_xn(flags);
 
 	l3[l3i] = (paddr & ~0xFFFUL) | L3_PAGE | attr;
 
@@ -267,6 +285,7 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (flags & VM_DEVICE)   attr = PTE_ATTR_DEVICE;
 	if (flags & VM_USER)     attr |= PTE_USER | PTE_NG;
 	if (!(flags & VM_WRITE)) attr |= PTE_RO;
+	attr |= pte_xn(flags);
 
 	/* L2 block descriptor: valid + bit[1]=0 (block, not table) + AF. */
 	uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l2_phys);
@@ -296,6 +315,7 @@ int vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flag
 	if (flags & VM_DEVICE)   attr = PTE_ATTR_DEVICE;
 	if (flags & VM_USER)     attr |= PTE_USER | PTE_NG;
 	if (!(flags & VM_WRITE)) attr |= PTE_RO;
+	attr |= pte_xn(flags);
 
 	l1[l1i] = (paddr & ~0x3FFFFFFFUL) | PTE_VALID | PTE_AF | attr;
 
@@ -320,7 +340,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1p);
 	if ((l1[l1i] & PTE_VALID) && (l1[l1i] & 3) != 3) {
 		/* 1 GB L1 block */
-		if (l1[l1i] & PTE_USER) huge1g = l1[l1i] & ~0x3FFFFFFFUL;
+		if (l1[l1i] & PTE_USER) huge1g = l1[l1i] & PA_1G_MASK;
 		l1[l1i] = 0;
 		__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
 		                 :: "r"((vaddr & ~0x3FFFFFFFUL) >> 12) : "memory");
@@ -333,7 +353,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		if (l2[l2i] & PTE_VALID) {
 			if ((l2[l2i] & 3) != 3) {
 				/* 2 MB block */
-				if (l2[l2i] & PTE_USER) huge_base = l2[l2i] & ~0x1FFFFFUL;
+				if (l2[l2i] & PTE_USER) huge_base = l2[l2i] & PA_2M_MASK;
 				l2[l2i] = 0;
 				__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
 				                 :: "r"((vaddr & ~0x1FFFFFUL) >> 12) : "memory");
@@ -360,7 +380,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		for (int i = 0; i < 512; i++)
 			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 	} else if ((pte & PTE_VALID) && (pte & PTE_USER))
-		pmm_free((void *)(pte & ~0xFFFUL));
+		pmm_free((void *)(pte & PA_MASK));
 }
 
 uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
@@ -375,15 +395,15 @@ uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
 	uint64_t l3i = (vaddr >> 12) & 0x1FF;
 
 	if (!(l1[l1i] & PTE_VALID)) return 0;
-	if ((l1[l1i] & 3) != 3) return (l1[l1i] & ~0x3FFFFFFFUL) | (vaddr & 0x3FFFFFFFUL);
+	if ((l1[l1i] & 3) != 3) return (l1[l1i] & PA_1G_MASK) | (vaddr & 0x3FFFFFFFUL);
 
 	uint64_t *l2 = (uint64_t *)PHYS_TO_VIRT(l1[l1i] & ~0xFFFUL);
 	if (!(l2[l2i] & PTE_VALID)) return 0;
-	if ((l2[l2i] & 3) != 3) return (l2[l2i] & ~0x1FFFFFUL) | (vaddr & 0x1FFFFFUL);
+	if ((l2[l2i] & 3) != 3) return (l2[l2i] & PA_2M_MASK) | (vaddr & 0x1FFFFFUL);
 
 	uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
 	if (!(l3[l3i] & PTE_VALID)) return 0;
-	return (l3[l3i] & ~0xFFFUL);
+	return (l3[l3i] & PA_MASK);
 }
 
 /* The PTE-downgrade paths in this file already broadcast `tlbi ...is`
@@ -457,7 +477,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 			if (entry & PTE_USER) {
 				entry |= PTE_RO;
 				l1_old[i] = entry;
-				huge1g_get(entry & ~0x3FFFFFFFUL);
+				huge1g_get(entry & PA_1G_MASK);
 			}
 			l1_new[i] = entry;
 			continue;
@@ -476,7 +496,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 				if (entry & PTE_USER) {
 					entry |= PTE_RO;
 					l2_old[j] = entry;
-					uint64_t pa = entry & ~0x1FFFFFUL;
+					uint64_t pa = entry & PA_2M_MASK;
 					for (int k = 0; k < 512; k++)
 						pmm_hold((void *)(pa + (uint64_t)k * PAGE_SIZE));
 				}
@@ -496,7 +516,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 				if ((entry & PTE_USER) && !(entry & PTE_NOFREE)) {
 					entry |= PTE_RO;
 					l3_old[k] = entry;
-					pmm_hold((void *)(entry & ~0xFFFUL));
+					pmm_hold((void *)(entry & PA_MASK));
 				}
 				l3_new[k] = entry;
 			}
