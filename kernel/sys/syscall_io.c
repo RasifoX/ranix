@@ -16,11 +16,13 @@ typedef struct { uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel; } linux_winsize_
 static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 {
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);   /* pin: ioctl fops may block (tty, block dev) */
 	if (f) {
-		if (f->inode && f->inode->fops && f->inode->fops->ioctl)
-			return f->inode->fops->ioctl(f, cmd, arg);
-		return -25; /* fd exists but has no ioctl (pipe, regular file…) */
+		long r = (f->inode && f->inode->fops && f->inode->fops->ioctl)
+		       ? f->inode->fops->ioctl(f, cmd, arg)
+		       : -25; /* fd exists but has no ioctl (pipe, regular file…) */
+		fput(f);
+		return r;
 	}
 	/* fd not in table — fallback for stdin/stdout before /dev/console open */
 	switch (cmd) {
