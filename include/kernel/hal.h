@@ -80,11 +80,23 @@ struct process;
 void arch_save_tls(struct process *p);
 void arch_restore_tls(struct process *p);
 
-/* Safe user memory access guards. Placeholders today (SMAP is not enabled — see
- * the SMEP commit message); they become stac/clac once every fop's direct
- * user-buffer access is funnelled. */
+/* SMAP/PAN enforcement is OFF this phase: the two arch hooks below are no-ops.
+ * Every user touch is already routed through them so a later enforcement phase
+ * flips the whole tree on by editing only these two lines (x86: stac/clac,
+ * aarch64: msr PSTATE.PAN clear/set). */
+#if defined(__x86_64__)
 static inline void arch_user_access_begin(void) { __asm__ volatile("" ::: "memory"); }
 static inline void arch_user_access_end(void)   { __asm__ volatile("" ::: "memory"); }
+#else
+static inline void arch_user_access_begin(void) { __asm__ volatile("" ::: "memory"); }
+static inline void arch_user_access_end(void)   { __asm__ volatile("" ::: "memory"); }
+#endif
+
+/* Bracket helpers for the bulk and user-stack cases (signal frame, ptrace
+ * peek/poke) that cannot use copy_*_user. No-ops until enforcement; the single
+ * funnel point is the two arch hooks above. */
+static inline void uaccess_begin(void) { arch_user_access_begin(); }
+static inline void uaccess_end(void)   { arch_user_access_end(); }
 
 /* Safe user memory access */
 int  access_ok(const void *addr, size_t n);
@@ -92,6 +104,23 @@ int  user_pages_mapped(const void *addr, size_t n);
 long copy_from_user(void *dst, const void *src, size_t n);
 long copy_to_user(void *dst, const void *src, size_t n);
 long strncpy_from_user(char *dst, const char *src, size_t n);
+
+/* Single-scalar accessors built on the same extable-protected primitive as
+ * copy_*_user. Return 0 on success, -1 on bad address/fault. */
+long __get_user_n(void *dst, const void *src, size_t n);
+long __put_user_n(void *dst, const void *src, size_t n);
+#define get_user(x, ptr) \
+	__get_user_n(&(x), (ptr), sizeof(*(ptr)))
+#define put_user(x, ptr) \
+	({ __typeof__(*(ptr)) __pu_v = (x); __put_user_n((ptr), &__pu_v, sizeof(*(ptr))); })
+
+/* Fop read/write funnel. A vfs fops ->read/->write buffer may be a user pointer
+ * (the read(2)/write(2) data path) OR a kernel pointer (vfs_kernel_install,
+ * file-backed mmap page fill, overlay copy-up, io_uring). Route user addresses
+ * through the extable-protected copy; fall back to memcpy for kernel addresses.
+ * Behavior-preserving with SMAP/PAN off. Returns 0 on success, -1 on fault. */
+long copy_fop_to_user(void *dst, const void *src, size_t n);
+long copy_fop_from_user(void *dst, const void *src, size_t n);
 
 /* Register access abstractions */
 static inline uint32_t reg_read32(uint64_t addr) {

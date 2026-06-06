@@ -1,4 +1,5 @@
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
 #include <kernel/block.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
@@ -541,7 +542,7 @@ static ssize_t ext2_read(vfs_file_t *f, void *buf, size_t len)
 
 		size_t copy = fs->block_size - blk_off;
 		if (copy > rem) copy = rem;
-		memcpy((uint8_t *)buf + done, tmp + blk_off, copy);
+		if (copy_fop_to_user((uint8_t *)buf + done, tmp + blk_off, copy) != 0) break;
 		done += (ssize_t)copy;
 		rem  -= copy;
 		pos  += copy;
@@ -913,7 +914,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 		} else {
 			memset(blkbuf, 0, fs->block_size);
 		}
-		memcpy(blkbuf + boff, src + done, chunk);
+		if (copy_fop_from_user(blkbuf + boff, src + done, chunk) != 0) break;
 		if (write_block(fs, phys, blkbuf) != 0) break;
 		pos  += chunk;
 		done += chunk;

@@ -605,7 +605,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos < (off_t)n) {
 		size_t avail = (size_t)(n - f->pos);
 		if (len > avail) len = avail;
-		memcpy(buf, tmp + f->pos, len);
+		if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) { buddy_free(phys, 0); return -14; }
 		f->pos += (off_t)len;
 		ret = (ssize_t)len;
 	}
