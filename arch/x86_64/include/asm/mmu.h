@@ -12,9 +12,10 @@
                           ? (uint64_t)(v) - 0xFFFFFFFF80000000UL \
                           : (uint64_t)(v) - DIRECT_MAP_BASE)
 
-/* User space layout */
+/* User space layout. Stack top at 256 GB stays inside PML4 slot 0 (512 GB),
+ * so fork/exit's slot-0-only page-table walk covers the whole user span. */
 #define ARCH_USER_CODE_BASE   0x400000UL
-#define ARCH_USER_STACK_TOP   0x80000000UL
+#define ARCH_USER_STACK_TOP   0x4000000000UL
 #define ARCH_USER_STACK_PAGES 256
 #define ARCH_USER_MMAP_BASE   0x40000000UL
 
