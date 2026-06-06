@@ -666,6 +666,13 @@ if [ -x /bin/c-glibc ]; then
 	check "c-glibc" "glibc-ok" "$(timeout 15 /bin/c-glibc 2>/dev/null)"
 fi
 
+# Stock GNU coreutils: an unmodified host /bin/echo (GNU coreutils) running
+# against the shipped glibc. Proves a real GNU tool runs, exercising the full
+# __libc_start_main path (locale/argv/environ) beyond the trivial c-glibc.
+if [ -x /bin/gnu-echo ]; then
+	check "c-gnucoreutils" "glibc-ok" "$(timeout 15 /bin/gnu-echo glibc-ok 2>/dev/null)"
+fi
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
