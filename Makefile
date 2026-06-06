@@ -12,11 +12,13 @@ else ifeq ($(ARCH),x86_64)
     MUSL_SYSROOT = $(HOME)/opt/x86_64-linux-musl-cross/x86_64-linux-musl
 endif
 
-# musl's libc.so IS the dynamic linker; ship it where PT_INTERP points. (The
-# toolchain's ld-musl-*.so.1 is a symlink to an absolute install path that does
-# not exist here, so copy the real libc.so.)
+# musl's ld-musl-*.so.1 IS both the dynamic linker and libc; ship it where
+# PT_INTERP points. We use Alpine's musl 1.2.5 loader (extracted from the cached
+# musl.apk) rather than the cross-toolchain's 1.2.2 libc.so: 1.2.5 understands
+# DT_RELR relative relocations, so modern Alpine binaries run in-place. musl's
+# ABI is stable, so userspace built against the 1.2.2 toolchain runs unchanged.
 LDSO_NAME = ld-musl-$(ARCH).so.1
-LDSO_SRC  = $(MUSL_SYSROOT)/lib/libc.so
+LDSO_SRC  = $(APK_DIR)/lib/$(LDSO_NAME)
 
 # Stock glibc smoke test: a trivial binary built with a stock glibc gcc, shipped
 # alongside the real ld.so + libc.so.6 it dynamically links to, so the suite
@@ -350,6 +352,13 @@ $(APK_STATIC_BIN):
 	@chmod +x "$@"
 	@echo "[OK] apk.static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
+# Extract the musl 1.2.5 ld-musl loader from the cached Alpine musl.apk; this is
+# the system loader (LDSO_SRC) shipped to /lib. Depends on apk-static, which
+# downloads musl.apk.
+$(LDSO_SRC): $(APK_STATIC_BIN)
+	@tar xzf "$(APK_DIR)/musl.apk" -C "$(APK_DIR)" lib/$(LDSO_NAME) 2>/dev/null
+	@chmod +x "$@"
+
 $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
 		$(GLIBC_HOST_CC) -O2 -o $@ $< && \
@@ -357,7 +366,7 @@ $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 	else echo "[skip] c-glibc: stock glibc toolchain/loader unavailable"; fi
 GLIBC_TEST_DEP = $(GLIBC_TEST_BIN)
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
