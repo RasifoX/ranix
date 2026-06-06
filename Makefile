@@ -18,6 +18,15 @@ endif
 LDSO_NAME = ld-musl-$(ARCH).so.1
 LDSO_SRC  = $(MUSL_SYSROOT)/lib/libc.so
 
+# Stock glibc smoke test (x86_64 only): a trivial binary built with the HOST gcc
+# (glibc), shipped alongside the real ld.so + libc.so.6 it dynamically links to,
+# so the suite exercises a genuine glibc ld.so/__libc_start_main startup.
+GLIBC_HOST_CC = gcc
+GLIBC_LDSO    = /lib64/ld-linux-x86-64.so.2
+GLIBC_LIBC    = /lib/x86_64-linux-gnu/libc.so.6
+GLIBC_TEST_SRC = userspace/c_glibc.c
+GLIBC_TEST_BIN = $(BUILD_DIR)/c-glibc
+
 CC  = clang --target=$(ARCH)-none-elf
 AS  = clang --target=$(ARCH)-none-elf
 LD  = ld.lld
@@ -292,7 +301,18 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(wildcard tests/ranix_test.sh)
+ifeq ($(ARCH),x86_64)
+$(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
+	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
+		$(GLIBC_HOST_CC) -O2 -o $@ $< && \
+		echo "[OK] c-glibc (host glibc) built"; \
+	else echo "[skip] c-glibc: host glibc toolchain/loader unavailable"; fi
+GLIBC_TEST_DEP = $(GLIBC_TEST_BIN)
+else
+GLIBC_TEST_DEP =
+endif
+
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -337,6 +357,13 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 		ln -sf python3 $(BUILD_DIR)/initramfs/bin/python; \
 		mkdir -p $(BUILD_DIR)/initramfs/usr/lib; \
 		cp "$(PYTHON_ZIP)" $(BUILD_DIR)/initramfs/usr/lib/python$(subst .,,$(PY_XY)).zip; \
+	fi
+	@if [ -x "$(GLIBC_TEST_BIN)" ]; then \
+		cp "$(GLIBC_TEST_BIN)" $(BUILD_DIR)/initramfs/bin/c-glibc; \
+		chmod +x $(BUILD_DIR)/initramfs/bin/c-glibc; \
+		mkdir -p $(BUILD_DIR)/initramfs/lib64 $(BUILD_DIR)/initramfs/lib/x86_64-linux-gnu; \
+		cp "$(GLIBC_LDSO)" $(BUILD_DIR)/initramfs/lib64/ld-linux-x86-64.so.2; \
+		cp "$(GLIBC_LIBC)" $(BUILD_DIR)/initramfs/lib/x86_64-linux-gnu/libc.so.6; \
 	fi
 	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti

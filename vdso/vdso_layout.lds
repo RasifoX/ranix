@@ -3,7 +3,13 @@
  * and libc's AT_SYSINFO_EHDR-relative symbol resolution lands correctly. A
  * default -shared link splits RX text from an RW .dynamic segment (page-aligned
  * apart), which breaks a flat copy. There are no relocations and no writable
- * globals, so a single RX segment is safe. */
+ * globals, so a single RX segment is safe.
+ *
+ * The text segment carries FILEHDR + PHDRS so its p_vaddr is 0 (the ELF header
+ * lands at byte 0 == AT_SYSINFO_EHDR). glibc derives the load bias as
+ * AT_SYSINFO_EHDR minus the first PT_LOAD's p_vaddr; if the segment started past
+ * the headers, that bias is off by the header size and _DYNAMIC resolves into
+ * .dynstr — a fatal ld.so assertion. */
 SECTIONS
 {
 	. = SIZEOF_HEADERS;
@@ -25,6 +31,6 @@ SECTIONS
 
 PHDRS
 {
-	text    PT_LOAD    FLAGS(5);   /* R E — the whole image */
+	text    PT_LOAD    FILEHDR PHDRS FLAGS(5);   /* R E — headers + whole image */
 	dynamic PT_DYNAMIC FLAGS(4);
 }
