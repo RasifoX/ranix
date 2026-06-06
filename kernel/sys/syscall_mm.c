@@ -91,9 +91,11 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_1G_MASK;
 		else {
-			uint64_t next = (p->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
-			if (next + len < next) return -12;   /* cursor overflow */
-			va = next; p->huge1g_next = next + len;
+			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+			uint64_t next = (p->vm->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
+			if (next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -12; }   /* cursor overflow */
+			va = next; p->vm->huge1g_next = next + len;
+			spin_unlock_irq(&p->vm->fault_lock, cf);
 		}
 		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
@@ -128,9 +130,11 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
 		else {
 			uint64_t ceil = HUGE1G_VA_BASE;   /* mmap window ends below the 1 GB-hugepage window, itself below the stack */
-			uint64_t next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-			if (next + len > ceil || next + len < next) return -12;   /* over window / wrap */
-			va = next; p->mmap_next = next + len;
+			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+			uint64_t next = (p->vm->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+			if (next + len > ceil || next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -12; }   /* over window / wrap */
+			va = next; p->vm->mmap_next = next + len;
+			spin_unlock_irq(&p->vm->fault_lock, cf);
 		}
 		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		uint64_t done = 0;
@@ -163,12 +167,19 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	uint64_t va;
 	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	else {
-		/* The bump-allocated mmap window ends below the 1 GB-hugepage window
+		/* The bump cursor lives on the (thread-shared) address space; bump it
+		 * under fault_lock so two threads mmap'ing at once get distinct ranges
+		 * instead of the same VA. The window ends below the 1 GB-hugepage window
 		 * (itself below the stack); refuse a VA that would overrun it (Linux
 		 * returns ENOMEM when no region fits) rather than colliding. */
 		uint64_t ceil = HUGE1G_VA_BASE;
-		if (p->mmap_next + len > ceil || p->mmap_next + len < p->mmap_next) return -12;
-		va = p->mmap_next; p->mmap_next += len;
+		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+		if (p->vm->mmap_next + len > ceil || p->vm->mmap_next + len < p->vm->mmap_next) {
+			spin_unlock_irq(&p->vm->fault_lock, cf);
+			return -12;
+		}
+		va = p->vm->mmap_next; p->vm->mmap_next += len;
+		spin_unlock_irq(&p->vm->fault_lock, cf);
 	}
 
 	if (flags & MAP_ANONYMOUS) {

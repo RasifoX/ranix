@@ -65,6 +65,8 @@ vm_space_t *vm_create(void)
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
 	vs->root = NULL;
 	vs->vmas = NULL;
+	vs->mmap_next = ARCH_USER_MMAP_BASE;
+	vs->huge1g_next = HUGE1G_VA_BASE;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t pml4_phys = alloc_table();
@@ -370,6 +372,8 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
 	new_vs->root = NULL;
 	new_vs->vmas = NULL;
+	new_vs->mmap_next = vs->mmap_next;
+	new_vs->huge1g_next = vs->huge1g_next;
 	new_vs->refcount = 1;
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 	new_vs->magic = VM_SPACE_MAGIC;
