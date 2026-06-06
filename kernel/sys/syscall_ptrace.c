@@ -36,6 +36,35 @@ static void ptrace_do_stop(process_t *p)
 	p->ptrace_in_syscall = 0;
 }
 
+/* A stopping signal (SIGSTOP/TSTP/TTIN/TTOU, including the one PTRACE_ATTACH
+ * injects) hit a traced task: enter a ptrace group-stop. Reported to the tracer
+ * regardless of waitpid WUNTRACED, and resumed by PTRACE_CONT/DETACH (which clear
+ * ptrace_stop + wake) or a fatal signal. Called from signal_dispatch on the
+ * user-return path. */
+void ptrace_group_stop(int sig)
+{
+	process_t *p = task_current();
+	p->job_stop_sig         = sig;
+	p->ptrace_stop_sig      = sig;
+	p->ptrace_stop          = 1;
+	p->ptrace_stop_reported = 0;
+	arch_get_cpu_ctx()->wd_where = "ptrace:groupstop";
+
+	process_t *tracer = proc_get(p->tracer);
+	p->ptrace_in_syscall = 1;
+	if (tracer) { task_wake(tracer); proc_put(tracer); }
+	/* Stay stopped until the tracer continues us (clears ptrace_stop) or detaches
+	 * (clears tracer); a fatal SIGKILL also breaks out to terminate. A spurious
+	 * wake (another posted signal) must not un-stop us — re-check and re-sleep. */
+	while (p->ptrace_stop && p->tracer &&
+	       !(p->sig_pending & (1UL << (SIGKILL - 1))))
+		task_sleep_interruptible();
+	p->ptrace_in_syscall    = 0;
+	p->ptrace_stop          = 0;
+	p->ptrace_stop_reported = 0;
+	p->ptrace_stop_sig      = 0;
+}
+
 /* A debug trap (single-step #DB / breakpoint #BP) hit the current traced
  * process: report a SIGTRAP stop to the tracer, sleep until continued. Returns 1
  * if traced (handled — don't kill). Called from the arch exception path. */
