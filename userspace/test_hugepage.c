@@ -37,6 +37,12 @@ int main(void)
 		if (p[i] != (char)(i / 4096)) { puts("FAIL parent-cow"); return 0; }
 
 	if (munmap(p, len) != 0) { puts("FAIL munmap"); return 0; }
+
+	/* length within HUGE-1 of SIZE_MAX must be rejected, not wrap to a tiny map */
+	char *w = mmap(NULL, (size_t)-1 - 4096, PROT_READ | PROT_WRITE,
+	               MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+	if (w != MAP_FAILED) { puts("FAIL wrap"); return 0; }
+
 	puts("OK");
 	return 0;
 }
