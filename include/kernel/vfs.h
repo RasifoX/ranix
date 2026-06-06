@@ -54,6 +54,13 @@
 #define SEEK_CUR   1
 #define SEEK_END   2
 
+/* ── mount flags (subset of the Linux MS_* ABI) ──────────── */
+#define MS_RDONLY  0x0001
+#define MS_NOSUID  0x0002
+#define MS_NODEV   0x0004
+#define MS_NOEXEC  0x0008
+#define MS_REMOUNT 0x0020
+
 struct vfs_inode;
 struct vfs_file;
 struct vfs_dentry;
@@ -181,6 +188,8 @@ typedef struct vfs_mount {
     void             (*kill_sb)(void *priv);   /* umount destructor (tmpfs/overlay); may be NULL */
     void             (*get_sb)(void *priv);    /* bump sb refcount when a namespace clones the mount */
     vfs_inode_t       *orig_inode;
+    unsigned long      flags;         /* per-mount MS_RDONLY/NOSUID/NODEV/NOEXEC */
+    char               mnt_path[256]; /* absolute mountpoint path, for flag/fstype lookup */
     struct vfs_mount  *next;
 } vfs_mount_t;
 
@@ -219,6 +228,9 @@ typedef struct vma {
 /* ── VFS interface ───────────────────────────────────────── */
 void       vfs_init(void);
 int        vfs_mount(const char *path, const char *fstype, void *data);
+int        vfs_mount_flags(const char *path, const char *fstype, void *data, unsigned long flags);
+int        vfs_remount(const char *path, unsigned long flags);
+unsigned long vfs_path_mnt_flags(const char *path);   /* MS_* of the mount covering path */
 const char *vfs_fstype_name(int idx);
 
 /* mount namespace — each holds a private list of mounts; processes following

@@ -184,6 +184,7 @@ static long xattr_set(const char *upath, const char *uname, const void *uval,
 	if (size > XATTR_VALUE_MAX) return -7; /* E2BIG */
 	vfs_inode_t *in = xattr_resolve(upath, kpath);
 	if (!in) return -2;
+	if (vfs_path_mnt_flags(kpath) & MS_RDONLY) return -30; /* EROFS */
 	if (ns == 1 && !S_ISREG(in->mode) && !S_ISDIR(in->mode)) return -95;
 	void *kv = NULL;
 	if (size) {
@@ -245,6 +246,7 @@ static long sys_removexattr(const char *p, const char *n)
 	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
 	vfs_inode_t *in = xattr_resolve(p, kpath);
 	if (!in) return -2;
+	if (vfs_path_mnt_flags(kpath) & MS_RDONLY) return -30; /* EROFS */
 	return vfs_inode_removexattr(in, kname);
 }
 
@@ -623,11 +625,15 @@ static long sys_sync(void) { return 0; }
 static long sys_mount(const char *source, const char *target, const char *fstype,
                       unsigned long flags, const void *data)
 {
-	(void)flags;
 	if (!cap_has(task_current()->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
 	char ktarget[256]; char kfstype[64];
 	if (strncpy_from_user(ktarget, target, sizeof(ktarget)) < 0) return -14;
+
+	if (flags & MS_REMOUNT)
+		return vfs_remount(ktarget, flags) == 0 ? 0 : -22;
+
 	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
+	unsigned long mflags = flags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC);
 
 	/* sysfs/cgroup/devtmpfs etc. → accept silently */
 	const char *fsname = kfstype;
@@ -653,7 +659,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 			if (*p == '/') name = p + 1;
 		block_device_t *bd = block_device_find(name);
 		if (!bd) return -1;
-		return vfs_mount(ktarget, fsname, bd) == 0 ? 0 : -1;
+		return vfs_mount_flags(ktarget, fsname, bd, mflags) == 0 ? 0 : -1;
 	}
 
 	/* mount options string (tmpfs size=, overlay lowerdir/upperdir/workdir).
@@ -662,7 +668,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	const char *kdp = NULL;
 	if (data && strncpy_from_user(kdata, data, sizeof(kdata)) >= 0) kdp = kdata;
 
-	int r = vfs_mount(ktarget, fsname, (void *)kdp);
+	int r = vfs_mount_flags(ktarget, fsname, (void *)kdp, mflags);
 	return r == 0 ? 0 : -1;
 }
 
@@ -910,6 +916,7 @@ static long sys_utimensat(int dirfd, const char *path, const void *times, int fl
 		char kp[PROC_NAME_MAX];
 		int r = resolve_path(kp, dirfd, path);
 		if (r) return r;
+		if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 		vfs_dentry_t *d = vfs_dentry_resolve(kp);
 		if (!d || !d->inode) return -2;            /* ENOENT */
 		in = d->inode;
