@@ -86,12 +86,14 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * reserved pool, in the process's own high VA window. Eagerly populated. */
 	if ((flags & MAP_HUGETLB) && ((flags >> MAP_HUGE_SHIFT) & 0x3F) == 30 &&
 	    (flags & MAP_ANONYMOUS) && prot != 0) {
+		if (len > (uint64_t)-1 - (HUGE_1G_SIZE - 1)) return -12;   /* rounding would wrap */
 		len = (len + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_1G_MASK;
 		else {
-			p->huge1g_next = (p->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
-			va = p->huge1g_next; p->huge1g_next += len;
+			uint64_t next = (p->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
+			if (next + len < next) return -12;   /* cursor overflow */
+			va = next; p->huge1g_next = next + len;
 		}
 		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
@@ -120,12 +122,15 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * round to the huge-page boundary; pages are populated eagerly so there is
 	 * no demand-fault path to teach about blocks. */
 	if ((flags & MAP_HUGETLB) && (flags & MAP_ANONYMOUS) && prot != 0) {
+		if (len > (uint64_t)-1 - (HUGE_PAGE_SIZE - 1)) return -12;   /* rounding would wrap */
 		len = (len + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
 		else {
-			p->mmap_next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-			va = p->mmap_next; p->mmap_next += len;
+			uint64_t ceil = ARCH_USER_STACK_TOP - (uint64_t)ARCH_USER_STACK_PAGES * PAGE_SIZE;
+			uint64_t next = (p->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+			if (next + len > ceil || next + len < next) return -12;   /* over stack / wrap */
+			va = next; p->mmap_next = next + len;
 		}
 		if (cgroup_charge_mem(p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
 		uint64_t done = 0;
