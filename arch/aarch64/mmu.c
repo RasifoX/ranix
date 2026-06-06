@@ -116,7 +116,10 @@ void arch_map_high_memory(uint64_t max_phys)
 			if (slot + 1 > used) used = slot + 1;
 		}
 		if (l1[l1i] & PTE_VALID) continue;
-		l1[l1i] = phys | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_NORMAL;
+		/* High RAM (>=8 GB) is pure direct-map data — no kernel text lives here,
+		 * so make it non-executable from both EL0 and EL1. */
+		l1[l1i] = phys | PTE_BLOCK | PTE_AF | PTE_VALID | PTE_ATTR_NORMAL
+		        | PTE_UXN | PTE_PXN;
 	}
 
 	/* Clean the extra L1 tables (written cacheably here) to PoC, mirroring
