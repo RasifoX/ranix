@@ -750,9 +750,11 @@ static long sys_mq_timedsend(int mqdes, const char *umsg, size_t len,
     (void)prio; (void)ts;
     /* reuse write path */
     process_t *p = task_current();
-    vfs_file_t *f = fd_get(p->fds, mqdes);
-    if (!f || !f->inode || f->inode->fops != &mq_fops) return -9;
-    return mqfd_write(f, umsg, len);
+    vfs_file_t *f = fget(p->fds, mqdes);   /* pin across the blocking send */
+    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -9; }
+    long r = mqfd_write(f, umsg, len);
+    fput(f);
+    return r;
 }
 
 static long sys_mq_timedreceive(int mqdes, char *umsg, size_t len,
@@ -760,9 +762,11 @@ static long sys_mq_timedreceive(int mqdes, char *umsg, size_t len,
 {
     (void)uprio; (void)ts;
     process_t *p = task_current();
-    vfs_file_t *f = fd_get(p->fds, mqdes);
-    if (!f || !f->inode || f->inode->fops != &mq_fops) return -9;
-    return mqfd_read(f, umsg, len);
+    vfs_file_t *f = fget(p->fds, mqdes);   /* pin across the blocking receive */
+    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -9; }
+    long r = mqfd_read(f, umsg, len);
+    fput(f);
+    return r;
 }
 
 static long sys_mq_getsetattr(int mqdes, const mq_attr_t *newattr, mq_attr_t *oldattr)

@@ -966,9 +966,11 @@ static long sys_execveat(int dirfd, const char *path, char * const argv[],
                          char * const envp[], int flags)
 {
 	if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
-		vfs_file_t *f = fd_get(task_current()->fds, dirfd);
-		if (!f || !f->path[0]) return -9;
-		return sys_execve(f->path, argv, envp);
+		vfs_file_t *f = fget(task_current()->fds, dirfd);  /* pin: f->path is read across execve */
+		if (!f || !f->path[0]) { if (f) fput(f); return -9; }
+		long ret = sys_execve(f->path, argv, envp);
+		fput(f);
+		return ret;
 	}
 	if (!path) return -14;
 	char *kp = kmalloc(PATH_MAX);
