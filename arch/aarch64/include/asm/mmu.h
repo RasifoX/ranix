@@ -9,9 +9,11 @@
 #define VIRT_TO_PHYS(v) ((uint64_t)(v) - VIRT_OFFSET)
 #define MMIO_TO_VIRT(p) PHYS_TO_VIRT(p)
 
-/* User space layout */
+/* User space layout. Stack top at 256 GB stays inside L0[0] (512 GB), so
+ * fork/exit's slot-0-only page-table walk covers the whole user span. TTBR0 is
+ * already T0SZ=16 (48-bit), so no TCR change is needed. */
 #define ARCH_USER_CODE_BASE   0x400000UL
-#define ARCH_USER_STACK_TOP   0x80000000UL
+#define ARCH_USER_STACK_TOP   0x4000000000UL
 #define ARCH_USER_STACK_PAGES 256
 #define ARCH_USER_MMAP_BASE   0x40000000UL
 
