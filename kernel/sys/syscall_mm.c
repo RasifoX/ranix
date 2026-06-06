@@ -74,6 +74,9 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * cannot write a PTE over the (shared) kernel half of the page tables. */
 	if ((flags & MAP_FIXED) && addr && !access_ok((void *)addr, len)) return -22;
 
+	/* W^X: a single mapping is never both writable and executable. */
+	if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) return -13;   /* EACCES */
+
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
@@ -302,6 +305,9 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	addr &= ~(uint64_t)(PAGE_SIZE - 1);
 	len  = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
+
+	/* W^X: a single mapping is never both writable and executable. */
+	if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) return -13;   /* EACCES */
 
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;

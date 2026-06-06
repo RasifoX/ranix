@@ -526,6 +526,9 @@ check "c-compat"       "OK"  "$(timeout 5 /bin/test_compat 2>/dev/null | tail -1
 check "c-ifioctl"      "OK"  "$(timeout 5 /bin/test_ifioctl 2>/dev/null | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
+# ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──
+check "c-wx"           "OK"  "$(timeout 10 /bin/test_wx 2>/dev/null | tail -1)"
+
 # ── 42. ASLR — mmap base differs between processes ────────────
 _a1=$(/bin/test_aslr 2>/dev/null)
 _a2=$(/bin/test_aslr 2>/dev/null)
