@@ -28,6 +28,8 @@
 #define PTE_SHARE   (3UL << 8)
 #define PTE_AF      (1UL << 10)
 #define PTE_NG      (1UL << 11)  /* non-global: TLB entry tagged by ASID */
+#define PTE_PXN     (1UL << 53)  /* privileged execute-never */
+#define PTE_UXN     (1UL << 54)  /* unprivileged execute-never */
 #define PTE_NOFREE  (1UL << 55)  /* software bit: kernel-shared page, skip free on vm_destroy */
 
 #define PTE_ATTR_DEVICE     (MT_DEVICE_nGnRnE << 2)
