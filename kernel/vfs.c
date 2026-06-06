@@ -1520,6 +1520,16 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 	char *parent_path = vfs_parent_alloc(path, &fname);
 	if (!parent_path) return -12;
 
+	/* "." and ".." are not real directory entries (filesystems synthesize them
+	 * only in readdir); they are resolved by the path walker. They can never be
+	 * symlinks, so lstat == stat — defer to the full resolver instead of a
+	 * doomed lookup() of a literal "." against the parent. */
+	if ((fname[0] == '.' && fname[1] == '\0') ||
+	    (fname[0] == '.' && fname[1] == '.' && fname[2] == '\0')) {
+		kfree(parent_path);
+		return vfs_stat(path, out);
+	}
+
 	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
 	/* Volatile parents (e.g. /proc/<pid> reached via /proc/self) hand back a
 	 * function-scoped dentry whose storage is dead on return; only the inode

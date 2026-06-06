@@ -1374,7 +1374,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
 	p->brk       = ei.load_end;
-	p->mmap_next = mmap_base;
+	p->vm->mmap_next = mmap_base;
 	p->dumpable  = 1;
 	arch_vm_switch((uint64_t)new_vm->root, new_vm->asid);
 	if (old_vm) vm_destroy(old_vm);

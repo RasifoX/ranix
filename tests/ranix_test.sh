@@ -698,12 +698,17 @@ fi
 if [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello.deb ]; then
 	export PATH="/usr/bin:/usr/sbin:/sbin:/bin:$PATH"
 	rm -f /usr/bin/hello
-	timeout 30 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg.out 2>&1
+	# dpkg-deb's forked-helper segfault (shared mmap cursor) and the "."/".."
+	# stat gap are fixed, and a stuck pipe read is now interruptible; dpkg -i now
+	# runs to its decompressor stage but the <decompress> helper still fails, so
+	# install does not yet complete. Bounded + hard-killed so it can't wedge the
+	# suite; flips to a hard check the moment -i completes.
+	timeout -s KILL 20 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg.out 2>&1
 	if [ -x /usr/bin/hello ] && /usr/bin/hello 2>/dev/null | grep -q 'Hello, world!' && \
 	   /usr/bin/dpkg -l hello 2>/dev/null | grep -q '^ii  hello'; then
 		check "dpkg-install" "ok" "ok"
 	else
-		echo "SKIP: dpkg-install (known gap: forked dpkg-deb helper segfaults; $(tail -1 /tmp/dpkg.out 2>/dev/null))"
+		echo "SKIP: dpkg-install (known gap: dpkg-deb's <decompress> helper still fails; $(tail -1 /tmp/dpkg.out 2>/dev/null))"
 	fi
 fi
 
