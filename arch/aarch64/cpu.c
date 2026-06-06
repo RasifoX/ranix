@@ -43,16 +43,6 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 	ctx->sp   = ustack_top;
 }
 
-void arch_user_access_begin(void)
-{
-	/* PAN not supported on Cortex-A72 */
-}
-
-void arch_user_access_end(void)
-{
-	/* PAN not supported on Cortex-A72 */
-}
-
 void arch_set_user_kstack(uint64_t kstack_top)
 {
 	(void)kstack_top;

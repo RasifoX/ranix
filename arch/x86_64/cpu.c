@@ -24,9 +24,6 @@ extern void syscall_entry(void);
 static cpu_context_t early_cpu_ctx;
 static uint8_t early_irq_stack[4096] __attribute__((aligned(16)));
 
-void arch_user_access_begin(void) { __asm__ volatile("" ::: "memory"); }
-void arch_user_access_end(void)   { __asm__ volatile("" ::: "memory"); }
-
 void arch_set_user_kstack(uint64_t kstack_top)
 {
 	tss_set_rsp0(kstack_top);
@@ -122,6 +119,18 @@ void arch_cpu_init(void)
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
 	cr4_val |= (1ULL << 9);
 	cr4_val |= (1ULL << 10);
+
+	/* SMEP (CR4.20), gated on CPUID.(EAX=7,ECX=0):EBX bit7. The kernel can no
+	 * longer fetch instructions from a user page — a CPU backstop on top of the
+	 * W^X/NX page attributes. SMAP (CR4.21) is intentionally left off: it would
+	 * fault every kernel read/write of a user buffer, and the fops read/write
+	 * paths still touch user buffers directly (some via copy_*_user, some via raw
+	 * memcpy), so enabling it needs every fop funnelled through the uaccess
+	 * helpers first. */
+	uint32_t ebx7;
+	__asm__ volatile("movl $7, %%eax\n\txorl %%ecx, %%ecx\n\tcpuid\n"
+		: "=b"(ebx7) :: "eax", "ecx", "edx");
+	if (ebx7 & (1U << 7)) cr4_val |= (1ULL << 20);   /* SMEP */
 	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
 
 	arch_syscall_init();
