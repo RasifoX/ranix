@@ -102,7 +102,7 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 	/* count + total of dumpable VMAs (capped) */
 	int nv = 0;
 	uint64_t total = 0;
-	for (vma_t *v = proc->vmas; v; v = v->next) {
+	for (vma_t *v = proc->vm->vmas; v; v = v->next) {
 		if (v->size == 0) continue;
 		if (total + v->size > CORE_MAX_BYTES) break;
 		total += v->size; nv++;
@@ -148,7 +148,7 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 
 	/* PT_LOAD phdrs */
 	uint64_t off = load_off;
-	for (vma_t *v = proc->vmas; v; v = v->next) {
+	for (vma_t *v = proc->vm->vmas; v; v = v->next) {
 		if (v->size == 0) continue;
 		if (off + v->size > load_off + total) break;
 		memset(&ph, 0, sizeof(ph));
@@ -191,7 +191,7 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 	{
 		static uint8_t zero[4096];
 		uint64_t written = 0;
-		for (vma_t *v = proc->vmas; v && written < total; v = v->next) {
+		for (vma_t *v = proc->vm->vmas; v && written < total; v = v->next) {
 			if (v->size == 0) continue;
 			if (written + v->size > total) break;
 			for (uint64_t a = 0; a < v->size; a += 4096) {

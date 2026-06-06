@@ -39,6 +39,8 @@ else
 endif
 GLIBC_TEST_SRC = userspace/c_glibc.c
 GLIBC_TEST_BIN = $(BUILD_DIR)/c-glibc
+GLIBC_SPAWN_SRC = userspace/c_glibcspawn.c
+GLIBC_SPAWN_BIN = $(BUILD_DIR)/c-glibcspawn
 
 # Stock GNU coreutils proof: ship an unmodified host coreutils binary (echo),
 # which dynamically links the same glibc shipped above. Exercises the full
@@ -212,6 +214,14 @@ APK_KEYS_APK      = $(APK_BASE)/alpine-keys-2.5-r0.apk
 # (apk-tools' OpenSSL looks under OPENSSLDIR=/etc/ssl).
 APK_CACERTS_APK   = $(APK_BASE)/ca-certificates-bundle-20260413-r0.apk
 
+# Debian (glibc) package path: dpkg + a tiny target package (hello) and the
+# runtime-library closure, fetched as .deb files on the HOST at build time and
+# shipped into the initramfs so `dpkg -i` can run on-device, offline. The
+# binaries are amd64 ELF + interp /lib64/ld-linux-x86-64.so.2, so this only
+# applies to the x86_64 build (mirrors the x86_64-only gnu-echo); aarch64 skips.
+DEB_SUITE          = bookworm
+DEB_PKGS           = dpkg hello
+
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
@@ -283,6 +293,12 @@ SSL_SERVER_BIN     = $(CACHE_DIR)/mbedtls-$(ARCH)/ssl_server
 PYTHON_HOST        = $(CACHE_DIR)/python-host/python
 PYTHON_BIN         = $(CACHE_DIR)/python-$(ARCH)/python
 PYTHON_ZIP         = $(CACHE_DIR)/python-$(ARCH)/python$(subst .,,$(PY_XY)).zip
+# Debian dpkg staging (x86_64 only). DEB_ROOTFS is the extracted .deb closure
+# laid out at real multiarch paths (/usr/bin, /bin, /lib/x86_64-linux-gnu, ...)
+# ready to copy straight into the initramfs; the marker file gates the rule.
+DEB_DIR            = $(CACHE_DIR)/deb-amd64
+DEB_ROOTFS         = $(CACHE_DIR)/deb-rootfs-amd64
+DEB_STAMP          = $(DEB_ROOTFS)/.stamp
 
 # mbedTLS — userspace TLS/HTTPS, cross-built static like bash/busybox
 MBEDTLS_VER    = 3.6.2
@@ -389,6 +405,38 @@ $(APK_CACERTS):
 	@tar xzf "$(APK_DIR)/ca-certificates-bundle.apk" -C "$(APK_DIR)" etc/ssl/certs/ca-certificates.crt 2>/dev/null
 	@cp "$(APK_DIR)/etc/ssl/certs/ca-certificates.crt" "$@"
 
+# Debian dpkg + closure: fetch the .deb set on the host, extract it into a rootfs
+# laid out at real multiarch paths, and seed a minimal /var/lib/dpkg admin dir so
+# `dpkg -i` can configure packages offline. libc6 is pre-marked installed (Ranix
+# ships the host glibc, which satisfies the libc6 dependency); ldconfig and
+# start-stop-daemon are no-op stubs dpkg requires on PATH. x86_64 only.
+$(DEB_STAMP):
+ifeq ($(ARCH),x86_64)
+	@if command -v dpkg-deb >/dev/null 2>&1; then \
+		sh scripts/fetch-deb.sh "$(CACHE_DIR)" "$(DEB_SUITE)" amd64 $(DEB_PKGS) >/dev/null || \
+		    { echo "[skip] dpkg: Debian package fetch failed"; exit 0; }; \
+		rm -rf "$(DEB_ROOTFS)"; mkdir -p "$(DEB_ROOTFS)"; \
+		for d in "$(DEB_DIR)"/*.deb; do \
+			case "$$d" in *hello_*) continue;; esac; \
+			dpkg-deb -x "$$d" "$(DEB_ROOTFS)" 2>/dev/null; \
+		done; \
+		mkdir -p "$(DEB_ROOTFS)/sbin"; \
+		printf '#!/bin/sh\nexit 0\n' > "$(DEB_ROOTFS)/sbin/ldconfig"; \
+		printf '#!/bin/sh\nexit 0\n' > "$(DEB_ROOTFS)/sbin/start-stop-daemon"; \
+		chmod +x "$(DEB_ROOTFS)/sbin/ldconfig" "$(DEB_ROOTFS)/sbin/start-stop-daemon"; \
+		mkdir -p "$(DEB_ROOTFS)/var/lib/dpkg/info" "$(DEB_ROOTFS)/var/lib/dpkg/updates" \
+		         "$(DEB_ROOTFS)/var/lib/dpkg/triggers" "$(DEB_ROOTFS)/var/log"; \
+		printf 'Package: libc6\nStatus: install ok installed\nPriority: required\nSection: libs\nMaintainer: Ranix <root@ranix>\nArchitecture: amd64\nVersion: 2.36-9\nDescription: GNU C Library shared libraries (provided by Ranix host glibc)\n\n' \
+		    > "$(DEB_ROOTFS)/var/lib/dpkg/status"; \
+		: > "$(DEB_ROOTFS)/var/lib/dpkg/available"; \
+		cp "$(DEB_DIR)"/hello_*.deb "$(DEB_ROOTFS)/hello.deb"; \
+		touch "$@"; \
+		echo "[OK] Debian dpkg rootfs staged (x86_64)"; \
+	else echo "[skip] dpkg: dpkg-deb not on host, Debian package path unavailable"; fi
+else
+	@true
+endif
+
 # Extract the musl 1.2.5 ld-musl loader from the cached Alpine musl.apk; this is
 # the system loader (LDSO_SRC) shipped to /lib. Depends on apk-static, which
 # downloads musl.apk.
@@ -401,9 +449,18 @@ $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 		$(GLIBC_HOST_CC) -O2 -o $@ $< && \
 		echo "[OK] c-glibc (stock glibc) built for $(ARCH)"; \
 	else echo "[skip] c-glibc: stock glibc toolchain/loader unavailable"; fi
-GLIBC_TEST_DEP = $(GLIBC_TEST_BIN)
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(APK_KEYS_DIR) $(APK_CACERTS) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
+$(GLIBC_SPAWN_BIN): $(GLIBC_SPAWN_SRC)
+	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
+		$(GLIBC_HOST_CC) -O2 -pthread -o $@ $< && \
+		echo "[OK] c-glibcspawn (stock glibc) built for $(ARCH)"; \
+	else echo "[skip] c-glibcspawn: stock glibc toolchain/loader unavailable"; fi
+GLIBC_TEST_DEP = $(GLIBC_TEST_BIN) $(GLIBC_SPAWN_BIN)
+ifeq ($(ARCH),x86_64)
+DEB_DEP = $(DEB_STAMP)
+endif
+
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(APK_KEYS_DIR) $(APK_CACERTS) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(DEB_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -459,6 +516,15 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 			cp "$(GNU_COREUTILS_BIN)" $(BUILD_DIR)/initramfs/bin/gnu-echo; \
 			chmod +x $(BUILD_DIR)/initramfs/bin/gnu-echo; \
 		fi; \
+		if [ -x "$(GLIBC_SPAWN_BIN)" ]; then \
+			cp "$(GLIBC_SPAWN_BIN)" $(BUILD_DIR)/initramfs/bin/c-glibcspawn; \
+			chmod +x $(BUILD_DIR)/initramfs/bin/c-glibcspawn; \
+		fi; \
+	fi
+	@if [ -f "$(DEB_STAMP)" ]; then \
+		(cd "$(DEB_ROOTFS)" && find . -path ./hello.deb -prune -o -print | cpio -pdu --quiet "$(CURDIR)/$(BUILD_DIR)/initramfs" 2>/dev/null); \
+		mkdir -p $(BUILD_DIR)/initramfs/var/cache; \
+		cp "$(DEB_ROOTFS)/hello.deb" $(BUILD_DIR)/initramfs/var/cache/hello.deb; \
 	fi
 	@if [ -x "$(APK_STATIC_BIN)" ]; then \
 		cp "$(APK_STATIC_BIN)" $(BUILD_DIR)/initramfs/bin/apk.static; \

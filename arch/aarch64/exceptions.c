@@ -77,7 +77,7 @@
             { extern uint64_t arch_vm_get_paddr(uint64_t *, uint64_t);
               uint64_t fpa = (p && p->vm) ? arch_vm_get_paddr(p->vm->root, far & ~0xFFFUL) : 0;
               int hasvma = 0;
-              for (vma_t *v = p ? p->vmas : 0; v; v = v->next)
+              for (vma_t *v = (p && p->vm) ? p->vm->vmas : 0; v; v = v->next)
                   if (far >= v->vaddr && far < v->vaddr + v->size) { hasvma = 1; break; }
               kprintf("  FAR pte_pa=%lx vma=%d\n", fpa, hasvma); }
             /* Walk frame pointer chain to get call stack */

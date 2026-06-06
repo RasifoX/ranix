@@ -190,8 +190,8 @@ typedef struct process {
 	void           *ctty;
 	vfs_fops_t     *ctty_fops;
 
-	/* ── virtual memory regions ──────────────── */
-	vma_t          *vmas;
+	/* virtual memory regions live on the shared vm_space (p->vm->vmas), so all
+	 * threads of a process see one VMA list — see vma_add/vma_clip. */
 
 	/* ── vfork ───────────────────────────────── */
 	pid_t           vfork_parent;  /* -1 if not a vfork child */

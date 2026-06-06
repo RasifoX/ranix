@@ -65,7 +65,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * soft limit (rlim_set==0 means uninitialized → unlimited). */
 	if (p->rlim_set && p->rlim_cur[9 /*RLIMIT_AS*/] != (uint64_t)-1) {
 		uint64_t used = 0;
-		for (vma_t *v = p->vmas; v; v = v->next) used += v->size;
+		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
 		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
 		if (used + req > p->rlim_cur[9]) return -12; /* ENOMEM */
 	}
@@ -113,7 +113,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_clip(p, va, len); vma_add(p, va, len, vf);
+			vma_replace(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -153,7 +153,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_WRITE) vf |= VMA_WRITE;
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_clip(p, va, len); vma_add(p, va, len, vf);
+			vma_replace(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -193,7 +193,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 			if (flags & MAP_SHARED) vf |= VMA_SHARED;
 			if ((flags & MAP_LOCKED) || p->mlock_future) vf |= VMA_LOCKED;
-			vma_clip(p, va, len); vma_add(p, va, len, vf);
+			vma_replace(p, va, len, vf);
 		}
 		return (long)va;
 	}
@@ -235,7 +235,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 				if (prot & PROT_WRITE) vf |= VMA_WRITE;
 				if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 				if (cacheable && (flags & MAP_SHARED)) vf |= VMA_SHARED;
-				vma_clip(p, va, len); vma_add(p, va, len, vf);
+				vma_replace(p, va, len, vf);
 			}
 			fput(f);
 			return (long)va;
@@ -274,7 +274,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		if (prot & PROT_READ)  vf |= VMA_READ;
 		if (prot & PROT_WRITE) vf |= VMA_WRITE;
 		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-		vma_clip(p, va, len); vma_add(p, va, len, vf);
+		vma_replace(p, va, len, vf);
 	}
 	fput(f);
 	return (long)va;
@@ -289,17 +289,12 @@ static long sys_munmap(uint64_t addr, size_t len)
 	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE)
 		vm_unmap(p->vm, va);
-	/* remove fully-covered VMAs */
-	vma_t **pp = &p->vmas;
-	while (*pp) {
-		vma_t *v = *pp;
-		if (v->vaddr >= addr && v->vaddr + v->size <= addr + len) {
-			*pp = v->next;
-			kfree(v);
-		} else {
-			pp = &v->next;
-		}
-	}
+	/* Drop the VMA coverage for exactly [addr, addr+len): trims VMAs the range
+	 * partially overlaps and splits one it punches a hole in, not just the fully
+	 * covered ones. A stale VMA left over a now-unmapped slice would otherwise
+	 * win the fault lookup with the old region's permissions — glibc's malloc and
+	 * ld.so unmap sub-ranges of larger reservations constantly. */
+	vma_clip(p, addr, len);
 	return 0;
 }
 
@@ -322,6 +317,43 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
 	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
 
+	/* Update VMA permissions BEFORE touching the PTEs, under the space's
+	 * fault_lock. With the VMA list shared across threads, a sibling faulting
+	 * mid-mprotect must observe the new protection — if it saw the old (still
+	 * readable) flags after the page was unmapped, the fault handler would
+	 * demand-fault a fresh zero page into a region being made PROT_NONE. Doing
+	 * the flag update first means a racing fault either reads the still-mapped
+	 * page (benign, about to change) or sees the new prot and is denied. Split
+	 * any VMA the range only partially covers so the new prot applies to exactly
+	 * [addr, addr+len) — applying it to the whole VMA would e.g. strip write from
+	 * a binary's data segment when ld.so makes its small RELRO sub-region RO. */
+	uint32_t vmaflags = VMA_USER;
+	if (prot & PROT_READ)  vmaflags |= VMA_READ;
+	if (prot & PROT_WRITE) vmaflags |= VMA_WRITE;
+	if (prot & PROT_EXEC)  vmaflags |= VMA_EXEC;
+	uint64_t vf = spin_lock_irq(&p->vm->fault_lock);
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
+		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
+		if (vend <= addr || vstart >= addr + len) continue; /* no overlap */
+		uint64_t lo = addr > vstart ? addr : vstart;
+		uint64_t hi = (addr + len) < vend ? (addr + len) : vend;
+		uint32_t newf = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON));
+		if (vstart == lo && vend == hi) {
+			v->flags = newf;                       /* whole VMA */
+		} else {
+			uint32_t oldf = v->flags;              /* carve out the middle */
+			if (vstart < lo) vma_add_locked(p->vm, vstart, lo - vstart, oldf);
+			if (hi < vend)   vma_add_locked(p->vm, hi, vend - hi, oldf);
+			v->vaddr = lo; v->size = hi - lo; v->flags = newf;
+		}
+	}
+	spin_unlock_irq(&p->vm->fault_lock, vf);
+
+	/* PTEs are updated after the VMA flags are already published, and each
+	 * vm_map/vm_unmap takes fault_lock itself (so this loop must not hold it).
+	 * A sibling faulting in the gap sees the new VMA prot: if the page is still
+	 * mapped a read just succeeds, and once it is unmapped the PROT_NONE VMA
+	 * denies the refault — never a fresh zero page into a protected region. */
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
 		uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
@@ -343,31 +375,6 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	 * down so the new protection takes effect everywhere. */
 	arch_tlb_flush_range(p->vm, addr, addr + len);
 
-	/* Keep VMA permissions in sync so the fault handler enforces the new prot.
-	 * Split any VMA that the range only partially covers, so the new prot
-	 * applies to exactly [addr, addr+len) — applying it to the whole VMA would
-	 * e.g. strip write from a binary's data segment when ld.so makes its small
-	 * RELRO sub-region read-only. */
-	uint32_t vmaflags = VMA_USER;
-	if (prot & PROT_READ)  vmaflags |= VMA_READ;
-	if (prot & PROT_WRITE) vmaflags |= VMA_WRITE;
-	if (prot & PROT_EXEC)  vmaflags |= VMA_EXEC;
-	for (vma_t *v = p->vmas; v; v = v->next) {
-		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
-		if (vend <= addr || vstart >= addr + len) continue; /* no overlap */
-		uint64_t lo = addr > vstart ? addr : vstart;
-		uint64_t hi = (addr + len) < vend ? (addr + len) : vend;
-		uint32_t newf = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON));
-		if (vstart == lo && vend == hi) {
-			v->flags = newf;                       /* whole VMA */
-		} else {
-			uint32_t oldf = v->flags;              /* carve out the middle */
-			if (vstart < lo) vma_add(p, vstart, lo - vstart, oldf);
-			if (hi < vend)   vma_add(p, hi, vend - hi, oldf);
-			v->vaddr = lo; v->size = hi - lo; v->flags = newf;
-		}
-	}
-
 	return 0;
 }
 
@@ -387,7 +394,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 static void thp_collapse(process_t *p, uint64_t va)
 {
 	vma_t *vma = NULL;
-	for (vma_t *v = p->vmas; v; v = v->next)
+	for (vma_t *v = p->vm->vmas; v; v = v->next)
 		if (va >= v->vaddr && va + HUGE_PAGE_SIZE <= v->vaddr + v->size) { vma = v; break; }
 	if (!vma) return;
 	if (!(vma->flags & VMA_ANON) || !(vma->flags & VMA_WRITE) || (vma->flags & VMA_SHARED))
@@ -421,7 +428,7 @@ static void thp_collapse(process_t *p, uint64_t va)
  * per-page prefault/drop helpers must leave them alone. */
 static vma_t *anon_vma_at(process_t *p, uint64_t va)
 {
-	for (vma_t *v = p->vmas; v; v = v->next) {
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		if (va < v->vaddr || va >= v->vaddr + v->size) continue;
 		if (!(v->flags & VMA_ANON) || (v->flags & (VMA_HUGE | VMA_HUGE_1G))) return NULL;
 		return v;
@@ -499,7 +506,7 @@ static long sys_madvise(uint64_t addr, size_t len, int advice)
 static void mm_set_locked(process_t *p, uint64_t addr, size_t len, int on)
 {
 	uint64_t end = addr + len;
-	for (vma_t *v = p->vmas; v; v = v->next) {
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
 		if (vend <= addr || vstart >= end) continue;
 		uint64_t lo = addr > vstart ? addr : vstart;
@@ -571,7 +578,7 @@ static long sys_mlockall(int flags)
 	process_t *p = task_current();
 	p->mlock_future = (flags & MCL_FUTURE) ? 1 : 0;
 	if (flags & MCL_CURRENT) {
-		for (vma_t *v = p->vmas; v; v = v->next) {
+		for (vma_t *v = p->vm->vmas; v; v = v->next) {
 			if (!(flags & MCL_ONFAULT)) mm_prefault(p, v->vaddr, v->size);
 			v->flags |= VMA_LOCKED;
 		}
@@ -583,7 +590,7 @@ static long sys_munlockall(void)
 {
 	process_t *p = task_current();
 	p->mlock_future = 0;
-	for (vma_t *v = p->vmas; v; v = v->next)
+	for (vma_t *v = p->vm->vmas; v; v = v->next)
 		v->flags &= ~(uint32_t)VMA_LOCKED;
 	return 0;
 }
@@ -599,7 +606,7 @@ static long sys_msync(uint64_t addr, size_t len, int flags)
 	/* the whole range must be mapped, else ENOMEM */
 	for (uint64_t va = addr; va < end; va += 0x1000) {
 		int found = 0;
-		for (vma_t *v = p->vmas; v; v = v->next)
+		for (vma_t *v = p->vm->vmas; v; v = v->next)
 			if (va >= v->vaddr && va < v->vaddr + v->size) { found = 1; break; }
 		if (!found) return -12;                        /* ENOMEM */
 	}

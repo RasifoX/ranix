@@ -118,15 +118,54 @@ static long sys_close(int fd);
 static long sys_lseek(int fd, off_t off, int whence);
 static long sys_fstat(int fd, linux_stat_t *st);
 
-void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
+/* VMAs describe the address space, not a single thread, so they live on the
+ * shared vm_space and every thread sees the same list (Linux keeps the VMA
+ * tree in mm_struct). Because all threads share the list, every traversal and
+ * mutation runs under the space's fault_lock — the same lock the page-fault
+ * handler already holds while it walks the list — so a concurrent mmap/mprotect/
+ * munmap on another CPU can't corrupt it mid-scan. The *_locked helpers assume
+ * the caller holds it; the public entry points take it. A thread that lacks a
+ * vm only during teardown has no regions to track. */
+static void vma_add_locked(vm_space_t *vs, uint64_t vaddr, uint64_t size, uint32_t flags)
 {
 	vma_t *v = kmalloc(sizeof(*v));
 	if (!v) return;
 	v->vaddr = vaddr;
 	v->size  = size;
 	v->flags = flags;
-	v->next  = p->vmas;
-	p->vmas  = v;
+	v->next  = vs->vmas;
+	vs->vmas = v;
+}
+
+void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
+{
+	if (!p->vm) return;
+	uint64_t f = spin_lock_irq(&p->vm->fault_lock);
+	vma_add_locked(p->vm, vaddr, size, flags);
+	spin_unlock_irq(&p->vm->fault_lock, f);
+}
+
+static void vma_clip_locked(vm_space_t *vs, uint64_t va, uint64_t len)
+{
+	uint64_t end = va + len;
+	int changed = 1;
+	while (changed) {
+		changed = 0;
+		vma_t **pp = &vs->vmas;
+		for (vma_t *v = *pp; v; pp = &v->next, v = v->next) {
+			uint64_t vend = v->vaddr + v->size;
+			if (v->vaddr >= end || vend <= va) continue;   /* disjoint */
+			uint64_t lv = v->vaddr, ls = (va > v->vaddr) ? va - v->vaddr : 0;
+			uint64_t rv = end,      rs = (vend > end)    ? vend - end    : 0;
+			uint32_t fl = v->flags;
+			*pp = v->next;
+			kfree(v);
+			if (ls) vma_add_locked(vs, lv, ls, fl);
+			if (rs) vma_add_locked(vs, rv, rs, fl);
+			changed = 1;   /* list mutated — restart the scan */
+			break;
+		}
+	}
 }
 
 /* Remove [va, va+len) from the VMA set, trimming or splitting any overlapping
@@ -136,36 +175,36 @@ void vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags)
  * permissions then win the fault lookup. */
 void vma_clip(process_t *p, uint64_t va, uint64_t len)
 {
-	uint64_t end = va + len;
-	int changed = 1;
-	while (changed) {
-		changed = 0;
-		vma_t **pp = &p->vmas;
-		for (vma_t *v = *pp; v; pp = &v->next, v = v->next) {
-			uint64_t vend = v->vaddr + v->size;
-			if (v->vaddr >= end || vend <= va) continue;   /* disjoint */
-			uint64_t lv = v->vaddr, ls = (va > v->vaddr) ? va - v->vaddr : 0;
-			uint64_t rv = end,      rs = (vend > end)    ? vend - end    : 0;
-			uint32_t fl = v->flags;
-			*pp = v->next;
-			kfree(v);
-			if (ls) vma_add(p, lv, ls, fl);
-			if (rs) vma_add(p, rv, rs, fl);
-			changed = 1;   /* list mutated — restart the scan */
-			break;
-		}
-	}
+	if (!p->vm) return;
+	uint64_t f = spin_lock_irq(&p->vm->fault_lock);
+	vma_clip_locked(p->vm, va, len);
+	spin_unlock_irq(&p->vm->fault_lock, f);
 }
 
-static void vma_free_all(process_t *p)
+/* Clip [va,va+len) and install one fresh VMA over it, atomically under the lock
+ * so a concurrent fault never observes the gap between the clip and the add.
+ * This is the install step every mmap variant uses. */
+void vma_replace(process_t *p, uint64_t va, uint64_t len, uint32_t flags)
 {
-	vma_t *v = p->vmas;
+	if (!p->vm) return;
+	uint64_t f = spin_lock_irq(&p->vm->fault_lock);
+	vma_clip_locked(p->vm, va, len);
+	vma_add_locked(p->vm, va, len, flags);
+	spin_unlock_irq(&p->vm->fault_lock, f);
+}
+
+/* Free the whole VMA list of an address space. Called from vm_destroy when the
+ * last thread drops its reference — the regions outlive any single thread. */
+void vma_free_space(vm_space_t *vs)
+{
+	if (!vs) return;
+	vma_t *v = vs->vmas;
 	while (v) {
 		vma_t *next = v->next;
 		kfree(v);
 		v = next;
 	}
-	p->vmas = NULL;
+	vs->vmas = NULL;
 }
 
 /* exit/getpid → sys/syscall_proc.c; reboot/syslog/utimensat → sys/syscall_misc.c */
