@@ -71,23 +71,13 @@ static vfs_fops_t full_fops = {
 	.write = full_write,
 };
 
-/* ── /dev/urandom ────────────────────────────────────────────── */
-
-static uint64_t   rand_state = 0xdeadbeefcafebabe;
-static spinlock_t rand_lock  = SPINLOCK_INIT;
+/* ── /dev/urandom (and /dev/random) ──────────────────────────── */
 
 static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
-	extern volatile uint64_t kernel_ticks;
-	uint8_t *b = buf;
-	spin_lock(&rand_lock);
-	rand_state ^= kernel_ticks;
-	for (size_t i = 0; i < len; i++) {
-		rand_state = rand_state * 6364136223846793005ULL + 1442695040888963407ULL;
-		b[i] = (uint8_t)(rand_state >> 33);
-	}
-	spin_unlock(&rand_lock);
+	extern void csprng_bytes(void *, size_t);
+	csprng_bytes(buf, len);
 	return (ssize_t)len;
 }
 

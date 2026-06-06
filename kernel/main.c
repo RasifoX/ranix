@@ -267,6 +267,7 @@ void kernel_main(void)
 #endif
 	}
 
+	{ extern void csprng_init(void); csprng_init(); }
 	vfs_init();
 	vfs_mount("/", "ramfs", NULL);
 	vfs_mkdir("/dev",  0755);
