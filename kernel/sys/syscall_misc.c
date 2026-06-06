@@ -1,5 +1,6 @@
 #include <kernel/capabilities.h>
 #include <kernel/block.h>
+#include <kernel/cpumask.h>
 
 /* ── statfs ──────────────────────────────────────────────── */
 
@@ -954,21 +955,39 @@ static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 {
 	extern int smp_ncpus;
 	if (len < 8 || !access_ok(mask, len)) return -22;
-	uint64_t m;
-	if (copy_from_user(&m, mask, 8)) return -14;
-	uint64_t online = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
-	if ((m & online) == 0) return -22;             /* mask selects no online CPU */
+
+	/* Pull the user cpu_set_t into a kernel cpumask, ignoring bits past NR_CPUS. */
+	cpumask_t req;
+	cpumask_clear(&req);
+	size_t n = len < sizeof(req) ? len : sizeof(req);
+	if (copy_from_user(&req, mask, n)) return -14;
+
+	cpumask_t online;
+	cpumask_set_first_n(smp_ncpus, &online);
+	for (int i = 0; i < CPUMASK_LONGS; i++) req.bits[i] &= online.bits[i];
+	if (cpumask_empty(&req)) return -22;            /* selects no online CPU */
+
 	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
-	uint64_t aff = (m & online) == online ? 0 : (m & online);
-	p->cpu_affinity = aff;
+
+	int all = cpumask_weight(&req) == smp_ncpus;
+	if (all) {
+		if (p->cpu_affinity) { kfree(p->cpu_affinity); p->cpu_affinity = NULL; }
+	} else {
+		cpumask_t *aff = p->cpu_affinity;
+		if (!aff) aff = kmalloc(sizeof(*aff));
+		if (!aff) { if (pid) proc_put(p); return -12; }
+		*aff = req;
+		p->cpu_affinity = aff;
+	}
+
 	int is_self = (p == task_current());
 	if (pid) proc_put(p);
-	if (is_self && aff) {
+	if (is_self && !all) {
 		/* re-evaluate placement: if the current CPU is now excluded, yield so
 		 * the next enqueue reassigns us to an allowed CPU. */
 		int cid = (int)arch_get_cpu_ctx()->cpu_id;
-		if (!(aff & (1ULL << cid))) yield();
+		if (!cpumask_test_cpu(cid, &req)) yield();
 	}
 	return 0;
 }
@@ -977,13 +996,15 @@ static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 {
 	if (len < 8 || !access_ok(mask, len)) return -22;
 	extern int smp_ncpus;
-	uint64_t online = (smp_ncpus < 64) ? ((1ULL << smp_ncpus) - 1) : ~0ULL;
 	process_t *p = pid ? proc_get(pid) : task_current();
 	if (!p) return -3;
-	uint64_t m = p->cpu_affinity ? p->cpu_affinity : online;
+	cpumask_t m;
+	if (p->cpu_affinity) m = *p->cpu_affinity;
+	else cpumask_set_first_n(smp_ncpus, &m);
 	if (pid) proc_put(p);
-	copy_to_user(mask, &m, 8);
-	return 8;
+	size_t n = len < sizeof(m) ? len : sizeof(m);
+	copy_to_user(mask, &m, n);
+	return (long)n;
 }
 
 #define PR_SET_NAME    15
