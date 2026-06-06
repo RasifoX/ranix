@@ -1201,10 +1201,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	uint64_t at_base    = 0;          /* AT_BASE: dynamic linker load base */
 	uint64_t interp_lo = 0, interp_hi = 0;
 	/* ASLR mmap base; the dynamic linker (if any) loads at its bottom.
-	 * personality ADDR_NO_RANDOMIZE (0x0040000) pins it (setarch -R, debuggers). */
+	 * personality ADDR_NO_RANDOMIZE (0x0040000) pins it (setarch -R, debuggers).
+	 * 24 page-bits of entropy → base in [1 GB, ~65 GB), leaving the rest of the
+	 * 256 GB span for the mmap window below the 1 GB-hugepage ceiling. */
 	int no_aslr = (task_current()->personality & 0x0040000) != 0;
 	uint64_t mmap_base  = USER_MMAP_BASE_ +
-		(no_aslr ? 0 : ((rng_next() & 0xffffULL) << 12));
+		(no_aslr ? 0 : ((rng_next() & 0xffffffULL) << 12));
 
 	/* Dynamically linked: load the interpreter (ld.so) too and enter it
 	 * instead of the executable. It performs relocations in userspace, then
