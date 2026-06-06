@@ -27,6 +27,7 @@
 #define PTE_DIRTY   (1UL << 6)
 #define PTE_HUGE    (1UL << 7)   /* 2 MB page at PD level */
 #define PTE_GLOBAL  (1UL << 8)
+#define PTE_NX      (1UL << 63)  /* no-execute (needs EFER.NXE) */
 
 #define PTE_ATTR_NORMAL  (PTE_VALID | PTE_WRITE | PTE_AF)
 #define PTE_ATTR_DEVICE  (PTE_VALID | PTE_WRITE | PTE_AF | PTE_PCD | PTE_PWT)

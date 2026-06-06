@@ -46,13 +46,8 @@ cpu_context_t *arch_get_cpu_ctx(void)
 
 void arch_syscall_init(void)
 {
-	/* Also enable SMAP/SMEP in CR4 if we want hardware guards */
-	uint64_t cr4;
-	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-	/* SMEP(20), SMAP(21) - set if supported. For now just ensure they are handled. */
-	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
-
-	/* EFER.SCE — enable syscall/sysret */
+	/* EFER.SCE — enable syscall/sysret. EFER.NXE is set earlier in the boot/
+	 * trampoline asm, before any NX-tagged PTE is walked. */
 	__asm__ volatile(
 		"movl $0xC0000080, %%ecx\n"
 		"rdmsr\n"

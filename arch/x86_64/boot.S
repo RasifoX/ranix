@@ -70,9 +70,20 @@ _start:
 	mov  %eax, %cr3
 .cr3_set:
 
-	mov  $0xC0000080, %ecx    /* EFER */
+	/* EFER: LME (long mode) + NXE (no-execute) when CPUID advertises NX. NXE
+	 * must be on before any NX-tagged PTE is walked, else bit 63 faults as
+	 * reserved. ebx (multiboot ptr) was already saved to _dtb_ptr above. */
+	mov  $0x80000001, %eax
+	cpuid
+	and  $(1 << 20), %edx     /* EDX.NX */
+	mov  %edx, %ebx
+	mov  $0xC0000080, %ecx
 	rdmsr
 	or   $0x100, %eax         /* LME */
+	test %ebx, %ebx
+	jz   1f
+	or   $0x800, %eax         /* NXE */
+1:
 	wrmsr
 
 	mov  %cr0, %eax
