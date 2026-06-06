@@ -643,9 +643,9 @@ static spinlock_t proc_ino_lock = SPINLOCK_INIT;
 
 static uint64_t proc_ino_alloc(void)
 {
-	spin_lock(&proc_ino_lock);
+	uint64_t f = spin_lock_irq(&proc_ino_lock);
 	uint64_t n = proc_ino_next++;
-	spin_unlock(&proc_ino_lock);
+	spin_unlock_irq(&proc_ino_lock, f);
 	return n;
 }
 

@@ -507,9 +507,9 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *ra
 	vi->priv     = priv;
 	vi->iops     = &ext2_iops;
 
-	spin_lock(&ext2_ino_lock);
+	uint64_t f = spin_lock_irq(&ext2_ino_lock);
 	ext2_ino_counter++;
-	spin_unlock(&ext2_ino_lock);
+	spin_unlock_irq(&ext2_ino_lock, f);
 	return vi;
 }
 
