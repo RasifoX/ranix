@@ -22,6 +22,7 @@
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/smp.h>
+#include <kernel/cpumask.h>
 #include <asm/mmu.h>
 
 extern void futex_wake_addr(uint32_t *uaddr);
@@ -374,11 +375,11 @@ static process_t *cpu_rq_pop(cpu_context_t *cpu)
 	return p;
 }
 
-/* sched_setaffinity restriction: bit i of p->cpu_affinity allows CPU i; a 0
- * mask is the default (unrestricted). */
+/* sched_setaffinity restriction: a NULL mask is the default (unrestricted),
+ * otherwise CPU cpu_id must be set in the mask. */
 static inline int cpu_allowed(process_t *p, int cpu_id)
 {
-	return p->cpu_affinity == 0 || (p->cpu_affinity & (1ULL << cpu_id));
+	return !p->cpu_affinity || cpumask_test_cpu(cpu_id, p->cpu_affinity);
 }
 
 /* pop the first queued task allowed on self_id (work-stealing respects

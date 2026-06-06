@@ -116,7 +116,7 @@ typedef struct process {
 	uint64_t        cutime_ticks;   /* reaped children's user time (times(2)) */
 	uint64_t        cstime_ticks;   /* reaped children's system time */
 	int             nice;          /* -20..19, default 0 */
-	uint64_t        cpu_affinity;  /* sched_setaffinity mask (bit i = CPU i); 0 = all */
+	struct cpumask *cpu_affinity;  /* sched_setaffinity mask; NULL = all CPUs */
 	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
 	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
 	int             seccomp_mode;  /* 0 off, 1 strict, 2 filter */
