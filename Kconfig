@@ -21,12 +21,20 @@ config DENTRY_MAX
 	help
 	  Overridable at boot with the vfs_dentry_max= cmdline key.
 
+config NR_CPUS
+	int "Logical CPU id ceiling (cpumask width)"
+	default 8192
+	help
+	  Linux's NR_CPUS: the bit width of a cpumask_t. Affinity masks are
+	  allocated lazily so this costs nothing per process until set.
+
 config MAX_CPUS
-	int "Ceiling for statically-sized per-CPU arrays"
+	int "Bring-up ceiling (clamps the static AP boot-sync table)"
 	default 256
 	help
 	  Detection (FDT/MADT) is clamped to this; a larger box degrades
-	  gracefully. Each unit costs BSS (x86 GDT/TSS dominate).
+	  gracefully. Sizes only ap_boot_sync[] (40 B/CPU in .bss.boot); the
+	  bulky per-CPU state is allocated to the detected count at boot.
 
 config FD_TABLE_INIT
 	int "Initial fd table capacity"
