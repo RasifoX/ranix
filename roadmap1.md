@@ -14,6 +14,12 @@ Kural: her versiyon hem x86_64 hem aarch64'te build ve test edilmeli.
 
 **Linux karşılaştırması**: Syscall yüzeyi ~Linux 4.11+ ; dinamik binary + **8/8 namespace** + cgroups v2 + container + **seccomp (STRICT+BPF)** + **gerçek glibc (static+dynamic)** var. Mimari boşluk daralıyor: çok çekirdek ✅, dinamik linker ✅, namespaces ✅ (8/8), TLS/DNS/DHCP ✅, IPv6 loopback dual-stack ✅, **glibc temel ✅**; **kalan büyük blok: gerçek dağıtım runtime'ı (Python/Node → Claude CLI)**.
 
+**2026-06-06 — güvenlik delikleri (ptrace + no_new_privs, iki arch yeşil):** İki privilege-escalation deliği kapatıldı (pure permission logic, security_audit.md #2/#5).
+- **ptrace ATTACH izin kontrolü:** `ptrace_may_access` (Linux ATTACH/REALCREDS): caller euid == target {r,e,s}uid + egid == {r,e,s}gid + target dumpable, VEYA CAP_SYS_PTRACE. ATTACH artık bu kapıdan geçiyor; `/proc/<pid>/mem` ve cross-process `/proc/<pid>/maps` aynı kapıya bağlandı (`proc_may_access`).
+- **Yan kök bug'lar:** setuid ailesi (setuid/setreuid/setresuid) son uid-0'ı bıraktığında cap'leri düşürmüyordu (`cred_setxuid_fixup`, Linux cap_emulate_setxuid) → su sonrası tam cap kalıyordu; fork `dumpable`'ı kopyalamıyordu (PCB sıfır → 0).
+- **no_new_privs zorunlu:** execve artık NNP (veya traced) ise S_ISUID/S_ISGID elevation uygulamıyor; privilege-değişen exec'te AT_SECURE=1 + tehlikeli env (LD_PRELOAD/LD_LIBRARY_PATH/...) scrub. NNP fork+exec boyunca miras (üç clone yolu).
+- Testler: `c-ptraceperm` (uid-1000 pid-1'e ATTACH→EPERM, /proc/1/mem|maps okunamaz, kendi child'ının maps'i okunur), `c-nnp` (NNP sonrası suid-root helper uid 0 vermez, fork+exec'te korunur). Mevcut c-ptrace/su/login yeşil.
+
 **2026-06-03 — glibc port temel oturumu (bu oturum, 8 commit, iki arch yeşil):** glibc'ye TEK SATIR dokunmadan, her fatal'i Ranix'in eksik bir Linux davranışına işaret olarak okuyup çekirdeği standarda çektik.
 - **glibc static + dynamic ÇALIŞIYOR** (ld-linux + libc.so.6 + reloc), hem execve hem init= yoluyla.
 - **glibc NPTL pthread** create/join/mutex/cond/**cond_timedwait** (doğru timeout), malloc arena, libm, **dlopen/dlsym/dlclose**, stdio file I/O.

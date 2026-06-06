@@ -297,6 +297,8 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
 	@if [ -z "$(DEMO)" ]; then cp $(USER_TEST_BINS) $(BUILD_DIR)/initramfs/bin/; fi
+	@if [ -z "$(DEMO)" ] && [ -f $(BUILD_DIR)/initramfs/bin/test_suidhelper ]; then \
+		chmod u+s $(BUILD_DIR)/initramfs/bin/test_suidhelper; fi
 	@mkdir -p $(BUILD_DIR)/initramfs/lib
 	@cp $(LDSO_SRC) $(BUILD_DIR)/initramfs/lib/$(LDSO_NAME)
 	@if [ -z "$(DEMO)" ]; then cp userspace/libfoo.so $(BUILD_DIR)/initramfs/lib/; fi
