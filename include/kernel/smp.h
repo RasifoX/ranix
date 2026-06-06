@@ -4,13 +4,14 @@
 #include <kernel/hal.h>
 #include <kernel/config.h>
 
-/* Ceiling for the statically-sized per-CPU arrays. The bulky per-CPU stacks are
- * allocated dynamically to the detected count in smp_init(); what remains static
- * is sized by MAX_CPUS — all_cpus[], ap_boot_sync[], the x86 GDT/TSS tables, and
- * the watchdog scan buffers. At 8192 those cost ~2 MB of BSS (the x86 GDT/TSS
- * alone is ~1.3 MB), wasted on every machine. 256 still exceeds any target Ranix
- * runs on by 64x; detection (FDT/MADT) is clamped to it, so a larger box degrades
- * gracefully rather than overflowing. */
+/* Bring-up ceiling, separate from NR_CPUS (cpumask.h — the cpumask width). The
+ * bulky per-CPU stacks are allocated to the detected count in smp_init(); what
+ * stays static is sized by MAX_CPUS — all_cpus[], ap_boot_sync[], the x86
+ * GDT/TSS tables, and the watchdog scan buffers. Sizing those by NR_CPUS (8192)
+ * would cost MBs of BSS (cpu_tss alone ~850 KB) wasted on every machine; 256
+ * exceeds any target Ranix runs on by 64x. Detection (FDT/MADT) is clamped to
+ * it, so a larger box degrades gracefully rather than overflowing. cpumasks
+ * still span the full NR_CPUS so affinity/IPI masks scale to a Linux-size box. */
 #define MAX_CPUS CONFIG_MAX_CPUS
 
 extern int smp_ncpus;
