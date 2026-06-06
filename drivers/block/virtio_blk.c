@@ -1,4 +1,5 @@
 #include <kernel/block.h>
+#include <kernel/hal.h>
 #include <kernel/pci.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -156,7 +157,7 @@ static int vblk_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 		/* poll used ring */
 		uint32_t spin = 0;
 		while (p->used->idx == p->last_used_idx) {
-			__asm__ volatile("pause" ::: "memory");
+			cpu_relax();
 			if (++spin > 10000000) {
 				kprintf("virtio-blk: timeout lba=%lu\n", lba + i);
 				return -1;
@@ -218,7 +219,7 @@ static int vblk_write(block_device_t *dev, uint64_t lba, const void *buf, uint64
 
 		uint32_t spin = 0;
 		while (p->used->idx == p->last_used_idx) {
-			__asm__ volatile("pause" ::: "memory");
+			cpu_relax();
 			if (++spin > 10000000) {
 				kprintf("virtio-blk: write timeout lba=%lu\n", lba + i);
 				return -1;
