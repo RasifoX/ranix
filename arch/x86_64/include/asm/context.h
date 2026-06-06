@@ -257,6 +257,7 @@ typedef struct {
 #define SYS_ARCH_SET_ROBUST_LIST   273
 #define SYS_ARCH_GET_ROBUST_LIST   274
 #define SYS_ARCH_SPLICE            275
+#define SYS_ARCH_SYNC_FILE_RANGE   277
 #define SYS_ARCH_FUTIMENS          280 /* same number, used via fd path */
 #define SYS_ARCH_UTIMENSAT         280
 #define SYS_ARCH_EPOLL_PWAIT       281
