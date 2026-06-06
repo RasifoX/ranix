@@ -15,10 +15,10 @@
 #define HUGE_PAGE_SIZE  (2UL * 1024 * 1024)
 #define HUGE_PAGE_MASK  (~(HUGE_PAGE_SIZE - 1))
 
-/* 1 GB hugepage mmaps live in their own high VA window, clear of the normal
- * mmap region and stack (both under 2 GB), so a 1 GB-aligned block never
- * collides with them. */
-#define HUGE1G_VA_BASE  0x100000000UL   /* 4 GB */
+/* 1 GB hugepage mmaps live in their own high VA window, above the mmap ceiling
+ * and below the stack, so a 1 GB-aligned block never collides with the normal
+ * mmap region or the stack. Stays inside page-table slot 0 (< 512 GB). */
+#define HUGE1G_VA_BASE  0x3F00000000UL   /* 252 GB */
 
 #define VM_SPACE_MAGIC 0x564D5350u   /* "VMSP" — set at create, checked at lifecycle ops */
 
