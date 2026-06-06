@@ -549,6 +549,10 @@ check "shadow-no-read" "1" \
 # $6$ crypt) and land in a uid-1000 session shell — the whole getty/login chain.
 check "c-login"          "OK"  "$(timeout 20 /bin/test_login 2>/dev/null)"
 
+# ── 45b. ptrace_may_access + no_new_privs (run as uid-1000 'test') ──
+check "c-ptraceperm" "OK" "$(timeout 12 su test -c /bin/test_ptraceperm 2>/dev/null)"
+check "c-nnp"        "OK" "$(timeout 10 su test -c /bin/test_nnp 2>/dev/null)"
+
 echo "---"
 
 # ── 46. SMP — nproc ve affinity ───────────────────────────────
