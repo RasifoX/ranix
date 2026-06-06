@@ -191,7 +191,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	}
 
 	/* File-backed mmap */
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);   /* pin across the blocking map loop */
 	if (!f) return -9;
 
 	/* Mapping backed by an inode-owned page via the mmap fop. Two kinds:
@@ -211,6 +211,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 				uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
 				if (!phys) {
 					for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
+					fput(f);
 					return -22; /* EINVAL — offset past backing */
 				}
 				vm_map(p->vm, v, phys, pte_flags);
@@ -225,16 +226,17 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 				if (cacheable && (flags & MAP_SHARED)) vf |= VMA_SHARED;
 				vma_clip(p, va, len); vma_add(p, va, len, vf);
 			}
+			fput(f);
 			return (long)va;
 		}
 	}
 
-	if (!f->inode->fops->read) return -9;
+	if (!f->inode->fops->read) { fput(f); return -9; }
 
 	uint64_t file_off = off;
 	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 		void *pg = buddy_alloc(0);
-		if (!pg) return -12;
+		if (!pg) { fput(f); return -12; }
 		void *pg_virt = (void *)PHYS_TO_VIRT(pg);
 		memset(pg_virt, 0, PAGE_SIZE);
 
@@ -263,6 +265,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
 		vma_clip(p, va, len); vma_add(p, va, len, vf);
 	}
+	fput(f);
 	return (long)va;
 }
 
