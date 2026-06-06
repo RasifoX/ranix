@@ -358,17 +358,17 @@ static long sys_flock(int fd, int operation)
 #define LOCK_NB 4
 #define LOCK_UN 8
 	process_t *p = task_current();
-	vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, fd) : NULL;
+	vfs_file_t *f = (p && p->fds) ? fget(p->fds, fd) : NULL;  /* pin across the wait loop */
 	if (!f) return -9; /* EBADF */
 	int cmd = operation & ~LOCK_NB;
-	if (cmd == LOCK_UN) { vfs_flock_release(f); return 0; }
-	if (cmd != LOCK_SH && cmd != LOCK_EX) return -22; /* EINVAL */
+	if (cmd == LOCK_UN) { vfs_flock_release(f); fput(f); return 0; }
+	if (cmd != LOCK_SH && cmd != LOCK_EX) { fput(f); return -22; } /* EINVAL */
 	for (;;) {
 		int r = vfs_flock_try(f, cmd);
-		if (r == 0) return 0;
-		if (operation & LOCK_NB) return -11; /* EWOULDBLOCK */
+		if (r == 0) { fput(f); return 0; }
+		if (operation & LOCK_NB) { fput(f); return -11; } /* EWOULDBLOCK */
 		yield();                              /* block: retry when holder releases */
-		if (task_has_actionable_signal()) return -4; /* EINTR */
+		if (task_has_actionable_signal()) { fput(f); return -4; } /* EINTR */
 	}
 }
 
