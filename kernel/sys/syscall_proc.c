@@ -1139,11 +1139,37 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -2; }
 	if (st.size == 0)              { EXEC_STAGE_FREE(); return -2; }
 
-	/* resolve credentials for the new image */
+	/* resolve credentials for the new image. no_new_privs (and a still-traced
+	 * task) suppresses S_ISUID/S_ISGID elevation: the image runs with the
+	 * caller's ids. AT_SECURE/env-scrub kick in only on an id change. */
 	uid_t new_euid = p->euid;
 	gid_t new_egid = p->egid;
-	if (st.mode & S_ISUID) new_euid = st.uid;
-	if (st.mode & S_ISGID) new_egid = st.gid;
+	int nnp = p->no_new_privs || p->tracer != 0;
+	if (!nnp && (st.mode & S_ISUID)) new_euid = st.uid;
+	if (!nnp && (st.mode & S_ISGID)) new_egid = st.gid;
+	int secure_exec = (new_euid != p->euid) || (new_egid != p->egid);
+
+	/* secure-exec env scrub: a privilege-raising exec must not inherit the
+	 * caller's loader-controlling variables, or a suid binary runs attacker code
+	 * via ld.so. Drop them from kenvp[] in place; AT_SECURE is set below. */
+	if (secure_exec) {
+		static const char *const unsafe[] = {
+			"LD_PRELOAD=", "LD_LIBRARY_PATH=", "LD_AUDIT=", "LD_ORIGIN_PATH=",
+			"LD_PROFILE=", "LD_DEBUG=", "LD_DYNAMIC_WEAK=", "LD_SHOW_AUXV=",
+			"GCONV_PATH=", "GETCONF_DIR=", "TMPDIR=", 0 };
+		int w = 0;
+		for (int e = 0; e < envc; e++) {
+			int drop = 0;
+			for (int u = 0; unsafe[u]; u++) {
+				const char *pfx = unsafe[u]; const char *s = kenvp[e];
+				int i = 0; while (pfx[i] && pfx[i] == s[i]) i++;
+				if (!pfx[i]) { drop = 1; break; }
+			}
+			if (!drop) kenvp[w++] = kenvp[e];
+		}
+		envc = w;
+		kenvp[envc] = 0;
+	}
 
 	uint8_t *buf = kmalloc(st.size);
 	if (!buf) { EXEC_STAGE_FREE(); return -12; }
@@ -1396,7 +1422,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (vdso_advertise) PUSH_AUX(33, VDSO_VADDR);
 	PUSH_AUX(31, at_execfn_addr);
 	PUSH_AUX(25, at_random_addr);
-	PUSH_AUX(23, 0);
+	PUSH_AUX(23, secure_exec ? 1 : 0);   /* AT_SECURE */
 	PUSH_AUX(26, 0);   /* AT_HWCAP2 — no extra feature bits advertised */
 	PUSH_AUX(17, TIMER_HZ);
 #if defined(__aarch64__)
