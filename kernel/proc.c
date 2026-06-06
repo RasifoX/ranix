@@ -14,6 +14,21 @@ _Static_assert(sizeof(process_t) <= (PAGE_SIZE << PCB_ORDER),
 
 static spinlock_t sighand_lock;
 
+/* affinity masks are owned per-PCB: fork/clone duplicate, teardown frees. A
+ * NULL mask means unrestricted, so an allocation failure degrades to that. */
+static struct cpumask *cpu_affinity_dup(const struct cpumask *src)
+{
+	if (!src) return NULL;
+	struct cpumask *m = kmalloc(sizeof(*m));
+	if (m) *m = *src;
+	return m;
+}
+
+static void cpu_affinity_free(process_t *p)
+{
+	if (p->cpu_affinity) { kfree(p->cpu_affinity); p->cpu_affinity = NULL; }
+}
+
 sighand_t *sighand_alloc(sighand_t *copy_from)
 {
 	sighand_t *sh = kmalloc(sizeof(*sh));
@@ -346,7 +361,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->mmap_next = parent->mmap_next;
 	child->huge1g_next = parent->huge1g_next;
 	child->mlock_future = parent->mlock_future;
-	child->cpu_affinity = parent->cpu_affinity;
+	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->no_new_privs = parent->no_new_privs;  /* sticky; pdeathsig is NOT inherited */
 	child->reaped    = 0;
 	child->vfork_parent = -1;
@@ -461,6 +476,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	return child->pid;
 
 fail_early:
+	cpu_affinity_free(child);
 	if (child->vm)     vm_destroy(child->vm);
 	if (child->fds)    fd_table_destroy(child->fds);
 	sighand_put(child->sighand);
@@ -500,6 +516,7 @@ pid_t proc_vfork(void)
 	child->cap_permitted   = parent->cap_permitted;
 	child->cap_effective   = parent->cap_effective;
 	child->cap_inheritable = parent->cap_inheritable;
+	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
@@ -513,11 +530,12 @@ pid_t proc_vfork(void)
 	child->ctty         = parent->ctty;
 	child->ctty_fops    = parent->ctty_fops;
 	child->sighand      = sighand_alloc(parent->sighand);
-	if (!child->sighand) { buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -1; }
+	if (!child->sighand) { cpu_affinity_free(child); buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -1; }
 	child->sig_mask     = parent->sig_mask;
 
 	child->kstack = kstack_alloc();
 	if (!child->kstack) {
+		cpu_affinity_free(child);
 		sighand_put(child->sighand);
 		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 		return -1;
@@ -541,6 +559,7 @@ pid_t proc_vfork(void)
 	int pid = alloc_pid();
 	if (pid < 0) {
 		spin_unlock_irq(&sched_lock, f);
+		cpu_affinity_free(child);
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 		return -1;
@@ -599,6 +618,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->cap_permitted   = parent->cap_permitted;
 	child->cap_effective   = parent->cap_effective;
 	child->cap_inheritable = parent->cap_inheritable;
+	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = -1;
@@ -693,6 +713,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	return child->pid;
 
 fail:
+	cpu_affinity_free(child);
 	if (child->vm) vm_destroy(child->vm);
 	sighand_put(child->sighand);
 	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
@@ -741,6 +762,7 @@ void proc_put(process_t *p)
 	int free_now = (--p->refcount == 0 && p->pcb_dead);
 	spin_unlock_irq(&sched_lock, f);
 	if (free_now) {
+		cpu_affinity_free(p);
 		p->magic = 0;
 		buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 	}
@@ -1213,6 +1235,7 @@ void proc_reap(process_t *child)
 	if (child->kstack)
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	if (free_now) {
+		cpu_affinity_free(child);
 		child->magic = 0;   /* poison before free: trips a later use-after-free */
 		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	}
