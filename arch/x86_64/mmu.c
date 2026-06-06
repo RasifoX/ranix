@@ -51,6 +51,6 @@ void arch_map_high_memory(uint64_t max_phys)
 			pml4[pml4i] = VIRT_TO_PHYS((uint64_t)pdpt) | 0x3UL;  /* P + RW */
 		}
 		if (pdpt[pdpti] & 1) continue;
-		pdpt[pdpti] = phys | 0x83UL;                  /* P + RW + PS(1GB) */
+		pdpt[pdpti] = phys | 0x83UL | (1UL << 63);    /* P + RW + PS(1GB) + NX (data only) */
 	}
 }

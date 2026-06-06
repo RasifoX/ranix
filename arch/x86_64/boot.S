@@ -126,8 +126,9 @@ setup_page_tables:
 	shl  $30, %eax
 	or   $0x83, %eax
 	mov  %eax, pdpt_dm(, %ecx, 8)
-	mov  %ecx, %eax            /* high dword: i >> 2 (bits above 4 GB) */
+	mov  %ecx, %eax            /* high dword: (i >> 2) | NX(bit 63) — direct map non-exec */
 	shr  $2, %eax
+	or   $0x80000000, %eax
 	mov  %eax, pdpt_dm + 4(, %ecx, 8)
 	inc  %ecx
 	cmp  $512, %ecx
