@@ -74,6 +74,13 @@ static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 	return vfs_mkdir(kp, mode);
 }
 
+/* A directory holds only "." and ".." (readdir idx 0,1) when empty. */
+static int dir_is_empty(const char *kp)
+{
+	vfs_dirent_t de;
+	return vfs_readdir(kp, 2, &de) != 0;
+}
+
 static long sys_unlink(const char *path)
 {
 	char kp[PATH_MAX];
@@ -93,6 +100,7 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 	if (vfs_lstat(kp, &vs) != 0) return -2;         /* ENOENT */
 	if (flags & AT_REMOVEDIR) {
 		if (!S_ISDIR(vs.mode)) return -20;          /* ENOTDIR */
+		if (!dir_is_empty(kp)) return -39;          /* ENOTEMPTY */
 	} else {
 		if (S_ISDIR(vs.mode)) return -21;           /* EISDIR */
 	}
@@ -113,7 +121,7 @@ static long sys_rename(const char *old, const char *new)
 	if ((r = copy_path_from_user(ko, old)) || (r = copy_path_from_user(kn, new)))
 		ret = r;
 	else
-		ret = vfs_rename(ko, kn) == 0 ? 0 : -2;
+		ret = vfs_rename(ko, kn);
 	kfree(ko); kfree(kn);
 	return ret;
 }
@@ -129,7 +137,7 @@ static long sys_renameat(int olddirfd, const char *old, int newdirfd, const char
 	if ((r = resolve_path(ko, olddirfd, old)) || (r = resolve_path(kn, newdirfd, newp)))
 		ret = r;
 	else
-		ret = vfs_rename(ko, kn) == 0 ? 0 : -2;
+		ret = vfs_rename(ko, kn);
 	kfree(ko); kfree(kn);
 	return ret;
 }
@@ -139,7 +147,13 @@ static long sys_rmdir(const char *path)
 	char kp[PATH_MAX];
 	int r = copy_path_from_user(kp, path);
 	if (r) return r;
-	return vfs_unlink(kp) == 0 ? 0 : -2;
+	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
+	vfs_stat_t vs = {0};
+	if (vfs_lstat(kp, &vs) != 0) return -2;     /* ENOENT */
+	if (!S_ISDIR(vs.mode)) return -20;          /* ENOTDIR */
+	if (!dir_is_empty(kp)) return -39;          /* ENOTEMPTY */
+	r = vfs_unlink(kp);
+	return r == -30 ? -30 : (r == 0 ? 0 : -2);
 }
 
 /* ── stat syscalls ───────────────────────────────────────── */

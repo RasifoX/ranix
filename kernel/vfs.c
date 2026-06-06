@@ -1581,18 +1581,32 @@ int vfs_rename(const char *old_path, const char *new_path)
 		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/,   new_name);
 	}
 	if (ret == 0) {
-		/* update dentry name in the tree */
 		uint64_t f = spin_lock_irq(&vfs_lock);
-		vfs_dentry_t *d = old_parent->child;
-		while (d) {
-			if (strcmp(d->name, old_name) == 0) {
-				int nlen = 0;
-				while (new_name[nlen] && nlen < 254) nlen++;
-				memcpy(d->name, new_name, nlen);
-				d->name[nlen] = '\0';
-				break;
+		/* drop a cached dentry for an overwritten target in the new dir */
+		if (old_parent != new_parent) {
+			vfs_dentry_t **tp = &new_parent->child;
+			while (*tp) {
+				if (strcmp((*tp)->name, new_name) == 0) {
+					vfs_dentry_t *dead = *tp; *tp = dead->next; kfree(dead); break;
+				}
+				tp = &(*tp)->next;
 			}
-			d = d->next;
+		}
+		/* detach the moved dentry from its old parent's child list */
+		vfs_dentry_t **pp = &old_parent->child;
+		while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
+		vfs_dentry_t *d = *pp;
+		if (d) {
+			int nlen = 0;
+			while (new_name[nlen] && nlen < 254) nlen++;
+			memcpy(d->name, new_name, nlen);
+			d->name[nlen] = '\0';
+			if (old_parent != new_parent) {
+				*pp = d->next;
+				d->parent = new_parent;
+				d->next   = new_parent->child;
+				new_parent->child = d;
+			}
 		}
 		spin_unlock_irq(&vfs_lock, f);
 	}

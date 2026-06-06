@@ -331,23 +331,48 @@ static int ramfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 static int ramfs_rename(vfs_inode_t *old_dir, const char *old_name,
                         vfs_inode_t *new_dir, const char *new_name)
 {
-	if (old_dir != new_dir) return -18; /* EXDEV: cross-dir not supported */
-	ramfs_dir_t *rd = old_dir->priv;
-	if (!rd) return -2;
-	/* remove new_name if it exists */
-	ramfs_unlink(new_dir, new_name);
-	ramfs_entry_t *e = rd->entries;
-	while (e) {
-		if (strcmp(e->name, old_name) == 0) {
-			int nlen = 0;
-			while (new_name[nlen] && nlen < 254) nlen++;
-			memcpy(e->name, new_name, nlen);
-			e->name[nlen] = '\0';
-			return 0;
-		}
-		e = e->next;
+	ramfs_dir_t *od = old_dir->priv;
+	ramfs_dir_t *nd = new_dir->priv;
+	if (!od || !nd) return -2;
+
+	ramfs_entry_t **pp = &od->entries;
+	while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
+	if (!*pp) return -2;
+	ramfs_entry_t *e = *pp;
+
+	if (old_dir == new_dir) {
+		ramfs_unlink(new_dir, new_name);
+		/* unlink may have unlinked the source if old_name==new_name; re-find */
+		pp = &od->entries;
+		while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
+		if (!*pp) return 0;
+		e = *pp;
+		int nlen = 0;
+		while (new_name[nlen] && nlen < 255) nlen++;
+		memcpy(e->name, new_name, nlen);
+		e->name[nlen] = '\0';
+		return 0;
 	}
-	return -2;
+
+	/* cross-directory: unlink any existing target, then splice the entry out
+	 * of the old list and into the new one, fixing parent dir link counts. */
+	ramfs_unlink(new_dir, new_name);
+	pp = &od->entries;
+	while (*pp && *pp != e) pp = &(*pp)->next;
+	if (!*pp) return -2;
+	*pp = e->next;
+	od->count--;
+	if (S_ISDIR(e->inode->mode)) old_dir->nlink--;
+
+	int nlen = 0;
+	while (new_name[nlen] && nlen < 255) nlen++;
+	memcpy(e->name, new_name, nlen);
+	e->name[nlen] = '\0';
+	e->next = nd->entries;
+	nd->entries = e;
+	nd->count++;
+	if (S_ISDIR(e->inode->mode)) new_dir->nlink++;
+	return 0;
 }
 
 static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
