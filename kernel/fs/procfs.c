@@ -1495,11 +1495,15 @@ static vfs_inode_t *procfs_cgroup_inode(int pid)
 	return in;
 }
 
+static vfs_inode_t *procfs_taskdir_inode(int pid);
+
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
 	if (!pp) return NULL;
 	int pid = pp->pid;
+	if (strcmp(name, "task") == 0)
+		return procfs_taskdir_inode(pid);
 	if (strcmp(name, "fd") == 0)
 		return procfs_fddir_inode(pid);
 	if (strcmp(name, "ns") == 0)
@@ -1527,7 +1531,7 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 
 static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
-	if (idx >= (uint32_t)(PID_FILES_N + 3 + PID_LINKS_N)) return -1;
+	if (idx >= (uint32_t)(PID_FILES_N + 4 + PID_LINKS_N)) return -1;
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	if (idx < PID_FILES_N) {
@@ -1554,11 +1558,16 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 		out->mode     = S_IFDIR | 0555;
 		out->next_off = idx + 1;
 		memcpy(out->name, "ns", 3);
-	} else {
+	} else if (idx == (uint32_t)(PID_FILES_N + 2 + PID_LINKS_N)) {
 		out->ino      = 0x8000 + (uint64_t)pid * 100 + 82;
 		out->mode     = S_IFREG | 0644;
 		out->next_off = idx + 1;
 		memcpy(out->name, "timens_offsets", 15);
+	} else {
+		out->ino      = 0x8000 + (uint64_t)pid * 100 + 70;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = idx + 1;
+		memcpy(out->name, "task", 5);
 	}
 	return 0;
 }
@@ -1590,6 +1599,86 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 	in->iops    = &procfs_piddir_iops;
 	in->fops    = &procfs_dir_fops;
 
+	procfs_piddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid  = pid;
+	in->priv = pp;
+	return in;
+}
+
+/* ── /proc/<pid>/task/ — per-thread directories ──────────────────
+ * task/<tid>/ is itself a pid-dir (same files as /proc/<tid>). ps -T,
+ * top -H and gdb thread enumeration read this; we list every live thread
+ * of the tgid, with the main thread (tid == tgid) always present. */
+static vfs_inode_t *procfs_taskdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	procfs_piddir_priv_t *pp = dir->priv;
+	if (!pp) return NULL;
+	int tid = 0;
+	for (const char *c = name; *c; c++) {
+		if (*c < '0' || *c > '9') return NULL;
+		tid = tid * 10 + (*c - '0');
+	}
+	process_t *t = proc_get((pid_t)tid);
+	if (!t) return NULL;
+	int ok = (t->tgid == (pid_t)pp->pid);
+	proc_put(t);
+	if (!ok) return NULL;
+	vfs_inode_t *in = procfs_piddir_inode(tid);
+	/* distinct ino from /proc/<tid>: the leader's task/<tid> shares pid==tid and
+	 * would otherwise alias the top-level pid dir. */
+	if (in) in->ino = proc_ino_alloc();
+	return in;
+}
+/* Enumerate the tgid's live threads. Each readdir(idx) returns the idx-th
+ * matching thread; the leader (tid == tgid) is index 0 and always present. */
+static int procfs_taskdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	procfs_piddir_priv_t *pp = dir->priv;
+	int tgid = pp ? pp->pid : 0;
+	int cnt = task_count();
+	uint32_t seen = 0;
+	for (int i = 0; i < cnt; i++) {
+		process_t *p = task_get(i);
+		if (!p) continue;
+		if (p->tgid != (pid_t)tgid) continue;
+		if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) continue;
+		if (seen == idx) {
+			uint64_t tid = (uint64_t)p->pid;
+			out->ino = 0x8000 + tid * 100 + 70;
+			out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+			int nl = 0; char rev[20]; uint64_t v = tid;
+			if (v == 0) rev[nl++] = '0';
+			while (v) { rev[nl++] = (char)('0' + v % 10); v /= 10; }
+			int o = 0; for (int j = nl - 1; j >= 0; j--) out->name[o++] = rev[j];
+			out->name[o] = '\0';
+			return 0;
+		}
+		seen++;
+	}
+	return -1;
+}
+static int procfs_taskdir_stat(vfs_inode_t *in, vfs_stat_t *out)
+{
+	out->ino = in->ino; out->mode = in->mode; out->nlink = 2; out->size = 0;
+	return 0;
+}
+static vfs_iops_t procfs_taskdir_iops = {
+	.lookup  = procfs_taskdir_lookup,
+	.readdir = procfs_taskdir_readdir,
+	.stat    = procfs_taskdir_stat,
+};
+static vfs_inode_t *procfs_taskdir_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino     = proc_ino_alloc();
+	in->mode    = S_IFDIR | 0555;
+	in->nlink   = 2;
+	in->refcount= 1;
+	in->iops    = &procfs_taskdir_iops;
+	in->fops    = &procfs_dir_fops;
 	procfs_piddir_priv_t *pp = kmalloc(sizeof(*pp));
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid  = pid;
