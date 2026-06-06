@@ -223,10 +223,14 @@ irq_handler:
 	bl   sched_free_dying_kstack
 
 .irq_ret:
+	/* signal_dispatch can sleep (SIGSTOP/ptrace group-stop) via a nested EL1 svc
+	 * that repoints task->ctx; pin our own trapframe across it (see .syscall_ret). */
+	mov  x19, sp
 	mov  x0, sp
 	bl   signal_dispatch
-	bl   sched_get_current_ctx
-	mov  sp, x0
+	bl   task_current
+	str  x19, [x0, #16]
+	mov  x0, x19
 	restore_trapframe
 	eret
 
@@ -276,10 +280,18 @@ sync_handler:
 	bl   sched_free_dying_kstack
 
 .syscall_ret:
+	/* signal_dispatch can itself sleep (a SIGSTOP/ptrace group-stop blocks in
+	 * job_stop_self/ptrace_group_stop via arch_yield, an EL1 svc → .yield). That
+	 * nested yield repoints task->ctx at its own svc frame and never restores it,
+	 * so reading task->ctx after signal_dispatch would restore a popped stack frame
+	 * — corruption. Pin our own trapframe (sp) across signal_dispatch and republish
+	 * it as task->ctx afterwards, mirroring .sync_fault. */
+	mov  x19, sp            /* x19 = our trapframe (callee-saved across the bl) */
 	mov  x0, sp
 	bl   signal_dispatch
-	bl   sched_get_current_ctx
-	mov  sp, x0
+	bl   task_current
+	str  x19, [x0, #16]      /* task->ctx = our trapframe */
+	mov  x0, x19
 	restore_trapframe
 	eret
 
@@ -294,10 +306,13 @@ sync_handler:
 	mov  sp, x0
 	bl   sched_requeue_prev
 	bl   sched_free_dying_kstack
-	mov  x0, sp
-	bl   signal_dispatch
 	bl   sched_get_current_ctx
+	mov  x19, x0           /* our trapframe after the reschedule */
 	mov  sp, x0
+	bl   signal_dispatch
+	bl   task_current
+	str  x19, [x0, #16]     /* re-pin: signal_dispatch may have slept (see .syscall_ret) */
+	mov  x0, x19
 	restore_trapframe
 	eret
 
@@ -318,9 +333,12 @@ sync_handler:
 	bl   sync_dispatch
 	bl   task_current
 	str  x19, [x0, #16]      /* restore caller's ctx */
+	mov  x19, sp             /* our fault frame; re-pin after signal_dispatch (may sleep) */
 	mov  x0, sp
 	bl   signal_dispatch
-	mov  x0, sp              /* return to our own fault frame */
+	bl   task_current
+	str  x19, [x0, #16]
+	mov  x0, x19             /* return to our own fault frame */
 	restore_trapframe
 	eret
 

@@ -1680,8 +1680,10 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 		int r = proc_check_or_sleep(child, p, !wnohang, flags);
 		if (r == 1) break;  /* zombie */
 		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
-			if (status && (uint64_t)status > 0x1000)
-				*status = (5 << 8) | 0x7f; /* WIFSTOPPED | SIGTRAP */
+			if (status && (uint64_t)status > 0x1000) {
+				int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5; /* SIGTRAP */
+				*status = (ss << 8) | 0x7f; /* WIFSTOPPED */
+			}
 			return (long)pid;
 		}
 		if (r == 3) {       /* job-control stop (WUNTRACED) */
