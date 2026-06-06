@@ -194,6 +194,14 @@ DEPS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.d)
 BUSYBOX_APK_aarch64 = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.37.0-r14.apk
 BUSYBOX_APK_x86_64  = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/busybox-static-1.37.0-r14.apk
 
+# apk.static (statically-linked musl apk-tools) + a tiny target package and its
+# only dependency (musl). Fetched on the HOST at build time and shipped into the
+# initramfs so the package-install path can be exercised on-device, offline.
+APK_BASE          = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/$(ARCH)
+APK_TOOLS_APK     = $(APK_BASE)/apk-tools-static-2.14.6-r3.apk
+APK_MUSL_APK      = $(APK_BASE)/musl-1.2.5-r11.apk
+APK_TREE_APK      = $(APK_BASE)/tree-2.2.1-r0.apk
+
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
@@ -204,7 +212,7 @@ PY_VER             = 3.12.3
 PY_XY              = 3.12
 PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
 
-.PHONY: all clean qemu image initramfs bash-static curl python test persisttest flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -254,6 +262,9 @@ initramfs: $(BUILD_DIR)/initramfs.cpio
 CACHE_DIR          = .cache
 BUSYBOX_APK_CACHED = $(CACHE_DIR)/busybox-$(ARCH).apk
 BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
+APK_DIR            = $(CACHE_DIR)/apk-$(ARCH)
+APK_STATIC_BIN     = $(APK_DIR)/apk.static
+APK_PKGS           = $(APK_DIR)/musl.apk $(APK_DIR)/tree.apk
 BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
 CURL_BIN           = $(CACHE_DIR)/curl-$(ARCH)/src/curl
 SSL_SERVER_BIN     = $(CACHE_DIR)/mbedtls-$(ARCH)/ssl_server
@@ -317,6 +328,28 @@ $(BASH_CACHED):
 	@llvm-strip "$@" 2>/dev/null || strip "$@" 2>/dev/null || true
 	@echo "[OK] bash-dynamic for $(ARCH) ready ($$(du -h $@ | cut -f1)), interp $$(readelf -l "$@" 2>/dev/null | grep -o '/lib/ld-musl[^]]*' | head -1)"
 
+apk-static: $(APK_STATIC_BIN)
+
+$(APK_STATIC_BIN):
+	@mkdir -p $(APK_DIR)
+	@if [ ! -f "$(APK_DIR)/apk-tools-static.apk" ]; then \
+		echo "Downloading apk-tools-static for $(ARCH)..."; \
+		wget -q "$(APK_TOOLS_APK)" -O "$(APK_DIR)/apk-tools-static.apk" || \
+		    { rm -f "$(APK_DIR)/apk-tools-static.apk"; echo "ERROR: apk-tools-static download failed"; exit 1; }; \
+	fi
+	@if [ ! -f "$(APK_DIR)/musl.apk" ]; then \
+		wget -q "$(APK_MUSL_APK)" -O "$(APK_DIR)/musl.apk" || \
+		    { rm -f "$(APK_DIR)/musl.apk"; echo "ERROR: musl.apk download failed"; exit 1; }; \
+	fi
+	@if [ ! -f "$(APK_DIR)/tree.apk" ]; then \
+		wget -q "$(APK_TREE_APK)" -O "$(APK_DIR)/tree.apk" || \
+		    { rm -f "$(APK_DIR)/tree.apk"; echo "ERROR: tree.apk download failed"; exit 1; }; \
+	fi
+	@tar xzf "$(APK_DIR)/apk-tools-static.apk" -C "$(APK_DIR)" sbin/apk.static 2>/dev/null
+	@cp "$(APK_DIR)/sbin/apk.static" "$@"
+	@chmod +x "$@"
+	@echo "[OK] apk.static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
+
 $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
 		$(GLIBC_HOST_CC) -O2 -o $@ $< && \
@@ -324,7 +357,7 @@ $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 	else echo "[skip] c-glibc: stock glibc toolchain/loader unavailable"; fi
 GLIBC_TEST_DEP = $(GLIBC_TEST_BIN)
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -380,6 +413,15 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 			cp "$(GNU_COREUTILS_BIN)" $(BUILD_DIR)/initramfs/bin/gnu-echo; \
 			chmod +x $(BUILD_DIR)/initramfs/bin/gnu-echo; \
 		fi; \
+	fi
+	@if [ -x "$(APK_STATIC_BIN)" ]; then \
+		cp "$(APK_STATIC_BIN)" $(BUILD_DIR)/initramfs/bin/apk.static; \
+		chmod +x $(BUILD_DIR)/initramfs/bin/apk.static; \
+		mkdir -p $(BUILD_DIR)/initramfs/etc/apk/keys \
+		         $(BUILD_DIR)/initramfs/var/apkrepo; \
+		echo "$(ARCH)" > $(BUILD_DIR)/initramfs/etc/apk/arch; \
+		cp "$(APK_DIR)/musl.apk" $(BUILD_DIR)/initramfs/var/apkrepo/musl.apk; \
+		cp "$(APK_DIR)/tree.apk" $(BUILD_DIR)/initramfs/var/apkrepo/tree.apk; \
 	fi
 	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
