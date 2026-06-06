@@ -13,6 +13,7 @@
 #include <kernel/board.h>
 #include <kernel/sync.h>
 #include <kernel/irq.h>
+#include <kernel/cpumask.h>
 
 /* LAPIC register offsets */
 #define LAPIC_EOI        0x0B0
@@ -241,7 +242,16 @@ void arch_smp_ipi_ack(void)
 #define VEC_TLB_SHOOTDOWN 0xF2
 
 static spinlock_t tlb_shoot_lock;
-static volatile uint32_t tlb_ack_mask;
+static cpumask_t tlb_ack_mask;
+
+/* Atomically clear one bit in a cpumask word (the targets ack concurrently). */
+static void cpumask_atomic_clear(int cpu, cpumask_t *m)
+{
+	volatile uint64_t *w = &m->bits[cpu / BITS_PER_LONG];
+	uint64_t bit = 1ULL << (cpu % BITS_PER_LONG);
+	uint64_t old;
+	do { old = *w; } while (atomic_cmpxchg64(w, old, old & ~bit) != old);
+}
 
 /* Vector 0xF2 handler: flush the whole non-global TLB (CR3 reload) and ack. */
 void tlb_shootdown_handler(void)
@@ -249,7 +259,7 @@ void tlb_shootdown_handler(void)
 	uint64_t cr3;
 	__asm__ volatile("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) :: "memory");
 	int self = (int)arch_get_cpu_ctx()->cpu_id;
-	atomic_and32(&tlb_ack_mask, ~((uint32_t)1 << self));
+	cpumask_atomic_clear(self, &tlb_ack_mask);
 	if (lapic) lapic_write(LAPIC_EOI, 0);
 }
 
@@ -277,12 +287,13 @@ void arch_tlb_shootdown_all(void)
 	spin_lock(&tlb_shoot_lock);
 
 	int self = (int)arch_get_cpu_ctx()->cpu_id;
-	uint32_t mask = 0;
-	for (int i = 0; i < MAX_CPUS; i++) {
+	cpumask_t mask;
+	cpumask_clear(&mask);
+	for (int i = 0; i < smp_ncpus; i++) {
 		if (i == self || !all_cpus[i] || !all_cpus[i]->online) continue;
-		mask |= (uint32_t)1 << i;
+		cpumask_set_cpu(i, &mask);
 	}
-	if (!mask) { spin_unlock(&tlb_shoot_lock); irq_restore(f); return; }
+	if (cpumask_empty(&mask)) { spin_unlock(&tlb_shoot_lock); irq_restore(f); return; }
 
 	tlb_ack_mask = mask;
 	smp_mb();
@@ -292,9 +303,9 @@ void arch_tlb_shootdown_all(void)
 	 * the shootdown. The send is a handful of writes; a target waiting for our
 	 * ack just spins those few cycles. */
 	uint64_t sf = irq_save();
-	for (int i = 0; i < MAX_CPUS; i++)
-		if (mask & ((uint32_t)1 << i))
-			tlb_ipi_send(i);
+	int cpu;
+	for_each_cpu(cpu, &mask)
+		tlb_ipi_send(cpu);
 	irq_restore(sf);
 
 	/* We hold the only shootdown lock, so no peer broadcast can be in flight and
@@ -303,10 +314,11 @@ void arch_tlb_shootdown_all(void)
 	 * halt), so this always completes; the large guard only avoids a hard wedge
 	 * during bring-up. */
 	uint64_t t = 0;
-	while (tlb_ack_mask) {
+	while (!cpumask_empty(&tlb_ack_mask)) {
 		__asm__ volatile("pause" ::: "memory");
 		if (++t > 5000000000UL) {
-			kprintf("tlb shootdown: stuck ack_mask=0x%x\n", tlb_ack_mask);
+			kprintf("tlb shootdown: stuck, %d acks pending\n",
+			        cpumask_weight(&tlb_ack_mask));
 			break;
 		}
 	}
