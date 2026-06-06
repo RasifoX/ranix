@@ -20,9 +20,11 @@ enable_mmu:
 	isb
 
 	mrs x2, sctlr_el1
-	orr x2, x2, #(1 << 0)
-	orr x2, x2, #(1 << 2)
-	orr x2, x2, #(1 << 12)
+	orr x2, x2, #(1 << 0)       /* M: MMU enable */
+	orr x2, x2, #(1 << 2)       /* C: data cache */
+	orr x2, x2, #(1 << 12)      /* I: instruction cache */
+	orr x2, x2, #(1 << 15)      /* UCT: EL0 read of CTR_EL0 (cache-line size) */
+	orr x2, x2, #(1 << 26)      /* UCI: EL0 cache maintenance (__clear_cache for R+X) */
 	msr sctlr_el1, x2
 	isb
 

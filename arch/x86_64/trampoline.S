@@ -73,15 +73,25 @@ trampoline_start:
 	mov  %eax, %cr4
 .Lno_la57:
 
+	/* Detect NX (CPUID.80000001:EDX.NX) into edi before we touch cr3/eax. */
+	mov  $0x80000001, %eax
+	cpuid
+	and  $(1 << 20), %edx
+	mov  %edx, %edi
+
 	/* Load top-level table (PML5 under 5-level, else PML4) */
 	mov  $(TRAMP_PHYS + DATA_OFF + TDATA_PML4), %ebx
 	mov  (%ebx), %eax
 	mov  %eax, %cr3
 
-	/* Enable LME */
+	/* Enable LME + NXE (NXE before any NX-tagged PTE is walked). */
 	mov  $0xC0000080, %ecx
 	rdmsr
 	or   $0x100, %eax
+	test %edi, %edi
+	jz   1f
+	or   $0x800, %eax
+1:
 	wrmsr
 
 	/* Enable paging */
