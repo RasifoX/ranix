@@ -1105,19 +1105,17 @@ static long sys_membarrier(int cmd, unsigned int flags)
 	}
 }
 
+/* GRND_NONBLOCK=1 GRND_RANDOM=2 GRND_INSECURE=4 */
 static long sys_getrandom(void *buf, size_t len, unsigned int flags)
 {
-	(void)flags;
+	extern void csprng_bytes(void *, size_t);
+	if (flags & ~0x7u) return -22;                  /* EINVAL: unknown flag */
 	if (!access_ok(buf, len)) return -14;
+	/* the DRBG is seeded at boot, so GRND_RANDOM never blocks here. */
 	for (size_t i = 0; i < len; ) {
 		uint8_t kb[256];
 		size_t chunk = len - i < sizeof(kb) ? len - i : sizeof(kb);
-		for (size_t j = 0; j < chunk; ) {
-			uint64_t r = rng_next();
-			size_t n = chunk - j < 8 ? chunk - j : 8;
-			for (size_t k = 0; k < n; k++, j++)
-				kb[j] = (uint8_t)(r >> (k * 8));
-		}
+		csprng_bytes(kb, chunk);
 		if (copy_to_user((uint8_t *)buf + i, kb, chunk) != 0) return -14;
 		i += chunk;
 	}
