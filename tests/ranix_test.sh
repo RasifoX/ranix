@@ -242,6 +242,9 @@ check "umount-write"  "xyz" "$(echo xyz > /tmp/umnt/f && cat /tmp/umnt/f)"
 check "umount-do"     "ok"  "$(umount /tmp/umnt && echo ok)"
 check "umount-gone"   ""    "$(cat /tmp/umnt/f 2>/dev/null)"
 
+# ── 26b. per-mount flag enforcement (rdonly/noexec/nosuid/nodev) ──
+check "c-mountflags"  "OK"  "$(timeout 15 /bin/test_mountflags 2>/dev/null)"
+
 # ── 27. sysctl write ──────────────────────────────────────────
 check "sysctl-write-hostname"  "testhostname" \
     "$(echo testhostname > /proc/sys/kernel/hostname && cat /proc/sys/kernel/hostname)"

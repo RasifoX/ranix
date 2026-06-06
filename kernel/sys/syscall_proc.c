@@ -1143,12 +1143,16 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -2; }
 	if (st.size == 0)              { EXEC_STAGE_FREE(); return -2; }
 
+	unsigned long mnt_flags = vfs_path_mnt_flags(kpath);
+	if (mnt_flags & MS_NOEXEC) { EXEC_STAGE_FREE(); return -13; } /* EACCES */
+
 	/* resolve credentials for the new image. no_new_privs (and a still-traced
 	 * task) suppresses S_ISUID/S_ISGID elevation: the image runs with the
-	 * caller's ids. AT_SECURE/env-scrub kick in only on an id change. */
+	 * caller's ids. A nosuid mount suppresses it too. AT_SECURE/env-scrub kick
+	 * in only on an id change. */
 	uid_t new_euid = p->euid;
 	gid_t new_egid = p->egid;
-	int nnp = p->no_new_privs || p->tracer != 0;
+	int nnp = p->no_new_privs || p->tracer != 0 || (mnt_flags & MS_NOSUID);
 	if (!nnp && (st.mode & S_ISUID)) new_euid = st.uid;
 	if (!nnp && (st.mode & S_ISGID)) new_egid = st.gid;
 	int secure_exec = (new_euid != p->euid) || (new_egid != p->egid);

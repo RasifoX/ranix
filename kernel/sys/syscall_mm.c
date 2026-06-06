@@ -202,6 +202,9 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	vfs_file_t *f = fget(p->fds, fd);   /* pin across the blocking map loop */
 	if (!f) return -9;
 
+	if ((prot & PROT_EXEC) && f->path[0] == '/' &&
+	    (vfs_path_mnt_flags(f->path) & MS_NOEXEC)) { fput(f); return -13; } /* EACCES */
+
 	/* Mapping backed by an inode-owned page via the mmap fop. Two kinds:
 	 *  - cacheable (ramfs/tmpfs): the fop returns a page of the file's own
 	 *    write-back buffer. MAP_SHARED maps it directly so stores land in the
