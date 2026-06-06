@@ -96,9 +96,9 @@ static vfs_inode_t *tmpfs_inode_alloc(tmpfs_sb_t *sb, mode_t mode)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) { sb_uncharge_inode(sb); return NULL; }
 	memset(in, 0, sizeof(*in));
-	spin_lock(&ino_lock);
+	uint64_t f = spin_lock_irq(&ino_lock);
 	in->ino = next_ino++;
-	spin_unlock(&ino_lock);
+	spin_unlock_irq(&ino_lock, f);
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;

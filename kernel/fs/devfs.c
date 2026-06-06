@@ -302,9 +302,9 @@ static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	spin_lock(&dev_ino_lock);
+	uint64_t f = spin_lock_irq(&dev_ino_lock);
 	in->ino = dev_ino_next++;
-	spin_unlock(&dev_ino_lock);
+	spin_unlock_irq(&dev_ino_lock, f);
 	in->mode    = e->mode;
 	in->nlink   = 1;
 	in->rdev    = e->rdev;
@@ -383,9 +383,9 @@ static vfs_inode_t *devfs_symlink_inode(const devfs_symlink_t *sl)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	spin_lock(&dev_ino_lock);
+	uint64_t f = spin_lock_irq(&dev_ino_lock);
 	in->ino = dev_ino_next++;
-	spin_unlock(&dev_ino_lock);
+	spin_unlock_irq(&dev_ino_lock, f);
 	in->mode     = S_IFLNK | 0777;
 	in->nlink    = 1;
 	in->refcount = 1;
@@ -432,9 +432,9 @@ static vfs_inode_t *devfs_fdproxy_inode(devfs_fdproxy_t *dp)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	spin_lock(&dev_ino_lock);
+	uint64_t f = spin_lock_irq(&dev_ino_lock);
 	in->ino = dev_ino_next++;
-	spin_unlock(&dev_ino_lock);
+	spin_unlock_irq(&dev_ino_lock, f);
 	in->mode     = S_IFCHR | 0666;
 	in->nlink    = 1;
 	in->refcount = 1;

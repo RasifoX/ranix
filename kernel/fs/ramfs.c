@@ -44,9 +44,9 @@ static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	spin_lock(&ino_lock);
+	uint64_t f = spin_lock_irq(&ino_lock);
 	in->ino = next_ino++;
-	spin_unlock(&ino_lock);
+	spin_unlock_irq(&ino_lock, f);
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;
