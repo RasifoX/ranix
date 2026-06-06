@@ -408,6 +408,7 @@ typedef struct {
 #define PROC_F_NET_UDP   22
 #define PROC_F_NET_ROUTE 23
 #define PROC_F_NET_IF6   24
+#define PROC_F_NET_UNIX  29
 
 /* /proc/sys entries */
 #define PROC_F_SYS_HZ            30
@@ -496,6 +497,7 @@ static int fill_net_tcp(char *buf, size_t sz);
 static int fill_net_udp(char *buf, size_t sz);
 static int fill_net_route(char *buf, size_t sz);
 static int fill_net_if_inet6(char *buf, size_t sz);
+static int fill_net_unix(char *buf, size_t sz);
 
 /* static file table for root dir */
 static const struct {
@@ -575,6 +577,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_UDP:   n = fill_net_udp(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_UNIX:  n = fill_net_unix(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->nodename); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->domainname); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -1836,14 +1839,49 @@ static int fill_net_if_inet6(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* /proc/net/unix: Num RefCount Protocol Flags Type St Inode Path
+ * (ss -x / netstat -x / lsof resolve AF_UNIX sockets from here). */
+static int fill_net_unix(char *buf, size_t sz)
+{
+	extern socket_t **gsock;
+	extern int        gsock_cap;
+	pb_t b = {buf, sz};
+	pb_str(&b, "Num       RefCount Protocol Flags    Type St Inode Path\n");
+	for (int i = 0; i < gsock_cap; i++) {
+		socket_t *s = gsock[i];
+		if (!s || s->domain != AF_UNIX) continue;
+		int listening = (s->type == SOCK_STREAM && s->tcp_state == TCP_LISTEN);
+		int connected = (s->unix_peer != NULL);
+		/* kernel object address (Num) */
+		pb_str(&b, "0000000000000000: ");
+		pb_str(&b, "0000000"); pb_u64(&b, (uint64_t)s->refcount); pb_char(&b, ' ');
+		pb_str(&b, "00000000 ");                                  /* Protocol */
+		pb_str(&b, listening ? "00010000 " : "00000000 ");        /* Flags (ACC for listeners) */
+		pb_hex8(&b, (uint32_t)(s->type & SOCK_TYPE_MASK));        /* Type */
+		pb_char(&b, ' ');
+		pb_str(&b, listening ? "01" : connected ? "03" : "01");   /* St: LISTEN/CONNECTED/UNCONNECTED */
+		pb_char(&b, ' ');
+		pb_u64(&b, (uint64_t)(0x10000 + i));                      /* Inode (synthesized) */
+		if (s->unix_path_len > 0 && s->unix_path[0]) {
+			pb_char(&b, ' ');
+			pb_str(&b, s->unix_path);
+		} else if (s->unix_path_len > 0) {
+			pb_str(&b, " @");                                     /* abstract namespace */
+		}
+		pb_char(&b, '\n');
+	}
+	return (int)(sz - b.rem);
+}
+
 static const struct { const char *name; int type; } net_files[] = {
 	{ "dev",     PROC_F_NET_DEV   },
 	{ "tcp",     PROC_F_NET_TCP   },
 	{ "udp",     PROC_F_NET_UDP   },
 	{ "route",   PROC_F_NET_ROUTE },
 	{ "if_inet6",PROC_F_NET_IF6   },
+	{ "unix",    PROC_F_NET_UNIX  },
 };
-#define NET_FILES_N 5
+#define NET_FILES_N 6
 
 static vfs_inode_t *procfs_netdir_inode(void);
 
