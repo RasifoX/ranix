@@ -50,8 +50,15 @@ static vfs_fops_t null_fops = {
 static ssize_t zero_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
-	memset(buf, 0, len);
-	return (ssize_t)len;
+	if (!access_ok(buf, len)) { memset(buf, 0, len); return (ssize_t)len; }
+	char z[256] = {0};
+	size_t done = 0;
+	while (done < len) {
+		size_t n = len - done < sizeof(z) ? len - done : sizeof(z);
+		if (copy_to_user((uint8_t *)buf + done, z, n) != 0) break;
+		done += n;
+	}
+	return (ssize_t)done;
 }
 
 static vfs_fops_t zero_fops = {
@@ -78,8 +85,16 @@ static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
 	extern void csprng_bytes(void *, size_t);
-	csprng_bytes(buf, len);
-	return (ssize_t)len;
+	if (!access_ok(buf, len)) { csprng_bytes(buf, len); return (ssize_t)len; }
+	uint8_t tmp[256];
+	size_t done = 0;
+	while (done < len) {
+		size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
+		csprng_bytes(tmp, n);
+		if (copy_to_user((uint8_t *)buf + done, tmp, n) != 0) break;
+		done += n;
+	}
+	return (ssize_t)done;
 }
 
 static vfs_fops_t urandom_fops = {
@@ -111,7 +126,7 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 	size_t got = kprintf_read_log(tmp, total);
 	size_t avail = (got > (size_t)f->pos) ? got - (size_t)f->pos : 0;
 	size_t n = avail < len ? avail : len;
-	if (n) memcpy(buf, tmp + f->pos, n);
+	if (n && copy_fop_to_user(buf, tmp + f->pos, n) != 0) { kfree(tmp); return -14; }
 	kfree(tmp);
 	f->pos += (off_t)n;
 	return (ssize_t)n;
@@ -120,9 +135,15 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	(void)f;
-	const char *s = buf;
-	for (size_t i = 0; i < len; i++) kprintf("%c", s[i]);
-	return (ssize_t)len;
+	char kb[256];
+	size_t done = 0;
+	while (done < len) {
+		size_t n = len - done < sizeof(kb) ? len - done : sizeof(kb);
+		if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) break;
+		for (size_t i = 0; i < n; i++) kprintf("%c", kb[i]);
+		done += n;
+	}
+	return (ssize_t)done;
 }
 
 static vfs_fops_t kmsg_fops = {

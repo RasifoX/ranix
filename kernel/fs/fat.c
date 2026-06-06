@@ -10,6 +10,7 @@
  * entry.
  */
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
 #include <kernel/block.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
@@ -278,7 +279,7 @@ static ssize_t fat_read(vfs_file_t *f, void *buf, size_t len)
 			uint32_t soff = in_clus % 512;
 			uint32_t n = 512 - soff;
 			if (n > len - done) n = (uint32_t)(len - done);
-			memcpy((uint8_t *)buf + done, sec + soff, n);
+			if (copy_fop_to_user((uint8_t *)buf + done, sec + soff, n) != 0) return (ssize_t)done;
 			done += n; in_clus += n;
 		}
 		in_clus = 0;

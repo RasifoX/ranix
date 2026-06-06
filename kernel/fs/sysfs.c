@@ -8,6 +8,7 @@
  * and eth0 appear automatically.
  * ───────────────────────────────────────────────────────────────────────── */
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/mmu.h>
@@ -181,7 +182,7 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos < (off_t)n) {
 		size_t avail = (size_t)(n - f->pos);
 		if (len > avail) len = avail;
-		memcpy(buf, tmp + (size_t)f->pos, len);
+		if (copy_fop_to_user(buf, tmp + (size_t)f->pos, len) != 0) { buddy_free(phys, 0); return -14; }
 		f->pos += (off_t)len;
 		ret = (ssize_t)len;
 	}
@@ -193,9 +194,11 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	sysfs_priv_t *pr = f->inode->priv;
 	if (!pr || pr->type != SF_NR_HUGEPAGES) return -22;
-	const char *s = buf;
+	char kbuf[32];
+	size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
+	if (copy_fop_from_user(kbuf, buf, n) != 0) return -14;
 	long v = 0; size_t i = 0;
-	while (i < len && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+	while (i < n && kbuf[i] >= '0' && kbuf[i] <= '9') { v = v * 10 + (kbuf[i] - '0'); i++; }
 	huge2m_nr_set(v);
 	return (ssize_t)len;
 }

@@ -1,5 +1,6 @@
 #include <kernel/fs/tmpfs.h>
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
 #include <kernel/proc.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
@@ -120,7 +121,7 @@ static ssize_t tmpfs_read(vfs_file_t *f, void *buf, size_t len)
 	if (!rf || f->pos >= (off_t)rf->size) return 0;
 	size_t avail = rf->size - (uint64_t)f->pos;
 	if (len > avail) len = avail;
-	memcpy(buf, rf->data + f->pos, len);
+	if (copy_fop_to_user(buf, rf->data + f->pos, len) != 0) return -14;
 	f->pos += len;
 	return (ssize_t)len;
 }
@@ -151,7 +152,7 @@ static ssize_t tmpfs_write(vfs_file_t *f, const void *buf, size_t len)
 		rf->capacity = real;
 	}
 
-	memcpy(rf->data + f->pos, buf, len);
+	if (copy_fop_from_user(rf->data + f->pos, buf, len) != 0) return -14;
 	f->pos += len;
 	if ((uint64_t)f->pos > rf->size) { rf->size = (uint64_t)f->pos; f->inode->size = rf->size; }
 	int64_t s, ns; ranix_walltime(&s, &ns);

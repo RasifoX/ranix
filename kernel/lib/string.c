@@ -13,6 +13,7 @@ extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
  * holds the bytes left to copy. */
 static unsigned long __copy_user(void *dst, const void *src, unsigned long n)
 {
+	uaccess_begin();
 #if defined(__x86_64__)
 	__asm__ volatile(
 	".Lcu_loop%=:\n"
@@ -49,6 +50,7 @@ static unsigned long __copy_user(void *dst, const void *src, unsigned long n)
 	: [n] "+r"(n), [src] "+r"(src), [dst] "+r"(dst)
 	:: "x8", "memory", "cc");
 #endif
+	uaccess_end();
 	return n;
 }
 
@@ -89,21 +91,49 @@ long copy_to_user(void *dst, const void *src, size_t n)
 	return __copy_user(dst, (void *)src, n) ? -1 : 0;
 }
 
+long __get_user_n(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(src, n)) return -1;
+	return __copy_user(dst, (void *)src, n) ? -1 : 0;
+}
+
+long __put_user_n(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(dst, n)) return -1;
+	return __copy_user(dst, (void *)src, n) ? -1 : 0;
+}
+
+long copy_fop_to_user(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(dst, n)) { memcpy(dst, src, n); return 0; }
+	return __copy_user(dst, src, n) ? -1 : 0;
+}
+
+long copy_fop_from_user(void *dst, const void *src, size_t n)
+{
+	if (!access_ok(src, n)) { memcpy(dst, src, n); return 0; }
+	return __copy_user(dst, src, n) ? -1 : 0;
+}
+
 long strncpy_from_user(char *dst, const char *src, size_t n)
 {
 	if (!access_ok(src, 1)) return -1;
 	process_t *p = task_current();
 	uint64_t cur_pg = (uint64_t)-1;
+	uaccess_begin();
 	for (size_t i = 0; i < n; i++) {
 		uint64_t pg = ((uint64_t)src + i) & PAGE_MASK;
 		if (pg != cur_pg) {
-			if (p && p->vm && !arch_vm_get_paddr(p->vm->root, pg))
+			if (p && p->vm && !arch_vm_get_paddr(p->vm->root, pg)) {
+				uaccess_end();
 				return -1;
+			}
 			cur_pg = pg;
 		}
 		dst[i] = src[i];
-		if (src[i] == '\0') return (long)i;
+		if (src[i] == '\0') { uaccess_end(); return (long)i; }
 	}
+	uaccess_end();
 	dst[n - 1] = '\0';
 	return (long)n;
 }
