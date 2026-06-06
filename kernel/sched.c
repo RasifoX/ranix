@@ -903,6 +903,20 @@ process_t *task_peek_locked(int i)
 	return (i < 0 || i >= proc_cnt) ? NULL : proctab[i];
 }
 
+/* live processes owned by ruid — RLIMIT_NPROC enforcement. Walks the global
+ * list (sentinel = proctab[0]) under sched_lock; a process counts until it is
+ * reaped (unlinked here), matching how Linux charges the limit. */
+int proc_count_uid(uid_t uid)
+{
+	int n = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next)
+		if (t->uid == uid) n++;
+	spin_unlock_irq(&sched_lock, f);
+	return n;
+}
+
 /* zombie reaping / wait helpers (proc_find_zombie/_or_sleep, proc_check_or_sleep, proc_reap) -> kernel/proc.c */
 
 /* Process lifecycle + signal delivery — split out for readability,

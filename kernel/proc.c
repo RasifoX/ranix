@@ -321,6 +321,17 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	process_t *parent = task_current();
 	arch_save_tls(parent);
 
+	/* RLIMIT_NPROC: a non-root caller may not exceed its soft cap on live
+	 * processes owned by its real uid. Only enforced once the limit is set
+	 * (rlim_set), so the default stays unbounded; root is exempt. */
+#define RLIMIT_NPROC 6
+	if (parent->euid != 0 && parent->rlim_set) {
+		uint64_t cap = parent->rlim_cur[RLIMIT_NPROC];
+		if (cap != (uint64_t)-1 && (uint64_t)proc_count_uid(parent->uid) >= cap)
+			return -11;   /* EAGAIN */
+	}
+#undef RLIMIT_NPROC
+
 	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -1;
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
@@ -357,6 +368,11 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->cap_permitted   = parent->cap_permitted;
 	child->cap_effective   = parent->cap_effective;
 	child->cap_inheritable = parent->cap_inheritable;
+	child->rlim_set = parent->rlim_set;
+	for (int _ri = 0; _ri < 16; _ri++) {
+		child->rlim_cur[_ri] = parent->rlim_cur[_ri];
+		child->rlim_max[_ri] = parent->rlim_max[_ri];
+	}
 	child->brk       = parent->brk;
 	child->mmap_next = parent->mmap_next;
 	child->huge1g_next = parent->huge1g_next;

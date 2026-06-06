@@ -306,6 +306,7 @@ void       task_exit(void);
 process_t *task_current(void);
 
 int        task_count(void);
+int        proc_count_uid(uid_t uid);      /* live processes owned by ruid (RLIMIT_NPROC) */
 process_t *task_get(int index);
 
 /* process lifecycle */
