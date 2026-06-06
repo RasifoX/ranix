@@ -1,4 +1,5 @@
 #include <kernel/vfs.h>
+#include <kernel/hal.h>
 #include <kernel/proc.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/mm/pmm.h>
@@ -123,11 +124,11 @@ static ssize_t hugetlbfs_read(vfs_file_t *f, void *buf, size_t len)
 		uint64_t blk = pos / HUGE_2M_SIZE, boff = pos % HUGE_2M_SIZE;
 		uint64_t n = HUGE_2M_SIZE - boff;
 		if (n > len - done) n = len - done;
-		memcpy((uint8_t *)buf + done, (void *)(PHYS_TO_VIRT(hf->blocks[blk]) + boff), (size_t)n);
+		if (copy_fop_to_user((uint8_t *)buf + done, (void *)(PHYS_TO_VIRT(hf->blocks[blk]) + boff), (size_t)n) != 0) break;
 		pos += n; done += n;
 	}
-	f->pos += (off_t)len;
-	return (ssize_t)len;
+	f->pos += (off_t)done;
+	return (ssize_t)done;
 }
 
 static ssize_t hugetlbfs_write(vfs_file_t *f, const void *buf, size_t len)
@@ -144,14 +145,14 @@ static ssize_t hugetlbfs_write(vfs_file_t *f, const void *buf, size_t len)
 		uint64_t blk = pos / HUGE_2M_SIZE, boff = pos % HUGE_2M_SIZE;
 		uint64_t n = HUGE_2M_SIZE - boff;
 		if (n > len - done) n = len - done;
-		memcpy((void *)(PHYS_TO_VIRT(hf->blocks[blk]) + boff), (const uint8_t *)buf + done, (size_t)n);
+		if (copy_fop_from_user((void *)(PHYS_TO_VIRT(hf->blocks[blk]) + boff), (const uint8_t *)buf + done, (size_t)n) != 0) break;
 		pos += n; done += n;
 	}
-	f->pos += (off_t)len;
+	f->pos += (off_t)done;
 	int64_t s, ns; ranix_walltime(&s, &ns);
 	f->inode->mtime = f->inode->ctime = s;
 	f->inode->mtime_nsec = f->inode->ctime_nsec = (uint32_t)ns;
-	return (ssize_t)len;
+	return (ssize_t)done;
 }
 
 /* Hand the generic mmap path the physical page covering `off`, holding an extra
