@@ -154,4 +154,9 @@ void arch_context_init_user(arch_context_t *ctx, uint64_t entry, uint64_t ustack
 	ctx->rflags = ARCH_SPSR_USER_TASK;
 	ctx->rsp    = ustack_top;
 	ctx->ss     = GDT_USER_DATA;
+	/* Architectural FPU/SSE reset state for a fresh process: the first
+	 * return-to-user fxrstors this image, so a zeroed area would load
+	 * FCW=0 / MXCSR=0 instead of the standard 0x037f / 0x1f80. */
+	*(uint16_t *)&ctx->fxsave[0]  = 0x037f;   /* FCW */
+	*(uint32_t *)&ctx->fxsave[24] = 0x1f80;   /* MXCSR */
 }
