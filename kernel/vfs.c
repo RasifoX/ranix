@@ -544,6 +544,11 @@ static vfs_dentry_t *follow_mounts(vfs_dentry_t *d)
 
 int vfs_mount(const char *path, const char *fstype, void *data)
 {
+	return vfs_mount_flags(path, fstype, data, 0);
+}
+
+int vfs_mount_flags(const char *path, const char *fstype, void *data, unsigned long flags)
+{
 	uint64_t f = spin_lock_irq(&vfs_lock);
 
 	int (*fill)(vfs_mount_t *, void *) = NULL;
@@ -563,6 +568,8 @@ int vfs_mount(const char *path, const char *fstype, void *data)
 	int _fl = 0; while (fstype && fstype[_fl] && _fl < 31) { mnt->fstype_name[_fl] = fstype[_fl]; _fl++; }
 	mnt->fstype_name[_fl] = '\0';
 	mnt->fstype     = mnt->fstype_name;
+	mnt->flags      = flags;
+	{ int _p = 0; while (path && path[_p] && _p < 255) { mnt->mnt_path[_p] = path[_p]; _p++; } mnt->mnt_path[_p] = '\0'; }
 	mnt->priv       = data;
 	mnt->kill_sb    = NULL;
 	mnt->get_sb     = NULL;
@@ -687,6 +694,47 @@ const char *vfs_path_fstype(const char *path)
 	}
 	spin_unlock_irq(&vfs_lock, f);
 	return best;
+}
+
+/* The mount covering an absolute path: longest mountpoint prefix, same rule as
+ * vfs_path_fstype. Caller holds vfs_lock. */
+static vfs_mount_t *mount_for_path(const char *path)
+{
+	mnt_namespace_t *mns = current_mnt_ns();
+	vfs_mount_t *best = NULL;
+	size_t bestlen = 0;
+	for (vfs_mount_t *m = mns->mounts; m; m = m->next) {
+		const char *mp = m->mnt_path[0] ? m->mnt_path : "/";
+		size_t l = strlen(mp);
+		if (l == 0) continue;
+		if (strncmp(path, mp, l) != 0) continue;
+		if (l > 1 && path[l] != '/' && path[l] != '\0') continue;
+		if (l >= bestlen) { bestlen = l; best = m; }
+	}
+	return best;
+}
+
+/* MS_* of the mount covering an absolute path. 0 (no restrictions) if nothing
+ * matches. A not-yet-created target resolves to the same mount as its parent
+ * since the longest prefix is the containing directory's mount. */
+unsigned long vfs_path_mnt_flags(const char *path)
+{
+	if (!path || path[0] != '/') return 0;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	vfs_mount_t *m = mount_for_path(path);
+	unsigned long fl = m ? m->flags : 0;
+	spin_unlock_irq(&vfs_lock, f);
+	return fl;
+}
+
+int vfs_remount(const char *path, unsigned long flags)
+{
+	if (!path || path[0] != '/') return -22;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	vfs_mount_t *m = mount_for_path(path);
+	if (m) m->flags = flags & ~MS_REMOUNT;
+	spin_unlock_irq(&vfs_lock, f);
+	return m ? 0 : -22;
 }
 
 /* Per-filesystem statfs: filesystems that track real block/inode usage
@@ -977,6 +1025,13 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 {
 	if (!fds) return -1;
 
+	unsigned long mflags = vfs_path_mnt_flags(path);
+	if (mflags & MS_RDONLY) {
+		int acc = flags & 3;
+		if (acc == O_WRONLY || acc == O_RDWR ||
+		    (flags & (O_CREAT | O_TRUNC))) return -30; /* EROFS */
+	}
+
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	vfs_inode_t  *inode = NULL;
 
@@ -1024,6 +1079,8 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	}
 
 	if (!inode) return -1;
+	if ((mflags & MS_NODEV) && (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)))
+		return -13; /* EACCES */
 	if ((flags & O_DIRECTORY) && !S_ISDIR(inode->mode)) return -20; /* ENOTDIR */
 	if (!inode->fops && !S_ISDIR(inode->mode)) return -1;
 
@@ -1253,6 +1310,7 @@ off_t vfs_seek(int fd, off_t off, int whence)
 
 int vfs_mkdir(const char *path, mode_t mode)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
 
 	const char *dname;
@@ -1277,6 +1335,7 @@ int vfs_mkdir(const char *path, mode_t mode)
 
 int vfs_mkfifo(const char *path, mode_t mode)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
@@ -1302,6 +1361,7 @@ int vfs_mkfifo(const char *path, mode_t mode)
  * driver registered for that major:minor (devfs registry). */
 int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
@@ -1325,6 +1385,7 @@ int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 
 int vfs_unlink(const char *path)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
 	if (!dir_path) return -12;
@@ -1400,6 +1461,7 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 
 int vfs_symlink(const char *target, const char *linkpath)
 {
+	if (vfs_path_mnt_flags(linkpath) & MS_RDONLY) return -30; /* EROFS */
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(linkpath, &fname);
 	if (!dir_path) return -12;
@@ -1486,6 +1548,7 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 
 int vfs_rename(const char *old_path, const char *new_path)
 {
+	if ((vfs_path_mnt_flags(old_path) | vfs_path_mnt_flags(new_path)) & MS_RDONLY) return -30; /* EROFS */
 	const char *old_name, *new_name;
 	char *old_dir = vfs_parent_alloc(old_path, &old_name);
 	char *new_dir = vfs_parent_alloc(new_path, &new_name);
@@ -1537,6 +1600,7 @@ int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 
 int vfs_chmod(const char *path, mode_t mode)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	if (!d || !d->inode) return -2;
 	d->inode->mode = (d->inode->mode & 0xF000) | (mode & 07777);
@@ -1570,6 +1634,7 @@ int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
 
 int vfs_chown(const char *path, uid_t uid, gid_t gid)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	if (!d || !d->inode) return -2;
 	return vfs_chown_inode(d->inode, uid, gid);
@@ -1598,6 +1663,7 @@ static vfs_inode_t *vfs_lresolve(const char *path)
 
 int vfs_lchown(const char *path, uid_t uid, gid_t gid)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	vfs_inode_t *in = vfs_lresolve(path);
 	if (!in) return -2;
 	int rc = vfs_chown_inode(in, uid, gid);
@@ -1607,6 +1673,7 @@ int vfs_lchown(const char *path, uid_t uid, gid_t gid)
 
 int vfs_lchmod(const char *path, mode_t mode)
 {
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
 	vfs_inode_t *in = vfs_lresolve(path);
 	if (!in) return -2;
 	in->mode = (in->mode & 0xF000) | (mode & 07777);
@@ -1616,6 +1683,7 @@ int vfs_lchmod(const char *path, mode_t mode)
 
 int vfs_link(const char *oldpath, const char *newpath)
 {
+	if (vfs_path_mnt_flags(newpath) & MS_RDONLY) return -30; /* EROFS */
 	vfs_dentry_t *od = vfs_dentry_resolve(oldpath);
 	if (!od || !od->inode) return -2;
 	if (S_ISDIR(od->inode->mode)) return -21;

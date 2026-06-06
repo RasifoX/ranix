@@ -67,7 +67,8 @@ static long sys_unlink(const char *path)
 	char kp[PATH_MAX];
 	int r = copy_path_from_user(kp, path);
 	if (r) return r;
-	return vfs_unlink(kp) == 0 ? 0 : -2;
+	r = vfs_unlink(kp);
+	return r == -30 ? -30 : (r == 0 ? 0 : -2);
 }
 
 static long sys_unlinkat(int dirfd, const char *path, int flags)
@@ -75,6 +76,7 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
+	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	vfs_stat_t vs = {0};
 	if (vfs_lstat(kp, &vs) != 0) return -2;         /* ENOENT */
 	if (flags & AT_REMOVEDIR) {
@@ -82,7 +84,8 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 	} else {
 		if (S_ISDIR(vs.mode)) return -21;           /* EISDIR */
 	}
-	return vfs_unlink(kp) == 0 ? 0 : -2;
+	r = vfs_unlink(kp);
+	return r == -30 ? -30 : (r == 0 ? 0 : -2);
 }
 
 /* rename takes two paths; stage them on the heap so the kernel-stack frame
@@ -240,6 +243,7 @@ static long sys_truncate(const char *path, off_t len)
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
+	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	vfs_dentry_t *de = vfs_dentry_resolve(kp);
 	if (!de || !de->inode) return -2;
 	vfs_inode_t *in = de->inode;
