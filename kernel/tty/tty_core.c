@@ -8,6 +8,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/input.h>
 #include <kernel/tick.h>
+#include <kernel/hal.h>
 
 /* c_lflag bits */
 #define ISIG    0x00000001
@@ -193,21 +194,31 @@ static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
         if (jc == 0) break;
     }
 
+    /* Drain into a kernel bounce buffer under the IRQ-off lock, then copy_to_user
+     * outside it — a faulting user store cannot run inside the lock window. */
     while (copied < len) {
         tty_poll_uart();
 
+        char chunk[64];
+        size_t got = 0;
         uint64_t flags = spin_lock_irq(&t->lock);
-        if (t->in_head != t->in_tail) {
-            b[copied++] = t->input_buf[t->in_tail];
+        while (got < sizeof(chunk) && copied + got < len &&
+               t->in_head != t->in_tail) {
+            chunk[got++] = t->input_buf[t->in_tail];
             t->in_tail = (t->in_tail + 1) % TTY_BUF_SIZE;
-            spin_unlock_irq(&t->lock, flags);
-        } else {
-            spin_unlock_irq(&t->lock, flags);
-            if (copied > 0) break;
-            if (f->flags & O_NONBLOCK) return -11;
-            fb_tty_flush();
-            poll_block((uint64_t)-1);
         }
+        spin_unlock_irq(&t->lock, flags);
+
+        if (got) {
+            if (copy_to_user(b + copied, chunk, got))
+                return copied ? (ssize_t)copied : -14;
+            copied += got;
+            continue;
+        }
+        if (copied > 0) break;
+        if (f->flags & O_NONBLOCK) return -11;
+        fb_tty_flush();
+        poll_block((uint64_t)-1);
     }
     return copied;
 }
@@ -224,7 +235,6 @@ static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
 {
     (void)f;
     tty_t *t = &tty0;
-    const char *p = buf;
 
     if (t->c_lflag & TOSTOP) {
         for (;;) {
@@ -234,22 +244,49 @@ static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
         }
     }
 
-    for (size_t i = 0; i + 3 < len; i++) {
-        if (p[i] == '\033' && p[i+1] == '[' && p[i+2] == '6' && p[i+3] == 'n') {
-            int col = 1, row = 1;
-            fb_tty_get_cursor(&col, &row);
-            uint64_t flags = spin_lock_irq(&t->lock);
-            const char *pre = "\033[";
-            for (const char *s = pre; *s; s++) buf_push(t, *s);
-            tty_inject_uint(t, (unsigned int)(row + 1));
-            buf_push(t, ';');
-            tty_inject_uint(t, (unsigned int)(col + 1));
-            buf_push(t, 'R');
-            spin_unlock_irq(&t->lock, flags);
-            break;
+    /* Bounce the user buffer into kernel memory so the escape scan and the echo
+     * path operate on a kernel copy (tty_echo_str is shared with kernel-string
+     * callers and must not learn about user pointers). Chunk to bound the stack;
+     * carry the last 3 bytes so the \033[6n probe is not split across chunks. */
+    char kb[512];
+    char carry[3];
+    size_t carry_n = 0;
+    size_t off = 0;
+    while (off < len) {
+        size_t want = len - off;
+        if (want > sizeof(kb) - carry_n) want = sizeof(kb) - carry_n;
+        char *p = kb;
+        for (size_t i = 0; i < carry_n; i++) p[i] = carry[i];
+        if (copy_from_user(kb + carry_n, (const char *)buf + off, want)) return -14;
+        size_t total = carry_n + want;
+
+        for (size_t i = 0; i + 3 < total; i++) {
+            if (p[i] == '\033' && p[i+1] == '[' && p[i+2] == '6' && p[i+3] == 'n') {
+                int col = 1, row = 1;
+                fb_tty_get_cursor(&col, &row);
+                uint64_t flags = spin_lock_irq(&t->lock);
+                const char *pre = "\033[";
+                for (const char *s = pre; *s; s++) buf_push(t, *s);
+                tty_inject_uint(t, (unsigned int)(row + 1));
+                buf_push(t, ';');
+                tty_inject_uint(t, (unsigned int)(col + 1));
+                buf_push(t, 'R');
+                spin_unlock_irq(&t->lock, flags);
+                break;
+            }
         }
+        /* Echo all but the trailing bytes that may begin a probe split across the
+         * next chunk; on the final chunk echo everything. */
+        size_t emit = total;
+        carry_n = 0;
+        if (off + want < len && total >= 3) {
+            emit = total - 3;
+            for (size_t i = 0; i < 3; i++) carry[i] = p[emit + i];
+            carry_n = 3;
+        }
+        tty_echo_str(t, p, (int)emit);
+        off += want;
     }
-    tty_echo_str(t, buf, len);
     fb_tty_flush();
     return len;
 }
@@ -261,9 +298,6 @@ static int tty_poll(vfs_file_t *f)
     tty_t *t = &tty0;
     return (t->in_head != t->in_tail) ? 1 : 0;
 }
-
-extern int copy_to_user(void *dst, const void *src, size_t size);
-extern int copy_from_user(void *dst, const void *src, size_t size);
 
 #define TCGETS     0x5401
 #define TCSETS     0x5402
