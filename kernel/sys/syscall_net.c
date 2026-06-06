@@ -961,9 +961,8 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
                 process_t *p = task_current();
                 void *files[SKB_SCM_MAX]; int nf = 0;
                 for (int i = 0; i < nfd; i++) {
-                    vfs_file_t *vf = fd_get(p->fds, cfds[i]);
+                    vfs_file_t *vf = fget(p->fds, cfds[i]);   /* atomic in-flight ref under the table lock */
                     if (!vf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -9; }
-                    vf->refcount++;             /* in-flight reference */
                     files[nf++] = vf;
                 }
                 uint8_t dbuf[SKB_DATA_MAX]; size_t dl = 0;
