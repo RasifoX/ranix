@@ -673,6 +673,24 @@ if [ -x /bin/gnu-echo ]; then
 	check "c-gnucoreutils" "glibc-ok" "$(timeout 15 /bin/gnu-echo glibc-ok 2>/dev/null)"
 fi
 
+# ── apk: install a real Alpine package on-device, offline. apk.static (static
+# musl apk-tools) installs tree + its musl dep from .apk files shipped in the
+# initramfs into a fresh root, then we run the installed binary. Proves the
+# package-install path end to end without any network. ──────────────────────
+if [ -x /bin/apk.static ] && [ -f /var/apkrepo/tree.apk ]; then
+	rm -rf /apkroot
+	mkdir -p /apkroot/etc/apk/keys
+	cp /etc/apk/arch /apkroot/etc/apk/arch 2>/dev/null
+	/bin/apk.static --root /apkroot --repositories-file /dev/null --no-cache \
+	    --initdb add --allow-untrusted \
+	    /var/apkrepo/musl.apk /var/apkrepo/tree.apk >/dev/null 2>&1
+	check "apk-install" "yes" \
+	    "$([ -x /apkroot/usr/bin/tree ] && echo yes || echo no)"
+	apkldso=$(ls /apkroot/lib/ld-musl-*.so.1 2>/dev/null | head -1)
+	check "apk-run" "1" \
+	    "$("$apkldso" /apkroot/usr/bin/tree --version 2>/dev/null | grep -c '^tree v')"
+fi
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
