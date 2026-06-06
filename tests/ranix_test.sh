@@ -199,6 +199,7 @@ check "c-proccmdline" "OK" "$(timeout 10 /bin/test_proccmdline 2>/dev/null)"
 check "c-procstat"    "OK" "$(timeout 8 /bin/test_procstat 2>/dev/null)"
 check "c-procvm"      "OK" "$(timeout 8 /bin/test_procvm 2>/dev/null)"
 check "proc-task-dir" "same" "$( [ \"$(timeout 8 cat /proc/1/task/1/comm 2>/dev/null)\" = \"$(timeout 8 cat /proc/1/comm 2>/dev/null)\" ] && echo same )"
+check "proc-net-unix" "1"  "$(cat /proc/net/unix | head -1 | grep -c RefCount)"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
