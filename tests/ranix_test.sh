@@ -685,32 +685,40 @@ fi
 # ── dpkg: install a real Debian .deb on-device, offline. The stock Debian dpkg
 # (glibc, from bookworm) unpacks + configures the `hello` package shipped in the
 # initramfs into the live root, then runs the installed binary — proving the
-# Debian/glibc package path end to end: dpkg-deb's ar+tar+lzma extraction, the
+# Debian/glibc package path end to end: dpkg-deb's ar+tar+gz extraction, the
 # admin-db update under /var/lib/dpkg, fork/exec of helper tools (tar, dpkg-deb,
-# ldconfig stub), and that the installed glibc ELF runs via the shipped loader.
+# ldconfig stub), the cross-directory rename of control info into
+# /var/lib/dpkg/info, the rmdir(2) ENOTDIR probe dpkg uses to reject control
+# directories, and that the installed glibc ELF runs via the shipped loader.
 # x86_64 only (Debian binaries are amd64); aarch64 simply skips.
 #
-# Known gap (tracked, not flaky): a forked dpkg-deb helper still segfaults in a
-# narrow glibc-internal case that the c-glibcspawn probe (vfork / posix_spawn /
-# posix_spawn+pipe / fork-from-thread, all PASS) does not reproduce — so install
-# does not yet complete. Reported as SKIP until that gap is root-caused, so the
-# infrastructure (Debian fetch + staging + dpkg admin db) stays in tree and the
-# suite stays green. Flips to a hard check the moment dpkg -i succeeds. ────────
-if [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello.deb ]; then
+# hello-gz.deb is the upstream hello repacked with gzip data compression (a
+# standard Debian compressor). The xz-compressed original (hello.deb) is still
+# checked as a known gap: liblzma decodes correctly in isolation (single-shot,
+# the streaming MT decoder, and dpkg's exact decode loop all PASS on-device), but
+# the real dpkg-deb <decompress> subprocess orchestration still reports the xz
+# data.tar member corrupt — tracked, not flaky, never fails the suite.
+if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello-gz.deb ]; then
 	export PATH="/usr/bin:/usr/sbin:/sbin:/bin:$PATH"
 	rm -f /usr/bin/hello
-	# dpkg-deb's forked-helper segfault (shared mmap cursor) and the "."/".."
-	# stat gap are fixed, and a stuck pipe read is now interruptible; dpkg -i now
-	# runs to its decompressor stage but the <decompress> helper still fails, so
-	# install does not yet complete. Bounded + hard-killed so it can't wedge the
-	# suite; flips to a hard check the moment -i completes.
-	timeout -s KILL 20 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg.out 2>&1
+	timeout -s KILL 25 /usr/bin/dpkg -i /var/cache/hello-gz.deb >/tmp/dpkg.out 2>&1
 	if [ -x /usr/bin/hello ] && /usr/bin/hello 2>/dev/null | grep -q 'Hello, world!' && \
 	   /usr/bin/dpkg -l hello 2>/dev/null | grep -q '^ii  hello'; then
 		check "dpkg-install" "ok" "ok"
 	else
-		echo "SKIP: dpkg-install (known gap: dpkg-deb's <decompress> helper still fails; $(tail -1 /tmp/dpkg.out 2>/dev/null))"
+		check "dpkg-install" "ok" "FAIL: $(tail -1 /tmp/dpkg.out 2>/dev/null)"
 	fi
+	# xz variant: tracked gap, reported but never a hard FAIL.
+	if [ -f /var/cache/hello.deb ]; then
+		rm -f /usr/bin/hello
+		timeout -s KILL 20 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg-xz.out 2>&1
+		if [ -x /usr/bin/hello ] && /usr/bin/hello 2>/dev/null | grep -q 'Hello, world!'; then
+			check "dpkg-install-xz" "ok" "ok"
+		else
+			echo "SKIP: dpkg-install-xz (known gap: dpkg-deb xz <decompress> reports data.tar corrupt; $(tail -1 /tmp/dpkg-xz.out 2>/dev/null))"
+		fi
+	fi
+	rm -f /usr/bin/hello
 fi
 
 # ── apk: install a real Alpine package on-device, offline. apk.static (static

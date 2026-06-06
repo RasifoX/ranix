@@ -430,6 +430,10 @@ ifeq ($(ARCH),x86_64)
 		    > "$(DEB_ROOTFS)/var/lib/dpkg/status"; \
 		: > "$(DEB_ROOTFS)/var/lib/dpkg/available"; \
 		cp "$(DEB_DIR)"/hello_*.deb "$(DEB_ROOTFS)/hello.deb"; \
+		rm -rf "$(DEB_ROOTFS)/.hellosrc"; \
+		dpkg-deb --raw-extract "$(DEB_ROOTFS)/hello.deb" "$(DEB_ROOTFS)/.hellosrc" >/dev/null 2>&1 && \
+		    dpkg-deb -Zgzip --build "$(DEB_ROOTFS)/.hellosrc" "$(DEB_ROOTFS)/hello-gz.deb" >/dev/null 2>&1; \
+		rm -rf "$(DEB_ROOTFS)/.hellosrc"; \
 		touch "$@"; \
 		echo "[OK] Debian dpkg rootfs staged (x86_64)"; \
 	else echo "[skip] dpkg: dpkg-deb not on host, Debian package path unavailable"; fi
@@ -521,10 +525,11 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 			chmod +x $(BUILD_DIR)/initramfs/bin/c-glibcspawn; \
 		fi; \
 	fi
-	@if [ -f "$(DEB_STAMP)" ]; then \
+	@if [ "$(ARCH)" = "x86_64" ] && [ -f "$(DEB_STAMP)" ]; then \
 		(cd "$(DEB_ROOTFS)" && find . -path ./hello.deb -prune -o -print | cpio -pdu --quiet "$(CURDIR)/$(BUILD_DIR)/initramfs" 2>/dev/null); \
 		mkdir -p $(BUILD_DIR)/initramfs/var/cache; \
 		cp "$(DEB_ROOTFS)/hello.deb" $(BUILD_DIR)/initramfs/var/cache/hello.deb; \
+		[ -f "$(DEB_ROOTFS)/hello-gz.deb" ] && cp "$(DEB_ROOTFS)/hello-gz.deb" $(BUILD_DIR)/initramfs/var/cache/hello-gz.deb; \
 	fi
 	@if [ -x "$(APK_STATIC_BIN)" ]; then \
 		cp "$(APK_STATIC_BIN)" $(BUILD_DIR)/initramfs/bin/apk.static; \
