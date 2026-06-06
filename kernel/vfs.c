@@ -1419,17 +1419,28 @@ int vfs_symlink(const char *target, const char *linkpath)
 int vfs_stat(const char *path, vfs_stat_t *out)
 {
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
-	if (!d || !d->inode) return -1;
-	if (d->inode->iops && d->inode->iops->stat)
-		return d->inode->iops->stat(d->inode, out);
-	out->ino   = d->inode->ino;
-	out->mode  = d->inode->mode;
-	out->nlink = d->inode->nlink;
-	out->uid   = d->inode->uid;
-	out->gid   = d->inode->gid;
-	out->size  = d->inode->size;
-	out->rdev  = d->inode->rdev;
-	return 0;
+	if (!d) return -1;
+	/* For volatile (no_cache) nodes d points at a function-scoped dentry in
+	 * vfs_dentry_resolve whose storage is already dead; only the inode it
+	 * referenced is kept alive. Capture the inode pointer once, before any
+	 * further call can clobber that stack, then operate solely on it. */
+	vfs_inode_t *in = d->inode;
+	if (!in) return -1;
+	int rc;
+	if (in->iops && in->iops->stat) {
+		rc = in->iops->stat(in, out);
+	} else {
+		out->ino   = in->ino;
+		out->mode  = in->mode;
+		out->nlink = in->nlink;
+		out->uid   = in->uid;
+		out->gid   = in->gid;
+		out->size  = in->size;
+		out->rdev  = in->rdev;
+		rc = 0;
+	}
+	if (!in->cached) vfs_inode_free(in);
+	return rc;
 }
 
 /* Like vfs_stat, but does NOT follow a final symlink (lstat): resolve the parent
@@ -1447,10 +1458,19 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 	if (!parent_path) return -12;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
+	/* Volatile parents (e.g. /proc/<pid> reached via /proc/self) hand back a
+	 * function-scoped dentry whose storage is dead on return; only the inode
+	 * stays alive. Capture it before any other call (even kfree) clobbers the
+	 * stack, then drive the lookup from the captured pointer. */
+	vfs_inode_t *pin = parent ? parent->inode : NULL;
 	kfree(parent_path);
-	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->lookup)
+	if (!parent) return -1;
+	if (!pin || !pin->iops || !pin->iops->lookup) {
+		if (pin && !pin->cached) vfs_inode_free(pin);
 		return -1;
-	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);
+	}
+	vfs_inode_t *in = pin->iops->lookup(pin, fname);
+	if (!pin->cached) vfs_inode_free(pin);
 	if (!in) return -1;
 
 	int rc = 0;
@@ -1460,7 +1480,7 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 		out->ino = in->ino; out->mode = in->mode; out->nlink = in->nlink;
 		out->uid = in->uid; out->gid = in->gid; out->size = in->size; out->rdev = in->rdev;
 	}
-	if (!in->cached) kfree(in);
+	if (!in->cached) vfs_inode_free(in);
 	return rc;
 }
 
