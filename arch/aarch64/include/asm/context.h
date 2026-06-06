@@ -106,6 +106,7 @@ typedef struct {
 #define SYS_ARCH_SYNC              81
 #define SYS_ARCH_FSYNC             82
 #define SYS_ARCH_FDATASYNC         83
+#define SYS_ARCH_SYNC_FILE_RANGE   84
 #define SYS_ARCH_TIMERFD_CREATE    85
 #define SYS_ARCH_TIMERFD_SETTIME   86
 #define SYS_ARCH_TIMERFD_GETTIME   87

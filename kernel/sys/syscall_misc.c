@@ -384,6 +384,15 @@ static long sys_fsync(int fd)
 }
 static long sys_fdatasync(int fd) { return sys_fsync(fd); }
 
+/* sync_file_range(fd, offset, nbytes, flags): a writeback hint for a byte range.
+ * Ranix-backed files live in RAM with no deferred writeback, so initiating it is
+ * a no-op that completes immediately. Validate the fd like fsync. */
+static long sys_sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int flags)
+{
+	(void)offset; (void)nbytes; (void)flags;
+	return sys_fsync(fd);
+}
+
 static long sys_fchdir(int fd)
 {
 	process_t *p = task_current();
