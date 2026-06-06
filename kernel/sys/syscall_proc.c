@@ -1689,6 +1689,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 			if (!any_alive) return -10; /* ECHILD */
 			if (wnohang)    return 0;
 			arch_yield();
+			if (task_has_actionable_signal()) return -4; /* EINTR */
 		}
 	}
 
@@ -1717,6 +1718,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 		}
 		if (wnohang) return 0;
 		arch_yield();
+		if (task_has_actionable_signal()) return -4; /* EINTR */
 	}
 
 	child->reaped = 1;

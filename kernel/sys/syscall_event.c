@@ -37,6 +37,7 @@ static ssize_t eventfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             return -11;
         }
         sleep_on_locked(&efd->rd_wait, &efd->lock, f);
+        if (task_has_actionable_signal()) return -4; /* EINTR */
     }
 }
 
@@ -61,6 +62,7 @@ static ssize_t eventfd_write_vfs(vfs_file_t *file, const void *buf, size_t len)
             return -11;
         }
         sleep_on_locked(&efd->wr_wait, &efd->lock, f);
+        if (task_has_actionable_signal()) return -4; /* EINTR */
     }
 }
 
@@ -215,6 +217,7 @@ static ssize_t timerfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             return -11;
         }
         sleep_on_locked(&t->rd_wait, &t->lock, f);
+        if (task_has_actionable_signal()) return -4; /* EINTR */
     }
 }
 
