@@ -61,6 +61,16 @@ static int sock_poll_vfs(vfs_file_t *file)
         spin_unlock_irq(&s->recv_lock, lf);
         return ready ? 0x0001 : 0;
     }
+    /* a nonblocking connect() still in handshake is neither readable nor
+     * writable; once it settles (ESTABLISHED or error) the socket becomes
+     * writable so poll(POLLOUT) returns and getsockopt(SO_ERROR) reports it. */
+    if (s->connect_inprog && s->type == SOCK_STREAM) {
+        if (s->tcp_state == TCP_SYN_SENT || s->tcp_state == TCP_SYN_RECV)
+            return 0;
+        if (s->tcp_state != TCP_ESTABLISHED)
+            return 0x0004;   /* connect failed → POLLOUT so SO_ERROR is read */
+        s->connect_inprog = 0;   /* connected — resume normal readability checks */
+    }
     uint64_t f = spin_lock_irq(&s->recv_lock);
     int has_data = (s->recv_head != NULL);
     spin_unlock_irq(&s->recv_lock, f);
@@ -529,8 +539,11 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
 static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
 {
     (void)addrlen;
-    socket_t *s = fd_to_sock(fd);
-    if (!s) return -9;
+    process_t  *cp = task_current();
+    vfs_file_t *cfile = fd_get(cp->fds, fd);
+    if (!cfile || !cfile->inode || cfile->inode->fops != &sock_fops) return -9;
+    socket_t *s = (socket_t *)cfile->inode->priv;
+    int nonblock = (cfile->flags & O_NONBLOCK) ? 1 : 0;
 
     uint16_t family = 0;
     if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -14;
@@ -591,11 +604,22 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
      * AF_UNSPEC client falls back to IPv4 instead of blocking on a dropped SYN */
     if (s->domain == AF_INET6) {
         netdev_t *d6 = net_route_dev6(&s->remote_ip6);
-        if (!ipv6_reachable(d6, &s->remote_ip6)) return -113; /* EHOSTUNREACH */
+        if (!ipv6_reachable(d6, &s->remote_ip6)) {
+            /* nonblocking: report the failure through SO_ERROR/poll like Linux,
+             * so a client iterating addrinfo (libfetch) moves on to the next
+             * address instead of mistaking a stale POLLOUT for success. */
+            if (nonblock) { s->so_error = 113; s->connect_inprog = 1; return -115; }
+            return -113; /* EHOSTUNREACH */
+        }
     }
 
     int rc = tcp_connect(s);
     if (rc < 0) return rc;
+
+    /* nonblocking connect: the SYN is out — return EINPROGRESS at once. The
+     * result surfaces later via poll(POLLOUT) + getsockopt(SO_ERROR), exactly
+     * as on Linux; tcp_input records it in so_error when the handshake settles. */
+    if (nonblock) { s->connect_inprog = 1; s->so_error = 0; return -115; }
 
     /* block until ESTABLISHED or RST — event-driven: tcp_input updates tcp_state
      * then wakes connect_waiter under recv_lock, so registering + re-checking
@@ -1255,7 +1279,8 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 	if (lv == SO_SOL_SOCKET) {
 		switch (opt) {
 		case SO_TYPE:       out = s->type; break;
-		case SO_ERROR:      out = s->so_error; s->so_error = 0; break;  /* read-and-clear */
+		case SO_ERROR:      out = s->so_error; s->so_error = 0;
+		                    s->connect_inprog = 0; break;  /* read-and-clear */
 		case SO_ACCEPTCONN: out = (s->tcp_state == TCP_LISTEN); break;
 		case SO_RCVBUF:     out = (int)s->so_rcvbuf; break;
 		case SO_SNDBUF:     out = (int)s->so_sndbuf; break;

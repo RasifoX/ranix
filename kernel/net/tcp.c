@@ -778,6 +778,8 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 
     /* RST handling */
     if (flags & TCP_RST) {
+        if (s->tcp_state == TCP_SYN_SENT || s->tcp_state == TCP_SYN_RECV)
+            s->so_error = 111;   /* ECONNREFUSED — surfaced via SO_ERROR */
         s->tcp_state = TCP_CLOSED;
         seg_clear(s);
         tcp_wake_connect(s);

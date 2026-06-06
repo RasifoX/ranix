@@ -12,6 +12,16 @@ static int copy_path_from_user(char *dst, const char *upath)
 	return 0;
 }
 
+/* Strip trailing '/' from a kernel path, keeping a lone "/". Linux's path walk
+ * ignores trailing slashes ("a/b/" names "b"); without this a tool that appends
+ * one (busybox mkdir -p, apk's dir extraction) makes the parent split see an
+ * empty final component. Operates in place on a mutable kernel buffer. */
+static void path_trim_trailing_slash(char *p)
+{
+	int n = (int)strlen(p);
+	while (n > 1 && p[n - 1] == '/') p[--n] = '\0';
+}
+
 /* resolve a (possibly dirfd-relative) user path to an absolute kernel path.
  * `out` must hold PATH_MAX bytes. A relative path is joined onto cwd in a heap
  * scratch buffer so this stays a single PATH_MAX stack frame. */
@@ -19,7 +29,7 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 {
 	int r = copy_path_from_user(out, upath);
 	if (r) return r;
-	if (out[0] == '/') return 0;
+	if (out[0] == '/') { path_trim_trailing_slash(out); return 0; }
 	process_t *p = task_current();
 	const char *base;
 	if (dirfd == AT_FDCWD) {
@@ -41,6 +51,7 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 	tmp[blen + plen] = '\0';
 	memcpy(out, tmp, blen + plen + 1);
 	kfree(tmp);
+	path_trim_trailing_slash(out);
 	return 0;
 }
 
@@ -51,6 +62,7 @@ static long sys_mkdir(const char *path, mode_t mode)
 	char kp[PATH_MAX];
 	int r = copy_path_from_user(kp, path);
 	if (r) return r;
+	path_trim_trailing_slash(kp);
 	return vfs_mkdir(kp, mode);
 }
 
