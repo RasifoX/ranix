@@ -80,10 +80,27 @@ static void ptrace_stop_check(arch_context_t *ctx, int is_exit)
 	p->ptrace_stop_reported = 0;
 }
 
+/* Linux ptrace_may_access (ATTACH/REALCREDS mode). The caller may access the
+ * target only if its euid matches the target's real, effective and saved uid
+ * and its egid matches all three gids, and the target is dumpable — or it holds
+ * CAP_SYS_PTRACE. Accessing oneself is always allowed. */
+int ptrace_may_access(process_t *t)
+{
+	process_t *p = task_current();
+	if (p == t) return 1;
+	if (cap_has(p->cap_effective, CAP_SYS_PTRACE)) return 1;
+	if (p->euid != t->uid || p->euid != t->euid || p->euid != t->suid ||
+	    p->egid != t->gid || p->egid != t->egid || p->egid != t->sgid)
+		return 0;
+	return t->dumpable != 0;
+}
+
 static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
 {
 	switch (request) {
 	case PTRACE_ATTACH:
+		if (!ptrace_may_access(tracee))
+			return -1; /* EPERM */
 		if (tracee->tracer != 0)
 			return -1; /* EPERM */
 		tracee->tracer      = p->pid;

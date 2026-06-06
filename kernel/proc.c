@@ -363,6 +363,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->mlock_future = parent->mlock_future;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->no_new_privs = parent->no_new_privs;  /* sticky; pdeathsig is NOT inherited */
+	child->dumpable  = parent->dumpable;
 	child->reaped    = 0;
 	child->vfork_parent = -1;
 
@@ -516,6 +517,8 @@ pid_t proc_vfork(void)
 	child->cap_permitted   = parent->cap_permitted;
 	child->cap_effective   = parent->cap_effective;
 	child->cap_inheritable = parent->cap_inheritable;
+	child->no_new_privs = parent->no_new_privs;
+	child->dumpable     = parent->dumpable;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
@@ -618,6 +621,8 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->cap_permitted   = parent->cap_permitted;
 	child->cap_effective   = parent->cap_effective;
 	child->cap_inheritable = parent->cap_inheritable;
+	child->no_new_privs = parent->no_new_privs;
+	child->dumpable     = parent->dumpable;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->brk          = parent->brk;
 	child->mmap_next    = parent->mmap_next;
@@ -796,6 +801,35 @@ vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid)
 	if (p && out_euid) *out_euid = p->euid;
 	spin_unlock_irq(&sched_lock, f);
 	return vm;
+}
+
+/* Linux cap_emulate_setxuid: when a process drops the last uid 0 from its
+ * {real,effective,saved} set, its permitted/effective caps are cleared; when
+ * only euid leaves 0, the effective set is cleared. Call after a setuid-family
+ * change with the pre-change root status and euid. Keeps a su/setuid drop from
+ * silently retaining CAP_SYS_PTRACE et al. */
+void cred_setxuid_fixup(process_t *p, int was_priv, uid_t old_euid)
+{
+	int has_root = (p->uid == 0 || p->euid == 0 || p->suid == 0);
+	if (was_priv && !has_root) {
+		p->cap_permitted   = 0;
+		p->cap_effective   = 0;
+		p->cap_inheritable = 0;
+	} else if (old_euid == 0 && p->euid != 0) {
+		p->cap_effective = 0;
+	}
+}
+
+/* ptrace_may_access gate for cross-process /proc readers (maps, mem). Pins the
+ * target so the credential read is safe, then applies the ptrace permission
+ * rule. Reading one's own /proc entry always passes. */
+int proc_may_access(pid_t pid)
+{
+	process_t *t = proc_get(pid);
+	if (!t) return 0;
+	int ok = ptrace_may_access(t);
+	proc_put(t);
+	return ok;
 }
 
 /*
