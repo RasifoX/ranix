@@ -446,7 +446,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETRANDOM:  ret = sys_getrandom((void*)arg0, (size_t)arg1, (unsigned int)arg2); break;
 	case SYS_ARCH_STATX:      ret = sys_statx((int)arg0, (const char*)arg1, (int)arg2, (unsigned int)arg3, (linux_statx_t*)arg4); break;
 	case SYS_ARCH_MEMBARRIER: ret = sys_membarrier((int)arg0, (unsigned int)arg1); break;
-	case SYS_ARCH_RSEQ:       ret = -22; break;
+	case SYS_ARCH_RSEQ:       ret = -38; break;   /* ENOSYS: no rseq; glibc falls back */
 	case SYS_ARCH_SET_ROBUST_LIST: ret = sys_set_robust_list((void*)arg0, (size_t)arg1); break;
 	case SYS_ARCH_GET_ROBUST_LIST: ret = sys_get_robust_list((pid_t)arg0, (void**)arg1, (size_t*)arg2); break;
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
