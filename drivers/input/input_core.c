@@ -3,6 +3,7 @@
 #include <kernel/sync.h>
 #include <kernel/proc.h>
 #include <kernel/lib/string.h>
+#include <kernel/hal.h>
 
 #define EV_BUF_SIZE 256
 
@@ -107,18 +108,21 @@ static ssize_t evdev_read(vfs_file_t *file, void *buf, size_t len)
         task_sleep();
     }
 
+    /* Drain into a kernel buffer under the IRQ-off lock, then copy_to_user once
+     * outside it — a faulting user store cannot run in the lock window. */
+    struct input_event evs[8];
+    int n = 0;
     uint64_t f = spin_lock_irq(&ev_lock);
-    uint8_t *dst = buf;
-    int copied = 0;
-    while (ev_head != ev_tail && len >= sizeof(struct input_event)) {
-        memcpy(dst, &event_buf[ev_tail], sizeof(struct input_event));
-        dst    += sizeof(struct input_event);
-        len    -= sizeof(struct input_event);
-        copied += sizeof(struct input_event);
+    while (ev_head != ev_tail && n < (int)(sizeof(evs) / sizeof(evs[0])) &&
+           (size_t)(n + 1) * sizeof(struct input_event) <= len) {
+        evs[n++] = event_buf[ev_tail];
         ev_tail = (ev_tail + 1) % EV_BUF_SIZE;
     }
     spin_unlock_irq(&ev_lock, f);
-    return copied;
+
+    if (n && copy_to_user(buf, evs, (size_t)n * sizeof(struct input_event)))
+        return -14;
+    return n * (int)sizeof(struct input_event);
 }
 
 static int evdev_poll(vfs_file_t *file)
@@ -139,9 +143,12 @@ static int evdev_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
     if (nr >= 0x20 && nr <= 0x3f) {
         int ev_type = nr - 0x20;
         if (!buf || size <= 0) return -22;
-        memset(buf, 0, (size_t)size);
+        uint8_t kb[64];
+        if (size > (int)sizeof(kb)) size = (int)sizeof(kb);
+        memset(kb, 0, (size_t)size);
         if (ev_type == 0 && size >= 1)
-            buf[0] = (1 << EV_SYN) | (1 << EV_KEY);
+            kb[0] = (1 << EV_SYN) | (1 << EV_KEY);
+        if (copy_to_user(buf, kb, (size_t)size)) return -14;
         return 0;
     }
     if (nr == 0x90) return 0; /* EVIOCGRAB */

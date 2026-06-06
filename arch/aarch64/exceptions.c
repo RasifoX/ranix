@@ -87,8 +87,10 @@
                  * blind, or the stack walk faults in EL1 and turns a survivable
                  * user segfault into a kernel panic. */
                 if (!access_ok((void *)fp, 16) || !user_pages_mapped((void *)fp, 16)) break;
+                uaccess_begin();
                 uint64_t saved_fp  = *(uint64_t *)fp;
                 uint64_t saved_lr  = *(uint64_t *)(fp + 8);
+                uaccess_end();
                 kprintf("  frame[%d]: fp=%lx lr=%lx\n", _i, saved_fp, saved_lr);
                 if (!saved_fp || saved_fp == fp) break;
                 fp = saved_fp;

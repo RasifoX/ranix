@@ -147,6 +147,7 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 #if defined(__aarch64__)
 	/* Restore full frame saved by signal_dispatch */
 	uint64_t usp  = ctx->sp;
+	uaccess_begin();
 	ctx->elr      = *(uint64_t *)(usp +   0);
 	ctx->regs[30] = *(uint64_t *)(usp +   8);
 	p->sig_mask   = *(uint64_t *)(usp +  16);
@@ -162,11 +163,13 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	ctx->fpcr     = *(uint32_t *)(usp + 204);
 	for (int _i = 0; _i < 64; _i++)
 		ctx->qregs[_i] = *(uint64_t *)(usp + 208 + (uint64_t)_i * 8);
+	uaccess_end();
 	ctx->sp       = usp + 864;
 #elif defined(__x86_64__)
 	/* After handler ret + restorer syscall, ctx->rsp = frame_base+8.
 	 * Frame layout matches signal_dispatch: offsets from frame_base+8. */
 	uint64_t base = ctx->rsp;
+	uaccess_begin();
 	p->sig_mask   = *(uint64_t *)(base +   0);
 	ctx->rip      = *(uint64_t *)(base +   8);
 	ctx->rsp      = *(uint64_t *)(base +  16);
@@ -191,5 +194,6 @@ static void sys_rt_sigreturn(arch_context_t *ctx)
 	ctx->r14      = *(uint64_t *)(base + 136);
 	ctx->r15      = *(uint64_t *)(base + 144);
 	memcpy(ctx->fxsave, (void *)(base + 160), sizeof(ctx->fxsave));
+	uaccess_end();
 #endif
 }
