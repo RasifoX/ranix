@@ -86,6 +86,16 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
 #define USER_STACK_TOP  ARCH_USER_STACK_TOP
 #define MAX_STACK_SIZE  (256 * PAGE_SIZE)
 
+/* Slot-0 invariant: vm_copy/vm_destroy walk only the top-level user slot (x86
+ * PML4 index 0, aarch64 L0[0]), each covering the first 512 GB of user VA. The
+ * whole user layout — stack top, the 1 GB-hugepage window, and the mmap ceiling
+ * below it — must stay inside that slot, or fork would skip and exit would leak
+ * the mappings above it (a COW-bypass / page leak). */
+_Static_assert(ARCH_USER_STACK_TOP <= 0x8000000000UL,
+               "user stack top must stay within page-table slot 0 (512 GB)");
+_Static_assert(HUGE1G_VA_BASE < 0x8000000000UL,
+               "1 GB-hugepage window must stay within page-table slot 0 (512 GB)");
+
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	vaddr &= PAGE_MASK;
