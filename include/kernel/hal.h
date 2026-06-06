@@ -77,9 +77,11 @@ struct process;
 void arch_save_tls(struct process *p);
 void arch_restore_tls(struct process *p);
 
-/* Safe user memory access guards */
-void arch_user_access_begin(void);
-void arch_user_access_end(void);
+/* Safe user memory access guards. Placeholders today (SMAP is not enabled — see
+ * the SMEP commit message); they become stac/clac once every fop's direct
+ * user-buffer access is funnelled. */
+static inline void arch_user_access_begin(void) { __asm__ volatile("" ::: "memory"); }
+static inline void arch_user_access_end(void)   { __asm__ volatile("" ::: "memory"); }
 
 /* Safe user memory access */
 int  access_ok(const void *addr, size_t n);
