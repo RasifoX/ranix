@@ -1116,6 +1116,10 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	}
 	EXEC_STAGE_FREE_PRE();
 	shebang_n = 0;
+	/* kstrs[0..koff) now holds the argv strings, each NUL-terminated and
+	 * contiguous — exactly the /proc/<pid>/cmdline layout. Capture before envp
+	 * strings get appended below. */
+	int argv_bytes = koff;
 	for (int e = 0; e < envc; e++) {
 		const char *s = envp[e];
 		int n = 0;
@@ -1271,6 +1275,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	int el = 0;
 	while (kpath[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = kpath[el]; el++; }
 	p->exe_path[el] = '\0';
+
+	/* publish the real argv for /proc/<pid>/cmdline (ps full command, pgrep -f) */
+	proc_set_cmdline(p, kstrs, (uint32_t)argv_bytes);
 
 	/* close O_CLOEXEC file descriptors before exec */
 	if (p->fds) {

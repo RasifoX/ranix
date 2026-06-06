@@ -291,8 +291,15 @@ static int fill_proc_cmdline(char *buf, size_t sz, int pid)
 	process_t *p = find_proc(pid);
 	if (!p) return 0;
 	pb_t b = {buf, sz};
-	pb_str(&b, p->name);
-	pb_char(&b, '\0');
+	if (p->cmdline && p->cmdline_len) {
+		for (uint32_t i = 0; i < p->cmdline_len; i++)
+			pb_char(&b, p->cmdline[i]);
+	} else {
+		/* kernel threads and not-yet-exec'd tasks have no argv: Linux emits the
+		 * comm in [brackets]; keep the bare comm so ps still labels them. */
+		pb_str(&b, p->name);
+		pb_char(&b, '\0');
+	}
 	proc_put(p);
 	return (int)(sz - b.rem);
 }

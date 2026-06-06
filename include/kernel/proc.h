@@ -229,6 +229,11 @@ typedef struct process {
 	/* full path of the running image, for /proc/<pid>/exe */
 	char            exe_path[PROC_NAME_MAX];
 
+	/* NUL-separated argv captured at execve, for /proc/<pid>/cmdline.
+	 * Bounded copy (Linux caps cmdline at the arg page); NULL until first exec. */
+	char           *cmdline;
+	uint32_t        cmdline_len;
+
 	/* namespaces (shared on fork, copied on unshare) */
 	struct uts_namespace  *uts_ns;
 	struct ipc_namespace  *ipc_ns;
@@ -312,6 +317,7 @@ process_t *task_get(int index);
 /* process lifecycle */
 pid_t      proc_create(const char *name, void (*fn)(void));
 pid_t      proc_exec(const char *name, const void *elf_data, size_t elf_len);
+void       proc_set_cmdline(process_t *p, const char *block, uint32_t len); /* replace /proc/<pid>/cmdline argv (NUL-separated) */
 void       vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags);
 void       vma_clip(process_t *p, uint64_t va, uint64_t len);
 pid_t      proc_fork(uint64_t clone_flags, uint64_t newsp);

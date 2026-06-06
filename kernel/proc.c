@@ -29,6 +29,25 @@ static void cpu_affinity_free(process_t *p)
 	if (p->cpu_affinity) { kfree(p->cpu_affinity); p->cpu_affinity = NULL; }
 }
 
+static void proc_cmdline_free(process_t *p)
+{
+	if (p->cmdline) { kfree(p->cmdline); p->cmdline = NULL; p->cmdline_len = 0; }
+}
+
+#define PROC_CMDLINE_MAX 4096   /* Linux caps /proc/<pid>/cmdline at the arg page */
+
+void proc_set_cmdline(process_t *p, const char *block, uint32_t len)
+{
+	proc_cmdline_free(p);
+	if (!block || !len) return;
+	if (len > PROC_CMDLINE_MAX) len = PROC_CMDLINE_MAX;
+	char *copy = kmalloc(len);
+	if (!copy) return;
+	memcpy(copy, block, len);
+	p->cmdline = copy;
+	p->cmdline_len = len;
+}
+
 sighand_t *sighand_alloc(sighand_t *copy_from)
 {
 	sighand_t *sh = kmalloc(sizeof(*sh));
@@ -397,6 +416,16 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail_early;
 	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
+
+	/* a forked child runs the same image: inherit the parent's argv so
+	 * /proc/<pid>/cmdline (ps full command) reflects the real command line. */
+	if (parent->cmdline && parent->cmdline_len) {
+		child->cmdline = kmalloc(parent->cmdline_len);
+		if (child->cmdline) {
+			memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
+			child->cmdline_len = parent->cmdline_len;
+		}
+	}
 	child->root         = parent->root;
 	child->umask = parent->umask;
 	child->ctty         = parent->ctty;
@@ -662,6 +691,14 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->ctty      = parent->ctty;
 	child->ctty_fops = parent->ctty_fops;
 
+	if (parent->cmdline && parent->cmdline_len) {
+		child->cmdline = kmalloc(parent->cmdline_len);
+		if (child->cmdline) {
+			memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
+			child->cmdline_len = parent->cmdline_len;
+		}
+	}
+
 	/* Threads share signal dispositions (CLONE_SIGHAND) but each has its own
 	 * blocked mask, inherited from the creator. */
 	child->sighand  = sighand_get(parent->sighand);
@@ -784,6 +821,7 @@ void proc_put(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 	if (free_now) {
 		cpu_affinity_free(p);
+		proc_cmdline_free(p);
 		p->magic = 0;
 		buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
 	}
@@ -1286,6 +1324,7 @@ void proc_reap(process_t *child)
 		buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
 	if (free_now) {
 		cpu_affinity_free(child);
+		proc_cmdline_free(child);
 		child->magic = 0;   /* poison before free: trips a later use-after-free */
 		buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	}
