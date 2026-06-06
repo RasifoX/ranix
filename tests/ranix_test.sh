@@ -561,6 +561,8 @@ check "smp-threads-ok" "OK" \
     "$(timeout 5 /bin/test_affinity 2>/dev/null | tail -1)"
 check "smp-cow-race" "OK" \
     "$(timeout 90 /bin/test_cowrace 2>/dev/null | tail -1)"
+check "smp-fd-close-race" "OK" \
+    "$(timeout 60 /bin/test_fdcloserace 2>/dev/null | tail -1)"
 check "c-tlbshoot" "OK" \
     "$(timeout 60 /bin/test_tlbshoot 2>/dev/null | tail -1)"
 
