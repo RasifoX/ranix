@@ -179,6 +179,16 @@ static process_t *find_proc(int pid)
 	return proc_get((pid_t)pid);
 }
 
+/* Address-space size in bytes: sum of mapped VMA extents. With no per-page
+ * present accounting this is our best VmSize/RSS proxy (Linux RSS counts
+ * resident pages; here everything mapped is treated resident). */
+static uint64_t proc_vm_bytes(process_t *p)
+{
+	uint64_t total = 0;
+	for (vma_t *v = p->vmas; v; v = v->next) total += v->size;
+	return total;
+}
+
 static int fill_proc_status(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
@@ -208,8 +218,11 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 		pb_u64(&b, p->groups[_i]);
 	}
 	pb_char(&b, '\n');
-	pb_str(&b, "VmSize:\t"); pb_u64(&b, (p->brk ? p->brk : 0) / 1024); pb_str(&b, " kB\n");
-	pb_str(&b, "VmRSS:\t"); pb_u64(&b, 64); pb_str(&b, " kB\n");
+	uint64_t vm_kb = proc_vm_bytes(p) / 1024;
+	pb_str(&b, "VmPeak:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
+	pb_str(&b, "VmSize:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
+	pb_str(&b, "VmHWM:\t");  pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
+	pb_str(&b, "VmRSS:\t");  pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "Threads:\t"); pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, '\n');
 	uint64_t sigign = 0, sigcgt = 0;
 	for (int _i = 0; p->sighand && _i < NSIG; _i++) {
@@ -254,9 +267,11 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	if (p->nice < 0) { pb_char(&b, '-'); pb_u64(&b, (uint64_t)(-p->nice)); } else pb_u64(&b, (uint64_t)p->nice);
 	pb_char(&b, ' ');                                           /* 19: nice */
 	pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, ' ');  /* 20: num_threads */
-	pb_str(&b, "0 0 ");                                         /* 21: itrealvalue, 22: starttime */
-	pb_u64(&b, p->brk);          pb_char(&b, ' ');              /* 23: vsize (bytes) */
-	pb_str(&b, "64 ");                                          /* 24: rss (pages, estimate) */
+	uint64_t vm_bytes = proc_vm_bytes(p);
+	pb_str(&b, "0 ");                                           /* 21: itrealvalue */
+	pb_u64(&b, p->start_tick);   pb_char(&b, ' ');              /* 22: starttime (ticks since boot) */
+	pb_u64(&b, vm_bytes ? vm_bytes : p->brk); pb_char(&b, ' '); /* 23: vsize (bytes) */
+	pb_u64(&b, vm_bytes / PAGE_SIZE); pb_char(&b, ' ');         /* 24: rss (pages) */
 	pb_str(&b, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");  /* 25-52 */
 	proc_put(p);
 	return (int)(sz - b.rem);
@@ -267,8 +282,9 @@ static int fill_proc_statm(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
 	pb_t b = {buf, sz};
-	uint64_t size = (p && p->brk) ? (p->brk / 4096) : 64;
-	uint64_t res  = 64;   /* RSS estimate (matches VmRSS in status) */
+	uint64_t vmpg = p ? proc_vm_bytes(p) / PAGE_SIZE : 0;
+	uint64_t size = vmpg ? vmpg : (p && p->brk ? p->brk / PAGE_SIZE : 64);
+	uint64_t res  = size;   /* resident == mapped (no per-page accounting) */
 	pb_u64(&b, size);                  pb_char(&b, ' ');   /* size     */
 	pb_u64(&b, res);                   pb_str(&b, " 0 1 0 ");/* resident shared text lib */
 	pb_u64(&b, size > 1 ? size - 1 : 0); pb_str(&b, " 0\n"); /* data dt */
