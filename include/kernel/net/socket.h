@@ -92,6 +92,7 @@ typedef struct socket {
     uint8_t     ts_ok;          /* both ends negotiated timestamps (RFC 7323) */
     uint32_t    ts_recent;      /* peer's latest TSval, echoed back as TSecr */
     process_t  *connect_waiter; /* blocking connect() / send() */
+    uint8_t     connect_inprog; /* nonblocking connect() in flight (EINPROGRESS) */
 
     /* TCP listen: incoming connection queue */
     int         backlog;
