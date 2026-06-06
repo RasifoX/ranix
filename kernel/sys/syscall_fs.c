@@ -667,6 +667,8 @@ static long sys_setpgid(pid_t pid, pid_t pgid) {
 static long sys_setuid(uid_t uid)
 {
 	process_t *p = task_current();
+	uid_t old_euid = p->euid;
+	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	if (p->euid == 0) {
 		p->uid = p->euid = p->suid = uid;
 	} else if (uid == p->uid || uid == p->suid) {
@@ -674,6 +676,7 @@ static long sys_setuid(uid_t uid)
 	} else {
 		return -1; /* EPERM */
 	}
+	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
 

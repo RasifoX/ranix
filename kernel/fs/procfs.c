@@ -325,8 +325,9 @@ static int fill_proc_filesystems(char *buf, size_t sz)
 
 static int fill_proc_maps(char *buf, size_t sz, int pid)
 {
-	process_t *p = find_proc(pid);
 	pb_t b = {buf, sz};
+	if (!proc_may_access(pid)) return (int)(sz - b.rem);   /* ptrace gate; empty on denial */
+	process_t *p = find_proc(pid);
 	if (!p) return (int)(sz - b.rem);
 	/* iterate VMAs */
 	for (vma_t *v = p->vmas; v; v = v->next) {
@@ -633,6 +634,7 @@ extern void arch_vm_switch(uint64_t root, unsigned asid);
 static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 {
 	procfs_inode_priv_t *pr = (procfs_inode_priv_t *)f->inode->priv;
+	if (!proc_may_access(pr->pid)) return -1;   /* EPERM — ptrace gate */
 	vm_space_t *vm = proc_get_vm(pr->pid);   /* pinned; vm_destroy to release */
 	if (!vm) return -3;   /* ESRCH */
 	process_t *cur = task_current();

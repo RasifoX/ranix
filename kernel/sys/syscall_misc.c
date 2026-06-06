@@ -428,6 +428,8 @@ static long sys_getrusage(int who, void *usage)
 static long sys_setreuid(uid_t ruid, uid_t euid)
 {
 	process_t *p = task_current();
+	uid_t old_euid = p->euid;
+	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
 	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
 	/* unprivileged: new values must come from the current triplet */
@@ -438,8 +440,9 @@ static long sys_setreuid(uid_t ruid, uid_t euid)
 	p->uid  = new_r;
 	p->euid = new_e;
 	/* setreuid: if ruid set or euid != old euid, update suid to new euid */
-	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != p->euid))
+	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != old_euid))
 		p->suid = new_e;
+	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
 
@@ -462,6 +465,8 @@ static long sys_setregid(gid_t rgid, gid_t egid)
 static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
 	process_t *p = task_current();
+	uid_t old_euid = p->euid;
+	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
 	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
 	uid_t new_s = (suid != (uid_t)-1) ? suid : p->suid;
@@ -471,6 +476,7 @@ static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 		if (new_s != p->uid && new_s != p->euid && new_s != p->suid) return -1;
 	}
 	p->uid = new_r; p->euid = new_e; p->suid = new_s;
+	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
 
