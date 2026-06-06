@@ -659,6 +659,13 @@ print("PYOK", acc, collections.Counter("mississippi")["s"])'
 	    "$(timeout 90 python3 -c "$PYPROG" 2>/dev/null | grep -c '^PYOK')"
 fi
 
+# ── Stock glibc: a host-gcc binary running a real glibc ld.so/__libc_start_main
+# startup against the shipped /lib64/ld-linux-x86-64.so.2 + libc.so.6. Guards the
+# kernel/glibc execution interaction (FPU/SSE init, auxv, relocs). x86_64 only. ──
+if [ -x /bin/c-glibc ]; then
+	check "c-glibc" "glibc-ok" "$(timeout 15 /bin/c-glibc 2>/dev/null)"
+fi
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
