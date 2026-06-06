@@ -8,6 +8,7 @@
 #include <drivers/serial/uart.h>
 #include <kernel/tty/fb_tty.h>
 #include <kernel/proc.h>
+#include <kernel/capabilities.h>
 
 /*
  * devfs — virtual device filesystem at /dev.
@@ -91,8 +92,18 @@ static vfs_fops_t urandom_fops = {
  * then EOF until more is logged), so `dmesg` shows the boot log; writes append
  * to the same ring via kprintf (the printk(3)/logger path). */
 
+/* dmesg_restrict (/proc/sys/kernel/dmesg_restrict): when set, only a privileged
+ * task may read the kernel log ring — the boot log carries addresses and device
+ * details useful to an attacker. Writes (logging) stay open. */
+extern int dmesg_restrict;
+
 static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 {
+	if (dmesg_restrict) {
+		process_t *c = task_current();
+		if (c && c->euid != 0 && !cap_has(c->cap_effective, CAP_SYS_ADMIN))
+			return -1;   /* EPERM */
+	}
 	size_t total = kprintf_log_len();
 	if ((size_t)f->pos >= total) return 0;
 	char *tmp = kmalloc(total ? total : 1);
