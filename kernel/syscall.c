@@ -631,6 +631,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_FLOCK:       ret = sys_flock((int)arg0, (int)arg1); break;
 	case SYS_ARCH_FSYNC:       ret = sys_fsync((int)arg0); break;
 	case SYS_ARCH_FDATASYNC:   ret = sys_fdatasync((int)arg0); break;
+	case SYS_ARCH_SYNC_FILE_RANGE: ret = sys_sync_file_range((int)arg0, (off_t)arg1, (off_t)arg2, (unsigned int)arg3); break;
 	case SYS_ARCH_FCHDIR:      ret = sys_fchdir((int)arg0); break;
 	case SYS_ARCH_GETRUSAGE:   ret = sys_getrusage((int)arg0, (void*)arg1); break;
 	case SYS_ARCH_SETREUID:    ret = sys_setreuid((uid_t)arg0, (uid_t)arg1); break;
