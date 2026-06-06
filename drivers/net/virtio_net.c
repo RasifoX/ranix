@@ -1,4 +1,5 @@
 #include <kernel/net/net.h>
+#include <kernel/hal.h>
 #include <kernel/fdt.h>
 #include <kernel/mm/vm.h>
 #include <kernel/mm/buddy.h>
@@ -507,7 +508,7 @@ static int vnet_pci_tx(netdev_t *dev, skb_t *skb)
     outw((uint16_t)(p->iobase + VIO_QUEUE_NOTIFY), 1);
 
     for (int i = 0; i < 100000; i++) {
-        __asm__ volatile("pause" ::: "memory");
+        cpu_relax();
         if (p->tx_used->idx != p->tx_last) break;
     }
     p->tx_last = p->tx_used->idx;
