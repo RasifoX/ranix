@@ -523,6 +523,7 @@ check "proc-capeff-nonzero" "1" \
     "$(awk '/^CapEff:/{print ($2 ~ /[1-9a-fA-F]/)?1:0}' /proc/self/status)"
 check "c-creds"        "OK"  "$(timeout 5 /bin/test_creds 2>/dev/null | tail -1)"
 check "c-forkbomb"     "OK"  "$(timeout 10 /bin/test_forkbomb 2>/dev/null | tail -1)"
+check "c-kptr"         "OK"  "$(timeout 10 /bin/test_kptr 2>/dev/null | tail -1)"
 check "c-compat"       "OK"  "$(timeout 5 /bin/test_compat 2>/dev/null | tail -1)"
 check "c-ifioctl"      "OK"  "$(timeout 5 /bin/test_ifioctl 2>/dev/null | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"

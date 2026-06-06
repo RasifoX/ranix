@@ -402,6 +402,15 @@ typedef struct {
 #define PROC_F_SYS_NFILE         42
 #define PROC_F_SYS_RANDOMIZE_VA  43
 #define PROC_F_SYS_CORE_PATTERN  44
+#define PROC_F_SYS_KPTR_RESTRICT  45
+#define PROC_F_SYS_DMESG_RESTRICT 46
+
+/* kernel.kptr_restrict: 0 = show kernel pointers, 1 = hide from non-root, 2 =
+ * hide from all. Default 1. No raw kernel pointer reaches /proc today, so this
+ * is the policy knob a %pK printer must consult once one is added.
+ * kernel.dmesg_restrict: 1 (default) restricts /dev/kmsg reads to privileged. */
+int kptr_restrict  = 1;
+int dmesg_restrict = 1;
 
 /* /proc/modules — monolithic kernel: no loadable modules (lsmod shows nothing). */
 static int fill_modules(char *buf, size_t sz) { (void)buf; (void)sz; return 0; }
@@ -556,6 +565,8 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_NFILE:        { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"4096\t0\t65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_CORE_PATTERN: { extern char core_pattern[128]; pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -601,6 +612,18 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		if (n > 0 && tmp[n-1] == '\n') n--;
 		memcpy(core_pattern, tmp, n);
 		core_pattern[n] = '\0';
+		return (ssize_t)len;
+	}
+	if (pr->type == PROC_F_SYS_KPTR_RESTRICT || pr->type == PROC_F_SYS_DMESG_RESTRICT) {
+		process_t *c = task_current();
+		if (c && c->euid != 0 && !cap_has(c->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		char tmp[16];
+		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+		if (copy_from_user(tmp, buf, n) != 0) return -14;
+		tmp[n] = '\0';
+		int v = (tmp[0] >= '0' && tmp[0] <= '9') ? tmp[0] - '0' : 0;
+		if (pr->type == PROC_F_SYS_KPTR_RESTRICT) { if (v > 2) v = 2; kptr_restrict = v; }
+		else                                       dmesg_restrict = v ? 1 : 0;
 		return (ssize_t)len;
 	}
 	return -1;
@@ -1773,8 +1796,10 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT },
 	{ "randomize_va_space", PROC_F_SYS_RANDOMIZE_VA },
 	{ "core_pattern",  PROC_F_SYS_CORE_PATTERN },
+	{ "kptr_restrict",  PROC_F_SYS_KPTR_RESTRICT  },
+	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
 };
-#define SYS_KERNEL_N 8
+#define SYS_KERNEL_N 10
 
 static procfs_sysfile_t sys_net_core_files[] = {
 	{ "somaxconn",       PROC_F_SYS_SOMAXCONN    },
@@ -1800,7 +1825,9 @@ static vfs_inode_t *procfs_sysfsdir_inode(void);
 static vfs_inode_t *procfs_sysfile_inode(int type)
 {
 	vfs_inode_t *in = procfs_inode_file(-1, type);
-	if (in && type == PROC_F_SYS_HOSTNAME)
+	if (in && (type == PROC_F_SYS_HOSTNAME ||
+	           type == PROC_F_SYS_KPTR_RESTRICT ||
+	           type == PROC_F_SYS_DMESG_RESTRICT))
 		in->mode = S_IFREG | 0644;
 	return in;
 }
