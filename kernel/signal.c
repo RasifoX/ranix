@@ -512,6 +512,7 @@ void signal_dispatch(arch_context_t *tf)
 		arch_get_cpu_ctx()->wd_where = "sig:badframe";
 		task_exit();
 	}
+	uaccess_begin();
 	*(uint64_t *)(usp +   0) = tf->elr;
 	*(uint64_t *)(usp +   8) = tf->regs[30];
 	*(uint64_t *)(usp +  16) = old_mask;
@@ -534,6 +535,7 @@ void signal_dispatch(arch_context_t *tf)
 		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
 		*(uint64_t *)(info + 24) = si.si_value;
 	}
+	uaccess_end();
 	tf->sp                   = usp;
 	tf->regs[30]             = sa->sa_restorer ? (uint64_t)sa->sa_restorer
 	                                            : tf->elr;
@@ -579,6 +581,7 @@ void signal_dispatch(arch_context_t *tf)
 		arch_get_cpu_ctx()->wd_where = "sig:badframe";
 		task_exit();
 	}
+	uaccess_begin();
 	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
 	*(uint64_t *)(usp +   8) = old_mask;
 	*(uint64_t *)(usp +  16) = tf->rip;
@@ -611,6 +614,7 @@ void signal_dispatch(arch_context_t *tf)
 		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
 		*(uint64_t *)(info + 24) = si.si_value;
 	}
+	uaccess_end();
 	tf->rsp                  = usp;
 	tf->rdi                  = (uint64_t)sig;
 	if (siginfo_wanted) {

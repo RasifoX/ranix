@@ -233,7 +233,9 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 			return -14;
 		uint64_t val = 0;
 		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
+		uaccess_begin();
 		val = *(volatile uint64_t *)addr;
+		uaccess_end();
 		arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 		(void)data;
 		return (long)val;
@@ -246,7 +248,9 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 		    !arch_vm_get_paddr(tracee->vm->root, addr & ~0xFFFUL))
 			return -14;
 		arch_vm_switch((uint64_t)tracee->vm->root, tracee->vm->asid);
+		uaccess_begin();
 		*(volatile uint64_t *)addr = (uint64_t)data;
+		uaccess_end();
 		arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 		return 0;
 	}

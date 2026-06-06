@@ -1005,11 +1005,15 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	char *kpath = kmalloc(PATH_MAX);
 	if (!kpath) return -12;
 	int i = 0;
+	/* path is user via SYS_ARCH_EXECVE, kernel via execveat (resolve_path). */
+	uaccess_begin();
 	while (i < PATH_MAX - 1 && path[i]) {
 		kpath[i] = path[i];
 		i++;
 	}
-	if (path[i]) { kfree(kpath); return -36; }   /* ENAMETOOLONG */
+	int too_long = path[i] != 0;
+	uaccess_end();
+	if (too_long) { kfree(kpath); return -36; }   /* ENAMETOOLONG */
 	kpath[i] = '\0';
 
 	/* Resolve #! interpreters and enforce execute permission before staging the
@@ -1090,10 +1094,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* a shebang prefix replaces argv[0]; skip the caller's argv[0] in that case */
 	int user_skip = shebang_n ? 1 : 0;
 	int user_argc = 0;
+	uaccess_begin();
 	if (argv) while (user_argc < max_ptrs && argv[user_argc]) user_argc++;
 	int user_start = (user_skip && user_argc > 0) ? 1 : 0;
 	argc = shebang_n + (user_argc - user_start);
 	if (envp) while (envc < max_ptrs && envp[envc]) envc++;
+	uaccess_end();
 
 	char **kargv = kmalloc((size_t)(argc + 1) * sizeof(char *));
 	char **kenvp = kmalloc((size_t)(envc + 1) * sizeof(char *));
@@ -1102,14 +1108,20 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #define EXEC_STAGE_FREE_PRE() do { for (int _k=0;_k<shebang_n;_k++) kfree(shebang_pre[_k]); } while (0)
 	int koff = 0;
 	for (int a = 0; a < argc; a++) {
+		/* shebang_pre[] is kernel; argv[] and the strings it points at are user.
+		 * Bracket only the user touches so kfree/return stays outside the window. */
+		uaccess_begin();
 		const char *s = (a < shebang_n) ? shebang_pre[a]
 		                                : argv[user_start + (a - shebang_n)];
 		int n = 0;
 		while (s[n]) n++;
+		uaccess_end();
 		if (koff + n + 1 > ARG_STR_MAX) {
 			EXEC_STAGE_FREE_PRE(); kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
 		}
+		uaccess_begin();
 		memcpy(kstrs + koff, s, n);
+		uaccess_end();
 		kstrs[koff + n] = '\0';
 		kargv[a] = kstrs + koff;
 		koff += n + 1;
@@ -1121,13 +1133,17 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * strings get appended below. */
 	int argv_bytes = koff;
 	for (int e = 0; e < envc; e++) {
+		uaccess_begin();
 		const char *s = envp[e];
 		int n = 0;
 		while (s[n]) n++;
+		uaccess_end();
 		if (koff + n + 1 > ARG_STR_MAX) {
 			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
 		}
+		uaccess_begin();
 		memcpy(kstrs + koff, s, n);
+		uaccess_end();
 		kstrs[koff + n] = '\0';
 		kenvp[e] = kstrs + koff;
 		koff += n + 1;
