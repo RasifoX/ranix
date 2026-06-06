@@ -8,16 +8,19 @@
 #define smp_rmb() __asm__ volatile("dsb ishld" ::: "memory")
 #define smp_wmb() __asm__ volatile("dsb ishst" ::: "memory")
 #define arch_flush_icache() __asm__ volatile("dsb ish; ic iallu; dsb ish; isb" ::: "memory")
+#define cpu_relax() __asm__ volatile("yield" ::: "memory")
 #elif defined(__x86_64__)
 #define smp_mb()  __asm__ volatile("mfence" ::: "memory")
 #define smp_rmb() __asm__ volatile("lfence" ::: "memory")
 #define smp_wmb() __asm__ volatile("sfence" ::: "memory")
 #define arch_flush_icache() __asm__ volatile("" ::: "memory")
+#define cpu_relax() __asm__ volatile("pause" ::: "memory")
 #else
 #define smp_mb()  __asm__ volatile("" ::: "memory")
 #define smp_rmb() __asm__ volatile("" ::: "memory")
 #define smp_wmb() __asm__ volatile("" ::: "memory")
 #define arch_flush_icache() __asm__ volatile("" ::: "memory")
+#define cpu_relax() __asm__ volatile("" ::: "memory")
 #endif
 
 void arch_halt(void);
