@@ -439,14 +439,20 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	child->ctty         = parent->ctty;
 	child->ctty_fops    = parent->ctty_fops;
 
+	/* The child gets its own (COW) address space, so deep-copy the parent space's
+	 * VMA list into the child space. Threads share a space and thus its VMAs;
+	 * only this fork-a-new-space path duplicates them. Read the parent list under
+	 * its fault_lock so a sibling thread's concurrent mmap/munmap can't tear it. */
 	{
-		vma_t **dst = &child->vmas;
-		for (vma_t *v = parent->vmas; v; v = v->next) {
+		uint64_t vlf = spin_lock_irq(&parent->vm->fault_lock);
+		vma_t **dst = &child->vm->vmas;
+		for (vma_t *v = parent->vm->vmas; v; v = v->next) {
 			vma_t *nv = kmalloc(sizeof(*nv));
-			if (!nv) goto fail_early;
+			if (!nv) { spin_unlock_irq(&parent->vm->fault_lock, vlf); goto fail_early; }
 			*nv = *v; nv->next = NULL;
 			*dst = nv; dst = &nv->next;
 		}
+		spin_unlock_irq(&parent->vm->fault_lock, vlf);
 	}
 
 	child->sighand = sighand_alloc(parent->sighand);   /* fork → private copy */
@@ -544,7 +550,6 @@ fail_early:
 	if (child->cgroup_ns) cgroup_ns_put(child->cgroup_ns);
 	if (owns_pidns) pid_ns_put(target_pidns);
 	cgroup_cancel_fork(parent);
-	for (vma_t *v = child->vmas, *nxt; v; v = nxt) { nxt = v->next; kfree(v); }
 	buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	return -1;
 }
@@ -1129,9 +1134,8 @@ void task_exit(void)
 		vm_activate();
 		vm_destroy(dying_vm);
 	}
-	arch_get_cpu_ctx()->wd_where = "exit:vmas";
-	vma_t *v = p->vmas; p->vmas = NULL;
-	while (v) { vma_t *nx = v->next; kfree(v); v = nx; }
+	/* The VMA list belongs to the address space, freed by vm_destroy above when
+	 * the last thread drops its reference — not per-thread here. */
 
 	/* Cleanup done — now mark dead and wake parent. */
 	arch_get_cpu_ctx()->wd_where = "exit:reparent";

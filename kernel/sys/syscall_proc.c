@@ -845,7 +845,7 @@ static long sys_sysinfo(void *info)
  * address space (stack + guard page + loaded segments), apply suid/sgid and the
  * capability transition, lay out the SysV initial stack (argv/envp/auxv), then
  * switch to the new space — freeing the old one only after the switch succeeds.
- * Relies on syscall.c helpers (vma_add, vma_free_all, rng_next) and the
+ * Relies on syscall.c helpers (vma_add, rng_next) and the
  * USER_STACK_/USER_MMAP_ macros, all in scope via the textual include.
  * ───────────────────────────────────────────────────────────────────────── */
 static long sys_execve(const char *path, char * const argv[], char * const envp[]);
@@ -1369,8 +1369,8 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	memset(kbuf, 0, ARG_WIN_BYTES);
 #define KB(va) (kbuf + (((va) - argbase) & (ARG_WIN_BYTES - 1)))
 
-	/* switch to new address space, freeing the old one */
-	vma_free_all(p);
+	/* switch to new address space; the old one's VMAs are freed by vm_destroy
+	 * when its last reference drops, and new_vm starts with an empty VMA list */
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
 	p->brk       = ei.load_end;
@@ -1526,7 +1526,6 @@ static long sys_exit(int code)
 {
 	process_t *p = task_current();
 	p->exit_code  = code;
-	vma_free_all(p);
 	task_exit();
 	return 0;
 }

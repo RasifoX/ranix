@@ -106,6 +106,7 @@ vm_space_t *vm_create(void)
 	if (!vs_phys) return NULL;
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
 	vs->root = NULL;
+	vs->vmas = NULL;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t l0_phys = alloc_table();
@@ -138,6 +139,9 @@ void vm_destroy(vm_space_t *vs)
 	if (!vs) return;
 	KASSERT(vs->magic == VM_SPACE_MAGIC);
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
+
+	extern void vma_free_space(vm_space_t *);
+	vma_free_space(vs);   /* last thread gone — the address space's regions die with it */
 
 	asid_free(vs->asid);   /* invalidates this tag's TLB entries on all CPUs */
 
@@ -443,6 +447,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	if (!new_vs_phys) return NULL;
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
 	new_vs->root = NULL;
+	new_vs->vmas = NULL;
 	new_vs->refcount = 1;
 	new_vs->asid = asid_alloc();
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;

@@ -1062,6 +1062,7 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	} else {
 		if ((flags & O_CREAT) && (flags & O_EXCL)) return -17; /* EEXIST */
 		inode = d->inode;
+		if (!inode) return -2; /* negative dentry — no backing inode, ENOENT */
 		if (flags & O_NOFOLLOW) {
 			/* note: vfs_lstat re-resolves and may mutate the dentry tree, so
 			 * cache inode above before calling it. */
