@@ -427,6 +427,8 @@ typedef struct {
 #define PROC_F_SYS_CORE_PATTERN  44
 #define PROC_F_SYS_KPTR_RESTRICT  45
 #define PROC_F_SYS_DMESG_RESTRICT 46
+#define PROC_F_SYS_MAX_MAP_COUNT  47
+#define PROC_F_SYS_SWAPPINESS     48
 
 /* kernel.kptr_restrict: 0 = show kernel pointers, 1 = hide from non-root, 2 =
  * hide from all. Default 1. No raw kernel pointer reaches /proc today, so this
@@ -590,6 +592,8 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_CORE_PATTERN: { extern char core_pattern[128]; pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -1816,13 +1820,20 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "domainname",    PROC_F_SYS_DOMAINNAME  },
 	{ "ngroups_max",   PROC_F_SYS_NGROUPS_MAX },
 	{ "pid_max",       PROC_F_SYS_PID_MAX     },
-	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT },
 	{ "randomize_va_space", PROC_F_SYS_RANDOMIZE_VA },
 	{ "core_pattern",  PROC_F_SYS_CORE_PATTERN },
 	{ "kptr_restrict",  PROC_F_SYS_KPTR_RESTRICT  },
 	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
 };
-#define SYS_KERNEL_N 10
+#define SYS_KERNEL_N 9
+
+/* /proc/sys/vm — overcommit_memory lives here in Linux (not under kernel.*) */
+static procfs_sysfile_t sys_vm_files[] = {
+	{ "max_map_count",     PROC_F_SYS_MAX_MAP_COUNT },
+	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT    },
+	{ "swappiness",        PROC_F_SYS_SWAPPINESS    },
+};
+#define SYS_VM_N 3
 
 static procfs_sysfile_t sys_net_core_files[] = {
 	{ "somaxconn",       PROC_F_SYS_SOMAXCONN    },
@@ -1844,6 +1855,7 @@ static vfs_inode_t *procfs_sysdir_inode(void);
 static vfs_inode_t *procfs_syskerneldir_inode(void);
 static vfs_inode_t *procfs_sysnetcoredir_inode(void);
 static vfs_inode_t *procfs_sysfsdir_inode(void);
+static vfs_inode_t *procfs_sysvmdir_inode(void);
 /* generic sysfile inode */
 static vfs_inode_t *procfs_sysfile_inode(int type)
 {
@@ -1997,20 +2009,56 @@ static vfs_inode_t *procfs_sysfsdir_inode(void)
 	return &d;
 }
 
-/* /proc/sys root — contains kernel/, net/, fs/ */
+/* /proc/sys/vm */
+static vfs_inode_t *procfs_sysvmdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < SYS_VM_N; i++)
+		if (strcmp(sys_vm_files[i].name, name) == 0)
+			return procfs_sysfile_inode(sys_vm_files[i].type);
+	return NULL;
+}
+static int procfs_sysvmdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)SYS_VM_N) return -1;
+	out->ino = 0xa400 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	const char *n = sys_vm_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+static vfs_iops_t procfs_sysvmdir_iops = {
+	.lookup  = procfs_sysvmdir_lookup,
+	.readdir = procfs_sysvmdir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_sysvmdir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa400; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_sysvmdir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
+/* /proc/sys root — contains kernel/, net/, fs/, vm/ */
 static vfs_inode_t *procfs_sysdir_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "kernel") == 0) return procfs_syskerneldir_inode();
 	if (strcmp(name, "net")    == 0) return procfs_sysnetdir_inode();
 	if (strcmp(name, "fs")     == 0) return procfs_sysfsdir_inode();
+	if (strcmp(name, "vm")     == 0) return procfs_sysvmdir_inode();
 	return NULL;
 }
 static int procfs_sysdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	static const char *subdirs[] = { "kernel", "net", "fs" };
-	if (idx >= 3) return -1;
+	static const char *subdirs[] = { "kernel", "net", "fs", "vm" };
+	if (idx >= 4) return -1;
 	out->ino = 0xa000 + idx; out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	const char *n = subdirs[idx];
 	int nlen = 0; while (n[nlen]) nlen++;
