@@ -185,6 +185,8 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
             if (pipe->writers > 0 || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
+            process_t *cur = task_current();
+            if (cur && (cur->sig_pending & ~cur->sig_mask)) { spin_unlock_irq(&pipe->lock, f); return -4; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     } else if (acc == O_WRONLY) {
@@ -192,6 +194,8 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
             f = spin_lock_irq(&pipe->lock);
             if (pipe->readers > 0) { spin_unlock_irq(&pipe->lock, f); break; }
             if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -6; /* ENXIO */ }
+            process_t *cur = task_current();
+            if (cur && (cur->sig_pending & ~cur->sig_mask)) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -4; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     }
