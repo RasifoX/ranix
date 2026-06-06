@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/auxv.h>
 
 #define NARGS 2000   /* > 64, total bytes > 16 KB */
 #define REPORT "/tmp/execargs.report"
@@ -104,6 +105,19 @@ static int run_too_long_path(void)
 	return errno == ENAMETOOLONG;
 }
 
+/* AT_RANDOM must point at 16 live, non-zero seed bytes — the stack canary and
+ * pointer guard derive from it. A zeroed (uninitialised) block means the kernel
+ * never filled the slot it reserved. */
+static int run_at_random(void)
+{
+	unsigned long ar = getauxval(AT_RANDOM);
+	if (!ar) return 0;
+	const unsigned char *r = (const unsigned char *)ar;
+	int nz = 0;
+	for (int i = 0; i < 16; i++) if (r[i]) nz++;
+	return nz != 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc >= 2 && strcmp(argv[1], "count") == 0)
@@ -113,8 +127,10 @@ int main(int argc, char **argv)
 	int ok_argv = run_big_argv(self);
 	int ok_long = run_long_path();
 	int ok_2big = run_too_long_path();
+	int ok_rand = run_at_random();
 
-	if (ok_argv && ok_long && ok_2big) puts("OK");
-	else printf("FAIL argv=%d long=%d toolong=%d\n", ok_argv, ok_long, ok_2big);
+	if (ok_argv && ok_long && ok_2big && ok_rand) puts("OK");
+	else printf("FAIL argv=%d long=%d toolong=%d rand=%d\n",
+	            ok_argv, ok_long, ok_2big, ok_rand);
 	return 0;
 }

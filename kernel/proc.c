@@ -253,8 +253,13 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	sp -= 16;
 	uint64_t at_random = sp;
-	sp -= 16;
-	strcpy((char *)sp, name);
+	{ extern void csprng_bytes(void *, size_t); csprng_bytes((void *)at_random, 16); }
+
+	size_t nlen_full = 0;
+	while (name[nlen_full] && nlen_full < PATH_MAX - 1) nlen_full++;
+	sp -= nlen_full + 1;
+	memcpy((char *)sp, name, nlen_full);
+	((char *)sp)[nlen_full] = '\0';
 	uint64_t at_execfn = sp;
 
 	sp &= ~15ULL;
