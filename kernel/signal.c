@@ -436,9 +436,20 @@ void signal_dispatch(arch_context_t *tf)
 
 	/* Job-control stop: SIG_DFL for SIGSTOP/TSTP/TTIN/TTOU stops the process.
 	 * SIGSTOP is uncatchable. We sleep here on the user-return path; SIGCONT (or
-	 * a fatal signal) resumes us via sig_cont_stop_locked clearing job_stopped. */
+	 * a fatal signal) resumes us via sig_cont_stop_locked clearing job_stopped.
+	 *
+	 * If the task is traced, a stopping signal is a ptrace group-stop: report it
+	 * to the tracer (unconditionally, not gated on waitpid WUNTRACED) and sleep
+	 * until PTRACE_CONT/DETACH or a fatal signal. Without this an ATTACH-induced
+	 * SIGSTOP on a sleeping tracee stops the task but the tracer's plain waitpid
+	 * never sees it — a permanent wedge. */
 	if (sig == SIGSTOP || (sig_default_stop(sig) && !handler)) {
-		job_stop_self(sig);
+		if (p->tracer) {
+			extern void ptrace_group_stop(int sig);
+			ptrace_group_stop(sig);
+		} else {
+			job_stop_self(sig);
+		}
 		return;
 	}
 
