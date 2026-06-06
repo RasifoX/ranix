@@ -117,6 +117,7 @@ else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
     QEMU_CMD    = qemu-system-x86_64 -cpu max -device isa-debug-exit,iobase=0x501,iosize=1
+    QEMU_NET    = -netdev user,id=n0 -device virtio-net-pci,netdev=n0
     QEMU_KERNEL = $(TARGET)
     SRCS_ARCH = \
         arch/x86_64/cpu.c \
@@ -203,6 +204,13 @@ APK_BASE          = https://dl-cdn.alpinelinux.org/alpine/v3.21/main/$(ARCH)
 APK_TOOLS_APK     = $(APK_BASE)/apk-tools-static-2.14.6-r3.apk
 APK_MUSL_APK      = $(APK_BASE)/musl-1.2.5-r11.apk
 APK_TREE_APK      = $(APK_BASE)/tree-2.2.1-r0.apk
+# Alpine's package-signing public keys. Shipped into /etc/apk/keys so a live
+# `apk add` verifies the signed APKINDEX + packages without --allow-untrusted.
+APK_KEYS_APK      = $(APK_BASE)/alpine-keys-2.5-r0.apk
+# Mozilla CA bundle (extracted from Alpine's ca-certificates-bundle apk) shipped
+# to /etc/ssl/certs so a live `apk add` over HTTPS verifies the mirror's TLS cert
+# (apk-tools' OpenSSL looks under OPENSSLDIR=/etc/ssl).
+APK_CACERTS_APK   = $(APK_BASE)/ca-certificates-bundle-20260413-r0.apk
 
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
@@ -267,6 +275,8 @@ BUSYBOX_EXTRACT    = $(CACHE_DIR)/busybox-$(ARCH)
 APK_DIR            = $(CACHE_DIR)/apk-$(ARCH)
 APK_STATIC_BIN     = $(APK_DIR)/apk.static
 APK_PKGS           = $(APK_DIR)/musl.apk $(APK_DIR)/tree.apk
+APK_KEYS_DIR       = $(APK_DIR)/keys
+APK_CACERTS        = $(APK_DIR)/ca-certificates.crt
 BASH_CACHED        = $(CACHE_DIR)/bash-dynamic-$(ARCH)
 CURL_BIN           = $(CACHE_DIR)/curl-$(ARCH)/src/curl
 SSL_SERVER_BIN     = $(CACHE_DIR)/mbedtls-$(ARCH)/ssl_server
@@ -352,6 +362,33 @@ $(APK_STATIC_BIN):
 	@chmod +x "$@"
 	@echo "[OK] apk.static for $(ARCH) ready ($$(du -h $@ | cut -f1))"
 
+# Alpine signing keys for the target arch, extracted from the cached alpine-keys
+# apk. The per-arch set under usr/share/apk/keys/$(ARCH) carries the key that
+# signs the v3.21 APKINDEX, so a live `apk add` verifies without --allow-untrusted.
+$(APK_KEYS_DIR):
+	@mkdir -p "$(APK_DIR)"
+	@if [ ! -f "$(APK_DIR)/alpine-keys.apk" ]; then \
+		echo "Downloading alpine-keys for $(ARCH)..."; \
+		wget -q "$(APK_KEYS_APK)" -O "$(APK_DIR)/alpine-keys.apk" || \
+		    { rm -f "$(APK_DIR)/alpine-keys.apk"; echo "ERROR: alpine-keys download failed"; exit 1; }; \
+	fi
+	@rm -rf "$@" "$(APK_DIR)/usr" && mkdir -p "$@"
+	@gzip -dc "$(APK_DIR)/alpine-keys.apk" 2>/dev/null | \
+	    tar x -C "$(APK_DIR)" usr/share/apk/keys 2>/dev/null
+	@cp "$(APK_DIR)"/usr/share/apk/keys/$(ARCH)/*.rsa.pub "$@/"
+
+# Mozilla CA bundle extracted from Alpine's ca-certificates-bundle apk, cached for
+# the initramfs so live HTTPS package fetches verify the mirror certificate.
+$(APK_CACERTS):
+	@mkdir -p "$(APK_DIR)"
+	@if [ ! -f "$(APK_DIR)/ca-certificates-bundle.apk" ]; then \
+		echo "Downloading ca-certificates-bundle for $(ARCH)..."; \
+		wget -q "$(APK_CACERTS_APK)" -O "$(APK_DIR)/ca-certificates-bundle.apk" || \
+		    { rm -f "$(APK_DIR)/ca-certificates-bundle.apk"; echo "ERROR: ca-certificates download failed"; exit 1; }; \
+	fi
+	@tar xzf "$(APK_DIR)/ca-certificates-bundle.apk" -C "$(APK_DIR)" etc/ssl/certs/ca-certificates.crt 2>/dev/null
+	@cp "$(APK_DIR)/etc/ssl/certs/ca-certificates.crt" "$@"
+
 # Extract the musl 1.2.5 ld-musl loader from the cached Alpine musl.apk; this is
 # the system loader (LDSO_SRC) shipped to /lib. Depends on apk-static, which
 # downloads musl.apk.
@@ -366,7 +403,7 @@ $(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
 	else echo "[skip] c-glibc: stock glibc toolchain/loader unavailable"; fi
 GLIBC_TEST_DEP = $(GLIBC_TEST_BIN)
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(APK_KEYS_DIR) $(APK_CACERTS) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -431,6 +468,12 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 		echo "$(ARCH)" > $(BUILD_DIR)/initramfs/etc/apk/arch; \
 		cp "$(APK_DIR)/musl.apk" $(BUILD_DIR)/initramfs/var/apkrepo/musl.apk; \
 		cp "$(APK_DIR)/tree.apk" $(BUILD_DIR)/initramfs/var/apkrepo/tree.apk; \
+		cp "$(APK_KEYS_DIR)"/*.rsa.pub $(BUILD_DIR)/initramfs/etc/apk/keys/ 2>/dev/null; \
+		if [ -f "$(APK_CACERTS)" ]; then \
+			mkdir -p $(BUILD_DIR)/initramfs/etc/ssl/certs; \
+			cp "$(APK_CACERTS)" $(BUILD_DIR)/initramfs/etc/ssl/certs/ca-certificates.crt; \
+			cp "$(APK_CACERTS)" $(BUILD_DIR)/initramfs/etc/ssl/cert.pem; \
+		fi; \
 	fi
 	@cp "$(DROPBEAR_BIN)" $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
@@ -755,7 +798,7 @@ ifeq ($(ARCH),x86_64)
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
 test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
 	@rm -f $(TEST_LOG)
-	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 3G -display none \
+	timeout $(TEST_TIMEOUT) $(QEMU_CMD) $(QEMU_NET) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
 	    -drive id=d0,file=$(BUILD_DIR)/gpt-test.img,format=raw,if=none \
 	    -device ich9-ahci,id=ahci -device ide-hd,drive=d0,bus=ahci.0 \
@@ -767,7 +810,7 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)
-	timeout $(TEST_TIMEOUT) $(QEMU_CMD) -smp 4 -m 512M -display none \
+	timeout $(TEST_TIMEOUT) $(QEMU_CMD) $(QEMU_NET) -smp 4 -m 512M -display none \
 	    -serial file:$(TEST_LOG) \
 	    -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio || true
 endif

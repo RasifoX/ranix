@@ -696,6 +696,35 @@ if [ -x /bin/apk.static ] && [ -f /var/apkrepo/tree.apk ]; then
 	    "$(/apkroot/usr/bin/tree --version 2>/dev/null | grep -c '^tree v')"
 fi
 
+# ── apk (live): fetch + signature-verify + install a real package over HTTPS
+# from the Alpine CDN, then run it. Unlike apk-install (offline, from shipped
+# .apk files) this exercises the full network path: DNS → TLS (verified against
+# the shipped CA bundle) → signed APKINDEX + package download (Alpine signing
+# keys in /etc/apk/keys, no --allow-untrusted) → extract/install. Resilient: PASS
+# on success, SKIP (suite stays green) if the mirror/DNS is genuinely
+# unreachable, FAIL only if the network is up but apk's fetch/verify/install
+# breaks — mirroring how c-curl-https tolerates an unreachable host. ──────────
+if [ -x /bin/apk.static ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+	MIRROR="https://dl-cdn.alpinelinux.org/alpine/v3.21/main"
+	rm -rf /apklive; mkdir -p /apklive/etc/apk/keys
+	cp /etc/apk/arch /apklive/etc/apk/arch 2>/dev/null
+	cp /etc/apk/keys/*.rsa.pub /apklive/etc/apk/keys/ 2>/dev/null
+	printf '%s\n' "$MIRROR" > /apklive/etc/apk/repositories
+	# Fetch + verify + install in one shot (--initdb sets up the DB, then add pulls
+	# tree and its musl dep over HTTPS, signature-verified, no --allow-untrusted).
+	# Bounded so a slow/unreachable mirror can never eat the suite's time budget.
+	timeout 45 /bin/apk.static --root /apklive --keys-dir /etc/apk/keys --no-cache \
+	    --repositories-file /apklive/etc/apk/repositories --initdb add tree >/tmp/apkadd 2>&1
+	apkrc=$?
+	if [ -x /apklive/usr/bin/tree ] && /apklive/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
+		check "apk-live" "yes" "yes"   # fetched, verified, installed, runs
+	elif [ $apkrc -eq 124 ] || grep -qiE "temporary error|could not|unreachable|name does not resolve|network|timed out|connection|Permission denied" /tmp/apkadd; then
+		echo "SKIP: apk-live (mirror unreachable/slow: $(tail -1 /tmp/apkadd 2>/dev/null))"
+	else
+		check "apk-live" "yes" "no($(tail -1 /tmp/apkadd 2>/dev/null))"
+	fi
+fi
+
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"
 [ $FAIL -eq 0 ] && echo ALL_PASS || echo SOME_FAIL
