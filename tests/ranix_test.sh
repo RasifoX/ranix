@@ -195,6 +195,7 @@ check "hungtask-selftest" "ok"     "$(dmesg 2>/dev/null | grep -q 'hungtask: sel
 check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'HUNG TASK: pid=' && echo ok)"
 check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
 check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
+check "c-proccmdline" "OK" "$(timeout 10 /bin/test_proccmdline 2>/dev/null)"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
@@ -271,7 +272,7 @@ check "proc-mountinfo"    "1"  "$([ -n "$(grep 'proc rw - proc' /proc/self/mount
 check "proc-uptime"       "1"  "$([ -f /proc/uptime ] && echo 1)"
 # busybox top in batch mode walks /proc/[pid]/stat + /proc/meminfo — exercises
 # the procfs process table end to end (a real "monitoring works" check).
-check "top-batch"         "1"  "$(top -bn1 2>/dev/null | grep -c 'PID')"
+check "top-batch"         "1"  "$(top -bn1 2>/dev/null | grep -c '^ *PID')"
 # more monitoring tools that read /proc + statfs — work now that those are real
 check "df-runs"           "1"  "$(df / 2>/dev/null | grep -c '/')"
 check "free-runs"         "1"  "$(free 2>/dev/null | grep -c -i 'mem')"
