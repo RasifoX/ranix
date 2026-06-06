@@ -198,10 +198,12 @@ static ssize_t fdproxy_read(vfs_file_t *f, void *buf, size_t len)
 	devfs_fdproxy_t *dp = f->inode->priv;
 	process_t *cur = task_current();
 	if (!cur || !cur->fds) return -9;
-	vfs_file_t *target = fd_get(cur->fds, dp->fd_n);
+	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking read */
 	if (!target || !target->inode || !target->inode->fops ||
-	    !target->inode->fops->read) return -9;
-	return target->inode->fops->read(target, buf, len);
+	    !target->inode->fops->read) { if (target) fput(target); return -9; }
+	ssize_t r = target->inode->fops->read(target, buf, len);
+	fput(target);
+	return r;
 }
 
 static ssize_t fdproxy_write(vfs_file_t *f, const void *buf, size_t len)
@@ -209,10 +211,12 @@ static ssize_t fdproxy_write(vfs_file_t *f, const void *buf, size_t len)
 	devfs_fdproxy_t *dp = f->inode->priv;
 	process_t *cur = task_current();
 	if (!cur || !cur->fds) return -9;
-	vfs_file_t *target = fd_get(cur->fds, dp->fd_n);
+	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking write */
 	if (!target || !target->inode || !target->inode->fops ||
-	    !target->inode->fops->write) return -9;
-	return target->inode->fops->write(target, buf, len);
+	    !target->inode->fops->write) { if (target) fput(target); return -9; }
+	ssize_t r = target->inode->fops->write(target, buf, len);
+	fput(target);
+	return r;
 }
 
 static vfs_fops_t fdproxy_fops = {
