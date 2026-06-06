@@ -680,6 +680,7 @@ Terminalde `claude` komutu çalışıyor. Masaüstü YOK — bu, v1.0'a giden so
 > yapılamaz (gerçek yazılım portu). 0.9.5'in Python/Node portuyla aynı kategoride, sıraya kondu.
 
 ### Claude CLI önkoşulları (özetle)
+- [x] **Kullanıcı VA 256 GB** ✅ (2026-06-06): `ARCH_USER_STACK_TOP` 2 GB→256 GB (iki arch), V8 pointer-compression cage (4 GB PROT_NONE) artık başarılı (c-bigmmap PASS). 1 GB-hugepage penceresi 252 GB'a taşındı; mmap tavanı onun altına sabitlendi. Slot-0 invariant (<512 GB) static-assert ile korunuyor. ASLR mmap entropisi 16→24 page-bit. Node'un kalan tek VA bloğu kalktı.
 - [ ] Node.js 20 dinamik linked → glibc + libstdc++ + libz gerekiyor
 - [x] DNS çalışıyor (api.anthropic.com çözülüyor) ✓ (v0.9) ✅ (getaddrinfo, gerçek NIC)
 - [x] TLS çalışıyor ✓ (v0.9) ✅ (mbedTLS, gerçek internet)
