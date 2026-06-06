@@ -689,6 +689,11 @@ if [ -x /bin/apk.static ] && [ -f /var/apkrepo/tree.apk ]; then
 	apkldso=$(ls /apkroot/lib/ld-musl-*.so.1 2>/dev/null | head -1)
 	check "apk-run" "1" \
 	    "$("$apkldso" /apkroot/usr/bin/tree --version 2>/dev/null | grep -c '^tree v')"
+	# tree carries DT_RELR relocations (musl >=1.2.3). Running it in place via
+	# its PT_INTERP /lib/ld-musl-*.so.1, no explicit loader, proves the system
+	# loader is 1.2.5 and applies RELR; a 1.2.2 loader skips RELR and segfaults.
+	check "apk-run-inplace" "1" \
+	    "$(/apkroot/usr/bin/tree --version 2>/dev/null | grep -c '^tree v')"
 fi
 
 echo "---"
