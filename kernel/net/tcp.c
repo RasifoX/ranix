@@ -471,10 +471,10 @@ static spinlock_t ephemeral_lock  = SPINLOCK_INIT;
 
 uint16_t alloc_port(void)
 {
-    spin_lock(&ephemeral_lock);
+    uint64_t f = spin_lock_irq(&ephemeral_lock);
     uint16_t p = next_ephemeral++;
     if (next_ephemeral == 0) next_ephemeral = 49152;
-    spin_unlock(&ephemeral_lock);
+    spin_unlock_irq(&ephemeral_lock, f);
     return p;
 }
 
