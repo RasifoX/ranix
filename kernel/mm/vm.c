@@ -113,6 +113,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	uint64_t lf = spin_lock_irq(&p->vm->fault_lock);
 	uint64_t paddr = arch_vm_get_paddr(p->vm->root, vaddr);
 	int ret = -1;
+	uint64_t cow_old = 0;   /* old COW page to free + shoot down after fault_lock */
 
 	/* No mapping — a stack expansion, or a demand fault into an anonymous VMA
 	 * whose pages were dropped (MADV_DONTNEED/FREE) and never re-touched. Both
@@ -217,7 +218,11 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		}
 #endif
 		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE | cow_exec) == 0) {
-			pmm_free((void *)paddr);
+			/* A multithreaded space shares this page table across CPUs: a sibling
+			 * thread may hold a stale writable TLB entry for the old page. Defer the
+			 * free and shoot the other CPUs down past fault_lock — a sibling spinning
+			 * for the lock IRQ-off must be able to ack the IPI. */
+			cow_old = paddr;
 			p->mem_charged += PAGE_SIZE;
 			ret = 0;
 		} else {
@@ -230,6 +235,13 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 
 out:
 	spin_unlock_irq(&p->vm->fault_lock, lf);
+	if (cow_old) {
+		if (p->vm->refcount > 1) {
+			extern void arch_tlb_flush_range(vm_space_t *, uint64_t, uint64_t);
+			arch_tlb_flush_range(p->vm, vaddr, vaddr + PAGE_SIZE);
+		}
+		pmm_free((void *)cow_old);
+	}
 	return ret;
 }
 
