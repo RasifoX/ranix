@@ -149,8 +149,10 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	 * protection violation — e.g. an mprotect'd read-only region — so leave
 	 * ret = -1 and let the caller raise SIGSEGV. Pages with no VMA (heap/brk)
 	 * fall through to the COW path below. */
+	uint32_t cow_exec = 0;   /* preserve executability across the COW remap */
 	for (vma_t *v = p->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
+			if (v->flags & VMA_EXEC) cow_exec = VM_EXEC;
 			if (v->flags & VMA_HUGE_1G) {
 				/* 1 GB hugepage COW: copy the whole block (hugetlb pages are
 				 * never split). Shared or sole-owner blocks just go writable. */
@@ -177,7 +179,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 				/* A file-backed shared page (not VMA_ANON) is the inode's own buffer,
 				 * kept off teardown's free path — preserve VM_NOFREE when remapping it
 				 * writable so vm_destroy doesn't free a page the file still owns. */
-				uint32_t wf = VM_USER | VM_READ | VM_WRITE;
+				uint32_t wf = VM_USER | VM_READ | VM_WRITE | cow_exec;
 				if (!(v->flags & VMA_ANON)) wf |= VM_NOFREE;
 				ret = vm_map(p->vm, vaddr, paddr, wf);
 				goto out;
@@ -196,7 +198,15 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		void *new_p = vm_pmm_page_oom();
 		if (!new_p) { cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); goto out; }
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
-		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE) == 0) {
+#if defined(__aarch64__)
+		if (cow_exec) {
+			uintptr_t pp = (uintptr_t)PHYS_TO_VIRT(new_p);
+			for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
+				__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
+			__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+		}
+#endif
+		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE | cow_exec) == 0) {
 			pmm_free((void *)paddr);
 			p->mem_charged += PAGE_SIZE;
 			ret = 0;
@@ -205,7 +215,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 			cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
 		}
 	} else {
-		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE);
+		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
 	}
 
 out:
