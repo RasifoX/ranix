@@ -38,6 +38,11 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 return read ? (ssize_t)read : -11; /* EAGAIN */
             }
+            process_t *cur = task_current();
+            if (cur && (cur->sig_pending & ~cur->sig_mask)) {
+                spin_unlock_irq(&pipe->lock, f);
+                return read ? (ssize_t)read : -4; /* EINTR */
+            }
             sleep_on_locked(&pipe->rd_wait, &pipe->lock, f);
             continue;
         }
@@ -75,6 +80,11 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
             if (file->flags & O_NONBLOCK) {
                 spin_unlock_irq(&pipe->lock, f);
                 return written ? (ssize_t)written : -11; /* EAGAIN */
+            }
+            process_t *cur = task_current();
+            if (cur && (cur->sig_pending & ~cur->sig_mask)) {
+                spin_unlock_irq(&pipe->lock, f);
+                return written ? (ssize_t)written : -4; /* EINTR */
             }
             sleep_on_locked(&pipe->wr_wait, &pipe->lock, f);
             continue;

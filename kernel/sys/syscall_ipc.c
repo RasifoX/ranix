@@ -101,10 +101,12 @@ static long sys_shmat(int shmid, const void *shmaddr, int shmflg)
     process_t *p = task_current();
     uint64_t va = (uint64_t)shmaddr;
     if (!va) {
-        /* kernel picks address */
-        va = p->mmap_next;
+        /* kernel picks address; the bump cursor is shared by all threads */
+        uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+        va = p->vm->mmap_next;
         if (!va) va = 0x50000000ULL;
-        p->mmap_next = va + size + PAGE_SIZE;
+        p->vm->mmap_next = va + size + PAGE_SIZE;
+        spin_unlock_irq(&p->vm->fault_lock, cf);
     }
 
     /* map physical pages of kaddr into user VA */

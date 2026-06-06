@@ -188,8 +188,8 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	}
 
 	p->brk          = ei.load_end;
-	p->mmap_next    = ARCH_USER_MMAP_BASE;
-	p->huge1g_next  = HUGE1G_VA_BASE;
+	p->vm->mmap_next    = ARCH_USER_MMAP_BASE;
+	p->vm->huge1g_next  = HUGE1G_VA_BASE;
 	p->vfork_parent = -1;
 	p->reaped       = 0;
 
@@ -209,12 +209,12 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 					vfs_read(ifd, ibuf, ist.size);
 					vfs_close(ifd);
 					elf_info_t ii = {0};
-					if (elf_load(p->vm, ibuf, (size_t)ist.size, p->mmap_next, &ii) == 0) {
+					if (elf_load(p->vm, ibuf, (size_t)ist.size, p->vm->mmap_next, &ii) == 0) {
 						jump_entry   = ii.entry;
-						at_base      = p->mmap_next;
+						at_base      = p->vm->mmap_next;
 						interp_lo    = ii.load_bias;
 						interp_hi    = ii.load_end;
-						p->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+						p->vm->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 					}
 				}
 				kfree(ibuf);
@@ -401,8 +401,6 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 		child->rlim_max[_ri] = parent->rlim_max[_ri];
 	}
 	child->brk       = parent->brk;
-	child->mmap_next = parent->mmap_next;
-	child->huge1g_next = parent->huge1g_next;
 	child->mlock_future = parent->mlock_future;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->no_new_privs = parent->no_new_privs;  /* sticky; pdeathsig is NOT inherited */
@@ -581,7 +579,6 @@ pid_t proc_vfork(void)
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->vm           = vm_get(parent->vm);
 	child->brk          = parent->brk;
-	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = parent->pid;
 	child->reaped       = 0;
 	child->fds          = fd_table_copy(parent->fds);
@@ -685,7 +682,6 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	child->dumpable     = parent->dumpable;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->brk          = parent->brk;
-	child->mmap_next    = parent->mmap_next;
 	child->vfork_parent = -1;
 
 	int nlen = 0;

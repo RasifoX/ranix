@@ -26,8 +26,10 @@ typedef struct {
 	uint64_t  *root;       /* physical address of top-level page table */
 	uint32_t   refcount;   /* number of processes/threads sharing this space */
 	uint32_t   asid;       /* aarch64 TLB tag (1..255; 0 = flush-on-switch); unused on x86 */
-	spinlock_t fault_lock; /* serializes fault resolution among shared threads */
+	spinlock_t fault_lock; /* serializes fault resolution + the cursors below among shared threads */
 	struct vma *vmas;      /* mapped-region list; shared by all threads of this space */
+	uint64_t   mmap_next;  /* bump cursor for anon/file mmap placement (shared by all threads) */
+	uint64_t   huge1g_next;/* bump cursor for the 1 GB-hugepage VA window (shared by all threads) */
 	uint32_t   magic;      /* VM_SPACE_MAGIC; corruption/use-after-free tripwire */
 } vm_space_t;
 
