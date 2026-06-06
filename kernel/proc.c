@@ -86,6 +86,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	p->sighand = sighand_alloc(NULL);
 	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
 	p->magic = PROC_MAGIC;
+	p->start_tick = kernel_ticks;
 
 	process_t *current = task_current();
 	p->ppid  = current ? current->pid : 0;
@@ -142,6 +143,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(p, 0, sizeof(*p));
 	p->magic = PROC_MAGIC;
+	p->start_tick = kernel_ticks;
 	p->sighand = sighand_alloc(NULL);
 	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
 
@@ -356,6 +358,7 @@ pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
+	child->start_tick = kernel_ticks;
 
 	/* cgroup pids limit: reject the fork if it would exceed pids.max. Charged
 	 * here; released by cgroup_cancel_fork on a later failure, or by
@@ -551,6 +554,7 @@ pid_t proc_vfork(void)
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
+	child->start_tick = kernel_ticks;
 
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;
@@ -655,6 +659,7 @@ pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *
 	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
+	child->start_tick = kernel_ticks;
 
 	child->ppid         = parent->pid;
 	child->pgrp         = parent->pgrp;

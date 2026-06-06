@@ -196,6 +196,7 @@ check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'HUNG TASK: pi
 check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
 check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
 check "c-proccmdline" "OK" "$(timeout 10 /bin/test_proccmdline 2>/dev/null)"
+check "c-procstat"    "OK" "$(timeout 8 /bin/test_procstat 2>/dev/null)"
 
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"

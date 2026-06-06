@@ -234,6 +234,9 @@ typedef struct process {
 	char           *cmdline;
 	uint32_t        cmdline_len;
 
+	/* kernel_ticks when the PCB was created, for /proc/<pid>/stat starttime */
+	uint64_t        start_tick;
+
 	/* namespaces (shared on fork, copied on unshare) */
 	struct uts_namespace  *uts_ns;
 	struct ipc_namespace  *ipc_ns;
