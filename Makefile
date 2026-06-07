@@ -28,14 +28,18 @@ ifeq ($(ARCH),aarch64)
     GLIBC_HOST_CC = aarch64-linux-gnu-gcc
     GLIBC_LDSO    = /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1
     GLIBC_LIBC    = /usr/aarch64-linux-gnu/lib/libc.so.6
+    GLIBC_LIBM    = /usr/aarch64-linux-gnu/lib/libm.so.6
     GLIBC_LDSO_DST = lib/ld-linux-aarch64.so.1
     GLIBC_LIBC_DST = lib/libc.so.6
+    GLIBC_LIBM_DST = lib/libm.so.6
 else
     GLIBC_HOST_CC = gcc
     GLIBC_LDSO    = /lib64/ld-linux-x86-64.so.2
     GLIBC_LIBC    = /lib/x86_64-linux-gnu/libc.so.6
+    GLIBC_LIBM    = /lib/x86_64-linux-gnu/libm.so.6
     GLIBC_LDSO_DST = lib64/ld-linux-x86-64.so.2
     GLIBC_LIBC_DST = lib/x86_64-linux-gnu/libc.so.6
+    GLIBC_LIBM_DST = lib/x86_64-linux-gnu/libm.so.6
 endif
 GLIBC_TEST_SRC = userspace/c_glibc.c
 GLIBC_TEST_BIN = $(BUILD_DIR)/c-glibc
@@ -221,6 +225,12 @@ APK_CACERTS_APK   = $(APK_BASE)/ca-certificates-bundle-20260413-r0.apk
 # applies to the x86_64 build (mirrors the x86_64-only gnu-echo); aarch64 skips.
 DEB_SUITE          = bookworm
 DEB_PKGS           = dpkg hello
+# apt itself + its dependency closure (libapt-pkg, gpgv, the http/https/file
+# methods, ...) plus the target package `tree`. Staged into the same Debian
+# rootfs as dpkg so `apt-get install` runs on-device against a local file repo
+# (offline, deterministic) and, when the network is up, against deb.debian.org.
+DEB_APT_TARGET     = tree
+DEB_APT_PKGS       = apt debian-archive-keyring
 
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
@@ -434,6 +444,8 @@ ifeq ($(ARCH),x86_64)
 		dpkg-deb --raw-extract "$(DEB_ROOTFS)/hello.deb" "$(DEB_ROOTFS)/.hellosrc" >/dev/null 2>&1 && \
 		    dpkg-deb -Zgzip --build "$(DEB_ROOTFS)/.hellosrc" "$(DEB_ROOTFS)/hello-gz.deb" >/dev/null 2>&1; \
 		rm -rf "$(DEB_ROOTFS)/.hellosrc"; \
+		sh scripts/stage-apt.sh "$(CACHE_DIR)" "$(DEB_SUITE)" "$(DEB_DIR)" "$(DEB_ROOTFS)" \
+		    $(DEB_APT_TARGET) $(DEB_APT_PKGS) || { echo "[skip] apt: staging failed"; }; \
 		touch "$@"; \
 		echo "[OK] Debian dpkg rootfs staged (x86_64)"; \
 	else echo "[skip] dpkg: dpkg-deb not on host, Debian package path unavailable"; fi
@@ -516,6 +528,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 		mkdir -p $(BUILD_DIR)/initramfs/$(dir $(GLIBC_LDSO_DST)) $(BUILD_DIR)/initramfs/$(dir $(GLIBC_LIBC_DST)); \
 		cp "$(GLIBC_LDSO)" $(BUILD_DIR)/initramfs/$(GLIBC_LDSO_DST); \
 		cp "$(GLIBC_LIBC)" $(BUILD_DIR)/initramfs/$(GLIBC_LIBC_DST); \
+		[ -e "$(GLIBC_LIBM)" ] && cp "$(GLIBC_LIBM)" $(BUILD_DIR)/initramfs/$(GLIBC_LIBM_DST); \
 		if [ "$(ARCH)" = "x86_64" ] && [ -x "$(GNU_COREUTILS_BIN)" ]; then \
 			cp "$(GNU_COREUTILS_BIN)" $(BUILD_DIR)/initramfs/bin/gnu-echo; \
 			chmod +x $(BUILD_DIR)/initramfs/bin/gnu-echo; \
