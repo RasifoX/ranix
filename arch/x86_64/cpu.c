@@ -32,6 +32,16 @@ void arch_set_user_kstack(uint64_t kstack_top)
 }
 
 void arch_halt(void)  { __asm__ volatile("hlt"); }
+
+void arch_idle_halt(volatile int *flag)
+{
+	__asm__ volatile("cli");
+	if (*flag) { __asm__ volatile("sti"); return; }
+	/* sti enables IRQs only after the *next* instruction, so sti;hlt is an
+	 * atomic pair: a resched IPI cannot slip in between, and the hlt wakes on it. */
+	__asm__ volatile("sti; hlt");
+}
+
 void arch_yield(void) { __asm__ volatile("int $0x40"); }
 
 cpu_context_t *arch_get_cpu_ctx(void)
