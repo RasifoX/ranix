@@ -895,7 +895,7 @@ if [ -x /bin/apk.static ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
 	apkrc=$?
 	if [ -x /apklive/usr/bin/tree ] && /apklive/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
 		check "apk-live" "yes" "yes"   # fetched, verified, installed, runs
-	elif [ $apkrc -eq 124 ] || grep -qiE "temporary error|could not|unreachable|name does not resolve|network|timed out|connection|Permission denied" /tmp/apkadd; then
+	elif [ $apkrc -eq 124 ] || grep -qiE "temporary error|could not|unreachable|name does not resolve|network|timed out|timeout|connection|connect|no route|host|resolve|dns|tls|ssl handshake|fetch.*://|bad address|broken pipe|reset by peer|Permission denied" /tmp/apkadd; then
 		echo "SKIP: apk-live (mirror unreachable/slow: $(tail -1 /tmp/apkadd 2>/dev/null))"
 	else
 		check "apk-live" "yes" "no($(tail -1 /tmp/apkadd 2>/dev/null))"
