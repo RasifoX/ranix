@@ -291,6 +291,18 @@ void wait_queue_init(wait_queue_t *q)
 	q->tasks = NULL;
 }
 
+/* caller holds q->lock; unlink curr if still queued */
+static void wq_unlink_locked(wait_queue_t *q, process_t *curr)
+{
+	for (process_t **pp = &q->tasks; *pp; pp = &(*pp)->wait_next)
+		if (*pp == curr) { *pp = curr->wait_next; curr->wait_next = NULL; return; }
+}
+
+/* A waiter must remove itself from the queue on every wakeup — not only wake_up
+ * but task_signal / the deadline sweep also flip a sleeper to READY, and those
+ * leave it linked. A stale node left in q->tasks corrupts a later wake_up walk
+ * (it follows a freed/dangling wait_next and drops the real waiters → lost
+ * wakeup). Self-unlink after the yield makes the queue correct for any waker. */
 void sleep_on(wait_queue_t *q)
 {
 	process_t *curr = task_current();
@@ -299,13 +311,16 @@ void sleep_on(wait_queue_t *q)
 	uint64_t f = spin_lock_irq(&q->lock);
 	curr->state = PROC_SLEEPING;
 	curr->sleeping_on_queue = 1;
-	/* Avoid duplicate entries (sched_tick may wake without removing) */
 	process_t *t = q->tasks; int found = 0;
 	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
 	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
 	spin_unlock_irq(&q->lock, f);
 
 	arch_yield();
+
+	f = spin_lock_irq(&q->lock);
+	wq_unlink_locked(q, curr);
+	spin_unlock_irq(&q->lock, f);
 }
 
 void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
@@ -319,24 +334,35 @@ void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
 	uint64_t f = spin_lock_irq(&q->lock);
 	curr->state = PROC_SLEEPING;
 	curr->sleeping_on_queue = 1;
-	/* Avoid duplicate entries (sched_tick may wake without removing) */
 	process_t *t = q->tasks; int found = 0;
 	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
 	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
 	spin_unlock_irq(&q->lock, f);
 	spin_unlock_irq(lock, irq_flags);
 	arch_yield();
+
+	f = spin_lock_irq(&q->lock);
+	wq_unlink_locked(q, curr);
+	spin_unlock_irq(&q->lock, f);
 }
 
 void wake_up(wait_queue_t *q)
 {
 	uint64_t f = spin_lock_irq(&q->lock);
+	/* Detach each node and read its wait_next BEFORE waking it: task_wake makes
+	 * the task runnable, so the instant it returns the task may resume on another
+	 * CPU and re-enqueue itself, overwriting p->wait_next mid-traversal — a read
+	 * after task_wake could follow a stale link and drop the remaining waiters
+	 * (lost wakeup). q->lock is held across the whole walk, so a woken task's
+	 * re-enqueue blocks until the list is fully drained. */
 	process_t *p = q->tasks;
-	while (p) {
-		task_wake(p);
-		p = p->wait_next;
-	}
 	q->tasks = NULL;
+	while (p) {
+		process_t *next = p->wait_next;
+		p->wait_next = NULL;
+		task_wake(p);
+		p = next;
+	}
 	spin_unlock_irq(&q->lock, f);
 }
 

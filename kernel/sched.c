@@ -480,7 +480,10 @@ static void idle_loop(void)
 			c->need_resched = 0;   /* consume the hint; runqueue is the truth */
 			arch_yield();
 		} else {
-			arch_halt();
+			/* Atomic re-check + halt: a resched IPI landing between the test
+			 * above and the halt must not be lost (else the woken task waits
+			 * runnable while this CPU sleeps until an unrelated tick). */
+			arch_idle_halt(&c->need_resched);
 		}
 	}
 }
