@@ -1044,7 +1044,8 @@ void task_exit(void)
 		 * the 0 before the wake — release ordering the bare store lacks. */
 		arch_get_cpu_ctx()->wd_where = "exit:ctid";
 		smp_mb();
-		*cctid = 0;
+		uint32_t zero = 0;
+		copy_to_user(cctid, &zero, sizeof(zero));   /* fault → ignore, like Linux put_user */
 		smp_mb();
 		arch_get_cpu_ctx()->wd_where = "exit:futex";
 		futex_wake_addr(cctid);
