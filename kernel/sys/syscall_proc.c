@@ -325,7 +325,11 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 			arch_yield();
 			f = spin_lock_irq(&futex_lock);
 			if (q.woken) { self->wake_deadline = 0; spin_unlock_irq(&futex_lock, f); return 0; }
-			int sig = (self->sig_pending & ~self->sig_mask) != 0;
+			/* Only a signal that will actually be delivered interrupts the wait.
+			 * An ignored (SIG_IGN) or non-fatal-default pending signal must not —
+			 * a process that ignores SIGPIPE would otherwise get a spurious EINTR
+			 * on a condvar wait. Mirrors pipe/event's task_has_actionable_signal. */
+			int sig = task_has_actionable_signal();
 			uint32_t c2;
 			int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
 			int tmo  = 0;
@@ -746,9 +750,8 @@ static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 	uint64_t ticks = (uint64_t)k.tv_sec * TIMER_HZ +
 	                 (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
 	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
-	process_t *cp = task_current();
 	while (kernel_ticks < end) {
-		if (cp->sig_pending & ~cp->sig_mask) return -4; /* EINTR */
+		if (task_has_actionable_signal()) return -4; /* EINTR (delivered signal only) */
 		task_sleep_until(end);
 	}
 	return 0;
