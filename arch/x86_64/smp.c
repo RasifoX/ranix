@@ -187,11 +187,12 @@ void arch_secondary_init(int cpu_id)
 	gdt_init(cpu_id);
 	idt_load();
 
-	/* Enable SSE */
+	/* Enable SSE; CR0.WP so ring-0 stores honour the read-only PTE bit (see
+	 * arch_cpu_init — kernel writes to COW user pages must fault, not write through). */
 	uint64_t cr0, cr4_val;
 	__asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
 	cr0 &= ~(1ULL << 2);
-	cr0 |= (1ULL << 1);
+	cr0 |= (1ULL << 1) | (1ULL << 16);
 	__asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
 	cr4_val |= (3ULL << 9);

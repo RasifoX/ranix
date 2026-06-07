@@ -702,11 +702,11 @@ fi
 # x86_64 only (Debian binaries are amd64); aarch64 simply skips.
 #
 # hello-gz.deb is the upstream hello repacked with gzip data compression (a
-# standard Debian compressor). The xz-compressed original (hello.deb) is still
-# checked as a known gap: liblzma decodes correctly in isolation (single-shot,
-# the streaming MT decoder, and dpkg's exact decode loop all PASS on-device), but
-# the real dpkg-deb <decompress> subprocess orchestration still reports the xz
-# data.tar member corrupt — tracked, not flaky, never fails the suite.
+# standard Debian compressor); hello.deb is the xz-compressed original. Both must
+# install: the xz path exercises dpkg-deb's fork+pipe <decompress> orchestration
+# where the decompressor child's pipe-read buffer straddles a fresh COW page —
+# the case CR0.WP must cover so a kernel write into that buffer faults for COW
+# instead of writing through to the still-shared physical page.
 if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello-gz.deb ]; then
 	export PATH="/usr/bin:/usr/sbin:/sbin:/bin:$PATH"
 	rm -f /usr/bin/hello
@@ -717,17 +717,14 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello
 	else
 		check "dpkg-install" "ok" "FAIL: $(tail -1 /tmp/dpkg.out 2>/dev/null)"
 	fi
-	# xz variant: tracked gap, reported but never a hard FAIL. liblzma decodes
-	# this data correctly in isolation on-device (single-shot, the MT decoder at
-	# 1/2/4 threads, chunked-fed, and the full fork+pipe <decompress> shape all
-	# verified), yet the stock dpkg-deb subprocess still reports it corrupt.
+	# xz variant: the stock dpkg-deb fork+pipe <decompress> path, end to end.
 	if [ -f /var/cache/hello.deb ]; then
 		rm -f /usr/bin/hello
 		timeout -s KILL 20 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg-xz.out 2>&1
 		if [ -x /usr/bin/hello ] && /usr/bin/hello 2>/dev/null | grep -q 'Hello, world!'; then
 			check "dpkg-install-xz" "ok" "ok"
 		else
-			echo "SKIP: dpkg-install-xz (known gap: dpkg-deb xz <decompress> reports data.tar corrupt; $(tail -1 /tmp/dpkg-xz.out 2>/dev/null))"
+			check "dpkg-install-xz" "ok" "FAIL: $(tail -1 /tmp/dpkg-xz.out 2>/dev/null)"
 		fi
 	fi
 	rm -f /usr/bin/hello
