@@ -23,12 +23,13 @@ def pkginfo(tar_bytes):
     info = {}
     isize = 0
     for m in t.getmembers():
-        if m.name in (".PKGINFO", "./.PKGINFO"):
+        base = m.name[2:] if m.name.startswith("./") else m.name
+        if base == ".PKGINFO":
             for line in t.extractfile(m).read().decode().splitlines():
                 if "=" in line and not line.startswith("#"):
                     k, v = line.split("=", 1)
                     info.setdefault(k.strip(), []).append(v.strip())
-        elif m.isreg():
+        elif m.isreg() and base not in (".BUILDINFO", ".MTREE"):
             isize += m.size
     info["_isize"] = [str(isize)]
     return info
