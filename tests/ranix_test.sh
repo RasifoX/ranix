@@ -347,6 +347,13 @@ check "proc-net-udp"    "1"  "$([ -f /proc/net/udp ] && echo 1)"
 # ── 36. C test: threads + tgid ────────────────────────────────
 check "c-threads"    "OK"  "$(timeout 8 /bin/test_threads 2>/dev/null)"
 
+# FP/SIMD register state across SMP context switch + migration (liblzma gate).
+check "c-fpusmp"     "OK"  "$(timeout 60 /bin/test_fpusmp 2>/dev/null | tail -1)"
+
+# A blocking futex must not EINTR on an ignored (SIG_IGN) pending signal: Linux
+# only interrupts a blocking syscall for a signal that is actually delivered.
+check "c-futexignsig" "OK" "$(timeout 15 /bin/test_futexignsig 2>/dev/null | tail -1)"
+
 # ── 37. C test: inotify ───────────────────────────────────────
 check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
 
@@ -710,7 +717,10 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello
 	else
 		check "dpkg-install" "ok" "FAIL: $(tail -1 /tmp/dpkg.out 2>/dev/null)"
 	fi
-	# xz variant: tracked gap, reported but never a hard FAIL.
+	# xz variant: tracked gap, reported but never a hard FAIL. liblzma decodes
+	# this data correctly in isolation on-device (single-shot, the MT decoder at
+	# 1/2/4 threads, chunked-fed, and the full fork+pipe <decompress> shape all
+	# verified), yet the stock dpkg-deb subprocess still reports it corrupt.
 	if [ -f /var/cache/hello.deb ]; then
 		rm -f /usr/bin/hello
 		timeout -s KILL 20 /usr/bin/dpkg -i /var/cache/hello.deb >/tmp/dpkg-xz.out 2>&1
