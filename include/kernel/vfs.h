@@ -151,6 +151,7 @@ typedef struct vfs_inode {
                                *    must not relocate it on grow (would dangle the mapping). */
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
+    uint32_t     priv_static; /* 1: priv borrows static/caller-owned data — do not kfree it */
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
     int64_t      atime, mtime, ctime;
     uint32_t     atime_nsec, mtime_nsec, ctime_nsec;
