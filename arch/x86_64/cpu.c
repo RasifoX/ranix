@@ -119,11 +119,14 @@ void arch_cpu_init(void)
 		:: "r"(gs_base) : "rax", "ecx", "rdx"
 	);
 
-	/* enable SSE and FXSAVE */
+	/* enable SSE and FXSAVE; CR0.WP so ring-0 stores honour the read-only PTE bit.
+	 * Without WP, a kernel write to a COW-write-protected user page (e.g. pipe_read
+	 * filling a user buffer that straddles a fresh COW page) writes through to the
+	 * still-shared physical page instead of faulting, corrupting both mappings. */
 	uint64_t cr0, cr4_val;
 	__asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
 	cr0 &= ~(1ULL << 2);
-	cr0 |= (1ULL << 1);
+	cr0 |= (1ULL << 1) | (1ULL << 16);
 	__asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
 
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
