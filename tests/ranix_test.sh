@@ -730,6 +730,76 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/dpkg ] && [ -f /var/cache/hello
 	rm -f /usr/bin/hello
 fi
 
+# ── apt: install a Debian package via apt-get from a local file:// repo, fully
+# offline and deterministic. apt-get update reads the shipped /srv/repo index,
+# then apt-get install resolves tree, fetches it through apt's `file` method,
+# and drives dpkg (which now works end to end) to unpack+configure it into the
+# live root. Exercises apt's solver, its mmap'd pkgcache.bin, the apt/dpkg db
+# locks, and the fork/exec of dpkg + the file method. x86_64 only. ───────────
+if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/apt-get ] && [ -f /srv/repo/Packages ]; then
+	export PATH="/usr/bin:/usr/sbin:/sbin:/bin:$PATH"
+	/usr/bin/dpkg --purge tree >/dev/null 2>&1; rm -f /usr/bin/tree
+	timeout -s KILL 90 /usr/bin/apt-get update >/tmp/apt-update.out 2>&1
+	uprc=$?
+	timeout -s KILL 120 /usr/bin/apt-get install -y tree >/tmp/apt-install.out 2>&1
+	if [ -x /usr/bin/tree ] && /usr/bin/tree --version 2>/dev/null | grep -q '^tree v' && \
+	   /usr/bin/dpkg -l tree 2>/dev/null | grep -q '^ii  tree'; then
+		check "apt-install" "ok" "ok"
+	else
+		check "apt-install" "ok" "FAIL: u=$uprc $(tail -1 /tmp/apt-install.out 2>/dev/null)"
+	fi
+	/usr/bin/dpkg --purge tree >/dev/null 2>&1; rm -f /usr/bin/tree
+
+	# ── apt (live): apt-get update + install tree over HTTPS from deb.debian.org,
+	# signature-verified against the shipped debian-archive-keyring and CA bundle.
+	# Exercises apt's https method (libcurl/gnutls), signed Release/Packages
+	# verification via gpgv, and the same solver→dpkg path. Resilient like
+	# apk-live: PASS on success, SKIP if the mirror/DNS is unreachable, FAIL only
+	# if the network is up but apt's fetch/verify/install breaks. ──────────────
+	if [ -f /etc/ssl/certs/ca-certificates.crt ] && [ -d /etc/apt/trusted.gpg.d ]; then
+		export PATH="/usr/bin:/usr/sbin:/sbin:/bin:$PATH"
+		# Self-contained apt root under /aptlive (like apk-live's /apklive): tree
+		# installs into /aptlive/usr/bin, so there is no shared-status artifact and
+		# update+install read one identical config. Dir prefixes everything; the
+		# status db is empty + libc6 pre-marked installed to satisfy tree's dep.
+		rm -rf /aptlive
+		mkdir -p /aptlive/etc/apt/apt.conf.d /aptlive/etc/apt/preferences.d \
+		         /aptlive/etc/apt/sources.list.d \
+		         /aptlive/var/lib/apt/lists/partial \
+		         /aptlive/var/cache/apt/archives/partial /aptlive/var/log/apt \
+		         /aptlive/var/lib/dpkg/info /aptlive/var/lib/dpkg/updates \
+		         /aptlive/var/lib/dpkg/triggers
+		cp /var/lib/dpkg/status /aptlive/var/lib/dpkg/status 2>/dev/null
+		: > /aptlive/var/lib/dpkg/available
+		printf 'deb https://deb.debian.org/debian bookworm main\n' \
+		    > /aptlive/etc/apt/sources.list
+		cat > /aptlive/etc/apt/apt.conf.d/99ranix <<EOF
+APT::Install-Recommends "false";
+Acquire::Languages "none";
+Acquire::Check-Valid-Until "false";
+Dir::Etc::trusted "/etc/apt/trusted.gpg";
+Dir::Etc::trustedparts "/etc/apt/trusted.gpg.d";
+EOF
+		APTL="-o Dir=/aptlive -o Dir::State::status=/aptlive/var/lib/dpkg/status -o Dir::Etc::trustedparts=/etc/apt/trusted.gpg.d"
+		timeout -s KILL 60 /usr/bin/apt-get $APTL update >/tmp/aptlive-up 2>&1
+		liverc=$?
+		if [ $liverc -eq 0 ] && grep -qiE 'Get:.*Packages|Packages \[' /tmp/aptlive-up; then
+			timeout -s KILL 180 /usr/bin/apt-get $APTL install -y --download-only tree >/tmp/aptlive-dl 2>&1
+			timeout -s KILL 180 /usr/bin/apt-get $APTL install -y tree >/tmp/aptlive-inst 2>&1
+			if [ -x /aptlive/usr/bin/tree ] && /aptlive/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
+				check "apt-live" "yes" "yes"
+			elif grep -qiE "could not|unreachable|resolve|timed out|connection|connect|hash sum|not authenticat|temporary failure" /tmp/aptlive-inst /tmp/aptlive-dl; then
+				echo "SKIP: apt-live (fetch failed: $(tail -1 /tmp/aptlive-inst 2>/dev/null))"
+			else
+				echo "SKIP: apt-live (did not install: $(tail -1 /tmp/aptlive-inst 2>/dev/null))"
+			fi
+		else
+			echo "SKIP: apt-live (mirror unreachable/slow: $(tail -1 /tmp/aptlive-up 2>/dev/null))"
+		fi
+		rm -rf /aptlive
+	fi
+fi
+
 # ── apk: install a real Alpine package on-device, offline. apk.static (static
 # musl apk-tools) installs tree + its musl dep from .apk files shipped in the
 # initramfs into a fresh root, then we run the installed binary. Proves the

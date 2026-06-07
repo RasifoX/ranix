@@ -139,6 +139,8 @@ static int pipe_poll(vfs_file_t *file)
     int r = 0;
     if (avail > 0) r |= 0x0001; /* POLLIN  */
     if (free  > 0) r |= 0x0004; /* POLLOUT */
+    if (pipe->writers == 0) r |= 0x0011; /* POLLHUP | POLLIN: drained EOF is readable */
+    if (pipe->readers == 0) r |= 0x0008; /* POLLERR: write end with no reader */
     return r;
 }
 
