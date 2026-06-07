@@ -103,6 +103,7 @@ static vfs_inode_t *tmpfs_inode_alloc(tmpfs_sb_t *sb, mode_t mode)
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;
+	in->cached   = 1;   /* fs-owned: freed via unlink/evict, never by the VFS transient-free path */
 	in->i_sb     = sb;
 	process_t *p = task_current();
 	in->uid = p ? p->euid : 0;

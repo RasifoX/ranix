@@ -51,6 +51,7 @@ static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 	in->mode     = mode;
 	in->nlink    = 1;
 	in->refcount = 1;
+	in->cached   = 1;   /* fs-owned: freed via unlink/evict, never by the VFS transient-free path */
 	process_t *p = task_current();
 	in->uid = p ? p->euid : 0;
 	in->gid = p ? p->egid : 0;
