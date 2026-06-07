@@ -479,7 +479,7 @@ static ssize_t inotify_read_vfs(vfs_file_t *file, void *buf, size_t len)
         }
         if (file->flags & O_NONBLOCK) { spin_unlock_irq(&inst->lock, f); return -11; }
         sleep_on_locked(&inst->rd_wait, &inst->lock, f);
-        if (task_current()->sig_pending & ~task_current()->sig_mask) return -4;
+        if (task_has_actionable_signal()) return -4; /* EINTR */
     }
 }
 
@@ -672,7 +672,7 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
                    ? (ssize_t)sizeof(info) : -14;
         }
         if (sfd->flags & O_NONBLOCK) return -11; /* EAGAIN */
-        if (p->sig_pending & ~p->sig_mask) return -4; /* EINTR */
+        if (task_has_actionable_signal()) return -4; /* EINTR */
         /* event-driven: task_signal wakes the reader when a signal is posted; the
          * poll_block backstop re-checks otherwise. Off the per-tick blanket wake. */
         poll_block((uint64_t)-1);
