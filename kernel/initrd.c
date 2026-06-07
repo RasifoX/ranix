@@ -2,6 +2,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/cmdline.h>
 
 uint64_t boot_initrd_start = 0;
 uint64_t boot_initrd_size  = 0;
@@ -92,6 +93,10 @@ void initrd_init(void)
     uint64_t ptr = vaddr;
     uint64_t end = vaddr + boot_initrd_size;
 
+    int verbose = cmdline_has("initrd.debug");
+    unsigned long nfiles = 0;
+    unsigned long nbytes = 0;
+
     while (ptr < end) {
         struct cpio_newc_header *hdr = (struct cpio_newc_header *)ptr;
         if (ptr + sizeof(*hdr) > end) break;
@@ -125,8 +130,11 @@ void initrd_init(void)
         const uint8_t *data = (const uint8_t *)data_offset;
 
         if (strcmp(name, ".") != 0) {
-            kprintf("initrd: extracted %s (size %u)\n", name, filesize);
+            if (verbose)
+                kprintf("initrd: extracted %s (size %u)\n", name, filesize);
             install(name, data, filesize, mode, uid, gid);
+            nfiles++;
+            nbytes += filesize;
         }
 
         /* Next header is after data, rounded up to 4 bytes */
@@ -134,7 +142,7 @@ void initrd_init(void)
         ptr = (ptr + 3) & ~3ULL;
     }
 
-    kprintf("initrd: unpack complete\n");
+    kprintf("initramfs: extracted %lu files, %lu bytes\n", nfiles, nbytes);
 
     /* /etc skeleton — only install if not already provided by initramfs */
     vfs_mkdir("/etc", 0755);
