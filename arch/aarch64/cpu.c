@@ -5,6 +5,19 @@
 static cpu_context_t early_cpu_ctx;
 
 void arch_halt(void)  { __asm__ volatile("wfi"); }
+
+void arch_idle_halt(volatile int *flag)
+{
+	/* Mask IRQs, then re-check: a wakeup that already set *flag is now seen with
+	 * no race. wfi still wakes on a pending physical IRQ even with PSTATE.I set
+	 * (it is an architectural wakeup event), so a resched IPI that lands while
+	 * masked breaks the wfi; we then unmask and the handler runs. */
+	__asm__ volatile("msr daifset, #2" ::: "memory");
+	if (*flag) { __asm__ volatile("msr daifclr, #2" ::: "memory"); return; }
+	__asm__ volatile("wfi");
+	__asm__ volatile("msr daifclr, #2" ::: "memory");
+}
+
 void arch_yield(void) { __asm__ volatile("svc #0"); }
 
 void arch_cpu_init(void)

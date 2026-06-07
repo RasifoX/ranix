@@ -24,6 +24,12 @@
 #endif
 
 void arch_halt(void);
+/* Idle-halt with a race-free wakeup check: disable IRQs, and only if *flag is
+ * still 0 enter the low-power halt atomically with re-enabling IRQs (x86 sti;hlt,
+ * aarch64 wfi which wakes on a pending IRQ regardless of the mask). Closes the
+ * window where a resched IPI lands between the idle loop's flag test and the
+ * halt — without it the woken task sits runnable while the CPU sleeps. */
+void arch_idle_halt(volatile int *flag);
 void arch_yield(void);
 void arch_cpu_init(void);
 
