@@ -25,7 +25,7 @@ extern volatile uint64_t kernel_ticks;
 
 /* ── kernel log ring buffer ───────────────────────────────── */
 
-#define LOG_BUF_SIZE (1 << 17)  /* 128 KB */
+#define LOG_BUF_SIZE (1 << 18)  /* 256 KB */
 
 static char   log_buf[LOG_BUF_SIZE];
 static size_t log_head = 0;
