@@ -7,6 +7,8 @@
 #include <kernel/lib/string.h>
 #include <kernel/config.h>
 
+extern int task_has_actionable_signal(void);
+
 typedef struct {
     uint8_t      *buffer;
     uint32_t      head;
@@ -38,8 +40,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 return read ? (ssize_t)read : -11; /* EAGAIN */
             }
-            process_t *cur = task_current();
-            if (cur && (cur->sig_pending & ~cur->sig_mask)) {
+            if (task_has_actionable_signal()) {
                 spin_unlock_irq(&pipe->lock, f);
                 return read ? (ssize_t)read : -4; /* EINTR */
             }
@@ -81,8 +82,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
                 spin_unlock_irq(&pipe->lock, f);
                 return written ? (ssize_t)written : -11; /* EAGAIN */
             }
-            process_t *cur = task_current();
-            if (cur && (cur->sig_pending & ~cur->sig_mask)) {
+            if (task_has_actionable_signal()) {
                 spin_unlock_irq(&pipe->lock, f);
                 return written ? (ssize_t)written : -4; /* EINTR */
             }
@@ -185,8 +185,7 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
             if (pipe->writers > 0 || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
-            process_t *cur = task_current();
-            if (cur && (cur->sig_pending & ~cur->sig_mask)) { spin_unlock_irq(&pipe->lock, f); return -4; }
+            if (task_has_actionable_signal()) { spin_unlock_irq(&pipe->lock, f); return -4; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     } else if (acc == O_WRONLY) {
@@ -194,8 +193,7 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
             f = spin_lock_irq(&pipe->lock);
             if (pipe->readers > 0) { spin_unlock_irq(&pipe->lock, f); break; }
             if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -6; /* ENXIO */ }
-            process_t *cur = task_current();
-            if (cur && (cur->sig_pending & ~cur->sig_mask)) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -4; }
+            if (task_has_actionable_signal()) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -4; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     }
