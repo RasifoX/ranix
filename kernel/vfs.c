@@ -141,7 +141,7 @@ static void vfs_inode_free(vfs_inode_t *in)
 {
 	if (!in || in->cached) return; /* cached=1: owned by dentry tree, pipe, or static */
 	vfs_inode_free_xattrs(in);
-	if (in->priv) kfree(in->priv);
+	if (in->priv && !in->priv_static) kfree(in->priv);
 	kfree(in);
 }
 

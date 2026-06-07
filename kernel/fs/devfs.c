@@ -332,6 +332,7 @@ static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 	in->refcount= 1;
 	in->fops    = e->fops;
 	in->priv    = e->priv;
+	in->priv_static = 1; /* e->priv is caller/driver-owned, not this inode's to free */
 	return in;
 }
 
@@ -353,6 +354,7 @@ static vfs_inode_t *devfs_subdir_make(const char *subdir_name)
 	in->iops     = &devfs_subdir_iops;
 	in->fops     = &devfs_dir_fops;
 	in->priv     = (void *)subdir_name;
+	in->priv_static = 1; /* borrows the static subdir name string */
 	return in;
 }
 
@@ -411,6 +413,7 @@ static vfs_inode_t *devfs_symlink_inode(const devfs_symlink_t *sl)
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->priv     = (void *)sl->target;
+	in->priv_static = 1; /* borrows the static symlink-target string */
 	in->size     = (uint64_t)strlen(sl->target);
 	in->iops     = &devfs_symlink_iops;
 	return in;
@@ -460,6 +463,7 @@ static vfs_inode_t *devfs_fdproxy_inode(devfs_fdproxy_t *dp)
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->priv     = dp;
+	in->priv_static = 1; /* borrows the static fdproxy descriptor */
 	in->fops     = &fdproxy_fops;
 	in->iops     = &devfs_fdproxy_iops;
 	return in;

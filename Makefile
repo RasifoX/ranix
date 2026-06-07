@@ -232,6 +232,14 @@ DEB_PKGS           = dpkg hello
 DEB_APT_TARGET     = tree
 DEB_APT_PKGS       = apt debian-archive-keyring
 
+# Arch Linux (glibc) package path: pacman + its runtime closure run under a
+# self-contained /opt/arch prefix against ARCH'S OWN glibc 2.43 (the Arch
+# toolchain links >= glibc 2.42, newer than the host glibc Ranix ships for the
+# Debian path). Fetched as .pkg.tar.zst on the HOST and shipped into the
+# initramfs so `pacman -U`/`-S` runs on-device, offline. x86_64 only; aarch64
+# skips (the payload is amd64 ELF). ARCH_PKG_TARGET is the package installed.
+ARCH_PKG_TARGET    = tree
+
 BASH_VER           = 5.2.37
 BASH_SRC_URL       = https://ftp.gnu.org/gnu/bash/bash-$(BASH_VER).tar.gz
 
@@ -309,6 +317,10 @@ PYTHON_ZIP         = $(CACHE_DIR)/python-$(ARCH)/python$(subst .,,$(PY_XY)).zip
 DEB_DIR            = $(CACHE_DIR)/deb-amd64
 DEB_ROOTFS         = $(CACHE_DIR)/deb-rootfs-amd64
 DEB_STAMP          = $(DEB_ROOTFS)/.stamp
+# Arch pacman staging (x86_64 only): ARCH_ROOTFS holds the /opt/arch prefix +
+# pacman wrapper + local file repo, ready to copy into the initramfs.
+ARCH_ROOTFS        = $(CACHE_DIR)/arch-rootfs-x86_64
+ARCH_STAMP         = $(ARCH_ROOTFS)/.stamp
 
 # mbedTLS — userspace TLS/HTTPS, cross-built static like bash/busybox
 MBEDTLS_VER    = 3.6.2
@@ -453,6 +465,23 @@ else
 	@true
 endif
 
+# Arch pacman + closure: fetch the .pkg.tar.zst set on the host, build the
+# self-contained /opt/arch prefix (Arch glibc + pacman + libalpm closure), the
+# pacman wrapper, an empty local db and a local file repo over the target
+# package. Needs python3 (drives libzstd via ctypes — the host has no zstd CLI)
+# and network to a package mirror; skips cleanly otherwise. x86_64 only.
+$(ARCH_STAMP):
+ifeq ($(ARCH),x86_64)
+	@if command -v python3 >/dev/null 2>&1; then \
+		rm -rf "$(ARCH_ROOTFS)"; mkdir -p "$(ARCH_ROOTFS)"; \
+		if sh scripts/stage-arch.sh "$(CACHE_DIR)" "$(ARCH_ROOTFS)" $(ARCH_PKG_TARGET); then \
+			touch "$@"; echo "[OK] Arch pacman rootfs staged (x86_64)"; \
+		else echo "[skip] pacman: Arch staging failed (mirror down?)"; fi; \
+	else echo "[skip] pacman: python3 not on host, Arch package path unavailable"; fi
+else
+	@true
+endif
+
 # Extract the musl 1.2.5 ld-musl loader from the cached Alpine musl.apk; this is
 # the system loader (LDSO_SRC) shipped to /lib. Depends on apk-static, which
 # downloads musl.apk.
@@ -474,9 +503,10 @@ $(GLIBC_SPAWN_BIN): $(GLIBC_SPAWN_SRC)
 GLIBC_TEST_DEP = $(GLIBC_TEST_BIN) $(GLIBC_SPAWN_BIN)
 ifeq ($(ARCH),x86_64)
 DEB_DEP = $(DEB_STAMP)
+ARCH_DEP = $(ARCH_STAMP)
 endif
 
-$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(APK_KEYS_DIR) $(APK_CACERTS) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(DEB_DEP) $(wildcard tests/ranix_test.sh)
+$(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) $(DROPBEAR_BIN) $(CURL_BIN) $(SSL_SERVER_BIN) $(PYTHON_BIN) $(APK_STATIC_BIN) $(APK_KEYS_DIR) $(APK_CACERTS) $(LDSO_SRC) $(GLIBC_TEST_DEP) $(DEB_DEP) $(ARCH_DEP) $(wildcard tests/ranix_test.sh)
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
@@ -543,6 +573,11 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 		mkdir -p $(BUILD_DIR)/initramfs/var/cache; \
 		cp "$(DEB_ROOTFS)/hello.deb" $(BUILD_DIR)/initramfs/var/cache/hello.deb; \
 		[ -f "$(DEB_ROOTFS)/hello-gz.deb" ] && cp "$(DEB_ROOTFS)/hello-gz.deb" $(BUILD_DIR)/initramfs/var/cache/hello-gz.deb; \
+	fi
+	@if [ "$(ARCH)" = "x86_64" ] && [ -f "$(ARCH_STAMP)" ]; then \
+		rm -rf $(BUILD_DIR)/initramfs/opt/arch $(BUILD_DIR)/initramfs/srv/pacmanrepo \
+		       $(BUILD_DIR)/initramfs/var/cache/pacman; \
+		(cd "$(ARCH_ROOTFS)" && find . -path ./.stamp -prune -o -print | cpio -pdu --quiet "$(CURDIR)/$(BUILD_DIR)/initramfs" 2>/dev/null); \
 	fi
 	@if [ -x "$(APK_STATIC_BIN)" ]; then \
 		cp "$(APK_STATIC_BIN)" $(BUILD_DIR)/initramfs/bin/apk.static; \
