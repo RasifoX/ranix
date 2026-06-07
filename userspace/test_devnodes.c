@@ -28,16 +28,27 @@ int main(void)
 
 	int rfd = open("/dev/kmsg", O_RDONLY);
 	check("kmsg-open-r", rfd >= 0);
-	char buf[65536];
-	int total = 0, n;
-	while (rfd >= 0 && (n = read(rfd, buf + total, sizeof(buf) - 1 - total)) > 0) {
+	/* The log ring can be larger than any reasonable fixed buffer and is
+	 * returned oldest-first, so the marker we just wrote is at the tail.
+	 * Drain incrementally, carrying a small overlap so the marker can't be
+	 * split across reads, instead of trying to hold the whole ring. */
+	char buf[8192];
+	int total = 0, n, found = 0;
+	const char *mk = "ranix-kmsg-marker-42";
+	size_t mklen = strlen(mk);
+	int carry = 0;
+	while (rfd >= 0 && (n = read(rfd, buf + carry, sizeof(buf) - 1 - carry)) > 0) {
+		int len = carry + n;
+		buf[len] = '\0';
 		total += n;
-		if (total >= (int)sizeof(buf) - 1) break;
+		if (strstr(buf, mk)) { found = 1; break; }
+		/* keep the last (mklen-1) bytes so a split marker is still found */
+		carry = (len >= (int)mklen - 1) ? (int)mklen - 1 : len;
+		memmove(buf, buf + len - carry, carry);
 	}
 	if (rfd >= 0) close(rfd);
-	buf[total > 0 ? total : 0] = '\0';
 	check("kmsg-nonempty", total > 0);
-	check("kmsg-has-marker", strstr(buf, "ranix-kmsg-marker-42") != NULL);
+	check("kmsg-has-marker", found);
 
 	/* /dev/rtc0: RTC_RD_TIME gives a plausible date (year >= 2020 = 120) */
 	int dfd = open("/dev/rtc0", O_RDONLY);
