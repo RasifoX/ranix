@@ -837,13 +837,7 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/pacman ] && [ -f /opt/arch/usr/
 		if [ -x /pacsroot/usr/bin/tree ] && /pacsroot/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
 			check "pacman-sync" "ok" "ok"
 		else
-			# `pacman -S` resolves+retrieves tree from the local file:// repo, but
-			# libalpm's file:// fetch (libcurl) copies the package into the cachedir
-			# corrupted, so its integrity check rejects it ("invalid or corrupted
-			# package") — even though `pacman -U` of the very same file installs it
-			# cleanly. A real libcurl-file:// copy gap on Ranix, tracked separately;
-			# SKIP (don't fail the suite) until the copy path is root-caused.
-			echo "SKIP: pacman-sync (file:// copy corrupts pkg in cachedir: $(tail -1 /tmp/pacman-s.out 2>/dev/null))"
+			check "pacman-sync" "ok" "FAIL: $(tail -1 /tmp/pacman-s.out 2>/dev/null)"
 		fi
 		rm -rf /pacsroot
 	fi
