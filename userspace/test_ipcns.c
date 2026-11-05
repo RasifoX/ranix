@@ -2,6 +2,7 @@
  * invisible in another. The child unshares CLONE_NEWIPC, so the queue the
  * parent created is absent there and O_CREAT|O_EXCL succeeds. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -13,7 +14,7 @@ int main(void)
 {
 	mq_unlink("/ipcns");
 	mqd_t q = mq_open("/ipcns", O_CREAT | O_RDWR, 0644, NULL);
-	if (q < 0) { printf("ipcns-fail create\n"); return 0; }
+	if (q < 0) { printf("ipcns-fail create errno=%d\n", errno); return 0; }
 
 	pid_t pid = fork();
 	if (pid == 0) {

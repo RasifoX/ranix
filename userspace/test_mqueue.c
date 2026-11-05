@@ -1,6 +1,7 @@
 /* POSIX message-queue blocking round-trip: the parent blocks in mq_receive
  * (empty queue) until the child sends, exercising the kernel's event-driven
  * recv wait + the sender's wake. */
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <string.h>
@@ -15,7 +16,7 @@ int main(void)
 	a.mq_maxmsg  = 4;
 	a.mq_msgsize = 64;
 	mqd_t q = mq_open("/rxt", O_CREAT | O_RDWR, 0600, &a);
-	if (q < 0) { puts("FAIL open"); return 1; }
+	if (q < 0) { printf("FAIL open errno=%d\n", errno); return 1; }
 
 	pid_t pid = fork();
 	if (pid == 0) {

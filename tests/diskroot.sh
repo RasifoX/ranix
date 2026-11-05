@@ -11,7 +11,7 @@ LOG=build/serial-test.log
 # Build the kernel/ISO and a fresh disk-root image. Clean first so a prior
 # build for another ARCH can't leave incompatible objects behind.
 make clean >/dev/null 2>&1
-make ARCH=x86_64 iso >/dev/null 2>&1 || { echo "[diskroot] iso build failed"; exit 1; }
+make ARCH=x86_64 ISO_CMDLINE=ranix.disk.rw=all iso >/dev/null 2>&1 || { echo "[diskroot] iso build failed"; exit 1; }
 rm -f build/diskroot.img
 make ARCH=x86_64 build/diskroot.img >/dev/null 2>&1 || { echo "[diskroot] image build failed"; exit 1; }
 
