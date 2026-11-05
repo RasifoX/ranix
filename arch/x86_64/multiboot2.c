@@ -113,7 +113,7 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
             mb2_module_t *mod = (mb2_module_t *)(p + 8);
             boot_initrd_start = (uint64_t)mod->mod_start;
             boot_initrd_size  = (uint64_t)(mod->mod_end - mod->mod_start);
-            kprintf("MB2: found module start=%x end=%x\n", mod->mod_start, mod->mod_end);
+            kprintf(KERN_DEBUG "boot: module start=0x%x end=0x%x\n", mod->mod_start, mod->mod_end);
         } else if (tag->type == MB2_TAG_TYPE_ACPI_OLD ||
                    tag->type == MB2_TAG_TYPE_ACPI_NEW) {
             /* The tag carries a copy of the RSDP; the boot identity map makes
@@ -134,7 +134,7 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
                 mb2_fb.green_shift = fb->green_pos;
                 mb2_fb.blue_shift  = fb->blue_pos;
                 mb2_fb_valid       = 1;
-                kprintf("MB2: framebuffer %dx%d @%llx R=%d G=%d B=%d\n",
+                kprintf(KERN_INFO "boot: framebuffer %dx%d at 0x%llx r=%d g=%d b=%d\n",
                         fb->width, fb->height, (unsigned long long)fb->addr,
                         fb->red_pos, fb->green_pos, fb->blue_pos);
             }

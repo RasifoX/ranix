@@ -121,7 +121,7 @@ int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
     mbox_buf[0] = i * sizeof(u32);
 
     if (mbox_call(MBOX_CH_PROP, mbox_buf) != 0) {
-        kprintf("fb: init failed\n");
+        kprintf(KERN_ERR "fb: init failed\n");
         return -1;
     }
 
@@ -130,7 +130,7 @@ int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
     u32 pitch       = mbox_buf[33];
 
     if (fb_bus_addr == 0) {
-        kprintf("fb: alloc failed\n");
+        kprintf(KERN_ERR "fb: alloc failed\n");
         return -1;
     }
 
@@ -146,7 +146,7 @@ int mbox_fb_init(u32 width, u32 height, fb_info_t *out) {
     out->green_shift = 8;
     out->blue_shift  = 16;
 
-    kprintf("fb: %dx%d, pitch %d, addr 0x%lx\n",
+    kprintf(KERN_INFO "fb: %dx%d, pitch %d, addr 0x%lx\n",
             width, height, pitch, (uint64_t)out->fb);
 
     return 0;

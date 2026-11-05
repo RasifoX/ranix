@@ -18,24 +18,43 @@ void pmm_hold(void *p)
 	spin_unlock_irq(&pmm_lock, f);
 }
 
-void pmm_free(void *p)
+int pmm_free(void *p)
 {
 	page_t *pg = paddr_to_page((uint64_t)p);
-	if (!pg || !(pg->flags & PG_MANAGED)) return;
+	if (!pg || !(pg->flags & PG_MANAGED)) return 0;
 
 	uint64_t f = spin_lock_irq(&pmm_lock);
 	if (pg->refcount == 0) {
 		spin_unlock_irq(&pmm_lock, f);
-		kprintf("pmm_free: double-free phys=%p\n", p);
-		return;
+		kprintf(KERN_ERR "mm: pmm_free double free phys=%p\n", p);
+		return 0;
 	}
 	pg->refcount--;
 	if (pg->refcount == 0) {
 		spin_unlock_irq(&pmm_lock, f);
 		buddy_free((uint64_t)p, 0);
-		return;
+		return 1;
 	}
 	spin_unlock_irq(&pmm_lock, f);
+	return 0;
+}
+
+/* Release a buddy block; returns the pages actually freed. With a page still
+ * mapped it goes page by page, so that page stays until the mapping lets go of it;
+ * otherwise whole, which keeps it out of the per-CPU caches, where its pages would
+ * stop the block from merging. */
+long pmm_free_block(uint64_t phys, int order)
+{
+	uint64_t n = 1ULL << order, f = spin_lock_irq(&pmm_lock);
+	int sole = 1;
+	for (uint64_t i = 0; i < n && sole; i++)
+		sole = paddr_to_page(phys + i * PAGE_SIZE)->refcount == 1;
+	spin_unlock_irq(&pmm_lock, f);
+	if (sole) { buddy_free(phys, order); return (long)n; }
+	long freed = 0;
+	for (uint64_t i = 0; i < n; i++)
+		freed += pmm_free((void *)(phys + i * PAGE_SIZE));
+	return freed;
 }
 
 uint64_t pmm_free_pages(void) { return buddy_free_pages(); }

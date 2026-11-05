@@ -38,7 +38,7 @@ void hugetlb_1g_reserve(uint64_t base, int nblocks)
 		pool_n++;
 	}
 	if (nblocks > 0)
-		kprintf("hugetlb: reserved %d x 1G @ %lu GB\n",
+		kprintf(KERN_INFO "mm: hugetlb reserved %d x 1 GB at %lu GB\n",
 		        nblocks, (unsigned long)(base >> 30));
 }
 
