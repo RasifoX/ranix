@@ -32,6 +32,7 @@
 
 #define VRING_DESC_F_NEXT     1
 #define VRING_DESC_F_WRITE    2   /* device writes this descriptor */
+#define VRING_AVAIL_F_NO_INTERRUPT 1
 
 typedef struct {
 	uint64_t addr;
@@ -159,14 +160,14 @@ static int vblk_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 		while (p->used->idx == p->last_used_idx) {
 			cpu_relax();
 			if (++spin > 10000000) {
-				kprintf("virtio-blk: timeout lba=%lu\n", lba + i);
+				kprintf(KERN_ERR "virtio_blk: timeout lba=%lu\n", lba + i);
 				return -1;
 			}
 		}
 		p->last_used_idx = p->used->idx;
 
 		if (*stat != 0) {
-			kprintf("virtio-blk: read error lba=%lu status=%u\n", lba + i, *stat);
+			kprintf(KERN_ERR "virtio_blk: read error lba=%lu status=%u\n", lba + i, *stat);
 			return -1;
 		}
 
@@ -221,14 +222,14 @@ static int vblk_write(block_device_t *dev, uint64_t lba, const void *buf, uint64
 		while (p->used->idx == p->last_used_idx) {
 			cpu_relax();
 			if (++spin > 10000000) {
-				kprintf("virtio-blk: write timeout lba=%lu\n", lba + i);
+				kprintf(KERN_ERR "virtio_blk: write timeout lba=%lu\n", lba + i);
 				return -1;
 			}
 		}
 		p->last_used_idx = p->used->idx;
 
 		if (*stat != 0) {
-			kprintf("virtio-blk: write error lba=%lu status=%u\n", lba + i, *stat);
+			kprintf(KERN_ERR "virtio_blk: write error lba=%lu status=%u\n", lba + i, *stat);
 			return -1;
 		}
 	}
@@ -240,12 +241,12 @@ static int vblk_write(block_device_t *dev, uint64_t lba, const void *buf, uint64
 void virtio_blk_init(void)
 {
 #if !defined(__x86_64__)
-	kprintf("virtio-blk: not available on this arch\n");
+	kprintf(KERN_DEBUG "virtio_blk: not available on this arch\n");
 	return;
 #else
 	uint8_t bus, devn, fn;
 	if (pci_find(0x1AF4, 0x1001, &bus, &devn, &fn) != 0) {
-		kprintf("virtio-blk: not found\n");
+		kprintf(KERN_DEBUG "virtio_blk: not found\n");
 		return;
 	}
 
@@ -282,6 +283,10 @@ void virtio_blk_init(void)
 	vring_desc_t  *desc  = (vring_desc_t  *)vblk_vring;
 	vring_avail_t *avail = (vring_avail_t *)(vblk_vring + 4096);
 	vring_used_t  *used  = (vring_used_t  *)(vblk_vring + 8192);
+
+	/* Polled driver: an unacknowledged interrupt would hold a shared PCI line
+	 * asserted and storm whichever device enabled it. */
+	avail->flags = VRING_AVAIL_F_NO_INTERRUPT;
 	uint8_t       *req_page = vblk_req;
 
 	uint64_t vring_phys = VIRT_TO_PHYS((uint64_t)vblk_vring);
@@ -307,7 +312,7 @@ void virtio_blk_init(void)
 	g_dev.priv        = &g_priv;
 
 	if (block_device_register(&g_dev) == 0)
-		kprintf("virtio-blk: %lu MB at I/O 0x%x\n",
+		kprintf(KERN_INFO "virtio_blk: %lu MB at io 0x%x\n",
 		        capacity >> 11, iobase);
 #endif
 }

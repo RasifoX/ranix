@@ -224,7 +224,7 @@ static void setup_queue(vnet_priv_t *p, int qidx,
     /* find order */
     int ord = 0; while ((1u << ord) < pages) ord++;
     void *phys = buddy_alloc(ord);
-    if (!phys) { kprintf("virtio-net: OOM for queue %d\n", qidx); return; }
+    if (!phys) { kprintf(KERN_ERR "virtio_net: out of memory for queue %d\n", qidx); return; }
     void *virt = (void *)PHYS_TO_VIRT(phys);
     memset(virt, 0, (size_t)pages * 4096);
 
@@ -311,6 +311,8 @@ static void vnet_poll(netdev_t *dev)
                 memcpy(skb->data, pkt, pkt_len);
                 skb->len = (uint16_t)pkt_len;
                 netdev_rx_enqueue(dev, skb);
+            } else {
+                netdev_rx_drop(dev);
             }
         }
 
@@ -431,7 +433,7 @@ static void probe_mmio(uint64_t phys, uint64_t size, void *ud)
         ((phys - VNET_MMIO_BASE) % 0x200) == 0)
         irq = VNET_MMIO_IRQ0 + (uint32_t)((phys - VNET_MMIO_BASE) / 0x200);
 
-    kprintf("virtio-net: found at 0x%lx irq=%u\n", phys, irq);
+    kprintf(KERN_INFO "virtio_net: found at 0x%lx irq=%u\n", phys, irq);
     virtio_net_setup(r, irq);
     g_init_done = 1;
 }
@@ -440,7 +442,7 @@ void virtio_net_init(void)
 {
     fdt_foreach_node("virtio_mmio", probe_mmio, NULL);
     if (!g_init_done)
-        kprintf("virtio-net: no device found\n");
+        kprintf(KERN_DEBUG "virtio_net: no device found\n");
 }
 
 #endif /* !__x86_64__ */
@@ -537,6 +539,8 @@ static void vnet_pci_poll(netdev_t *dev)
                 memcpy(skb->data, pkt, pkt_len);
                 skb->len = (uint16_t)pkt_len;
                 netdev_rx_enqueue(dev, skb);
+            } else {
+                netdev_rx_drop(dev);
             }
         }
 
@@ -593,7 +597,7 @@ void virtio_net_pci_init(void)
 {
     uint8_t bus, devn, fn;
     if (pci_find(0x1AF4, 0x1000, &bus, &devn, &fn) != 0) {
-        kprintf("virtio-net: PCI not found\n");
+        kprintf(KERN_DEBUG "virtio_net: not found on pci\n");
         return;
     }
 
@@ -624,7 +628,7 @@ void virtio_net_pci_init(void)
     for (int i = 0; i < 6; i++)
         g_pci_dev.mac[i] = inb((uint16_t)(iobase + VIO_NET_MAC + i));
 
-    kprintf("virtio-net: PCI found iobase=0x%x mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+    kprintf(KERN_INFO "virtio_net: pci iobase=0x%x mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
             iobase,
             g_pci_dev.mac[0], g_pci_dev.mac[1], g_pci_dev.mac[2],
             g_pci_dev.mac[3], g_pci_dev.mac[4], g_pci_dev.mac[5]);
