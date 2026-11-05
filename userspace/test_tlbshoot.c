@@ -2,18 +2,14 @@
  * Cross-CPU TLB shootdown test.
  *
  * Reader threads pinned to distinct CPUs tight-loop reading a shared page,
- * pulling a valid translation into each CPU's TLB and bumping a per-thread
- * progress counter every read. The main thread (pinned to CPU 0) then
- * mprotect(PROT_NONE)s the page. x86 invlpg is CPU-local, so without a
- * cross-CPU shootdown a sibling keeps its stale readable entry and keeps
- * reading — its counter keeps climbing. With the shootdown every sibling's TLB
- * is flushed and its next read faults; Ranix kills the faulting thread (it does
- * not deliver a catchable in-thread SIGSEGV — see test_mmap), so the counter
- * freezes.
+ * pulling a valid translation into each CPU's TLB. The main thread (pinned to
+ * CPU 0) then drops the page with MADV_DONTNEED. x86 invlpg is CPU-local, so
+ * without a cross-CPU shootdown a sibling keeps its stale entry and keeps reading
+ * the old value from a page that may already belong to someone else. With the
+ * shootdown its next read demand-faults a zero page.
  *
- * PASS = after the barrier every reader's counter stops advancing (all readers
- * faulted -> TLBs were flushed cross-CPU). A counter that keeps climbing past
- * the barrier proves a stale TLB (shootdown missing/broken).
+ * PASS = every reader sees the value change. A fault cannot be the signal here:
+ * it would end the whole process, not the one thread.
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -32,8 +28,8 @@
 #define VALUE_A  0xC0FFEE42u
 
 static volatile uint32_t *page;
-static volatile int barrier;             /* main flips after mprotect(PROT_NONE) */
-static volatile unsigned long progress[NREADERS];
+static volatile int warmed[NREADERS];
+static volatile int saw_change[NREADERS];
 
 static void pin(int cpu)
 {
@@ -48,15 +44,10 @@ static void *reader(void *arg)
 
 	uint32_t acc = 0;
 	for (int i = 0; i < 100000; i++) acc += page[0];   /* warm this CPU's TLB */
-	while (!barrier) acc += page[0];
-
-	/* PROT_NONE now. Each read faults once the TLB is flushed, killing this
-	 * thread mid-loop and freezing progress[id]. A stale TLB keeps it climbing. */
-	for (;;) {
-		acc += page[0];
-		progress[id]++;
-	}
-	return NULL;
+	warmed[id] = 1;
+	while (page[0] == VALUE_A) acc++;
+	saw_change[id] = 1;
+	return (void *)(long)acc;
 }
 
 int main(void)
@@ -71,22 +62,18 @@ int main(void)
 	for (int i = 0; i < NREADERS; i++)
 		pthread_create(&t[i], NULL, reader, (void *)(long)i);
 
-	usleep(200000);                      /* let readers warm their TLBs */
-	if (mprotect((void *)page, 4096, PROT_NONE) != 0) { puts("FAIL mprotect"); return 1; }
-	__sync_synchronize();
-	barrier = 1;
+	for (int i = 0; i < NREADERS; i++)
+		while (!warmed[i]) usleep(1000);
+	if (madvise((void *)page, 4096, MADV_DONTNEED) != 0) { puts("FAIL madvise"); return 1; }
 
-	usleep(100000);                      /* let post-barrier reads fault */
-	unsigned long a[NREADERS];
-	for (int i = 0; i < NREADERS; i++) a[i] = progress[i];
-	usleep(300000);                      /* faulted threads are dead: frozen */
-
+	usleep(400000);
 	for (int i = 0; i < NREADERS; i++) {
-		if (progress[i] != a[i]) {
+		if (!saw_change[i]) {
 			printf("FAIL reader %d still reading (stale cross-CPU TLB)\n", i);
 			return 1;
 		}
 	}
+	for (int i = 0; i < NREADERS; i++) pthread_join(t[i], NULL);
 	puts("OK");
 	return 0;
 }

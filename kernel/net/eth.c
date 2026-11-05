@@ -32,5 +32,5 @@ skb_t *eth_alloc(netdev_t *dev, const uint8_t *dst_mac, uint16_t ethertype)
 
 int eth_tx(netdev_t *dev, skb_t *skb)
 {
-    return dev->tx(dev, skb);
+    return netdev_tx(dev, skb);
 }

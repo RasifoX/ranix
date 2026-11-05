@@ -66,6 +66,17 @@ int main(void)
 	CHECK(rb[0] == 'x' && rb[4095] == 'x');
 	close(fd);
 
+	/* rename across directories, over an existing name, and of a directory */
+	CHECK(mkdir("/tmp/tfs/d1", 0755) == 0 && mkdir("/tmp/tfs/d2", 0755) == 0);
+	close(open("/tmp/tfs/d1/f", O_CREAT | O_WRONLY, 0644));
+	close(open("/tmp/tfs/d2/g", O_CREAT | O_WRONLY, 0644));
+	CHECK(rename("/tmp/tfs/d1/f", "/tmp/tfs/d2/g") == 0);
+	CHECK(access("/tmp/tfs/d1/f", F_OK) != 0 && access("/tmp/tfs/d2/g", F_OK) == 0);
+	CHECK(rename("/tmp/tfs/d2", "/tmp/tfs/d1/d2") == 0);
+	CHECK(access("/tmp/tfs/d1/d2/g", F_OK) == 0);
+	CHECK(rmdir("/tmp/tfs/d1") != 0 && errno == ENOTEMPTY);
+	CHECK(unlink("/tmp/tfs/d1/d2/g") == 0 && rmdir("/tmp/tfs/d1/d2") == 0 && rmdir("/tmp/tfs/d1") == 0);
+
 	CHECK(umount("/tmp/tfs") == 0);
 	puts("OK");
 	return 0;
