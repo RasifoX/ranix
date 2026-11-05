@@ -44,8 +44,15 @@ int tcp_connect(socket_t *s);
 /* Called by send() — send data segment */
 int tcp_send(socket_t *s, const void *data, uint16_t len);
 
-/* Called by close() — send FIN */
+/* Can tcp_send take a full segment now? Sleep until it can, or -4 on a signal. */
+int tcp_can_send(const socket_t *s);
+int tcp_send_wait(socket_t *s);
+
+/* Called by close() and shutdown() — send FIN */
 int tcp_close(socket_t *s);
+
+/* Called by close() after tcp_close: 1 if the caller frees the socket */
+int tcp_orphan(socket_t *s);
 
 /* Fill a struct tcp_info prefix (cwnd/ssthresh/rtt) for getsockopt(TCP_INFO);
  * returns the number of bytes written into buf (≤ buflen). */
@@ -62,8 +69,8 @@ int tcp_listen(socket_t *s, int backlog);
 /* Called from sched tick — retransmit expired segments */
 void tcp_tick(void);
 
-/* Deliver received data into socket's recv queue and wake waiter */
-void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
+/* Deliver received data into socket's recv queue and wake waiter; bytes taken */
+int sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
 
 /* Find a SOCK_STREAM socket by 4-tuple */
 socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t local_port,
