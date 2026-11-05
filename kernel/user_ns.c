@@ -1,5 +1,7 @@
 #include <kernel/user_namespace.h>
+#include <kernel/nsproxy.h>
 #include <kernel/proc.h>
+#include <kernel/capabilities.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
@@ -153,4 +155,31 @@ int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid)
 		}
 	}
 	return pos;
+}
+
+int capable_task(struct process *p, int cap)
+{
+	process_t *t = (process_t *)p;
+	return cap_has(t->cap_effective, cap) &&
+	       (!t->user_ns || t->user_ns == &init_user_ns);
+}
+
+/* CLONE_NEWUSER needs no privilege, and a task in a user namespace could stack a
+ * new one first: exec there drops the capabilities of a non-root uid, which must
+ * not stop `unshare -U` followed by a shell that unshares more. */
+int may_create_ns(struct process *p, unsigned long flags)
+{
+	process_t *t = (process_t *)p;
+	if (!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID |
+	               CLONE_NEWNET | CLONE_NEWCGROUP | CLONE_NEWTIME)))
+		return 1;
+	return (flags & CLONE_NEWUSER) || (t->user_ns && t->user_ns != &init_user_ns) ||
+	       cap_has(t->cap_effective, CAP_SYS_ADMIN);
+}
+
+int task_may_control(struct process *t, int cap)
+{
+	process_t *cur = task_current(), *tg = (process_t *)t;
+	return cur == tg || cur->euid == tg->uid || cur->euid == tg->euid ||
+	       capable_task((struct process *)cur, cap);
 }
