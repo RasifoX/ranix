@@ -62,16 +62,17 @@ SECTIONS
 
     . = ALIGN(4096);
     __bss_start = .;
+    /* The stack stays inside the section: GRUB places modules right after the
+     * last PT_LOAD byte, so anything past it lands on the initramfs. */
     .bss (NOLOAD) : {
         *(.bss*)
         *(COMMON)
+        . = ALIGN(8);
+        __bss_end = .;
+        . = ALIGN(16);
+        . += 16384;
+        __stack_top = .;
     }
-    . = ALIGN(8);
-    __bss_end = .;
-
-    . = ALIGN(16);
-    . += 16384;
-    __stack_top = .;
 
     __kernel_phys_end = __stack_top - VIRT_OFFSET;
 }
