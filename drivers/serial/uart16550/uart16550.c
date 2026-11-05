@@ -30,8 +30,19 @@ void uart_putc(char c)     { uart16550_putc(c); }
 char uart_getc(void)       { return uart16550_getc(); }
 int  uart_has_data(void)   { return uart16550_has_data(); }
 
+/* A machine with no COM1 floats the port to 0xFF, which reads as both "TX empty"
+ * and "RX ready": every RX drain loop would then spin forever on phantom bytes.
+ * Most laptops are this machine. Probed once; all paths go quiet if absent. */
+static int uart_absent;
+
+#define TX_WAIT_POLLS 100000   /* far above one 87 us character time */
+
 void uart16550_init(void)
 {
+	if (inb(LSR) == 0xFF) {
+		uart_absent = 1;
+		return;
+	}
 	outb(IER, 0x00);          /* disable interrupts */
 	outb(LCR, 0x80);          /* enable DLAB */
 	outb(RBR, 0x01);          /* baud divisor low: 115200 */
@@ -43,12 +54,19 @@ void uart16550_init(void)
 
 void uart16550_putc(char c)
 {
-	while (!(inb(LSR) & LSR_TX_EMPTY));
+	if (uart_absent) return;
+	for (int i = 0; !(inb(LSR) & LSR_TX_EMPTY); i++) {
+		if (i == TX_WAIT_POLLS) {   /* stuck transmitter: never block the console */
+			uart_absent = 1;
+			return;
+		}
+	}
 	outb(THR, (uint8_t)c);
 }
 
 int uart16550_has_data(void)
 {
+	if (uart_absent) return 0;
 	return inb(LSR) & LSR_RX_READY;
 }
 
@@ -98,6 +116,7 @@ static void uart16550_irq_handler(void)
 
 void uart16550_irq_init(void)
 {
+	if (uart_absent) return;
 	outb(MCR, 0x0B);          /* DTR + RTS + OUT2 (gate IRQ to PIC) */
 	outb(IER, 0x01);          /* enable received-data-available interrupt */
 	irq_register(COM1_VEC, uart16550_irq_handler);
