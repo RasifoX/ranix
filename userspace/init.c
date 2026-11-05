@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
@@ -33,6 +34,14 @@ static void maybe_switch_root(void)
 
 /* Mount everything in /etc/fstab, as a Linux init/rc would. busybox mount -a
  * parses fstab and skips noauto / already-mounted entries. */
+/* pid 1 inherits every orphan, so this waits for anything, not only for pid */
+static void wait_for(pid_t pid)
+{
+	int st;
+	pid_t r;
+	do r = waitpid(-1, &st, 0); while (r != pid && (r > 0 || errno == EINTR));
+}
+
 static void mount_all(void)
 {
 	if (access("/etc/fstab", F_OK) != 0) return;
@@ -43,12 +52,14 @@ static void mount_all(void)
 		execve("/bin/mount", av, ev);
 		_exit(127);
 	}
-	if (pid > 0) { int st; waitpid(pid, &st, 0); }
+	if (pid > 0) wait_for(pid);
 }
 
 static void do_poweroff(void)
 {
     sync();
+    /* An unattended machine must come back, not switch itself off. */
+    if (access("/reboot-on-exit", F_OK) == 0) { reboot(RB_AUTOBOOT); _exit(0); }
     reboot(RB_POWER_OFF);
     _exit(0);
 }
@@ -93,7 +104,7 @@ int main(void)
                 execve("/bin/bash", argv, envp);
                 _exit(127);
             }
-            if (pid > 0) { int st; waitpid(pid, &st, 0); }
+            if (pid > 0) wait_for(pid);
             do_poweroff();
         }
     }
@@ -117,7 +128,6 @@ int main(void)
             _exit(127);
         }
         if (pid < 0) { sleep(1); continue; }
-        int status;
-        waitpid(pid, &status, 0);
+        wait_for(pid);
     }
 }
