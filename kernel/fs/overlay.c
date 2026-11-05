@@ -22,6 +22,7 @@
 typedef struct {
 	vfs_inode_t *upper_root;
 	vfs_inode_t *lower_root;
+	vfs_dentry_t *lower_dent, *upper_dent;
 	uint32_t     refcount;
 	spinlock_t   lock;
 } ovl_sb_t;
@@ -304,7 +305,21 @@ static int ovl_truncate(vfs_inode_t *inode, off_t len)
 	return -22;
 }
 
+/* The view inode dies with the lookup: the change has to reach the upper layer. */
+static int ovl_setattr(vfs_inode_t *in, const vfs_iattr_t *a)
+{
+	ovl_inode_t *oi = in->priv;
+	vfs_iattr_apply(in, a);
+	if (!oi->upper) {
+		int r = S_ISDIR(in->mode) ? dir_copy_up(oi) : S_ISREG(in->mode) ? copy_up_file(oi) : 0;
+		if (r) return -28; /* ENOSPC */
+		if (!oi->upper) return 0;
+	}
+	return vfs_inode_setattr(oi->upper, a);
+}
+
 static vfs_iops_t ovl_iops = {
+	.setattr  = ovl_setattr,
 	.lookup   = ovl_lookup,
 	.create   = ovl_create,
 	.mkdir    = ovl_mkdir,
@@ -353,7 +368,10 @@ static void ovl_kill_sb(void *priv)
 	uint64_t f = spin_lock_irq(&sb->lock);
 	int last = (--sb->refcount == 0);
 	spin_unlock_irq(&sb->lock, f);
-	if (last) kfree(sb);
+	if (!last) return;
+	vfs_dentry_unpin(sb->lower_dent);
+	if (sb->upper_dent) vfs_dentry_unpin(sb->upper_dent);
+	kfree(sb);
 }
 
 int overlay_mount(vfs_mount_t *mnt, void *data)
@@ -384,6 +402,12 @@ int overlay_mount(vfs_mount_t *mnt, void *data)
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root);
 	if (!root_dentry) { kfree(root->priv); kfree(root); kfree(sb); return -1; }
+
+	/* the layers' inodes stay referenced until the last unmount */
+	sb->lower_dent = ld;
+	sb->upper_dent = ud;
+	vfs_dentry_pin(ld);
+	if (ud) vfs_dentry_pin(ud);
 
 	mnt->root    = root_dentry;
 	mnt->priv    = sb;

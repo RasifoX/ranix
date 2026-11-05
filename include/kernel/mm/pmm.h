@@ -23,8 +23,9 @@ extern page_t *mem_map;
 uint64_t pmm_init(uint64_t mem_start, uint64_t mem_limit);
 void pmm_free_region(uint64_t addr, uint64_t size);
 void *pmm_alloc(void);
-void pmm_free(void *page);
+int  pmm_free(void *page);   /* 1 if that was the last reference */
 void pmm_hold(void *page);
+long pmm_free_block(uint64_t phys, int order);
 
 page_t *paddr_to_page(uint64_t paddr);
 uint64_t page_to_paddr(page_t *page);
