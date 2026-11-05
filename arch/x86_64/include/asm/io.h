@@ -39,6 +39,16 @@ static inline uint32_t inl(uint16_t port)
 	return val;
 }
 
+static inline uint32_t mmio_read32(volatile uint32_t *reg)
+{
+	return *reg;
+}
+
+static inline void mmio_write32(volatile uint32_t *reg, uint32_t val)
+{
+	*reg = val;
+}
+
 static inline void io_wait(void)
 {
 	outb(0x80, 0);

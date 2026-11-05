@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 
 /* A tiny leaf function whose machine code we copy elsewhere to try to run. */
 static int retval(void) { return 0x5a; }
@@ -51,7 +52,12 @@ int main(void)
 	/* 2. Executing a stack page must fault — NX stack. */
 	if (!faults_in_child(exec_stack)) { puts("FAIL: stack executed"); return 1; }
 
-	/* 3. mprotect(W|X) must be rejected — W^X policy. */
+	/* 3. Under PR_SET_MDWE, mprotect(W|X) must be rejected. W+X is otherwise
+	 * allowed by default because JITs depend on it. */
+	void *rwx = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+	                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (rwx == MAP_FAILED) { puts("FAIL: default RWX refused"); return 1; }
+	if (prctl(65, 1UL, 0UL, 0UL, 0UL) != 0) { puts("FAIL: PR_SET_MDWE"); return 1; }
 	void *m = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
 	               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (m == MAP_FAILED) { puts("mmap-failed"); return 1; }
