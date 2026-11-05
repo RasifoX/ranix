@@ -1,12 +1,12 @@
 /* io_uring(7) — Linux 5.1+ async I/O submission/completion rings.
  *
  * SQ ring, CQ ring and the SQE array are kernel-allocated pages that userspace
- * mmaps via the ring fd. Both sides share the pages through an UNCACHED mapping:
- * userspace's mmap goes through the file mmap fop (which sys_mmap maps NOCACHE),
- * and the kernel touches the same physical pages through an ioremap() alias with
- * the same attribute. Matching attributes keep the lock-free head/tail protocol
- * coherent on aarch64 (Normal-NC vs cached aliasing is otherwise not coherent)
- * without per-access cache maintenance.
+ * mmaps via the ring fd. Both sides reach the pages as normal write-back memory:
+ * userspace's mmap goes through a cacheable file mmap fop and the kernel uses the
+ * direct map. Matching attributes keep the lock-free head/tail protocol coherent
+ * on aarch64 (Normal-NC vs cached aliasing is not). An ioremap() alias per ring
+ * would spend the fixed ioremap window, which is never given back, so any user
+ * could exhaust it.
  *
  * Submission is synchronous-at-enter: io_uring_enter() drains the SQ, runs each
  * op against the existing vfs/socket paths, and posts the CQE before returning.
@@ -40,10 +40,11 @@ typedef struct io_ring {
 	uint32_t ring_order;
 	uint32_t sqes_order;
 
-	uint8_t *ring;        /* uncached kernel alias of ring_phys */
-	struct io_uring_sqe *sqes; /* uncached kernel alias of sqes_phys */
+	uint8_t *ring;        /* direct-map address of ring_phys */
+	struct io_uring_sqe *sqes; /* direct-map address of sqes_phys */
 
 	/* pointers into *ring (the layout userspace sees via the offsets struct) */
+	int mapped;   /* userspace has mmapped the ring */
 	volatile uint32_t *sq_head, *sq_tail, *sq_dropped, *sq_array, *sq_flags;
 	volatile uint32_t *cq_head, *cq_tail, *cq_overflow, *cq_flags;
 	struct io_uring_cqe *cqes;
@@ -73,9 +74,12 @@ static int order_for(size_t bytes)
 static void io_ring_free(io_ring_t *r)
 {
 	if (!r) return;
-	if (r->ring_phys) buddy_free((uint64_t)r->ring_phys, r->ring_order);
-	if (r->sqes_phys) buddy_free((uint64_t)r->sqes_phys, r->sqes_order);
-	/* The ioremap windows are never reclaimed (matches ioremap's bump model). */
+	/* A live user mapping may outlast the fd and there is no unmap hook, so a
+	 * mapped ring stays allocated: a small leak, never a use-after-free. */
+	if (!r->mapped) {
+		if (r->ring_phys) buddy_free((uint64_t)r->ring_phys, r->ring_order);
+		if (r->sqes_phys) buddy_free((uint64_t)r->sqes_phys, r->sqes_order);
+	}
 	kfree(r);
 }
 
@@ -92,6 +96,7 @@ static uint64_t io_ring_mmap(vfs_file_t *f, off_t off)
 {
 	io_ring_t *r = (io_ring_t *)f->priv;
 	if (!r) return 0;
+	r->mapped = 1;
 	uint64_t o = (uint64_t)off;
 	if (o >= IORING_OFF_SQES) {
 		uint64_t d = o - IORING_OFF_SQES;
@@ -109,6 +114,8 @@ static uint64_t io_ring_mmap(vfs_file_t *f, off_t off)
 static vfs_fops_t io_ring_fops = {
 	.close = io_ring_close,
 	.mmap  = io_ring_mmap,
+	.mmap_cacheable  = 1,
+	.mmap_keep_pages = 1,
 };
 
 static vfs_iops_t io_ring_iops = { 0 };
@@ -169,11 +176,8 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 	memset((void *)PHYS_TO_VIRT((uint64_t)r->ring_phys), 0, (size_t)PAGE_SIZE << r->ring_order);
 	memset((void *)PHYS_TO_VIRT((uint64_t)r->sqes_phys), 0, (size_t)PAGE_SIZE << r->sqes_order);
 
-	r->ring = ioremap((uint64_t)r->ring_phys, (size_t)PAGE_SIZE << r->ring_order,
-	                  VM_READ | VM_WRITE | VM_NOCACHE);
-	r->sqes = ioremap((uint64_t)r->sqes_phys, (size_t)PAGE_SIZE << r->sqes_order,
-	                  VM_READ | VM_WRITE | VM_NOCACHE);
-	if (!r->ring || !r->sqes) { io_ring_free(r); return -12; }
+	r->ring = (uint8_t *)PHYS_TO_VIRT((uint64_t)r->ring_phys);
+	r->sqes = (struct io_uring_sqe *)PHYS_TO_VIRT((uint64_t)r->sqes_phys);
 
 	r->sq_head    = (volatile uint32_t *)(r->ring + sq_off_head);
 	r->sq_tail    = (volatile uint32_t *)(r->ring + sq_off_tail);
@@ -241,9 +245,22 @@ static void cqe_post(io_ring_t *r, uint64_t user_data, int32_t res)
 
 /* Run one SQE synchronously against the file/socket layer and return the result
  * to place in res. user_data is copied straight to the CQE by the caller. */
+/* The access-mode gate of vfs_read/vfs_write: only vfs_open files have a real one */
+static int sqe_badmode(const vfs_file_t *f, int refused)
+{
+	mode_t m = f->inode->mode;
+	return (S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m)) && (f->flags & 3) == refused;
+}
+
 static int32_t sqe_execute(const struct io_uring_sqe *s)
 {
 	process_t *p = task_current();
+
+	/* The file ops trust f->pos, which lseek keeps non-negative. An SQE sets it
+	 * straight from user memory, and a negative one indexes /proc's scratch
+	 * buffers and the page files backwards. -1 alone means "current position". */
+	if (s->opcode != IORING_OP_NOP && s->off != (uint64_t)-1 && (int64_t)s->off < 0)
+		return -22;
 
 	switch (s->opcode) {
 	case IORING_OP_NOP:
@@ -256,7 +273,8 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 		vfs_file_t *f = fget(p->fds, s->fd);
 		if (!f) return -9;
 		int32_t res;
-		if (!f->inode->fops || !f->inode->fops->read) { res = -22; }
+		if (sqe_badmode(f, O_WRONLY)) { res = -9; }   /* as read(2) */
+		else if (!f->inode->fops || !f->inode->fops->read) { res = -22; }
 		else {
 			vfs_file_t tmp = *f;
 			/* off==-1 means "use the file's current position" (Linux) */
@@ -275,7 +293,8 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 		vfs_file_t *f = fget(p->fds, s->fd);
 		if (!f) return -9;
 		int32_t res;
-		if (!f->inode->fops || !f->inode->fops->write) { res = -22; }
+		if (sqe_badmode(f, O_RDONLY)) { res = -9; }   /* as write(2) */
+		else if (!f->inode->fops || !f->inode->fops->write) { res = -22; }
 		else {
 			vfs_file_t tmp = *f;
 			if (s->opcode == IORING_OP_WRITE && s->off != (uint64_t)-1) tmp.pos = (off_t)s->off;
@@ -297,6 +316,7 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 		vfs_fops_t *fo = f->inode->fops;
 		int32_t total = 0, res = 0;
 		if (!fo || (is_write ? !fo->write : !fo->read)) { fput(f); return -22; }
+		if (sqe_badmode(f, is_write ? O_RDONLY : O_WRONLY)) { fput(f); return -9; }
 		vfs_file_t tmp = *f;
 		if (s->off != (uint64_t)-1) tmp.pos = (off_t)s->off;
 		for (uint32_t i = 0; i < s->len; i++) {
@@ -326,19 +346,27 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
  * execute each and post its CQE. Returns the number submitted. */
 static uint32_t submit_sqes(io_ring_t *r, uint32_t to_submit)
 {
+	uint64_t lf = spin_lock_irq(&r->lock);
 	uint32_t tail = *r->sq_tail;
 	__sync_synchronize();   /* read the SQEs userspace wrote before the tail */
 	uint32_t submitted = 0;
+	if (to_submit > r->sq_entries) to_submit = r->sq_entries;
 	while (submitted < to_submit && r->sq_local_head != tail) {
 		uint32_t idx = r->sq_array[r->sq_local_head & r->sq_mask];
 		if (idx >= r->sq_entries) { (*r->sq_dropped)++; r->sq_local_head++; continue; }
 		struct io_uring_sqe s = r->sqes[idx];   /* snapshot out of the shared page */
-		int32_t res = sqe_execute(&s);
-		cqe_post(r, s.user_data, res);
 		r->sq_local_head++;
 		submitted++;
+		/* An SQE is a read or write on any file: it can sleep, fault and close.
+		 * Doing that under this IRQ-off lock took the CPU's timer with it and
+		 * switched tasks with the lock held. */
+		spin_unlock_irq(&r->lock, lf);
+		int32_t res = sqe_execute(&s);
+		lf = spin_lock_irq(&r->lock);
+		cqe_post(r, s.user_data, res);
 	}
 	*r->sq_head = r->sq_local_head;   /* publish consumption to userspace */
+	spin_unlock_irq(&r->lock, lf);
 	return submitted;
 }
 
@@ -352,9 +380,7 @@ long io_uring_enter(int fd, uint32_t to_submit, uint32_t min_complete,
 	if (f->inode->fops != &io_ring_fops) { fput(f); return -22; }
 	io_ring_t *r = (io_ring_t *)f->priv;
 
-	uint64_t lf = spin_lock_irq(&r->lock);
 	uint32_t submitted = submit_sqes(r, to_submit);
-	spin_unlock_irq(&r->lock, lf);
 	if (submitted) wake_up(&r->cq_wait);   /* let a sibling enter()-waiter re-check */
 
 	/* Submission is synchronous, so completions are already posted; GETEVENTS
@@ -362,12 +388,14 @@ long io_uring_enter(int fd, uint32_t to_submit, uint32_t min_complete,
 	if (flags & IORING_ENTER_GETEVENTS) {
 		while (min_complete && (*r->cq_tail - *r->cq_head) < min_complete) {
 			if (task_has_actionable_signal()) { fput(f); return -4; }
-			uint64_t wf = spin_lock_irq(&r->cq_wait.lock);
+			/* r->lock, as completions post under it. sleep_on_locked takes the
+			 * queue's own lock, so the caller must not already hold that one. */
+			uint64_t wf = spin_lock_irq(&r->lock);
 			if ((*r->cq_tail - *r->cq_head) >= min_complete) {
-				spin_unlock_irq(&r->cq_wait.lock, wf);
+				spin_unlock_irq(&r->lock, wf);
 				break;
 			}
-			sleep_on_locked(&r->cq_wait, &r->cq_wait.lock, wf);
+			sleep_on_locked(&r->cq_wait, &r->lock, wf);
 		}
 	}
 
