@@ -15,6 +15,7 @@
 #define CAP_SETPCAP          8
 #define CAP_NET_BIND_SERVICE 10
 #define CAP_NET_RAW          13
+#define CAP_SYSLOG           34
 #define CAP_NET_ADMIN        12
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_PTRACE       19
@@ -22,6 +23,7 @@
 #define CAP_MKNOD            27
 #define CAP_SYS_BOOT         22
 #define CAP_SYS_NICE         23
+#define CAP_SYS_RESOURCE     24
 #define CAP_SYS_TIME         25
 #define CAP_SETFCAP          31
 
@@ -29,6 +31,15 @@
 #define CAP_NONE  (0ULL)
 
 #define cap_has(set, cap)  (!!((set) & (1ULL << (cap))))
+
+/* A task's capabilities act on the machine only from the initial user namespace.
+ * unshare(CLONE_NEWUSER) hands any uid a full set, valid for that namespace alone. */
+struct process;
+int capable_task(struct process *p, int cap);
+/* May p create the namespaces in flags (CLONE_NEW*)? */
+int may_create_ns(struct process *p, unsigned long flags);
+/* May the caller change t? Yes for itself, its own uid, or holding cap. */
+int task_may_control(struct process *t, int cap);
 
 /* capget/capset userspace ABI (__user_cap_header_struct / __user_cap_data_struct) */
 typedef struct {
