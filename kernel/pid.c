@@ -4,8 +4,8 @@
  * Lock order: the process-creation paths hold sched_lock and then take
  * pidns_lock (to publish the nr->process maps); nothing takes pidns_lock then
  * sched_lock, so there is no cycle. Reads of a running process's pidnrs are
- * lock-free — the vector is fixed between pidns_attach (at creation, before the
- * task runs) and pidns_detach (at exit).
+ * lock-free — the vector is fixed from pidns_attach (at creation, before the
+ * task runs) until the PCB is freed.
  */
 #include <kernel/pid_namespace.h>
 #include <kernel/proc.h>
@@ -19,6 +19,7 @@ pid_namespace_t init_pid_ns = {
 	.refcount = 1, .inum = 0xF0000005UL, .parent = NULL, .level = 0,
 };
 static spinlock_t pidns_lock = SPINLOCK_INIT;
+extern spinlock_t sched_lock;
 
 pid_namespace_t *current_pid_ns(void)
 {
@@ -126,7 +127,7 @@ void pidns_detach(process_t *p)
 			c->map[nr] = NULL;
 		if (c && c->reaper == p) c->reaper = NULL;
 	}
-	p->pid_levels = 0;
+	/* the numbers stay: wait reports a zombie to its parent by them */
 	spin_unlock_irq(&pidns_lock, f);
 }
 
@@ -153,4 +154,38 @@ process_t *pidns_find(pid_namespace_t *ns, int nr)
 	process_t *p = (nr > 0 && nr < ns->map_cap) ? ns->map[nr] : NULL;
 	spin_unlock_irq(&pidns_lock, f);
 	return p;
+}
+
+/* The map entry goes in task_exit, before the PCB can be reaped, and reap frees
+ * under sched_lock: finding and pinning under that lock cannot touch a dead PCB. */
+process_t *proc_get_user(pid_t nr)
+{
+	pid_namespace_t *ns = current_pid_ns();
+	if (ns == &init_pid_ns) return proc_get(nr);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *p = pidns_find(ns, (int)nr);
+	if (p) p->refcount++;
+	spin_unlock_irq(&sched_lock, f);
+	return p;
+}
+
+/* A pgrp or sid is stored as a global pid. In the initial namespace the number
+ * stands on its own: a group outlives its exited leader. */
+pid_t pid_from_user(pid_t nr)
+{
+	if (current_pid_ns() == &init_pid_ns) return nr;
+	process_t *p = proc_get_user(nr);
+	pid_t global = p ? (pid_t)p->pid : 0;
+	proc_put(p);
+	return global;
+}
+
+pid_t pid_to_user(pid_t global)
+{
+	pid_namespace_t *ns = current_pid_ns();
+	if (ns == &init_pid_ns) return global;
+	process_t *p = proc_get(global);
+	pid_t nr = p ? (pid_t)task_pid_nr_ns(p, ns) : 0;
+	proc_put(p);
+	return nr;
 }
