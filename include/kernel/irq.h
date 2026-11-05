@@ -7,6 +7,7 @@ typedef void (*irq_handler_t)(void);
 void irq_init(void);
 void irq_register(uint32_t irq, irq_handler_t handler);
 void irq_handle(uint32_t irq);
+uint64_t irq_stat(uint32_t irq, int cpu, uint64_t *handler);
 void irq_dispatch(uint32_t irq);
 void irq_enable(void);
 void irq_disable(void);

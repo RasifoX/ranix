@@ -65,5 +65,7 @@ typedef struct {
  * ET_EXEC. Used to place the dynamic linker away from the main executable. */
 int elf_load(vm_space_t *vm, const void *data, size_t len,
              uint64_t load_bias_hint, elf_info_t *info);
+int elf_load_fd(vm_space_t *vm, int fd, size_t len,
+                uint64_t load_bias_hint, elf_info_t *info);
 
 #endif
