@@ -27,6 +27,10 @@ static int           _blink_ticks     = 0;
 static int           _blink_state     = 1;
 static volatile int  _blink_dirty     = 0;
 
+/* KD_GRAPHICS: a program owns the pixels. Text still lands in the shadow and
+ * reaches the screen when text mode comes back. */
+static int           _graphics        = 0;
+
 /* color state */
 static u32 _def_fg = 0xFFFFFFFF;
 static u32 _def_bg = 0xFF000000;
@@ -77,7 +81,7 @@ static void flush_all(void)
 /* LOCK HELD */
 static void cursor_erase_from_fb(void)
 {
-    if (!_cursor_on_fb || !_fb) return;
+    if (!_cursor_on_fb || !_fb || _graphics) return;
     u32 px = _cursor_fb_col * FONT_W;
     u32 py = _cursor_fb_row * FONT_H;
     for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
@@ -91,7 +95,7 @@ static void cursor_erase_from_fb(void)
 /* LOCK HELD */
 static void cursor_draw_on_fb(void)
 {
-    if (!_cursor_visible || !_fb || !_blink_state) return;
+    if (!_cursor_visible || !_fb || !_blink_state || _graphics) return;
     u32 px = _cur_col * FONT_W;
     u32 py = _cur_row * FONT_H;
     for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
@@ -106,7 +110,7 @@ static void cursor_draw_on_fb(void)
 /* LOCK HELD */
 static void dirty_flush_locked(void)
 {
-    if (!_fb) return;
+    if (!_fb || _graphics) return;
     if (_cursor_visible) {
         u32 py = _cur_row * FONT_H;
         if (py < _dirty_y0) _dirty_y0 = py;
@@ -444,6 +448,7 @@ static void _putchar_locked(unsigned char u)
 
 void fb_tty_putchar(char c)
 {
+    if (!_fb) return;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     _putchar_locked((unsigned char)c);
     spin_unlock_irq(&fb_tty_lock, f);
@@ -454,16 +459,39 @@ void fb_tty_puts(const char *s) { while (*s) fb_tty_putchar(*s++); }
 
 void fb_tty_write(const char *buf, size_t len)
 {
+    if (!_fb) return;   /* no framebuffer: an escape sequence must not reach _fb */
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     for (size_t i = 0; i < len; i++)
         _putchar_locked((unsigned char)buf[i]);
     spin_unlock_irq(&fb_tty_lock, f);
 }
 
+/* LOCK NOT HELD. A panic or a program's exit may land here: text wins. */
+void fb_tty_set_graphics(int on)
+{
+    if (!_fb) return;
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    if (_graphics && !on) {
+        _graphics = 0;
+        _cursor_on_fb = 0;
+        flush_all();
+        _dirty_y0 = _fb->height;
+        _dirty_y1 = 0;
+        cursor_draw_on_fb();
+    } else if (on && !_graphics) {
+        cursor_erase_from_fb();
+        _graphics = 1;
+    }
+    spin_unlock_irq(&fb_tty_lock, f);
+}
+
+int fb_tty_get_graphics(void) { return _graphics; }
+
 void fb_tty_clear(void)
 {
     if (!_fb) return;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
+    _graphics = 0;                 /* the panic path clears to show itself */
     u32 shadow_size = _fb->pitch * _fb->height;
     u64 bg = (u64)_def_bg | ((u64)_def_bg << 32);
     u64 *p = (u64 *)shadow;
@@ -501,7 +529,7 @@ void fb_tty_erase_eol(void)
 
 void fb_tty_tick(void)
 {
-    if (!_cursor_visible || !_fb) return;
+    if (!_cursor_visible || !_fb || _graphics) return;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     if (++_blink_ticks < (TIMER_HZ / 2)) {
         spin_unlock_irq(&fb_tty_lock, f);

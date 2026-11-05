@@ -1,3 +1,4 @@
+#include <kernel/sync.h>
 #include <kernel/net/arp.h>
 #include <kernel/net/eth.h>
 #include <kernel/lib/string.h>
@@ -52,6 +53,49 @@ static void arp_table_update(uint32_t ip, const uint8_t *mac)
     arp_table[oldest].valid = 1;
 }
 
+/* ── packets waiting on a reply ──────────────────────────────────
+ * RFC 1122 2.3.2.2: keep at least the latest packet for an unresolved address.
+ * Dropping it costs a passive open its SYN-ACK. */
+#define ARP_HOLD_SIZE 8
+static struct { netdev_t *dev; uint32_t ip; skb_t *skb; } arp_held[ARP_HOLD_SIZE];
+static unsigned    arp_hold_next;
+static spinlock_t  arp_hold_lock = SPINLOCK_INIT;
+
+void arp_hold(netdev_t *dev, uint32_t ip, skb_t *skb)
+{
+    skb_t *old = NULL;
+    uint64_t f = spin_lock_irq(&arp_hold_lock);
+    int slot = -1;
+    for (int i = 0; i < ARP_HOLD_SIZE; i++) {
+        if (arp_held[i].skb && arp_held[i].ip == ip && arp_held[i].dev == dev) { slot = i; break; }
+        if (!arp_held[i].skb && slot < 0) slot = i;
+    }
+    if (slot < 0) slot = (int)(arp_hold_next++ % ARP_HOLD_SIZE);
+    old = arp_held[slot].skb;
+    arp_held[slot].dev = dev; arp_held[slot].ip = ip; arp_held[slot].skb = skb;
+    spin_unlock_irq(&arp_hold_lock, f);
+    if (old) skb_free(old);
+}
+
+static void arp_flush(netdev_t *dev, uint32_t ip, const uint8_t *mac)
+{
+    for (int i = 0; i < ARP_HOLD_SIZE; i++) {
+        uint64_t f = spin_lock_irq(&arp_hold_lock);
+        skb_t *skb = NULL;
+        if (arp_held[i].skb && arp_held[i].ip == ip && arp_held[i].dev == dev) {
+            skb = arp_held[i].skb;
+            arp_held[i].skb = NULL;
+        }
+        spin_unlock_irq(&arp_hold_lock, f);
+        if (!skb) continue;
+        eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
+        memcpy(eh->dst, mac, 6);
+        memcpy(eh->src, dev->mac, 6);
+        eh->type = htons(ETH_P_IP);
+        netdev_tx(dev, skb);
+    }
+}
+
 int arp_lookup(netdev_t *dev, uint32_t ip, uint8_t *mac_out)
 {
     /* loopback / self */
@@ -84,7 +128,7 @@ int arp_lookup(netdev_t *dev, uint32_t ip, uint8_t *mac_out)
     memcpy(eh->src, dev->mac, 6);
     eh->type = htons(ETH_P_ARP);
 
-    dev->tx(dev, skb);
+    netdev_tx(dev, skb);
     return -1;
 }
 
@@ -101,6 +145,7 @@ void arp_rx(netdev_t *dev, skb_t *skb)
     uint32_t tpa = ntohl(a->tpa);
 
     arp_table_update(spa, a->sha);
+    arp_flush(dev, spa, a->sha);
 
     if (ntohs(a->oper) == ARP_OP_REQ && tpa == dev->ip) {
         /* send reply */
@@ -111,11 +156,12 @@ void arp_rx(netdev_t *dev, skb_t *skb)
         memcpy(r->sha, dev->mac, 6);
         r->spa = htonl(dev->ip);
 
+        /* r and a are one buffer: sha is ours by now, tha holds the asker's */
         eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
-        memcpy(eh->dst, a->sha, 6);
+        memcpy(eh->dst, r->tha, 6);
         memcpy(eh->src, dev->mac, 6);
         eh->type = htons(ETH_P_ARP);
-        dev->tx(dev, skb);
+        netdev_tx(dev, skb);
     } else {
         skb_free(skb);
     }
