@@ -8,6 +8,7 @@ void idt_set_gate(uint8_t vec, void *handler, uint8_t flags);
 
 /* exception/irq vector assignments */
 #define VEC_TIMER    0x20
+#define VEC_MSI_FIRST 0x30   /* one vector, the RTL8168 */
 #define VEC_YIELD    0x40
 #define VEC_SYSCALL  0x80
 

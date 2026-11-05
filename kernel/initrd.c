@@ -70,7 +70,7 @@ static void install(const char *path, const uint8_t *data, unsigned int len,
         vfs_symlink(target, path);
     } else if ((mode & 0170000) == 0100000) {
         if (vfs_kernel_install(path, data, len) != 0)
-            kprintf("initrd: failed to install file: %s\n", path);
+            kprintf(KERN_ERR "initrd: failed to install file: %s\n", path);
     }
     inode_apply_meta(path, uid, gid, mode);
 }
@@ -78,16 +78,16 @@ static void install(const char *path, const uint8_t *data, unsigned int len,
 void initrd_init(void)
 {
     if (boot_initrd_start == 0 || boot_initrd_size == 0) {
-        kprintf("initrd: no boot initramfs found\n");
+        kprintf(KERN_WARN "initrd: no boot initramfs found\n");
         return;
     }
 
     uint64_t vaddr = PHYS_TO_VIRT(boot_initrd_start);
 
-    kprintf("initrd: parsing cpio at 0x%lx (size %lu)\n", vaddr, boot_initrd_size);
+    kprintf(KERN_DEBUG "initrd: parsing cpio at 0x%lx (size %lu)\n", vaddr, boot_initrd_size);
 
     uint8_t *db = (uint8_t *)vaddr;
-    kprintf("initrd: dump: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+    kprintf(KERN_DEBUG "initrd: dump: %02x %02x %02x %02x %02x %02x %02x %02x\n",
             db[0], db[1], db[2], db[3], db[4], db[5], db[6], db[7]);
 
     uint64_t ptr = vaddr;
@@ -104,7 +104,7 @@ void initrd_init(void)
         if (hdr->c_magic[0] != '0' || hdr->c_magic[1] != '7' ||
             hdr->c_magic[2] != '0' || hdr->c_magic[3] != '7' ||
             hdr->c_magic[4] != '0' || hdr->c_magic[5] != '1') {
-            kprintf("initrd: bad cpio magic\n");
+            kprintf(KERN_ERR "initrd: bad cpio magic\n");
             break;
         }
 
@@ -131,7 +131,7 @@ void initrd_init(void)
 
         if (strcmp(name, ".") != 0) {
             if (verbose)
-                kprintf("initrd: extracted %s (size %u)\n", name, filesize);
+                kprintf(KERN_DEBUG "initrd: extracted %s (size %u)\n", name, filesize);
             install(name, data, filesize, mode, uid, gid);
             nfiles++;
             nbytes += filesize;
@@ -142,7 +142,7 @@ void initrd_init(void)
         ptr = (ptr + 3) & ~3ULL;
     }
 
-    kprintf("initramfs: extracted %lu files, %lu bytes\n", nfiles, nbytes);
+    kprintf(KERN_INFO "initrd: %lu files, %lu bytes\n", nfiles, nbytes);
 
     /* /etc skeleton — only install if not already provided by initramfs */
     vfs_mkdir("/etc", 0755);

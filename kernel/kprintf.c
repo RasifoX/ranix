@@ -1,11 +1,14 @@
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
+#include <kernel/cmdline.h>
 #include <kernel/hal.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/ksyms.h>
 #include <kernel/proc.h>
+#include <kernel/pstore.h>
 #include <kernel/tty/fb_tty.h>
+#include <kernel/watchdog.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
 #include <asm/context.h>
@@ -18,6 +21,7 @@ typedef __builtin_va_list va_list;
 static int fb_ready        = 0;
 static int at_line_start   = 1;
 static spinlock_t kprintf_lock = SPINLOCK_INIT;
+static volatile int kprintf_unlocked;   /* panic: the lock's holder may be wedged */
 
 void kprintf_set_fb(void) { fb_ready = 1; }
 
@@ -47,16 +51,31 @@ size_t kprintf_read_log(char *dst, size_t max)
 
 size_t kprintf_log_len(void) { return log_len; }
 
+static int console_level = KLOG_INFO;
+static int line_level    = KLOG_INFO;   /* of the line being written */
+static int console_on    = 1;           /* that line goes to the console too */
+
+void klog_setup(void)
+{
+    char b[8];
+    if (cmdline_has("quiet")) console_level = KLOG_WARN;
+    if (cmdline_get("ranix.loglevel", b, sizeof(b)) && b[0] >= '0' && b[0] <= '9' && !b[1])
+        console_level = b[0] - '0';
+}
+
 static void _emit(char c)
 {
-    if (c == '\n')
-        uart_putc('\r');
-    uart_putc(c);
-    if (fb_ready)
-        fb_tty_putchar(c);
+    if (console_on) {
+        if (c == '\n')
+            uart_putc('\r');
+        uart_putc(c);
+        if (fb_ready)
+            fb_tty_putchar(c);
+    }
     log_buf[log_head] = c;
     log_head = (log_head + 1) % LOG_BUF_SIZE;
     if (log_len < LOG_BUF_SIZE) log_len++;
+    pstore_putc(c);
 }
 
 static int suppress_ts = 0;   /* panic banner: no [   S.UUUUUU] prefix */
@@ -68,7 +87,7 @@ static void _putc(char c)
         uint64_t t    = kernel_ticks;
         uint32_t secs = (uint32_t)(t / TIMER_HZ);
         uint32_t usec = (uint32_t)((t % TIMER_HZ) * (1000000 / TIMER_HZ));
-        char buf[16]; int i;
+        int i;
         _emit('[');
         /* 5-digit seconds, space-padded */
         i = 0;
@@ -115,11 +134,75 @@ static void fmt_uint(uint64_t n, int base, int width, char pad, int upper)
         _putc(buf[i]);
 }
 
+/* ── rate limit ───────────────────────────────────────────────
+ * A call site is known by its format string: past RL_BURST calls in RL_WINDOW its
+ * lines are dropped, and one summary line says how many once the window is over.
+ * Nothing is counted before the timer runs: no window could ever end. */
+#define RL_SLOTS   16
+#define RL_BURST   10
+#define RL_WINDOW  (5u * TIMER_HZ)
+
+static struct {
+    const char *fmt;
+    uint64_t    start;
+    uint32_t    seen, dropped;
+} rl[RL_SLOTS];
+
+static void rl_summary(int i)
+{
+    int saved_level = line_level, saved_on = console_on;
+    line_level = KLOG_WARN;
+    console_on = line_level <= console_level;
+    if (!at_line_start) _putc('\n');
+    _puts("log: ");
+    fmt_uint(rl[i].dropped, 10, 0, ' ', 0);
+    _puts(" similar lines suppressed: ");
+    for (const char *f = rl[i].fmt; *f && *f != '\n'; f++) _putc(*f);
+    _putc('\n');
+    rl[i].dropped = 0;
+    line_level = saved_level;
+    console_on = saved_on;
+}
+
+static int rl_drop(const char *fmt)
+{
+    uint64_t now = kernel_ticks;
+    for (int i = 0; i < RL_SLOTS; i++)
+        if (rl[i].dropped && now - rl[i].start >= RL_WINDOW) rl_summary(i);
+
+    int i = (int)(((uintptr_t)fmt >> 2) % RL_SLOTS);
+    if (rl[i].fmt != fmt || now - rl[i].start >= RL_WINDOW) {
+        if (rl[i].dropped) rl_summary(i);
+        rl[i].fmt = fmt;
+        rl[i].start = now;
+        rl[i].seen = 0;
+    }
+    if (++rl[i].seen <= RL_BURST) return 0;
+    rl[i].dropped++;
+    return 1;
+}
+
 void kprintf(const char *fmt, ...)
 {
-    uint64_t flags = spin_lock_irq(&kprintf_lock);
+    int level = KLOG_INFO, cont = 0;
+    if (fmt[0] == KLOG_TAG && fmt[1]) {
+        cont = fmt[1] == 'c';
+        if (!cont) level = fmt[1] - '0';
+        fmt += 2;
+    }
+
+    int locked = !kprintf_unlocked;
+    uint64_t flags = locked ? spin_lock_irq(&kprintf_lock) : 0;
     va_list args;
     va_start(args, fmt);
+
+    if (locked && !cont && kernel_ticks && rl_drop(fmt)) {
+        va_end(args);
+        spin_unlock_irq(&kprintf_lock, flags);
+        return;
+    }
+    if (!cont || at_line_start) line_level = level;
+    console_on = !locked || line_level <= console_level;
 
     while (*fmt) {
         if (*fmt != '%') { _putc(*fmt++); continue; }
@@ -181,6 +264,15 @@ void kprintf(const char *fmt, ...)
     }
 
     va_end(args);
+    pstore_commit();
+    if (locked) spin_unlock_irq(&kprintf_lock, flags);
+}
+
+/* Header updates share the log's serialization: pstore has no lock of its own. */
+void klog_pstore_beat(uint64_t ticks)
+{
+    uint64_t flags = spin_lock_irq(&kprintf_lock);
+    pstore_beat(ticks);
     spin_unlock_irq(&kprintf_lock, flags);
 }
 
@@ -244,12 +336,19 @@ static void panic_fault_detail(uint64_t fa, uint64_t sp, int is_write,
  * trace (kallsyms), full register file, and the exact build identity. */
 void panic_report(const char *msg, arch_context_t *ctx)
 {
-    static volatile int panic_active = 0;
+    static volatile uint32_t panic_owner = 0;   /* cpu id + 1 */
 
     irq_disable();
-    if (panic_active)            /* a fault while painting the panic — just stop */
+    uint32_t me = (uint32_t)arch_get_cpu_ctx()->cpu_id + 1;
+    uint32_t prev = atomic_cmpxchg32(&panic_owner, 0, me);
+    if (prev) {
+        /* Same CPU: a fault while painting the panic. Other CPU: let the first
+         * one finish. Neither may print. */
+        if (prev == me) panic_reset_nested();
         for (;;) arch_halt();
-    panic_active = 1;
+    }
+    kprintf_unlocked = 1;
+    panic_reset_begin(msg);      /* before anything that can wedge or fault */
     suppress_ts = 1;
 
     /* Fit the screen: clear it (start at the top, nothing scrolls off) and, if the
@@ -397,9 +496,13 @@ void panic_report(const char *msg, arch_context_t *ctx)
         fp = next;
     }
 
-    kprintf("\n  state frozen -- please power-cycle the machine.   [ end of panic ]\n");
+    if (panic_will_reset())
+        kprintf("\n  rebooting...   [ end of panic ]\n");
+    else
+        kprintf("\n  state frozen -- please power-cycle the machine.   [ end of panic ]\n");
     if (fb_ready)
         fb_tty_flush();
+    panic_reset_finish();
     for (;;)
         arch_halt();
 }

@@ -8,6 +8,9 @@ uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg);
 uint16_t pci_read16(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg);
 void     pci_write32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint32_t v);
 void     pci_write16(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint16_t v);
+/* A true byte cycle: for registers whose neighbours must not be rewritten, such
+ * as a device hidden from the reads a read-modify-write would rely on. */
+void     pci_write8(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint8_t v);
 
 // Returns 0 on success, fills *bus/*dev/*fn
 int pci_find(uint16_t vendor, uint16_t device, uint8_t *bus, uint8_t *devn, uint8_t *fn);
@@ -16,6 +19,7 @@ int pci_find_class(uint8_t cls, uint8_t sub, uint8_t prog, uint8_t *bus, uint8_t
 /* capability list walk (feature discovery) */
 int     pci_cap_ids(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t *ids, int max);
 uint8_t pci_find_cap(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t cap_id);
+int pci_msi_enable(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t vector);   /* x86_64 */
 #define PCI_CAP_PM    0x01   /* power management */
 #define PCI_CAP_MSI   0x05
 #define PCI_CAP_VNDR  0x09   /* vendor-specific (virtio modern) */

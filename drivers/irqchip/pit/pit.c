@@ -22,7 +22,7 @@ void pit_init(uint32_t hz)
 	outb(PIT_CMD, 0x36);          /* channel 0, lo/hi, square wave */
 	outb(PIT_CH0, div & 0xFF);
 	outb(PIT_CH0, div >> 8);
-	kprintf("PIT timer: %d Hz\n", (int)hz);
+	kprintf(KERN_INFO "timer: pit %d Hz\n", (int)hz);
 }
 
 static driver_t pit_driver = {

@@ -49,6 +49,7 @@ extern void irq_stub_28(void); extern void irq_stub_29(void);
 extern void irq_stub_2a(void); extern void irq_stub_2b(void);
 extern void irq_stub_2c(void); extern void irq_stub_2d(void);
 extern void irq_stub_2e(void); extern void irq_stub_2f(void);
+extern void irq_stub_30(void);
 extern void irq_stub_yield(void);
 extern void irq_stub_syscall(void);
 extern void irq_stub_ipi(void);
@@ -79,6 +80,8 @@ void idt_init(void)
 
 	for (int i = 0; i < 16; i++)
 		idt_set_gate(0x20 + i, irq_stubs[i], 0x8E);
+
+	idt_set_gate(VEC_MSI_FIRST, irq_stub_30, 0x8E);
 
 	idt_set_gate(VEC_YIELD,   irq_stub_yield,   0xEE);
 	idt_set_gate(VEC_SYSCALL, irq_stub_syscall, 0xEE);

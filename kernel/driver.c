@@ -19,7 +19,7 @@ int driver_register(driver_t *drv)
         int ret = drv->init();
         drv->initialized = (ret == 0) ? 1 : 0;
         if (ret != 0) {
-            kprintf("%s: init failed (%d)\n", drv->name, ret);
+            kprintf(KERN_ERR "%s: init failed (%d)\n", drv->name, ret);
             return ret;
         }
     } else {
@@ -30,7 +30,7 @@ int driver_register(driver_t *drv)
     driver_list = drv;
     driver_cnt++;
 
-    kprintf("%s: %s\n", drv->name, type_name(drv->type));
+    kprintf(KERN_INFO "%s: %s\n", drv->name, type_name(drv->type));
     return 0;
 }
 
@@ -53,7 +53,7 @@ driver_t *driver_find_by_type(driver_type_t type)
 void driver_list_all(void)
 {
     for (driver_t *d = driver_list; d; d = d->next)
-        kprintf("  %s  %s  %s\n", d->name, type_name(d->type),
+        kprintf(KERN_INFO "%s: %s %s\n", d->name, type_name(d->type),
                 d->initialized ? "ok" : "fail");
 }
 

@@ -21,6 +21,7 @@ static uint8_t     *blk_order;
 static uint8_t     *free_bm;
 static uint64_t    _base;
 static uint64_t    _npages;
+static uint64_t    _managed;
 
 static spinlock_t buddy_lock = SPINLOCK_INIT;
 static uint64_t  _free_pages;
@@ -130,7 +131,7 @@ static void *buddy_alloc_locked(int ord)
 	while (o < BUDDY_MAX_ORDER && free_list[o] == BUDDY_NIL)
 		o++;
 	if (o >= BUDDY_MAX_ORDER) {
-		kprintf("buddy: OOM (order %d)\n", ord);
+		kprintf(KERN_WARN "mm: buddy out of memory, order %d\n", ord);
 		return NULL;
 	}
 
@@ -149,7 +150,7 @@ static void *buddy_alloc_locked(int ord)
 	blk_order[p] = (uint8_t)ord;
 
 	if (!buddy_poison_ok(addr, ord))
-		kprintf("buddy: USE-AFTER-FREE write detected on addr=%lx ord=%d (poison clobbered)\n", addr, ord);
+		kprintf(KERN_ERR "mm: use-after-free write at 0x%lx ord=%d, poison clobbered\n", addr, ord);
 
 	uint64_t npg = 1ul << ord;
 	_free_pages -= npg;
@@ -220,7 +221,7 @@ void buddy_free(uint64_t addr, int ord)
 			uint64_t p = pidx(addr);
 			if (p < _npages && (mem_map[p].flags & PG_CACHED)) {
 				irq_restore(fl);
-				kprintf("buddy: DOUBLE-FREE addr=%lx ord=0 (cached)\n", addr);
+				kprintf(KERN_ERR "mm: double free at 0x%lx ord=0, cached\n", addr);
 				return;
 			}
 			if (mag->n == MAG_DEPTH) {
@@ -248,7 +249,7 @@ void buddy_free(uint64_t addr, int ord)
 	 * be pushed twice → the same page handed to two allocators. Catch + refuse. */
 	if (p < _npages && bm_get(p) && blk_order[p] == (uint8_t)ord) {
 		spin_unlock_irq(&buddy_lock, f);
-		kprintf("buddy: DOUBLE-FREE addr=%lx ord=%d (already free)\n", addr, ord);
+		kprintf(KERN_ERR "mm: double free at 0x%lx ord=%d, already free\n", addr, ord);
 		return;
 	}
 	buddy_poison(addr, ord);
@@ -286,7 +287,7 @@ void *buddy_alloc(int ord)
 				int bad = !buddy_poison_ok(addr, 0);
 				irq_restore(fl);
 				if (bad)
-					kprintf("buddy: USE-AFTER-FREE write detected on addr=%lx ord=0 (poison clobbered)\n", addr);
+					kprintf(KERN_ERR "mm: use-after-free write at 0x%lx ord=0, poison clobbered\n", addr);
 				return (void *)addr;
 			}
 		}
@@ -319,7 +320,7 @@ void buddy_add_region(uint64_t addr, uint64_t size)
 
 	for (uint64_t a = addr; a < end; a += PAGE_SIZE) {
 		uint64_t idx = pidx(a);
-		if (idx < _npages) mem_map[idx].flags |= PG_MANAGED;
+		if (idx < _npages) { mem_map[idx].flags |= PG_MANAGED; _managed++; }
 	}
 
 	while (addr < end) {
@@ -372,4 +373,5 @@ uint64_t buddy_free_pages(void)
 	return n;
 }
 
-uint64_t buddy_total_pages(void) { return _npages; }
+/* what the allocator was given: _npages also spans holes and reserved windows */
+uint64_t buddy_total_pages(void) { return _managed; }

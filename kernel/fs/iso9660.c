@@ -175,7 +175,7 @@ int iso9660_mount(vfs_mount_t *mnt, void *data)
 	vfs_dentry_t *rd = vfs_dentry_create(NULL, "/", root_vi);
 	if (!rd) { kfree(root_vi->priv); kfree(root_vi); return -1; }
 	mnt->root = rd;
-	kprintf("iso9660: mounted (root extent=%u size=%u)\n", extent, size);
+	kprintf(KERN_DEBUG "iso9660: mounted (root extent=%u size=%u)\n", extent, size);
 	return 0;
 }
 

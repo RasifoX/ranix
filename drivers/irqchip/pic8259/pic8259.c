@@ -1,5 +1,6 @@
 #include "pic8259.h"
 #include <asm/io.h>
+#include <asm/idt.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 
@@ -28,7 +29,7 @@ void pic8259_init(void)
 	outb(PIC1_DATA, 0xFE);
 	outb(PIC2_DATA, 0xFF);
 
-	kprintf("PIC 8259\n");
+	kprintf(KERN_INFO "irq: pic 8259\n");
 }
 
 void pic8259_eoi(uint32_t irq)
@@ -65,8 +66,36 @@ void irqchip_enable_irq(uint32_t irq)
 	pic8259_unmask(line);
 }
 
+/* IRQ7 and IRQ15 are what an 8259 reports when a line drops before the CPU's
+ * acknowledge. In that case the in-service bit is clear; no EOI is owed for the
+ * spurious chip, though a slave spurious still leaves the cascade in service on
+ * the master. */
+static int pic8259_spurious(uint32_t line)
+{
+	if (line != 7 && line != 15) return 0;
+	uint16_t port = (line == 7) ? PIC1_CMD : PIC2_CMD;
+	outb(port, 0x0B);                 /* OCW3: next read returns ISR */
+	int in_service = inb(port) & 0x80;
+	outb(port, 0x0A);                 /* back to IRR */
+	if (in_service) return 0;
+	if (line == 15) outb(PIC1_CMD, PIC_EOI);
+	return 1;
+}
+
+void irqchip_mask_unhandled(uint32_t irq)
+{
+	if (irq >= 0x20 && irq < 0x30) pic8259_mask(irq - 0x20);
+}
+
 void irq_dispatch(uint32_t irq)
 {
+	if (irq >= VEC_MSI_FIRST) {               /* came through the LAPIC, not the PIC */
+		extern void lapic_eoi(void);
+		lapic_eoi();
+		irq_handle(irq);
+		return;
+	}
+	if (irq >= 0x20 && irq < 0x30 && pic8259_spurious(irq - 0x20)) return;
 	pic8259_eoi(irq - 0x20);
 	irq_handle(irq);
 }

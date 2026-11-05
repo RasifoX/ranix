@@ -1,3 +1,4 @@
+#include <kernel/kprintf.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <kernel/lib/string.h>
@@ -21,8 +22,7 @@ void mmu_init(void)
 	vm_init_kernel(root);
 	vm_set_kernel_pt(root);
 
-	extern void kprintf(const char *, ...);
-	kprintf("paging: %s\n", la57 ? "5-level (LA57, 128 PB VA)" : "4-level (256 TB VA)");
+	kprintf(KERN_INFO "mm: paging %s\n", la57 ? "5-level (LA57, 128 PB VA)" : "4-level (256 TB VA)");
 }
 
 /* Direct map covers PML4[256] (boot pdpt_dm, first 512 GB). To map RAM past
