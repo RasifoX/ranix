@@ -64,22 +64,21 @@
          * a kernel control-flow corruption can branch to a low (user-range)
          * address, and keying off "elr < kernel base" would misreport that EL1
          * fault as a user segfault and kill a random process instead of panicking.
-         * EL0 fault → kill the offending process with SIGSEGV; EL1 → fall through
-         * to panic_report. (Delivering SIGSEGV to a user handler needs a nested-
-         * fault-safe signal path on both arches — a separate change.) */
+         * EL0 fault → the process's signal (task_force_fault); EL1 → fall through
+         * to panic_report. */
         if ((tf->spsr & 0xF) == 0) {
-            kprintf("segfault: pid=%d (%s) ELR=0x%lx FAR=0x%lx EC=0x%x ISS=0x%x\n",
+            kprintf(KERN_WARN "fault: segfault pid=%d (%s) elr=0x%lx far=0x%lx ec=0x%x iss=0x%x\n",
                     (int)p->pid, p->name, elr, far, ec, iss);
-            kprintf("  x0=%lx x1=%lx x2=%lx x3=%lx\n",
+            kprintf(KERN_WARN "fault: x0=0x%lx x1=0x%lx x2=0x%lx x3=0x%lx\n",
                     tf->regs[0], tf->regs[1], tf->regs[2], tf->regs[3]);
-            kprintf("  x20=%lx x21=%lx x29(fp)=%lx x30(lr)=%lx sp=%lx\n",
+            kprintf(KERN_WARN "fault: x20=0x%lx x21=0x%lx fp=0x%lx lr=0x%lx sp=0x%lx\n",
                     tf->regs[20], tf->regs[21], tf->regs[29], tf->regs[30], tf->sp);
             { extern uint64_t arch_vm_get_paddr(uint64_t *, uint64_t);
               uint64_t fpa = (p && p->vm) ? arch_vm_get_paddr(p->vm->root, far & ~0xFFFUL) : 0;
               int hasvma = 0;
               for (vma_t *v = (p && p->vm) ? p->vm->vmas : 0; v; v = v->next)
                   if (far >= v->vaddr && far < v->vaddr + v->size) { hasvma = 1; break; }
-              kprintf("  FAR pte_pa=%lx vma=%d\n", fpa, hasvma); }
+              kprintf(KERN_WARN "fault: far pte_pa=0x%lx vma=%d\n", fpa, hasvma); }
             /* Walk frame pointer chain to get call stack */
             uint64_t fp = tf->regs[29];
             for (int _i = 0; _i < 6 && fp && fp < 0xFFFF000000000000UL && (fp & 7) == 0; _i++) {
@@ -91,16 +90,26 @@
                 uint64_t saved_fp  = *(uint64_t *)fp;
                 uint64_t saved_lr  = *(uint64_t *)(fp + 8);
                 uaccess_end();
-                kprintf("  frame[%d]: fp=%lx lr=%lx\n", _i, saved_fp, saved_lr);
+                kprintf(KERN_WARN "fault: frame[%d] fp=0x%lx lr=0x%lx\n", _i, saved_fp, saved_lr);
                 if (!saved_fp || saved_fp == fp) break;
                 fp = saved_fp;
             }
-            extern void coredump(process_t *, int, arch_context_t *);
-            coredump(p, SIGSEGV, tf);
-            p->killed_by_sig = 1;
-            p->exit_code     = SIGSEGV;
-            task_exit();
-            __builtin_unreachable();
+            {
+                int sig = SIGSEGV, code = 0x80;   /* SI_KERNEL */
+                uint64_t addr = far;
+                if (ec == 0x20 || ec == 0x24) {
+                    uint32_t dfsc = iss & 0x3F;
+                    code = (dfsc >= 0x0C && dfsc <= 0x0F) ? 2 /* SEGV_ACCERR */ : 1 /* SEGV_MAPERR */;
+                } else if (ec == 0x22 || ec == 0x26) {
+                    sig = SIGBUS;  code = 1 /* BUS_ADRALN */;
+                } else if (ec == 0x00 || ec == 0x0E) {
+                    sig = SIGILL;  code = 1 /* ILL_ILLOPC */;  addr = elr;
+                } else if (ec == 0x3C) {
+                    sig = SIGTRAP; code = 1 /* TRAP_BRKPT */;  addr = elr;
+                }
+                task_force_fault(tf, sig, code, addr, esr, ec);
+                return;
+            }
         }
 
         unsigned long fixup = search_extable(elr);
