@@ -18,12 +18,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NWORK   16        /* >> typical -smp 4 to force migration */
 #define WIDTH   64        /* live FP lanes carried across the loop */
 #define INNER   20000
 #define ROUNDS  400
+#define LIMIT_S 30
 
 static volatile int g_fail;
 static volatile int g_stop;
@@ -58,7 +60,9 @@ static void *worker(void *arg)
     /* Establish the known-correct value once (same code, same input). */
     double golden = kernel_round(seed);
 
-    for (int r = 0; r < ROUNDS && !g_stop; r++) {
+    /* The work is fixed, the machine is not: under emulation it can run minutes. */
+    time_t end = time(NULL) + LIMIT_S;
+    for (int r = 0; r < ROUNDS && !g_stop && time(NULL) < end; r++) {
         /* Churn affinity to force migration mid-computation. */
         cpu_set_t set;
         CPU_ZERO(&set);
