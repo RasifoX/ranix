@@ -8,7 +8,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#ifndef STATX_BASIC_STATS       /* newer musl has it in sys/stat.h */
 #include <linux/stat.h>
+#endif
 
 static int do_statx(int dirfd, const char *path, int flags, struct statx *b)
 {
