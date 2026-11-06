@@ -4,6 +4,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/hugetlb.h>
+#include <kernel/cgroup.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/bug.h>
@@ -107,8 +108,13 @@ vm_space_t *vm_create(void)
 	vm_space_t *vs = (vm_space_t *)PHYS_TO_VIRT(vs_phys);
 	vs->root = NULL;
 	vs->vmas = NULL;
+	vs->mem_cg = NULL;
+	vs->mem_charged = 0;
+	vs->pt_charged = 0;
 	vs->mmap_next = ARCH_USER_MMAP_BASE;
 	vs->huge1g_next = HUGE1G_VA_BASE;
+	vs->brk = 0;
+	vs->brk_lock = (mutex_t)MUTEX_INIT;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
 	uint64_t l0_phys = alloc_table();
@@ -149,6 +155,8 @@ void vm_destroy(vm_space_t *vs)
 
 	if (!vs->root) { vs->magic = 0; buddy_free(VIRT_TO_PHYS(vs), 0); return; }
 
+	long freed = 0;
+
 	uint64_t l1_phys = user_l1(vs);   /* under L0[0] */
 	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 
@@ -156,7 +164,10 @@ void vm_destroy(vm_space_t *vs)
 		if (!(l1[i] & PTE_VALID)) continue;
 		if ((l1[i] & 3) != 3) {
 			/* 1 GB L1 block */
-			if (l1[i] & PTE_USER) huge1g_put(l1[i] & PA_1G_MASK);
+			if (l1[i] & PTE_USER) {
+				if (huge1g_refcount(l1[i] & PA_1G_MASK) == 1) freed += HUGE_1G_SIZE;
+				huge1g_put(l1[i] & PA_1G_MASK);
+			}
 			continue;
 		}
 
@@ -170,7 +181,7 @@ void vm_destroy(vm_space_t *vs)
 					huge2m_account(-1);
 					uint64_t pa = l2[j] & PA_2M_MASK;
 					for (int k = 0; k < 512; k++)
-						pmm_free((void *)(pa + (uint64_t)k * PAGE_SIZE));
+						freed += PAGE_SIZE * pmm_free((void *)(pa + (uint64_t)k * PAGE_SIZE));
 				}
 				continue;
 			}
@@ -183,7 +194,7 @@ void vm_destroy(vm_space_t *vs)
 				if (l3[k] & PTE_USER) {
 					is_user_l3 = 1;
 					if (!(l3[k] & PTE_NOFREE))
-						pmm_free((void *)(l3[k] & PA_MASK));
+						freed += PAGE_SIZE * pmm_free((void *)(l3[k] & PA_MASK));
 				}
 			}
 			/* Don't free kernel-inherited L3 tables (e.g. framebuffer split).
@@ -192,6 +203,9 @@ void vm_destroy(vm_space_t *vs)
 		}
 		buddy_free(l2_phys, 0);
 	}
+
+	cgroup_uncharge_mem(vs, freed);
+	cgroup_vm_release(vs);
 
 	buddy_free(l1_phys, 0);            /* user L1 */
 	buddy_free((uint64_t)vs->root, 0); /* L0 */
@@ -215,6 +229,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	} else {
 		l2_phys = alloc_table();
 		if (!l2_phys) return -1;
+		cgroup_charge_table(vs);
 		l1[l1i] = l2_phys | L12_TABLE;
 	}
 
@@ -229,6 +244,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 			              | PTE_VALID | (1UL << 1);
 			l3_phys = alloc_table();
 			if (!l3_phys) return -1;
+			cgroup_charge_table(vs);
 			uint64_t *l3_virt = (uint64_t *)PHYS_TO_VIRT(l3_phys);
 			for (int j = 0; j < PT_ENTRIES; j++)
 				l3_virt[j] = (base + (uint64_t)j * PAGE_SIZE) | attr;
@@ -242,6 +258,7 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	} else {
 		l3_phys = alloc_table();
 		if (!l3_phys) return -1;
+		cgroup_charge_table(vs);
 		l2[l2i] = l3_phys | L12_TABLE;
 	}
 
@@ -254,6 +271,13 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if (!(flags & VM_WRITE))    attr |= PTE_RO;
 	if (flags & VM_NOFREE)      attr |= PTE_NOFREE;   /* shared page: don't free on teardown */
 	attr |= pte_xn(flags);
+	uint64_t old = l3[l3i];
+	/* a remap of the same page (mprotect, a fault going writable) keeps its owner
+	 * and, for device memory, its memory type */
+	if ((old & PTE_VALID) && (old & PA_MASK) == (paddr & PA_MASK)) {
+		uint64_t mt = PTE_ATTR_NORMAL | PTE_ATTR_NORMAL_NC | PTE_ATTR_DEVICE;
+		attr = (attr & ~mt) | (old & (mt | PTE_NOFREE));
+	}
 
 	l3[l3i] = (paddr & ~0xFFFUL) | L3_PAGE | attr;
 
@@ -283,6 +307,7 @@ int vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	} else {
 		l2_phys = alloc_table();
 		if (!l2_phys) return -1;
+		cgroup_charge_table(vs);
 		l1[l1i] = l2_phys | L12_TABLE;
 	}
 
@@ -351,7 +376,10 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 		__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb"
 		                 :: "r"((vaddr & ~0x3FFFFFFFUL) >> 12) : "memory");
 		spin_unlock_irq(&vs->fault_lock, lf);
-		if (huge1g) huge1g_put(huge1g);
+		if (huge1g) {
+			if (huge1g_refcount(huge1g) == 1) cgroup_uncharge_mem(vs, HUGE_1G_SIZE);
+			huge1g_put(huge1g);
+		}
 		return;
 	}
 	if (l1[l1i] & PTE_VALID) {
@@ -382,11 +410,14 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 
 	/* Free the physical page(s) if user-owned (outside the lock; pmm has its own). */
 	if (huge_base) {
+		long freed = 0;
 		huge2m_account(-1);
 		for (int i = 0; i < 512; i++)
-			pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
-	} else if ((pte & PTE_VALID) && (pte & PTE_USER))
-		pmm_free((void *)(pte & PA_MASK));
+			freed += PAGE_SIZE * pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
+		cgroup_uncharge_mem(vs, freed);
+	} else if ((pte & PTE_VALID) && (pte & PTE_USER) && !(pte & PTE_NOFREE)) {
+		if (pmm_free((void *)(pte & PA_MASK))) cgroup_uncharge_mem(vs, PAGE_SIZE);
+	}
 }
 
 uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
@@ -450,8 +481,13 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	vm_space_t *new_vs = (vm_space_t *)PHYS_TO_VIRT(new_vs_phys);
 	new_vs->root = NULL;
 	new_vs->vmas = NULL;
+	new_vs->mem_cg = NULL;
+	new_vs->mem_charged = 0;
+	new_vs->pt_charged = 0;
 	new_vs->mmap_next = vs->mmap_next;
 	new_vs->huge1g_next = vs->huge1g_next;
+	new_vs->brk = vs->brk;
+	new_vs->brk_lock = (mutex_t)MUTEX_INIT;
 	new_vs->refcount = 1;
 	new_vs->asid = asid_alloc();
 	new_vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
