@@ -4,6 +4,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/proc.h>
 #include <kernel/config.h>
+#include <kernel/hal.h>
 
 /*
  * Unix98 pseudo-terminals. Opening /dev/ptmx allocates a master/slave pair and
@@ -19,8 +20,6 @@
 #define PTY_BUF   4096
 #define NCCS      19
 
-extern int copy_to_user(void *dst, const void *src, size_t size);
-extern int copy_from_user(void *dst, const void *src, size_t size);
 
 #define TCGETS     0x5401
 #define TCSETS     0x5402
@@ -152,22 +151,6 @@ static ssize_t slave_cooked_read(pty_t *p, void *dst, size_t len, int nb)
 	return (ssize_t)got;
 }
 
-/* Write to ring [buf,h,t]; wake `wq` readers. Drops on full; returns bytes
- * accepted. */
-static ssize_t ring_write(pty_t *p, uint8_t *ring, uint32_t *h, uint32_t *t,
-                          wait_queue_t *wq, const void *src, size_t len)
-{
-	const uint8_t *in = src;
-	size_t put = 0;
-	uint64_t f = spin_lock_irq(&p->lock);
-	uint32_t fr = r_free(*h, *t);
-	uint32_t n = fr < len ? fr : len;
-	for (uint32_t i = 0; i < n; i++) { ring[*h] = in[put++]; *h = (*h + 1) % PTY_BUF; }
-	spin_unlock_irq(&p->lock, f);
-	if (put) wake_up(wq);
-	return (ssize_t)put;
-}
-
 /* echo a byte back toward the master (slave→master ring) */
 static void echo_byte(pty_t *p, uint8_t c)
 {
@@ -183,8 +166,8 @@ static void echo_erase(pty_t *p)
 }
 
 /* Master write: feed bytes through the line discipline into the slave's m2s
- * stream. Returns bytes consumed (always len; full drops are silent like the
- * raw path). */
+ * stream. Returns bytes consumed (always len; a full m2s ring drops input,
+ * see test_ptyfull). */
 static ssize_t ldisc_input(pty_t *p, const void *src, size_t len)
 {
 	const uint8_t *in = src;
@@ -264,22 +247,49 @@ static ssize_t ldisc_input(pty_t *p, const void *src, size_t len)
 	return (ssize_t)len;
 }
 
-/* Slave write: OPOST/ONLCR cook on the way back to the master. */
-static ssize_t ldisc_output(pty_t *p, const void *src, size_t len)
+/* Slave write: OPOST/ONLCR cook on the way back to the master. A full ring
+ * makes the writer wait for the master to read, as a tty write does; it must
+ * not drop bytes, and it must not return 0 for a write of more than 0. With
+ * O_NONBLOCK and nothing taken: EAGAIN. Master gone: EIO. A newline under
+ * ONLCR waits until "\r\n" fits, so the pair is never split by a full ring. */
+static ssize_t ldisc_output(pty_t *p, const void *src, size_t len, int nb)
 {
 	const uint8_t *in = src;
-	if (!(p->c_oflag & OPOST))
-		return ring_write(p, p->s2m, &p->s2m_h, &p->s2m_t, &p->s2m_wait, src, len);
-
-	uint64_t f = spin_lock_irq(&p->lock);
-	for (size_t i = 0; i < len; i++) {
-		if (in[i] == '\n' && (p->c_oflag & ONLCR))
-			ring_put(p->s2m, &p->s2m_h, p->s2m_t, '\r');
-		ring_put(p->s2m, &p->s2m_h, p->s2m_t, in[i]);
+	size_t done = 0;
+	while (done < len) {
+		uint64_t f = spin_lock_irq(&p->lock);
+		if (!p->master_open) {
+			spin_unlock_irq(&p->lock, f);
+			return done ? (ssize_t)done : -5;
+		}
+		int crlf = (p->c_oflag & OPOST) && (p->c_oflag & ONLCR);
+		size_t start = done;
+		while (done < len) {
+			uint32_t fr = r_free(p->s2m_h, p->s2m_t);
+			uint8_t c = in[done];
+			if (crlf && c == '\n') {
+				if (fr < 2) break;
+				ring_put(p->s2m, &p->s2m_h, p->s2m_t, '\r');
+			} else if (fr < 1) {
+				break;
+			}
+			ring_put(p->s2m, &p->s2m_h, p->s2m_t, c);
+			done++;
+		}
+		if (done > start || done == len) {
+			spin_unlock_irq(&p->lock, f);
+			wake_up(&p->s2m_wait);          /* master readers */
+			continue;
+		}
+		if (nb) {
+			spin_unlock_irq(&p->lock, f);
+			return done ? (ssize_t)done : -11;
+		}
+		sleep_on_locked(&p->s2m_wait, &p->lock, f);   /* master_read wakes us */
+		if (task_has_actionable_signal())
+			return done ? (ssize_t)done : -4;
 	}
-	spin_unlock_irq(&p->lock, f);
-	wake_up(&p->s2m_wait);
-	return (ssize_t)len;
+	return (ssize_t)done;
 }
 
 static void termios_pack(pty_t *p, uint8_t t[36])
@@ -329,17 +339,23 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 		 * its own pgrp and it skips the SIGTTIN job-control wait. */
 		extern vfs_fops_t *pts_fops_ptr(void);
 		process_t *cur = task_current();
-		if (cur && cur->pgrp > 0) p->fg_pgrp = cur->pgrp;
-		if (cur) { cur->ctty = p; cur->ctty_fops = pts_fops_ptr(); }
+		int r = tty_acquire(p, pts_fops_ptr(), arg == 1);
+		if (r < 0) return r;
+		if (r == 0 && cur->pgrp > 0) p->fg_pgrp = cur->pgrp;
 		return 0;
 	}
 	case TIOCGPGRP:
-		return copy_to_user((void *)(uintptr_t)arg, &p->fg_pgrp, sizeof(p->fg_pgrp)) ? -14 : 0;
+	{
+		pid_t pgrp = pid_to_user(p->fg_pgrp);
+		return copy_to_user((void *)(uintptr_t)arg, &pgrp, sizeof(pgrp)) ? -14 : 0;
+	}
 	case TIOCSPGRP: {
 		pid_t pgrp;
 		if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
-		p->fg_pgrp = pgrp;
-		return 0;
+		pid_t fg;
+		long r = tty_check_fg(p, 1, pgrp, &fg);
+		if (r == 0) p->fg_pgrp = fg;
+		return (int)r;
 	}
 	case TIOCNOTTY: {
 		process_t *cur = task_current();
@@ -347,7 +363,15 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 		return 0;
 	}
 	}
-	return 0;   /* lenient: unknown tty ioctls succeed as no-ops */
+	/* line-control requests have nothing to act on here; anything else must not
+	 * read as success, or a caller trusts the buffer it passed */
+	switch (cmd) {
+	case 0x5409: case 0x540A: case 0x540B:   /* TCSBRK, TCXONC, TCFLSH */
+	case 0x540C: case 0x540D:                /* TIOCEXCL, TIOCNXCL */
+	case 0x5425: case 0x5427: case 0x5428:   /* TCSBRKP, TIOCSBRK, TIOCCBRK */
+		return 0;
+	}
+	return -25;   /* ENOTTY */
 }
 
 /* ── master (/dev/ptmx) ──────────────────────────────────────── */
@@ -383,16 +407,46 @@ static int ptmx_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 	return -24;   /* EMFILE: pty pool exhausted */
 }
 
+/* The line discipline works under p->lock with interrupts off, where user memory
+ * must not be touched, so it only ever sees a kernel copy. A pty read or write may
+ * be short, so one bounce buffer per call will do. */
+#define PTY_BOUNCE 4096UL
+
+static ssize_t ldisc_from_user(pty_t *p, ssize_t (*ldisc)(pty_t *, const void *, size_t),
+                               const void *buf, size_t len)
+{
+	if (!len) return 0;
+	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
+	uint8_t *kb = kmalloc(n);
+	if (!kb) return -12;
+	ssize_t r = copy_fop_from_user(kb, buf, n) ? -14 : ldisc(p, kb, n);
+	kfree(kb);
+	return r;
+}
+
+/* What is taken from the ring before a fault is lost, as for any read that faults. */
+static ssize_t copy_read_out(void *buf, const uint8_t *kb, ssize_t r)
+{
+	if (r > 0 && copy_fop_to_user(buf, kb, (size_t)r) != 0) return -14;
+	return r;
+}
+
 static ssize_t master_read(vfs_file_t *file, void *buf, size_t len)
 {
 	pty_t *p = file->priv;
-	return ring_read(p, p->s2m, &p->s2m_h, &p->s2m_t, &p->s2m_wait,
-	                 &p->slave_open, buf, len, file->flags & O_NONBLOCK);
+	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
+	uint8_t *kb = kmalloc(n ? n : 1);
+	if (!kb) return -12;
+	ssize_t r = copy_read_out(buf, kb, ring_read(p, p->s2m, &p->s2m_h, &p->s2m_t, &p->s2m_wait,
+	                                             &p->slave_open, kb, n, file->flags & O_NONBLOCK));
+	kfree(kb);
+	if (r > 0) wake_up(&p->s2m_wait);    /* slave writers waiting for room */
+	return r;
 }
 static ssize_t master_write(vfs_file_t *file, const void *buf, size_t len)
 {
 	pty_t *p = file->priv;
-	return ldisc_input(p, buf, len);
+	return ldisc_from_user(p, ldisc_input, buf, len);
 }
 static int master_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
@@ -424,6 +478,7 @@ static int master_close(vfs_file_t *file)
 	if (both_closed) p->in_use = 0;
 	spin_unlock_irq(&pool_lock, pf);
 	wake_up(&p->m2s_wait);   /* slave readers see EOF */
+	wake_up(&p->s2m_wait);   /* slave writers see EIO */
 	/* Terminal hangup: SIGHUP+SIGCONT the foreground group and detach the ctty
 	 * from every process that had this pty as its controlling terminal. */
 	tty_hangup(p, fg);
@@ -457,7 +512,12 @@ static ssize_t slave_read(vfs_file_t *file, void *buf, size_t len)
 		if (jc < 0) return jc;
 		if (jc == 0) break;
 	}
-	return slave_cooked_read(p, buf, len, file->flags & O_NONBLOCK);
+	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
+	uint8_t *kb = kmalloc(n ? n : 1);
+	if (!kb) return -12;
+	ssize_t r = copy_read_out(buf, kb, slave_cooked_read(p, kb, n, file->flags & O_NONBLOCK));
+	kfree(kb);
+	return r;
 }
 static ssize_t slave_write(vfs_file_t *file, const void *buf, size_t len)
 {
@@ -469,7 +529,14 @@ static ssize_t slave_write(vfs_file_t *file, const void *buf, size_t len)
 			if (jc == 0) break;
 		}
 	}
-	return ldisc_output(p, buf, len);
+	if (!len) return 0;
+	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
+	uint8_t *kb = kmalloc(n);
+	if (!kb) return -12;
+	ssize_t r = copy_fop_from_user(kb, buf, n) ? -14 :
+	            ldisc_output(p, kb, n, file->flags & O_NONBLOCK);
+	kfree(kb);
+	return r;
 }
 static int slave_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
