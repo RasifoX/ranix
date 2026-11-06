@@ -9,12 +9,24 @@
  *
  * This is additive: the only hooks into the core are cgroup_can_fork /
  * cgroup_charge_fork / cgroup_exit, called from the process lifecycle.
+ *
+ * A cgroup made through cgroupfs lives for good. One made for a session goes when
+ * its last holder does: the session, a task, an address space or a file charged
+ * to it. Its struct is then parked for the next session rather than freed, since
+ * an open cgroupfs file may still point at it; gen tells that file it is stale.
+ *
+ * Memory is charged when a page is allocated and uncharged when it is freed, not
+ * when a space maps or unmaps it. So a fork adds nothing but its page tables, and
+ * a page shared copy-on-write stays charged once, however many spaces come and go.
  */
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/cgroup.h>
+#include <kernel/capabilities.h>
+#include <kernel/pid_namespace.h>
 #include <kernel/hal.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 
@@ -31,24 +43,230 @@ typedef struct cgroup {
 	long            mem_cur;    /* memory.current bytes in this subtree */
 	int             frozen;     /* cgroup.freeze: 1 = this subtree is frozen */
 	int             cpu_weight; /* cpu.weight: 1..10000, default 100 */
+	uint32_t        refs;       /* holders; a child, a task, a space, a file count one each */
+	uint32_t        gen;        /* bumped when the struct is parked */
 } cgroup_t;
 
-static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0, .mem_max = -1, .cpu_weight = 100 };
+static cgroup_t cgroup_root = { .name = "", .pids_max = -1, .nr_procs = 0, .mem_max = -1,
+                                .cpu_weight = 100, .refs = 1 };
+static cgroup_t *cg_parked;   /* released structs, linked through ->sibling */
 static spinlock_t cg_lock = SPINLOCK_INIT;
 
-/* memory controller: charge n bytes to cg's subtree; fail if over memory.max */
-int cgroup_charge_mem(void *cgp, long n)
+static void cg_mem_add(cgroup_t *cg, long n)
 {
-	cgroup_t *cg = cgp ? (cgroup_t *)cgp : &cgroup_root;
+	for (cgroup_t *c = cg; c; c = c->parent) {
+		c->mem_cur += n;
+		if (c->mem_cur < 0) c->mem_cur = 0;
+	}
+}
+
+static void cg_put_locked(cgroup_t *cg)
+{
+	while (cg && --cg->refs == 0) {
+		cgroup_t **pp = &cg->parent->children;
+		while (*pp != cg) pp = &(*pp)->sibling;
+		*pp = cg->sibling;
+		cgroup_t *up = cg->parent;
+		/* pages of a file mapped elsewhere when it went: their cgroup is gone */
+		cg_mem_add(up, -cg->mem_cur);
+		cg->gen++;
+		cg->sibling = cg_parked;
+		cg_parked = cg;
+		cg = up;
+	}
+}
+
+void cgroup_put(void *cgp)
+{
 	uint64_t f = spin_lock_irq(&cg_lock);
-	for (cgroup_t *c = cg; c; c = c->parent)
-		if (c->mem_max >= 0 && c->mem_cur + n > c->mem_max) {
-			spin_unlock_irq(&cg_lock, f);
-			return -1;
-		}
-	for (cgroup_t *c = cg; c; c = c->parent) c->mem_cur += n;
+	cg_put_locked(cgp);
+	spin_unlock_irq(&cg_lock, f);
+}
+
+static cgroup_t *cg_alloc(cgroup_t *parent, const char *name, long mem_max, long pids_max)
+{
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cgroup_t *cg = cg_parked;
+	if (cg) cg_parked = cg->sibling;
+	spin_unlock_irq(&cg_lock, f);
+	uint32_t gen = cg ? cg->gen : 0;
+	if (!cg) cg = kmalloc(sizeof(*cg));
+	if (!cg) return NULL;
+	memset(cg, 0, sizeof(*cg));
+	int l = 0; while (name[l] && l < 63) { cg->name[l] = name[l]; l++; }
+	cg->name[l] = '\0';
+	cg->pids_max   = pids_max;
+	cg->mem_max    = mem_max;
+	cg->cpu_weight = 100;
+	cg->parent     = parent;
+	cg->refs       = 1;
+	cg->gen        = gen;
+	f = spin_lock_irq(&cg_lock);
+	parent->refs++;
+	cg->sibling = parent->children;
+	parent->children = cg;
+	spin_unlock_irq(&cg_lock, f);
+	return cg;
+}
+
+/* /cgroup/asess/<name>. The parent's limit is what all sessions together may
+ * hold, whatever each was promised, and it is set once, by the first session. */
+/* All sessions together may use what is free now, on top of what they hold, less
+ * what the host keeps: what the host itself has in use is not there to promise. */
+void *cgroup_session_create(const char *name, long mem_max, long pids_max, long avail, long reserve)
+{
+	static cgroup_t *all;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cgroup_t *parent = all;
+	spin_unlock_irq(&cg_lock, f);
+	if (!parent) {
+		parent = cg_alloc(&cgroup_root, "asess", 0, -1);
+		if (!parent) return NULL;
+		f = spin_lock_irq(&cg_lock);
+		cgroup_t *lost = all ? parent : NULL;
+		if (!all) all = parent;
+		parent = all;
+		if (lost) cg_put_locked(lost);
+		spin_unlock_irq(&cg_lock, f);
+	}
+	f = spin_lock_irq(&cg_lock);
+	long cap = avail + parent->mem_cur - reserve;
+	parent->mem_max = cap > 0 ? cap : 0;
+	spin_unlock_irq(&cg_lock, f);
+	return cg_alloc(parent, name, mem_max, pids_max);
+}
+
+void cgroup_mem_usage(void *cgp, long *cur, long *max)
+{
+	uint64_t f = spin_lock_irq(&cg_lock);
+	*cur = ((cgroup_t *)cgp)->mem_cur;
+	*max = ((cgroup_t *)cgp)->mem_max;
+	spin_unlock_irq(&cg_lock, f);
+}
+
+static int cg_over(const cgroup_t *cg, long n)
+{
+	for (const cgroup_t *c = cg; c; c = c->parent)
+		if (c->mem_max >= 0 && c->mem_cur + n > c->mem_max) return 1;
+	return 0;
+}
+
+static void cg_vm_add(vm_space_t *vm, cgroup_t *cg, long n)
+{
+	cg_mem_add(cg, n);
+	if (!vm->mem_cg) cg->refs++;
+	vm->mem_cg = cg;
+	vm->mem_charged += n;
+}
+
+/* memory controller: charge n bytes to the space's cgroup and its ancestors; fail
+ * if over memory.max */
+int cgroup_charge_mem(vm_space_t *vm, void *cgp, long n)
+{
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cgroup_t *cg = vm->mem_cg ? vm->mem_cg : cgp ? (cgroup_t *)cgp : &cgroup_root;
+	if (cg_over(cg, n)) {
+		spin_unlock_irq(&cg_lock, f);
+		return -1;
+	}
+	cg_vm_add(vm, cg, n);
 	spin_unlock_irq(&cg_lock, f);
 	return 0;
+}
+
+/* For a page table, which vm_map cannot refuse in time. It may overshoot the limit
+ * by a few pages; the next user page then fails. */
+void cgroup_charge_table(vm_space_t *vm)
+{
+	if (vm == kernel_vm_space) return;
+	process_t *p = task_current();
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cgroup_t *cg = vm->mem_cg ? vm->mem_cg : p && p->cgroup ? (cgroup_t *)p->cgroup : &cgroup_root;
+	cg_vm_add(vm, cg, PAGE_SIZE);
+	vm->pt_charged += PAGE_SIZE;
+	spin_unlock_irq(&cg_lock, f);
+}
+
+/* Files leave the top of the budget to the tasks: a write can fail with ENOSPC and
+ * be handled, but a task out of pages dies on its next copy-on-write. */
+#define FILE_HEADROOM (1L << 20)
+
+static int cg_over_file(cgroup_t *cg, long n)
+{
+	for (cgroup_t *c = cg; c; c = c->parent) {
+		if (c->mem_max < 0) continue;
+		long room = c->mem_max / 16 < FILE_HEADROOM ? c->mem_max / 16 : FILE_HEADROOM;
+		if (n > 0 && c->mem_cur + n + room > c->mem_max) return 1;
+	}
+	return 0;
+}
+
+/* File data on tmpfs and ramfs, memfd and SysV shm is paid for by whoever last
+ * grew it, whole, for as long as it lasts and wherever it lives. So a session
+ * cannot grow a host file for free, and a file it leaves behind stops holding its
+ * cgroup once the host grows it. *owner starts NULL and have is what it holds. */
+int cgroup_charge_file(void **owner, long have, long n)
+{
+	process_t *p = task_current();
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cgroup_t *cg = p && p->cgroup ? (cgroup_t *)p->cgroup : &cgroup_root;
+	cgroup_t *old = *owner;
+	long want = old == cg ? n : have + n;
+	if (cg_over(cg, want) || cg_over_file(cg, want)) {
+		spin_unlock_irq(&cg_lock, f);
+		return -1;
+	}
+	cg_mem_add(cg, want);
+	if (old != cg) {
+		cg->refs++;
+		*owner = cg;
+		if (old) {
+			cg_mem_add(old, -have);
+			cg_put_locked(old);
+		}
+	}
+	spin_unlock_irq(&cg_lock, f);
+	return 0;
+}
+
+void *cgroup_current(void)
+{
+	process_t *p = task_current();
+	return p && p->cgroup ? p->cgroup : &cgroup_root;
+}
+
+/* As cgroup_charge_file for a charge with a known payer, from any context.
+ * cgroup_file_release ends it. With force it may overshoot: the caller bounds it. */
+int cgroup_charge_to(void *owner, long n, int force)
+{
+	cgroup_t *cg = owner;
+	if (!cg) return 0;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	if (!force && (cg_over(cg, n) || cg_over_file(cg, n))) {
+		spin_unlock_irq(&cg_lock, f);
+		return -1;
+	}
+	cg_mem_add(cg, n);
+	cg->refs++;
+	spin_unlock_irq(&cg_lock, f);
+	return 0;
+}
+
+void cgroup_file_uncharge(void *owner, long n)
+{
+	if (!owner) return;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cg_mem_add(owner, -n);
+	spin_unlock_irq(&cg_lock, f);
+}
+
+void cgroup_file_release(void *owner, long n)
+{
+	if (!owner) return;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cg_mem_add(owner, -n);
+	cg_put_locked(owner);
+	spin_unlock_irq(&cg_lock, f);
 }
 
 /* 1 if cgp is the same cgroup as ancestorp or a descendant of it. Lockless
@@ -61,15 +279,20 @@ int cgroup_is_in_subtree(void *cgp, void *ancestorp)
 	return 0;
 }
 
-void cgroup_uncharge_mem(void *cgp, long n)
+void cgroup_uncharge_mem(vm_space_t *vm, long n)
 {
-	cgroup_t *cg = cgp ? (cgroup_t *)cgp : &cgroup_root;
 	uint64_t f = spin_lock_irq(&cg_lock);
-	for (cgroup_t *c = cg; c; c = c->parent) {
-		c->mem_cur -= n;
-		if (c->mem_cur < 0) c->mem_cur = 0;
-	}
+	if (vm->mem_cg) cg_mem_add(vm->mem_cg, -n);
+	vm->mem_charged = vm->mem_charged > n ? vm->mem_charged - n : 0;
 	spin_unlock_irq(&cg_lock, f);
+}
+
+/* The space is gone, its pages uncharged as they went: what is left is its tables. */
+void cgroup_vm_release(vm_space_t *vm)
+{
+	cgroup_uncharge_mem(vm, vm->pt_charged);
+	if (vm->mem_cg) cgroup_put(vm->mem_cg);
+	vm->mem_cg = NULL;
 }
 
 /* cpu.weight of a process's own cgroup (1..10000; default 100 = baseline) */
@@ -171,6 +394,7 @@ static int cg_charge(cgroup_t *cg)
 			return -1;
 		}
 	for (cgroup_t *c = cg; c; c = c->parent) c->nr_procs++;
+	cg->refs++;
 	spin_unlock_irq(&cg_lock, f);
 	return 0;
 }
@@ -180,6 +404,7 @@ static void cg_uncharge(cgroup_t *cg)
 	uint64_t f = spin_lock_irq(&cg_lock);
 	for (cgroup_t *c = cg; c; c = c->parent)
 		if (c->nr_procs > 0) c->nr_procs--;
+	cg_put_locked(cg);
 	spin_unlock_irq(&cg_lock, f);
 }
 
@@ -187,27 +412,59 @@ static void cg_uncharge(cgroup_t *cg)
 
 void *cgroup_root_get(void) { return &cgroup_root; }
 
-int cgroup_can_fork(struct process *parent)
+int cgroup_can_fork(void *cgp)
 {
-	cgroup_t *cg = parent->cgroup ? parent->cgroup : &cgroup_root;
-	return cg_charge(cg);   /* charges on success */
+	return cg_charge(cgp ? (cgroup_t *)cgp : &cgroup_root);
 }
 
-void cgroup_fork_attach(struct process *child, struct process *parent)
+void cgroup_fork_attach(struct process *child, void *cgp)
 {
-	child->cgroup = parent->cgroup ? parent->cgroup : &cgroup_root;
+	child->cgroup = cgp ? cgp : &cgroup_root;
 	/* the pid was already charged in cgroup_can_fork() */
 }
 
-void cgroup_cancel_fork(struct process *parent)
+void cgroup_cancel_fork(void *cgp)
 {
-	cgroup_t *cg = parent->cgroup ? parent->cgroup : &cgroup_root;
-	cg_uncharge(cg);
+	cg_uncharge(cgp ? (cgroup_t *)cgp : &cgroup_root);
 }
 
 void cgroup_exit(struct process *p)
 {
 	if (p->cgroup) { cg_uncharge((cgroup_t *)p->cgroup); p->cgroup = NULL; }
+}
+
+static void cg_add_procs(cgroup_t *cg, long n)
+{
+	for (cgroup_t *c = cg; c; c = c->parent) c->nr_procs += n;
+}
+
+/* Move n tasks and the charges of their address space. Their count leaves first,
+ * so an ancestor of both cgroups is not counted twice against its limit. */
+int cgroup_migrate(void *fromp, void *top, long n, vm_space_t *vm)
+{
+	cgroup_t *from = fromp, *to = top;
+	uint64_t f = spin_lock_irq(&cg_lock);
+	cg_add_procs(from, -n);
+	for (cgroup_t *c = to; c; c = c->parent)
+		if (c->pids_max >= 0 && c->nr_procs + n > c->pids_max) {
+			cg_add_procs(from, n);
+			spin_unlock_irq(&cg_lock, f);
+			return -1;
+		}
+	cg_add_procs(to, n);
+	to->refs += (uint32_t)n;
+	for (long i = 0; i < n; i++) cg_put_locked(from);
+	if (vm) {
+		if (vm->mem_charged) {
+			for (cgroup_t *c = vm->mem_cg; c; c = c->parent) c->mem_cur -= vm->mem_charged;
+			for (cgroup_t *c = to; c; c = c->parent) c->mem_cur += vm->mem_charged;
+		}
+		to->refs++;
+		if (vm->mem_cg) cg_put_locked(vm->mem_cg);
+		vm->mem_cg = to;
+	}
+	spin_unlock_irq(&cg_lock, f);
+	return 0;
 }
 
 /* ── cgroupfs ────────────────────────────────────────────────── */
@@ -217,7 +474,7 @@ enum { CG_PROCS = 0, CG_PIDS_MAX, CG_PIDS_CURRENT, CG_CONTROLLERS, CG_MEM_MAX, C
 static const char *cg_files[] = { "cgroup.procs", "pids.max", "pids.current", "cgroup.controllers",
                                   "memory.max", "memory.current", "cgroup.freeze", "cpu.weight" };
 
-typedef struct { cgroup_t *cg; int file; } cg_priv_t;   /* file=-1 → directory */
+typedef struct { cgroup_t *cg; uint32_t gen; int file; } cg_priv_t;   /* file=-1 → directory */
 
 static vfs_inode_t *cg_dir_inode(cgroup_t *cg);
 
@@ -237,6 +494,7 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 {
 	cg_priv_t *pr = f->inode->priv;
 	char tmp[96]; int n = 0;
+	if (pr->gen != pr->cg->gen) return -19; /* ENODEV */
 	switch (pr->file) {
 	case CG_PIDS_MAX:
 		if (pr->cg->pids_max < 0) { tmp[n++]='m';tmp[n++]='a';tmp[n++]='x'; }
@@ -266,7 +524,10 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 	default: /* cgroup.procs: pids whose cgroup is exactly this one */
 		for (int i = 0; i < task_count(); i++) {
 			process_t *p = task_get(i);
-			if (p && (cgroup_t *)p->cgroup == pr->cg) { n += cg_putlong(tmp + n, (long)p->pid); tmp[n++]='\n'; }
+			if (p && (pid_t)p->pid == (pid_t)p->tgid && (cgroup_t *)p->cgroup == pr->cg) {
+				int nr = task_pid_nr_ns(p, current_pid_ns());
+				if (nr) { n += cg_putlong(tmp + n, nr); tmp[n++]='\n'; }
+			}
 			if (n > (int)sizeof(tmp) - 24) break;
 		}
 		break;
@@ -284,6 +545,7 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	cg_priv_t *pr = f->inode->priv;
 	char kb[64];
 	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
+	if (pr->gen != pr->cg->gen) return -19; /* ENODEV */
 	if (copy_from_user(kb, buf, n) != 0) return -14;
 	kb[n] = '\0';
 
@@ -299,6 +561,7 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	if (pr->file == CG_FREEZE) {
 		pr->cg->frozen = (kb[0] == '1');
+		if (!pr->cg->frozen) proc_wake_frozen();
 		return (ssize_t)len;
 	}
 	if (pr->file == CG_CPU_WEIGHT) {
@@ -309,14 +572,19 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	if (pr->file == CG_PROCS) {
 		long pid = 0; for (int i = 0; kb[i] >= '0' && kb[i] <= '9'; i++) pid = pid*10 + (kb[i]-'0');
-		process_t *t = proc_find((pid_t)pid);
+		process_t *t = pid ? proc_get_user((pid_t)pid) : task_current();
 		if (!t) return -3; /* ESRCH */
-		cgroup_t *old = t->cgroup ? t->cgroup : &cgroup_root;
-		if (old == pr->cg) return (ssize_t)len;
-		if (cg_charge(pr->cg) != 0) return -11; /* EAGAIN: target subtree full */
-		cg_uncharge(old);
-		t->cgroup = pr->cg;
-		return (ssize_t)len;
+		if (!pid) proc_hold(t);
+		ssize_t ret = (ssize_t)len;
+		if (!task_may_control(t, CAP_SYS_ADMIN))
+			ret = -13; /* EACCES */
+		else {
+			int r = proc_move_cgroup(t, pr->cg);
+			if (r == -1) ret = -11; /* EAGAIN: target subtree full */
+			else if (r)  ret = r;
+		}
+		proc_put(t);
+		return ret;
 	}
 	return -22; /* EINVAL: read-only file */
 }
@@ -334,7 +602,7 @@ static vfs_inode_t *cg_file_inode(cgroup_t *cg, int file)
 	in->fops     = &cg_file_fops;
 	cg_priv_t *pr = kmalloc(sizeof(*pr));
 	if (!pr) { kfree(in); return NULL; }
-	pr->cg = cg; pr->file = file;
+	pr->cg = cg; pr->gen = cg->gen; pr->file = file;
 	in->priv = pr;
 	return in;
 }
@@ -343,6 +611,7 @@ static vfs_inode_t *cg_lookup(vfs_inode_t *dir, const char *name)
 {
 	cg_priv_t *dp = dir->priv;
 	cgroup_t *cg = dp->cg;
+	if (dp->gen != cg->gen) return NULL;
 	for (int i = 0; i < CG_NFILES; i++)
 		if (strcmp(name, cg_files[i]) == 0) return cg_file_inode(cg, i);
 	uint64_t f = spin_lock_irq(&cg_lock);
@@ -355,6 +624,7 @@ static vfs_inode_t *cg_lookup(vfs_inode_t *dir, const char *name)
 static int cg_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	cg_priv_t *dp = dir->priv;
+	if (dp->gen != dp->cg->gen) return -1;
 	if (idx < CG_NFILES) {
 		const char *nm = cg_files[idx];
 		int l = 0; while (nm[l]) l++;
@@ -381,20 +651,8 @@ static int cg_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 {
 	(void)mode;
 	cg_priv_t *dp = dir->priv;
-	cgroup_t *cg = kmalloc(sizeof(*cg));
-	if (!cg) return -12;
-	memset(cg, 0, sizeof(*cg));
-	int l = 0; while (name[l] && l < 63) { cg->name[l] = name[l]; l++; }
-	cg->name[l] = '\0';
-	cg->pids_max   = -1;
-	cg->mem_max    = -1;
-	cg->cpu_weight = 100;
-	cg->parent = dp->cg;
-	uint64_t f = spin_lock_irq(&cg_lock);
-	cg->sibling = dp->cg->children;
-	dp->cg->children = cg;
-	spin_unlock_irq(&cg_lock, f);
-	return 0;
+	if (dp->gen != dp->cg->gen) return -2;
+	return cg_alloc(dp->cg, name, -1, -1) ? 0 : -12;
 }
 
 static vfs_iops_t cg_dir_iops = { .lookup = cg_lookup, .readdir = cg_readdir, .mkdir = cg_mkdir };
@@ -413,7 +671,7 @@ static vfs_inode_t *cg_dir_inode(cgroup_t *cg)
 	in->no_cache = 1;
 	cg_priv_t *pr = kmalloc(sizeof(*pr));
 	if (!pr) { kfree(in); return NULL; }
-	pr->cg = cg; pr->file = -1;
+	pr->cg = cg; pr->gen = cg->gen; pr->file = -1;
 	in->priv = pr;
 	return in;
 }

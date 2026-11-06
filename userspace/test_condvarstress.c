@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
@@ -117,6 +118,7 @@ int main(void)
 	for (int i = 0; i < 3; i++) {
 		hog[i] = fork();
 		if (hog[i] == 0) {
+			prctl(PR_SET_PDEATHSIG, SIGKILL);   /* a timed-out parent must not leave it spinning */
 			volatile unsigned long x = 0;
 			for (;;) x++;
 		}

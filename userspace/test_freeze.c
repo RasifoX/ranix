@@ -40,9 +40,33 @@ int main(void)
 	cgwrite("/cgroup/ftest/cgroup.freeze", "0"); /* thaw */
 	int r2 = waitpid(pid, &st, 0);               /* now it runs to exit */
 
-	if (r1 == 0 && r2 == pid && WIFEXITED(st) && WEXITSTATUS(st) == 42)
-		printf("freeze-ok\n");
-	else
+	if (!(r1 == 0 && r2 == pid && WIFEXITED(st) && WEXITSTATUS(st) == 42)) {
 		printf("freeze-fail r1=%d r2=%d\n", r1, r2);
+		return 0;
+	}
+
+	/* A child that has not gone to sleep yet is frozen too: it finds the byte
+	 * without ever entering the scheduler, and must stop before user mode. */
+	for (int i = 0; i < 100; i++) {
+		int q[2];
+		pipe(q);
+		pid = fork();
+		if (pid == 0) {
+			char c; read(q[0], &c, 1);
+			_exit(42);
+		}
+		sprintf(b, "%d\n", (int)pid);
+		cgwrite("/cgroup/ftest/cgroup.procs", b);
+		cgwrite("/cgroup/ftest/cgroup.freeze", "1");
+		write(q[1], "x", 1);
+		usleep(3000);
+		r1 = waitpid(pid, &st, WNOHANG);
+		cgwrite("/cgroup/ftest/cgroup.freeze", "0");
+		r2 = r1 ? pid : waitpid(pid, &st, 0);
+		close(q[0]); close(q[1]);
+		if (r1 != 0) { printf("freeze-fail round %d r1=%d\n", i, r1); return 0; }
+	}
+	(void)r2;
+	printf("freeze-ok\n");
 	return 0;
 }
