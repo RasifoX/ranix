@@ -26,9 +26,13 @@ void icmpv6_rx(netdev_t *dev, skb_t *skb, ipv6_hdr_t *ip6)
     }
 
     switch (h->type) {
-    case ICMP6_NEIGH_SOL: ndp_rx_ns(dev, ip6, skb->data, skb->len); break;
-    case ICMP6_NEIGH_ADV: ndp_rx_na(dev, skb->data, skb->len);      break;
-    case ICMP6_ROUTER_ADV: ndp_rx_ra(dev, ip6, skb->data, skb->len); break;
+    /* 255 proves it came from this link: a router decrements it (RFC 4861) */
+    case ICMP6_NEIGH_SOL: if (ip6->hop_limit != 255) break;
+                          ndp_rx_ns(dev, ip6, skb->data, skb->len); break;
+    case ICMP6_NEIGH_ADV: if (ip6->hop_limit != 255) break;
+                          ndp_rx_na(dev, skb->data, skb->len);      break;
+    case ICMP6_ROUTER_ADV: if (ip6->hop_limit != 255) break;
+                           ndp_rx_ra(dev, ip6, skb->data, skb->len); break;
     default: break;   /* router solicitation etc. — we are a host, ignore */
     }
     skb_free(skb);

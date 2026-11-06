@@ -258,7 +258,7 @@ static int ipv6_xmit(netdev_t *dev, skb_t *skb, const in6_addr_t *dst)
     memcpy(eh->dst, dmac, 6);
     memcpy(eh->src, dev->mac, 6);
     eh->type = htons(ETH_P_IPV6);
-    return dev->tx(dev, skb);
+    return netdev_tx(dev, skb);
 }
 
 static uint32_t ip6_frag_id;
@@ -311,12 +311,16 @@ int ipv6_tx(netdev_t *dev, skb_t *skb, const in6_addr_t *dst, uint8_t next_hdr)
     }
 
     uint16_t plen = skb->len;
+    /* RFC 4861: neighbours drop discovery messages with any other hop limit, which
+     * leaves this host unreachable on the link and every global route dead. */
+    int nd = next_hdr == IP6_NH_ICMPV6 && skb->data[0] >= ICMP6_ROUTER_SOL &&
+             skb->data[0] <= ICMP6_NEIGH_ADV;
     ipv6_hdr_t *ip6 = (ipv6_hdr_t *)skb_push(skb, sizeof(ipv6_hdr_t));
     memset(ip6, 0, sizeof(*ip6));
     ip6->ver_tc_fl[0] = 0x60;          /* version 6, traffic class/flow 0 */
     ip6->payload_len  = htons(plen);
     ip6->next_hdr     = next_hdr;
-    ip6->hop_limit    = 64;
+    ip6->hop_limit    = nd ? 255 : 64;
     ip6->src = ipv6_src_for(dev, dst);
     ip6->dst = *dst;
 
