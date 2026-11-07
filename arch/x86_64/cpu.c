@@ -1,7 +1,10 @@
 #include <kernel/hal.h>
+#include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
 #include <asm/gdt.h>
 #include <kernel/proc.h>
+
+uint8_t avx_on;                     /* read by the entry stubs */
 
 #define MSR_FS_BASE 0xC0000100U
 
@@ -17,6 +20,9 @@ void arch_restore_tls(process_t *p)
 	uint32_t lo = (uint32_t)p->tls_base;
 	uint32_t hi = (uint32_t)(p->tls_base >> 32);
 	__asm__ volatile("wrmsr" :: "c"(MSR_FS_BASE), "a"(lo), "d"(hi));
+	/* in the kernel the user's GS base is the one swapgs has put aside */
+	__asm__ volatile("wrmsr" :: "c"(0xC0000102U), "a"((uint32_t)p->user_gs_base),
+	                 "d"((uint32_t)(p->user_gs_base >> 32)));
 }
 
 extern void syscall_entry(void);
@@ -32,6 +38,55 @@ void arch_set_user_kstack(uint64_t kstack_top)
 }
 
 void arch_halt(void)  { __asm__ volatile("hlt"); }
+
+/* MWAIT reaches the states that shut a core's clocks and caches; HLT stops at C1. The
+ * hint is taken only if the local timer survives there (ARAT) and CPUID lists the state. */
+static uint32_t mwait_hint;
+static int mwait_ok;
+
+void arch_idle_init(void)
+{
+	uint32_t a, b, c, d;
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0));
+	if (a < 6) return;
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+	if (!(c & (1u << 3))) return;              /* MONITOR/MWAIT */
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(6), "c"(0));
+	if (!(a & (1u << 2))) return;              /* ARAT */
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(5), "c"(0));
+	if (!(c & 1)) return;
+	for (int n = 3; n >= 1; n--)               /* C6, C3, C1: hint (n-1) << 4 */
+		if ((d >> (n * 4)) & 0xF) {
+			mwait_hint = (uint32_t)(n - 1) << 4;
+			mwait_ok = 1;
+			kprintf(KERN_INFO "cpu: idle by mwait, hint 0x%x\n", mwait_hint);
+			return;
+		}
+}
+
+/* /sys/kernel/cstate: how deep idle goes, 0 for HLT only, n for C-state n of MWAIT */
+int arch_idle_get(void) { return mwait_ok ? (int)(mwait_hint >> 4) + 1 : 0; }
+
+int arch_idle_set(int n)
+{
+	if (n < 0 || n > 8) return -22;
+	mwait_ok = n > 0;
+	mwait_hint = n > 0 ? (uint32_t)(n - 1) << 4 : 0;
+	return 0;
+}
+
+void arch_idle_deep(volatile int *flag, int deep)
+{
+	if (!deep || !mwait_ok) {
+		arch_idle_halt(flag);
+		return;
+	}
+	__asm__ volatile("cli");
+	__asm__ volatile("monitor" :: "a"(flag), "c"(0), "d"(0));
+	if (*flag) { __asm__ volatile("sti"); return; }
+	/* as with sti;hlt, nothing can land between the two */
+	__asm__ volatile("sti; mwait" :: "a"(mwait_hint), "c"(0));
+}
 
 void arch_idle_halt(volatile int *flag)
 {
@@ -85,14 +140,43 @@ void arch_syscall_init(void)
 		:: "r"(lstar) : "rax", "ecx", "rdx"
 	);
 
-	/* SFMASK */
+	/* SFMASK: IF, and every flag user code can hand the kernel at syscall entry.
+	 * TF would trap on the first kernel instruction, still on the user stack with
+	 * the user's GS; DF reverses the kernel's string copies; NT makes iretq fault. */
 	__asm__ volatile(
 		"movl $0xC0000084, %%ecx\n"
-		"movl $0x200, %%eax\n"
+		"movl $0x47700, %%eax\n"
 		"xorl %%edx, %%edx\n"
 		"wrmsr\n"
 		::: "eax", "ecx", "edx"
 	);
+}
+
+/* PAT entry 1 (PWT alone, unused otherwise) becomes write-combining. Every CPU
+ * must agree. A framebuffer written through it is many times faster than uncached. */
+void arch_pat_init(void)
+{
+	uint32_t lo, hi;
+	__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277U));
+	lo = (lo & 0xFFFF00FFU) | (0x01U << 8);
+	__asm__ volatile("wrmsr" :: "c"(0x277U), "a"(lo), "d"(hi));
+}
+
+/* Let the CPU choose its own frequency (HWP): left alone it sits at the base
+ * clock with no turbo. Measured on Casper: one thread 30% slower than Linux, four
+ * threads 64%. Asks for the full range, leaning to performance as Linux does. */
+void arch_hwp_init(void)
+{
+	uint32_t a;
+	__asm__ volatile("cpuid" : "=a"(a) : "a"(6) : "ebx", "ecx", "edx");
+	if (!(a & (1U << 7)))
+		return;
+	__asm__ volatile("wrmsr" :: "c"(0x770U), "a"(1U), "d"(0U));
+	uint32_t lo, hi;
+	__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x771U));
+	uint32_t highest = lo & 0xFF, lowest = lo >> 24;
+	uint32_t req = lowest | highest << 8 | 0x80U << 24;
+	__asm__ volatile("wrmsr" :: "c"(0x774U), "a"(req), "d"(0U));
 }
 
 void arch_cpu_init(void)
@@ -144,8 +228,21 @@ void arch_cpu_init(void)
 	__asm__ volatile("movl $7, %%eax\n\txorl %%ecx, %%ecx\n\tcpuid\n"
 		: "=b"(ebx7) :: "eax", "ecx", "edx");
 	if (ebx7 & (1U << 7)) cr4_val |= (1ULL << 20);   /* SMEP */
+	/* AVX. Software that reads CPUID without asking the OS (libopus does) runs
+	 * ymm code regardless, and video and crypto want it anyway. The upper halves
+	 * are kept beside the FXSAVE image; AVX-512 stays off, its state is not saved. */
+	uint32_t ecx1;
+	__asm__ volatile("movl $1, %%eax\n\tcpuid\n" : "=c"(ecx1) :: "eax", "ebx", "edx");
+	int avx = (ecx1 & (1U << 26)) && (ecx1 & (1U << 28));
+	if (avx) cr4_val |= (1ULL << 18);                /* OSXSAVE */
 	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
+	if (avx) {
+		__asm__ volatile("xsetbv" :: "a"(7), "d"(0), "c"(0));   /* x87, SSE, AVX */
+		avx_on = 1;
+	}
 
+	arch_pat_init();
+	arch_hwp_init();
 	arch_syscall_init();
 }
 

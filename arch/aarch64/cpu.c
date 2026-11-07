@@ -6,6 +6,11 @@ static cpu_context_t early_cpu_ctx;
 
 void arch_halt(void)  { __asm__ volatile("wfi"); }
 
+void arch_idle_deep(volatile int *flag, int deep) { (void)deep; arch_idle_halt(flag); }
+void arch_tick_slow(int slow) { (void)slow; }
+int arch_idle_get(void) { return 0; }
+int arch_idle_set(int n) { (void)n; return -22; }
+
 void arch_idle_halt(volatile int *flag)
 {
 	/* Mask IRQs, then re-check: a wakeup that already set *flag is now seen with
