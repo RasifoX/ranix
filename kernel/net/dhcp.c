@@ -3,6 +3,7 @@
  * busy-polling the NIC, bypassing the socket layer (we have no IP yet, and the
  * normal RX path would drop broadcast/unaddressed replies). Falls back to the
  * driver's static IP if no server answers. */
+#include <kernel/board.h>
 #include <kernel/net/net.h>
 #include <kernel/net/eth.h>
 #include <kernel/net/ip.h>
@@ -75,11 +76,13 @@ static void dhcp_send(netdev_t *dev, uint32_t xid, int msgtype, uint32_t reqip, 
 	memcpy(eh->dst, eth_bcast, 6); memcpy(eh->src, dev->mac, 6);
 	eh->type = htons(ETH_P_IP);
 
-	dev->tx(dev, skb);
+	netdev_tx(dev, skb);
 }
 
 /* Parse a received frame; if it is a DHCP reply for our xid, fill *yiaddr / opts
  * and return the message type, else 0. */
+uint32_t dhcp_last_lease;   /* seconds, from the last reply */
+
 static int dhcp_parse(skb_t *skb, uint32_t xid, uint32_t *yiaddr,
                       uint32_t *mask, uint32_t *gw, uint32_t *dns, uint32_t *serverid)
 {
@@ -109,6 +112,7 @@ static int dhcp_parse(skb_t *skb, uint32_t xid, uint32_t *yiaddr,
 		else if (t == 3)  *gw = val;
 		else if (t == 6)  *dns = val;
 		else if (t == 54) *serverid = val;
+		else if (t == 51) dhcp_last_lease = val;
 		i += 2 + l;
 	}
 	return msgtype;
@@ -120,9 +124,11 @@ static int dhcp_parse(skb_t *skb, uint32_t xid, uint32_t *yiaddr,
  * before a real server answers (it was fine only against QEMU's instant SLIRP). */
 static skb_t *dhcp_poll_reply(netdev_t *dev, uint32_t xid, int want_type,
                               uint32_t *yiaddr, uint32_t *mask, uint32_t *gw,
-                              uint32_t *dns, uint32_t *serverid, uint64_t deadline)
+                              uint32_t *dns, uint32_t *serverid, uint64_t deadline,
+                              int can_sleep)
 {
 	extern volatile uint64_t kernel_ticks;
+	extern void task_sleep_until(uint64_t deadline);
 	while (kernel_ticks < deadline) {
 		if (dev->poll) dev->poll(dev);
 		skb_t *skb;
@@ -131,13 +137,14 @@ static skb_t *dhcp_poll_reply(netdev_t *dev, uint32_t xid, int want_type,
 			if (mt == want_type) return skb;
 			skb_free(skb);
 		}
+		if (can_sleep) task_sleep_until(kernel_ticks + 1);
 	}
 	return NULL;
 }
 
 /* Returns 0 and configures dev (ip/gw/mask) on success; *out_dns gets the DNS
  * server (host order, 0 if none). Returns -1 on timeout. */
-int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
+static int dhcp_exchange(netdev_t *dev, uint32_t *out_dns, int can_sleep)
 {
 	extern volatile uint64_t kernel_ticks;
 	uint32_t xid = htonl((uint32_t)(0x52414e00u ^ (kernel_ticks * 2654435761u)));
@@ -152,9 +159,9 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	skb_t *off = NULL;
 	for (int attempt = 0; attempt < 4 && !off; attempt++) {
 		dhcp_send(dev, xid, DHCP_DISCOVER, 0, 0);
-		uint64_t to = (100u << attempt) + (kernel_ticks % 50); /* 1,2,4,8s + jitter */
+		uint64_t to = ((uint64_t)TIMER_HZ << attempt) + (kernel_ticks % (TIMER_HZ / 2)); /* 1,2,4,8s + jitter */
 		off = dhcp_poll_reply(dev, xid, DHCP_OFFER, &yiaddr, &mask, &gw, &dns,
-		                      &serverid, kernel_ticks + to);
+		                      &serverid, kernel_ticks + to, can_sleep);
 	}
 	if (!off) return -1;
 	skb_free(off);
@@ -163,9 +170,9 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	skb_t *ack = NULL;
 	for (int attempt = 0; attempt < 4 && !ack; attempt++) {
 		dhcp_send(dev, xid, DHCP_REQUEST, yiaddr, serverid);
-		uint64_t to = (100u << attempt) + (kernel_ticks % 50);
+		uint64_t to = ((uint64_t)TIMER_HZ << attempt) + (kernel_ticks % (TIMER_HZ / 2));
 		ack = dhcp_poll_reply(dev, xid, DHCP_ACK, &yiaddr, &mask, &gw, &dns,
-		                      &serverid, kernel_ticks + to);
+		                      &serverid, kernel_ticks + to, can_sleep);
 	}
 	if (!ack) return -1;
 	skb_free(ack);
@@ -175,9 +182,19 @@ int dhcp_configure(netdev_t *dev, uint32_t *out_dns)
 	if (gw)   dev->gw = gw;
 	if (out_dns) *out_dns = dns;
 
-	kprintf("dhcp: %s ip=%u.%u.%u.%u gw=%u.%u.%u.%u dns=%u.%u.%u.%u\n", dev->name,
+	kprintf(KERN_INFO "dhcp: %s ip=%u.%u.%u.%u gw=%u.%u.%u.%u dns=%u.%u.%u.%u\n", dev->name,
 	        (yiaddr >> 24) & 0xff, (yiaddr >> 16) & 0xff, (yiaddr >> 8) & 0xff, yiaddr & 0xff,
 	        (gw >> 24) & 0xff, (gw >> 16) & 0xff, (gw >> 8) & 0xff, gw & 0xff,
 	        (dns >> 24) & 0xff, (dns >> 16) & 0xff, (dns >> 8) & 0xff, dns & 0xff);
 	return 0;
+}
+
+/* The exchange reads replies straight off dev's RX queue, so the net_rx thread
+ * has to stay off it for the duration or it swallows the OFFER/ACK. */
+int dhcp_configure(netdev_t *dev, uint32_t *out_dns, int can_sleep)
+{
+	dev->rx_claimed = 1;
+	int rc = dhcp_exchange(dev, out_dns, can_sleep);
+	dev->rx_claimed = 0;
+	return rc;
 }

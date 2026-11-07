@@ -69,14 +69,19 @@ int VNAME(clock_gettime)(int clk, struct vts *ts)
 	/* Only CLOCK_REALTIME is served from vvar. CLOCK_MONOTONIC/BOOTTIME carry a
 	 * per-process time-namespace offset the global vvar can't express, so they
 	 * fall back to the syscall (which applies it). REALTIME is timens-invariant. */
-	if (clk != 0 /*REALTIME*/)
+	int mono = clk == 1 || clk == 7;     /* MONOTONIC, BOOTTIME */
+	if (clk != 0 /*REALTIME*/ && !(mono && !v->timens_used))
+		return (int)vsyscall2(SYS_clock_gettime_, clk, (long)ts);
+	/* Without a calibrated counter vvar is only the last tick's snapshot, up to
+	 * 10 ms behind the kernel clock: a deadline built from it fires that early. */
+	if (!v->cnt_valid)
 		return (int)vsyscall2(SYS_clock_gettime_, clk, (long)ts);
 	for (;;) {
 		uint32_t s = v->seq;
 		if (s & 1u) continue;
 		__asm__ volatile("" ::: "memory");
-		int64_t sec  = v->real_sec;
-		int64_t nsec = v->real_nsec;
+		int64_t sec  = mono ? v->mono_sec : v->real_sec;
+		int64_t nsec = mono ? v->mono_nsec : v->real_nsec;
 		if (v->cnt_valid) {
 			uint64_t delta = read_cnt() - v->cnt_base;
 			nsec += (int64_t)((delta * v->cnt_mult) >> v->cnt_shift);

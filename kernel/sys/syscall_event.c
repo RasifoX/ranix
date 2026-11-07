@@ -29,8 +29,7 @@ static ssize_t eventfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             }
             wake_up(&efd->wr_wait);
             spin_unlock_irq(&efd->lock, f);
-            copy_to_user(buf, &val, 8);
-            return 8;
+            return copy_fop_to_user(buf, &val, 8) ? -14 : 8;
         }
         if (file->flags & O_NONBLOCK) {
             spin_unlock_irq(&efd->lock, f);
@@ -46,7 +45,7 @@ static ssize_t eventfd_write_vfs(vfs_file_t *file, const void *buf, size_t len)
     if (len < 8) return -22;
     eventfd_t *efd = (eventfd_t *)file->inode->priv;
     uint64_t val = 0;
-    if (copy_from_user(&val, buf, 8) != 0) return -14;
+    if (copy_fop_from_user(&val, buf, 8) != 0) return -14;
     if (val == (uint64_t)-1) return -22; /* EINVAL */
     while (1) {
         uint64_t f = spin_lock_irq(&efd->lock);
@@ -54,7 +53,7 @@ static ssize_t eventfd_write_vfs(vfs_file_t *file, const void *buf, size_t len)
             efd->count += val;
             wake_up(&efd->rd_wait);
             spin_unlock_irq(&efd->lock, f);
-            poll_notify();
+            poll_notify_key(efd);
             return 8;
         }
         if (file->flags & O_NONBLOCK) {
@@ -87,6 +86,7 @@ static int eventfd_close_vfs(vfs_file_t *file)
 }
 
 static vfs_fops_t eventfd_fops = {
+    .poll_keyed = 1,
     .read  = eventfd_read_vfs,
     .write = eventfd_write_vfs,
     .poll  = eventfd_poll_vfs,
@@ -95,6 +95,7 @@ static vfs_fops_t eventfd_fops = {
 
 static long sys_eventfd2(unsigned int initval, int flags)
 {
+    if (flags & ~(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)) return -22;
     eventfd_t *efd = kmalloc(sizeof(*efd));
     if (!efd) return -12;
     efd->count = initval;
@@ -119,7 +120,8 @@ static long sys_eventfd2(unsigned int initval, int flags)
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
-    if (fd < 0) { kfree(f); kfree(in); kfree(efd); return -12; }
+    if (fd < 0) { kfree(f); kfree(in); kfree(efd); return fd == -1 ? -12 : fd; }
+    if (flags & EFD_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
     return fd;
 }
 
@@ -209,8 +211,7 @@ static ssize_t timerfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             uint64_t val = t->expirations;
             t->expirations = 0;
             spin_unlock_irq(&t->lock, f);
-            copy_to_user(buf, &val, 8);
-            return 8;
+            return copy_fop_to_user(buf, &val, 8) ? -14 : 8;
         }
         if (file->flags & O_NONBLOCK) {
             spin_unlock_irq(&t->lock, f);
@@ -250,6 +251,9 @@ typedef struct { linux_timespec_t it_interval; linux_timespec_t it_value; } linu
 
 static long sys_timerfd_create(int clockid, int flags)
 {
+    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC && clockid != CLOCK_BOOTTIME)
+        return -22;
+    if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -22;
     timerfd_t *t = kmalloc(sizeof(*t));
     if (!t) return -12;
     memset(t, 0, sizeof(*t));
@@ -272,11 +276,18 @@ static long sys_timerfd_create(int clockid, int flags)
     f->flags    = (flags & O_NONBLOCK) ? O_NONBLOCK : 0;
     f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
 
+    /* Before the fd exists: a sibling closing it first would free t, and the
+     * registration would leave the tick walking a dangling pointer. */
+    timerfd_register(t);
+
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
-    if (fd < 0) { kfree(f); kfree(in); kfree(t); return -12; }
-
-    timerfd_register(t);
+    if (fd < 0) {
+        timerfd_unregister(t);
+        kfree(f); kfree(in); kfree(t);
+        return fd == -1 ? -12 : fd;
+    }
+    if (flags & O_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
     return fd;
 }
 
@@ -296,6 +307,10 @@ static long sys_timerfd_settime(int fd, int flags,
     if (!t) return -9;
     linux_itimerspec_t kn;
     if (copy_from_user(&kn, unew, sizeof(kn)) != 0) return -14;
+    if (flags & ~3) return -22;
+    if (kn.it_value.tv_sec < 0 || kn.it_interval.tv_sec < 0 ||
+        (uint64_t)kn.it_value.tv_nsec >= 1000000000UL ||
+        (uint64_t)kn.it_interval.tv_nsec >= 1000000000UL) return -22;
 
     extern volatile uint64_t kernel_ticks;
 
@@ -314,7 +329,7 @@ static long sys_timerfd_settime(int fd, int flags,
         }
         ko.it_interval.tv_sec  = (int64_t)(t->interval_ns / 1000000000UL);
         ko.it_interval.tv_nsec = (int64_t)(t->interval_ns % 1000000000UL);
-        copy_to_user(uold, &ko, sizeof(ko));
+        if (copy_to_user(uold, &ko, sizeof(ko)) != 0) return -14;
     }
 
     uint64_t lf = spin_lock_irq(&t->lock);
@@ -352,15 +367,16 @@ static long sys_timerfd_gettime(int fd, linux_itimerspec_t *ucur)
     ko.it_interval.tv_sec  = (int64_t)(t->interval_ns / 1000000000UL);
     ko.it_interval.tv_nsec = (int64_t)(t->interval_ns % 1000000000UL);
     spin_unlock_irq(&t->lock, lf);
-    copy_to_user(ucur, &ko, sizeof(ko));
-    return 0;
+    return copy_to_user(ucur, &ko, sizeof(ko)) ? -14 : 0;
 }
 
 /* ── memfd_create ────────────────────────────────────────── */
 
 static long sys_memfd_create(const char *uname, unsigned int flags)
 {
-    (void)uname; (void)flags;
+    char ign[2];
+    if (flags & ~7u) return -22;   /* CLOEXEC, ALLOW_SEALING, HUGETLB */
+    if (strncpy_from_user(ign, uname, sizeof(ign)) < 0) return -14;
     /* Create an anonymous tmpfs file backed by ramfs */
     /* Use ramfs to allocate an inode; return an fd */
     extern vfs_inode_t *ramfs_create_anon(void);
@@ -368,16 +384,23 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
     if (!in) return -12;
 
     vfs_file_t *f = kmalloc(sizeof(*f));
-    if (!f) { /* can't easily free ramfs inode here; leak minimal */ return -12; }
+    if (!f) { in->iops->evict(in); return -12; }
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->flags    = O_RDWR;
     f->refcount = 0;   /* fd_alloc takes the +1; close() frees */
 
     process_t *p = task_current();
-    int fd = fd_alloc(p->fds, f);
-    if (fd < 0) { kfree(f); return -12; }
+    /* before the fd is visible: a sibling's close drops this count */
     atomic_fetch_add32((volatile uint32_t *)&in->open_refs, 1);
+    int fd = fd_alloc(p->fds, f);
+    if (fd < 0) {
+        atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1);
+        in->iops->evict(in);
+        kfree(f);
+        return fd == -1 ? -12 : fd;
+    }
+    if (flags & 1) fd_set_cloexec(p->fds, fd, 1);   /* MFD_CLOEXEC */
     return fd;
 }
 
@@ -462,20 +485,16 @@ static ssize_t inotify_read_vfs(vfs_file_t *file, void *buf, size_t len)
             uint32_t namelen_aligned = (namelen + 3) & ~3u;
             size_t evsize = 16 + namelen_aligned; /* 4+4+4+4 + name */
             if (len < evsize) { spin_unlock_irq(&inst->lock, f); return -22; }
-            uint8_t *p = (uint8_t *)buf;
-            copy_to_user(p,      &e->wd,   4);
-            copy_to_user(p +  4, &e->mask, 4);
-            uint32_t zero = 0;
-            copy_to_user(p +  8, &zero, 4); /* cookie */
-            copy_to_user(p + 12, &namelen_aligned, 4);
-            if (namelen_aligned > 0) {
-                char nbuf[256]; memset(nbuf, 0, namelen_aligned < 256 ? namelen_aligned : 256);
-                memcpy(nbuf, e->name, namelen < 256 ? namelen : 255);
-                copy_to_user(p + 16, nbuf, namelen_aligned < 256 ? namelen_aligned : 255);
-            }
+            /* staged: the copy out can fault, and this holds an IRQ-off spinlock */
+            uint8_t ev[16 + 256];
+            memset(ev, 0, sizeof(ev));
+            memcpy(ev,      &e->wd,   4);
+            memcpy(ev +  4, &e->mask, 4);
+            memcpy(ev + 12, &namelen_aligned, 4);
+            if (namelen) memcpy(ev + 16, e->name, namelen < 256 ? namelen : 255);
             inst->evt_head = (inst->evt_head + 1) % INOT_EVT_MAX;
             spin_unlock_irq(&inst->lock, f);
-            return (ssize_t)evsize;
+            return copy_fop_to_user(buf, ev, evsize) ? -14 : (ssize_t)evsize;
         }
         if (file->flags & O_NONBLOCK) { spin_unlock_irq(&inst->lock, f); return -11; }
         sleep_on_locked(&inst->rd_wait, &inst->lock, f);
@@ -547,7 +566,7 @@ static long sys_inotify_init1(int flags)
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
-    if (fd < 0) { kfree(f); kfree(in); inst->active = 0; return -12; }
+    if (fd < 0) { kfree(f); kfree(in); inst->active = 0; return fd == -1 ? -12 : fd; }
     if (flags & O_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
     return fd;
 }
@@ -560,8 +579,14 @@ static long sys_inotify_add_watch(int ifd, const char *upath, uint32_t mask)
     inotify_t *inst = (inotify_t *)ff->inode->priv;
     if (!inst) return -9;
 
-    char kpath[256];
-    if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0) return -14;
+    if (!(mask & 0x00000fffu)) return -22;   /* no event requested */
+    /* events carry the absolute path, so a relative one would never match */
+    char kpath[PATH_MAX];
+    int rp = resolve_path(kpath, AT_FDCWD, upath);
+    if (rp) return rp;
+    if (strlen(kpath) >= 256) return -36;    /* inot_watch_t.path */
+    long ar = access_check(kpath, 4, 1);     /* a watch reads the directory's names */
+    if (ar) return ar;
 
     uint64_t f = spin_lock_irq(&inst->lock);
     /* check if path already watched — update mask */
@@ -668,13 +693,14 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             __builtin_memset(&info, 0, sizeof(info));
             info.ssi_signo = (uint32_t)sig;
             info.ssi_pid   = (uint32_t)p->pid;
-            return copy_to_user(buf, &info, sizeof(info)) == 0
+            return copy_fop_to_user(buf, &info, sizeof(info)) == 0
                    ? (ssize_t)sizeof(info) : -14;
         }
         if (sfd->flags & O_NONBLOCK) return -11; /* EAGAIN */
         if (task_has_actionable_signal()) return -4; /* EINTR */
         /* event-driven: task_signal wakes the reader when a signal is posted; the
          * poll_block backstop re-checks otherwise. Off the per-tick blanket wake. */
+        poll_arm();
         poll_block((uint64_t)-1);
     }
 }
@@ -701,9 +727,11 @@ static vfs_fops_t signalfd_fops = {
 
 static long sys_signalfd4(int fd, const uint64_t *umask, size_t sigsetsize, int flags)
 {
-    (void)sigsetsize;
+    if (sigsetsize != 8 || (flags & ~(O_NONBLOCK | O_CLOEXEC))) return -22;
     uint64_t kmask = 0;
     if (umask && copy_from_user(&kmask, umask, sizeof(kmask)) != 0) return -14;
+    /* a read clears what it reports: SIGKILL must not be consumed that way */
+    kmask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
 
     process_t *p = task_current();
 
@@ -736,7 +764,8 @@ static long sys_signalfd4(int fd, const uint64_t *umask, size_t sigsetsize, int 
     if (flags & O_NONBLOCK) f->flags = O_NONBLOCK;
 
     int newfd = fd_alloc(p->fds, f);
-    if (newfd < 0) { kfree(f); kfree(sfd); kfree(in); return -12; }
+    if (newfd < 0) { kfree(f); kfree(sfd); kfree(in); return newfd == -1 ? -12 : newfd; }
+    if (flags & O_CLOEXEC) fd_set_cloexec(p->fds, newfd, 1);
     return newfd;
 }
 

@@ -14,13 +14,51 @@
 	pushq %r13
 	pushq %r14
 	pushq %r15
-	subq  $512, %rsp
+	subq  $768, %rsp
 	fxsave (%rsp)
+	cmpb  $0, avx_on(%rip)
+	je    .Lno_avx_save\@
+	vextractf128 $1, %ymm0,  512(%rsp)
+	vextractf128 $1, %ymm1,  528(%rsp)
+	vextractf128 $1, %ymm2,  544(%rsp)
+	vextractf128 $1, %ymm3,  560(%rsp)
+	vextractf128 $1, %ymm4,  576(%rsp)
+	vextractf128 $1, %ymm5,  592(%rsp)
+	vextractf128 $1, %ymm6,  608(%rsp)
+	vextractf128 $1, %ymm7,  624(%rsp)
+	vextractf128 $1, %ymm8,  640(%rsp)
+	vextractf128 $1, %ymm9,  656(%rsp)
+	vextractf128 $1, %ymm10, 672(%rsp)
+	vextractf128 $1, %ymm11, 688(%rsp)
+	vextractf128 $1, %ymm12, 704(%rsp)
+	vextractf128 $1, %ymm13, 720(%rsp)
+	vextractf128 $1, %ymm14, 736(%rsp)
+	vextractf128 $1, %ymm15, 752(%rsp)
+.Lno_avx_save\@:
 .endm
 
 .macro restore_context
 	fxrstor (%rsp)
-	addq  $512, %rsp
+	cmpb  $0, avx_on(%rip)
+	je    .Lno_avx_rest\@
+	vinsertf128 $1, 512(%rsp), %ymm0,  %ymm0
+	vinsertf128 $1, 528(%rsp), %ymm1,  %ymm1
+	vinsertf128 $1, 544(%rsp), %ymm2,  %ymm2
+	vinsertf128 $1, 560(%rsp), %ymm3,  %ymm3
+	vinsertf128 $1, 576(%rsp), %ymm4,  %ymm4
+	vinsertf128 $1, 592(%rsp), %ymm5,  %ymm5
+	vinsertf128 $1, 608(%rsp), %ymm6,  %ymm6
+	vinsertf128 $1, 624(%rsp), %ymm7,  %ymm7
+	vinsertf128 $1, 640(%rsp), %ymm8,  %ymm8
+	vinsertf128 $1, 656(%rsp), %ymm9,  %ymm9
+	vinsertf128 $1, 672(%rsp), %ymm10, %ymm10
+	vinsertf128 $1, 688(%rsp), %ymm11, %ymm11
+	vinsertf128 $1, 704(%rsp), %ymm12, %ymm12
+	vinsertf128 $1, 720(%rsp), %ymm13, %ymm13
+	vinsertf128 $1, 736(%rsp), %ymm14, %ymm14
+	vinsertf128 $1, 752(%rsp), %ymm15, %ymm15
+.Lno_avx_rest\@:
+	addq  $768, %rsp
 	popq  %r15
 	popq  %r14
 	popq  %r13
@@ -94,13 +132,15 @@ common_irq:
 	jz 1f
 	swapgs
 1:	save_context
+	movq %rsp, %rdi
+	call prof_sample
 	movq %rsp, %r15
 	call task_current
 	movq 16(%rax), %r14    /* interrupted ctx, restored for a kernel nested IRQ */
 	movq %r15, 16(%rax)    /* task->ctx = rsp */
 
 	/* get vector number from the stack (arch_context_t.vector) */
-	movq 632(%rsp), %rdi
+	movq 888(%rsp), %rdi
 	call irq_dispatch
 
 	/* An IRQ that interrupted ring 0 (the kernel, e.g. mid-syscall) is
@@ -108,7 +148,7 @@ common_irq:
 	 * iretq, leaving need_resched set for the next user boundary. Only an IRQ
 	 * that interrupted ring 3 (user) may reschedule. Mirrors aarch64
 	 * .irq_ret_kernel — see exceptions_asm.S. */
-	testq $3, 656(%rsp)
+	testq $3, 912(%rsp)
 	jz .irq_ret_kernel
 
 	/* Check for reschedule (per-CPU need_resched at %gs:80) */
@@ -165,6 +205,7 @@ irq_stub 20; irq_stub 21; irq_stub 22; irq_stub 23
 irq_stub 24; irq_stub 25; irq_stub 26; irq_stub 27
 irq_stub 28; irq_stub 29; irq_stub 2a; irq_stub 2b
 irq_stub 2c; irq_stub 2d; irq_stub 2e; irq_stub 2f
+irq_stub 30   /* VEC_MSI_FIRST */
 
 .global irq_stub_syscall
 irq_stub_syscall:
@@ -255,8 +296,12 @@ syscall_entry:
 .syscall_ret:
 	restore_context
 	addq $16, %rsp
+	/* schedule above may have switched to a kernel task's frame: swapping for it
+	 * too would run it on the GS base a process set with arch_prctl */
+	testq $3, 8(%rsp)
+	jz 2f
 	swapgs
-	iretq
+2:	iretq
 
 .global irq_stub_yield
 irq_stub_yield:
@@ -300,13 +345,15 @@ irq_stub_lapic:
 1:	pushq $0
 	pushq $0xF1
 	save_context
+	movq %rsp, %rdi
+	call prof_sample
 	movq %rsp, %r15
 	call task_current
 	movq 16(%rax), %r14    /* interrupted ctx, restored for a kernel nested IRQ */
 	movq %r15, 16(%rax)
 	call lapic_timer_irq
 	/* Kernel (ring 0) interruption is non-preemptible — restore and iretq. */
-	testq $3, 656(%rsp)
+	testq $3, 912(%rsp)
 	jz .lapic_ret_kernel
 	movl %gs:80, %eax
 	testl %eax, %eax
@@ -357,7 +404,7 @@ irq_stub_ipi:
 	call smp_ipi_membarrier_ack
 	call arch_smp_ipi_ack
 	/* Kernel (ring 0) interruption is non-preemptible — restore and iretq. */
-	testq $3, 656(%rsp)
+	testq $3, 912(%rsp)
 	jz .ipi_ret_kernel
 	movl $0, %gs:80
 	call schedule

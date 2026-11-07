@@ -28,6 +28,7 @@ struct vdso_vvar {
 	unsigned long long    cnt_base;
 	unsigned int          cnt_mult;   /* delta_ns = (delta_cnt * mult) >> shift */
 	unsigned int          cnt_shift;
+	unsigned int          timens_used;
 };
 
 #endif
