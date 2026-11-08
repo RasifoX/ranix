@@ -6,6 +6,7 @@
 #include <kernel/cgroup.h>
 #include <kernel/elf.h>
 #include <kernel/vfs.h>
+#include <kernel/cmdline.h>
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/buddy.h>
@@ -31,6 +32,7 @@
 #include <kernel/net/net.h>
 #include <kernel/net/netfilter.h>
 #include <kernel/io_uring.h>
+#include <kernel/asess.h>
 #include <kernel/config.h>
 
 /* mmap flags */
@@ -242,6 +244,7 @@ static uint64_t rng_next(void)
 /* memory-management syscalls (defined in sys/syscall_mm.c, included last) —
  * forward-declared so the other sys/*.c units can call them */
 static long sys_brk(uint64_t addr);
+static void drop_old_pages(process_t *p, uint64_t va, uint64_t len);
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off);
 static long sys_munmap(uint64_t addr, size_t len);
 static long sys_mprotect(uint64_t addr, size_t len, int prot);
@@ -257,12 +260,14 @@ static long sys_munlockall(void);
 static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldact, size_t sigsetsize);
 static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
 static long sys_kill(pid_t pid, int sig);
+static long kill_task(process_t *t, int sig);
 static long sys_tgkill(pid_t tgid, pid_t tid, int sig);
 static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo);
 static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *uinfo);
 
 #include "sys/syscall_fs.c"
 #include "sys/syscall_proc.c"
+#include "sys/syscall_timer.c"
 #include "sys/syscall_io.c"
 #include "sys/syscall_event.c"
 #include "sys/syscall_net.c"
@@ -271,11 +276,44 @@ static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *ui
 #include "sys/syscall_ipc.c"
 #include "sys/syscall_mm.c"
 #include "sys/syscall_sig.c"
+#include "sys/syscall_compat.c"
+
+/* SA_RESTART restarts a call a signal interrupted, except those that exist to wait
+ * for a signal or a deadline: those report EINTR whatever the handler's flags. */
+static int syscall_restartable(long n)
+{
+	switch (n) {
+#ifdef SYS_ARCH_PAUSE
+	case SYS_ARCH_PAUSE:
+#endif
+#ifdef SYS_ARCH_POLL
+	case SYS_ARCH_POLL:
+#endif
+#ifdef SYS_ARCH_SELECT
+	case SYS_ARCH_SELECT:
+#endif
+#ifdef SYS_ARCH_EPOLL_WAIT
+	case SYS_ARCH_EPOLL_WAIT:
+#endif
+	case SYS_ARCH_PPOLL:
+	case SYS_ARCH_PSELECT6:
+	case SYS_ARCH_EPOLL_PWAIT:
+	case SYS_ARCH_NANOSLEEP:
+	case SYS_ARCH_CLOCK_NANOSLEEP:
+	case SYS_ARCH_RT_SIGSUSPEND:
+	case SYS_ARCH_RT_SIGTIMEDWAIT:
+	case SYS_ARCH_SEMOP:
+	case SYS_ARCH_MSGRCV:
+	case SYS_ARCH_MSGSND:
+		return 0;
+	default:
+		return 1;
+	}
+}
 
 /* ── seccomp BPF (cBPF subset) ───────────────────────────────────────────────
  * Runs the installed classic-BPF program over a seccomp_data record and maps
  * the SECCOMP_RET action onto our dispatch decision: <0 ALLOW, 0 KILL, >0 errno. */
-struct sock_filter { uint16_t code; uint8_t jt, jf; uint32_t k; };
 struct seccomp_data { uint32_t nr; uint32_t arch; uint64_t instruction_pointer; uint64_t args[6]; };
 
 #if defined(__aarch64__)
@@ -293,26 +331,21 @@ static long seccomp_action(uint32_t r)
 	}
 }
 
-static long seccomp_run_filter(process_t *p, long nr,
-                               long a0, long a1, long a2, long a3, long a4, long a5)
+/* pc and offsets are 64-bit so a huge k from the program cannot wrap back into it */
+static long seccomp_run_filter(const struct seccomp_filter *flt, const struct seccomp_data *d)
 {
-	struct seccomp_data d;
-	d.nr = (uint32_t)nr; d.arch = SECCOMP_AUDIT_ARCH; d.instruction_pointer = 0;
-	d.args[0]=(uint64_t)a0; d.args[1]=(uint64_t)a1; d.args[2]=(uint64_t)a2;
-	d.args[3]=(uint64_t)a3; d.args[4]=(uint64_t)a4; d.args[5]=(uint64_t)a5;
-
-	const struct sock_filter *f = (const struct sock_filter *)p->seccomp_filter;
+	const struct sock_filter *f = flt->insns;
 	uint32_t A = 0, X = 0;
-	for (unsigned pc = 0; pc < p->seccomp_flen; pc++) {
+	for (size_t pc = 0; pc < flt->len; pc++) {
 		const struct sock_filter *i = &f[pc];
 		switch (i->code) {
 		case 0x20: /* BPF_LD|BPF_W|BPF_ABS */
-			if (i->k + 4 > sizeof(d)) return 0;
-			A = *(const uint32_t *)((const uint8_t *)&d + i->k); break;
-		case 0x80: A = (uint32_t)sizeof(d); break;            /* BPF_LD|BPF_W|BPF_LEN */
+			if ((size_t)i->k + 4 > sizeof(*d)) return 0;
+			A = *(const uint32_t *)((const uint8_t *)d + i->k); break;
+		case 0x80: A = (uint32_t)sizeof(*d); break;           /* BPF_LD|BPF_W|BPF_LEN */
 		case 0x00: A = i->k; break;                           /* BPF_LD|BPF_IMM */
-		case 0x21: if (i->k + 4 > sizeof(d)) return 0;        /* BPF_LDX|BPF_W|BPF_ABS */
-			X = *(const uint32_t *)((const uint8_t *)&d + i->k); break;
+		case 0x21: if ((size_t)i->k + 4 > sizeof(*d)) return 0; /* BPF_LDX|BPF_W|BPF_ABS */
+			X = *(const uint32_t *)((const uint8_t *)d + i->k); break;
 		case 0x05: pc += i->k; break;                         /* BPF_JMP|BPF_JA */
 		case 0x15: pc += (A == i->k) ? i->jt : i->jf; break;  /* JEQ|K */
 		case 0x25: pc += (A >  i->k) ? i->jt : i->jf; break;  /* JGT|K */
@@ -327,8 +360,86 @@ static long seccomp_run_filter(process_t *p, long nr,
 	return 0;   /* fell off the end without RET → kill */
 }
 
+/* Every filter in the chain runs. KILL beats ERRNO beats ALLOW; among ERRNOs the
+ * newest filter decides. */
+static long seccomp_run_chain(process_t *p, long nr,
+                              long a0, long a1, long a2, long a3, long a4, long a5)
+{
+	struct seccomp_data d;
+	d.nr = (uint32_t)nr; d.arch = SECCOMP_AUDIT_ARCH; d.instruction_pointer = 0;
+	d.args[0]=(uint64_t)a0; d.args[1]=(uint64_t)a1; d.args[2]=(uint64_t)a2;
+	d.args[3]=(uint64_t)a3; d.args[4]=(uint64_t)a4; d.args[5]=(uint64_t)a5;
+
+	long act = -1;
+	for (const struct seccomp_filter *f = p->seccomp_filter; f; f = f->prev) {
+		long r = seccomp_run_filter(f, &d);
+		if (r == 0) return 0;
+		if (r > 0 && act < 0) act = r;
+	}
+	return act;
+}
+
+/* Syscalls whose first argument is a fd. Their handlers look the file up and may
+ * sleep with it, while a sibling thread can close the fd: the dispatcher holds a
+ * reference for the whole call, so the file outlives every path through them. */
+static int syscall_takes_fd0(long n)
+{
+	switch (n) {
+	case SYS_ARCH_READ: case SYS_ARCH_WRITE: case SYS_ARCH_READV: case SYS_ARCH_WRITEV:
+	case SYS_ARCH_LSEEK: case SYS_ARCH_IOCTL: case SYS_ARCH_FCNTL: case SYS_ARCH_FSTAT:
+	case SYS_ARCH_GETDENTS64: case SYS_ARCH_FTRUNCATE: case SYS_ARCH_FCHMOD:
+	case SYS_ARCH_FCHOWN: case SYS_ARCH_FSYNC: case SYS_ARCH_FDATASYNC:
+	case SYS_ARCH_SYNC_FILE_RANGE: case SYS_ARCH_FCHDIR: case SYS_ARCH_FLOCK:
+	case SYS_ARCH_FSTATFS: case SYS_ARCH_FGETXATTR: case SYS_ARCH_PREAD64:
+	case SYS_ARCH_PWRITE64: case SYS_ARCH_SENDFILE: case SYS_ARCH_SENDTO:
+	case SYS_ARCH_RECVFROM: case SYS_ARCH_SENDMSG: case SYS_ARCH_RECVMSG:
+	case SYS_ARCH_SENDMMSG: case SYS_ARCH_RECVMMSG: case SYS_ARCH_CONNECT:
+	case SYS_ARCH_BIND: case SYS_ARCH_LISTEN: case SYS_ARCH_ACCEPT: case SYS_ARCH_ACCEPT4:
+	case SYS_ARCH_SHUTDOWN: case SYS_ARCH_GETSOCKNAME: case SYS_ARCH_GETPEERNAME:
+	case SYS_ARCH_SETSOCKOPT: case SYS_ARCH_GETSOCKOPT: case SYS_ARCH_EPOLL_CTL:
+	case SYS_ARCH_EPOLL_PWAIT: case SYS_ARCH_TIMERFD_SETTIME: case SYS_ARCH_TIMERFD_GETTIME:
+	case SYS_ARCH_SIGNALFD4: case SYS_ARCH_INOTIFY_ADD_WATCH: case SYS_ARCH_INOTIFY_RM_WATCH:
+	case SYS_ARCH_MQ_TIMEDSEND: case SYS_ARCH_MQ_TIMEDRECEIVE: case SYS_ARCH_MQ_GETSETATTR:
+	case SYS_ARCH_SPLICE: case SYS_ARCH_COPY_FILE_RANGE: case SYS_ARCH_FALLOCATE:
+	case SYS_ARCH_IO_URING_ENTER: case SYS_ARCH_IO_URING_REGISTER:
+	case SYS_ARCH_PIDFD_SEND_SIGNAL: case SYS_ARCH_SETNS:
+#if defined(__x86_64__)
+	case SYS_ARCH_EPOLL_WAIT:
+#endif
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/* ranix.slowsys on the command line: log each syscall that held its caller
+ * longer than 150 ms, except the ones that exist to wait. A trace for "where
+ * does this program spend its time" without stopping it under ptrace. */
+int slowsys_on = -1;
+uint64_t slowsys_ns(void) { int64_t s, ns; mono_time(&s, &ns); return (uint64_t)(s * 1000000000LL + ns); }
+static int slowsys_waits(long n)
+{
+#if defined(__x86_64__)
+	switch (n) { case 7: case 23: case 34: case 35: case 61: case 202: case 230: case 232:
+	case 247: case 270: case 271: case 281: case 441: return 1; }
+#endif
+	return 0;
+}
+
 void syscall_handle(arch_context_t *ctx)
 {
+	if (slowsys_on < 0) slowsys_on = cmdline_has("ranix.slowsys") ? 1 : 0;
+	int64_t ss_s = 0, ss_ns = 0;
+	if (slowsys_on) {
+		mono_time(&ss_s, &ss_ns);
+		/* time back in user mode since the last syscall: CPU, faults or waiting to run */
+		process_t *sc = task_current();
+		uint64_t now = (uint64_t)(ss_s * 1000000000LL + ss_ns);
+		if (sc->ss_exit_ns && now - sc->ss_exit_ns >= 500000000ULL)
+			kprintf(KERN_INFO "slowsys: user pid=%u tid=%u %lu ms faults=%u in %lu ms prev=%d next=%ld\n",
+			        sc->tgid, sc->pid, (unsigned long)((now - sc->ss_exit_ns) / 1000000), sc->ss_faults,
+			        (unsigned long)(sc->ss_fault_ns / 1000000), sc->ss_prevnr, (long)CTX_SYSCALL_N(ctx));
+	}
 	arch_get_cpu_ctx()->wd_where = "syscall";
 	/* Kernel-stack canary on trap entry too (not just on the way back out in
 	 * signal_dispatch): catch an overflow from the previous kernel path before
@@ -347,23 +458,28 @@ void syscall_handle(arch_context_t *ctx)
 	(void)arg5;
 
 	task_current()->ctx = ctx;
+	task_current()->walk_denied = 0;
 	ptrace_stop_check(ctx, 0);
 
 	/* seccomp: filter the syscall before dispatch. STRICT allows only
-	 * read/write/exit/sigreturn; FILTER runs the installed BPF program. */
+	 * read/write/exit/sigreturn; FILTER runs the installed BPF program. A session
+	 * is gated first, so no filter a task installs can change the gate's answer. */
 	int sec_skip = 0;
 	{
 		process_t *sc = task_current();
-		if (sc->seccomp_mode == 1) {
+		if (sc->asess && !asess_syscall_allowed(sc, n, arg0, arg1, arg2)) {
+			ret = -1;   /* EPERM */
+			sec_skip = 1;
+		} else if (sc->seccomp_mode == 1) {
 			if (n != SYS_ARCH_READ && n != SYS_ARCH_WRITE && n != SYS_ARCH_EXIT &&
 			    n != SYS_ARCH_EXIT_GROUP && n != SYS_ARCH_RT_SIGRETURN) {
-				sys_kill(sc->pid, 9 /*SIGKILL*/);
+				task_signal_group(sc, 9 /*SIGKILL*/);
 				sec_skip = 1;
 			}
 		} else if (sc->seccomp_mode == 2) {
-			long act = seccomp_run_filter(sc, n, arg0, arg1, arg2, arg3, arg4, arg5);
+			long act = seccomp_run_chain(sc, n, arg0, arg1, arg2, arg3, arg4, arg5);
 			if (act == 0) {              /* SECCOMP_RET_KILL_* */
-				sys_kill(sc->pid, 9);
+				task_signal_group(sc, 9);
 				sec_skip = 1;
 			} else if (act > 0) {        /* SECCOMP_RET_ERRNO: return -errno, skip */
 				ret = -act;
@@ -371,6 +487,9 @@ void syscall_handle(arch_context_t *ctx)
 			}                            /* act < 0 → ALLOW */
 		}
 	}
+
+	vfs_file_t *fd0_pin = (!sec_skip && syscall_takes_fd0(n))
+	                    ? fget(task_current()->fds, (int)arg0) : NULL;
 
 	if (!sec_skip) switch (n) {
 	/* ── I/O ─────────────────────────────────────────────── */
@@ -392,6 +511,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EPOLL_CREATE1: ret = sys_epoll_create1((int)arg0); break;
 	case SYS_ARCH_EPOLL_CTL:     ret = sys_epoll_ctl((int)arg0, (int)arg1, (int)arg2, (linux_epoll_event_t*)arg3); break;
 	case SYS_ARCH_EPOLL_PWAIT:   ret = sys_epoll_pwait((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (int)arg3, (void*)arg4); break;
+	case SYS_ARCH_EPOLL_PWAIT2:  ret = sys_epoll_pwait2((int)arg0, (linux_epoll_event_t*)arg1, (int)arg2, (const linux_timespec_t*)arg3, (void*)arg4); break;
 	/* ── open / stat ─────────────────────────────────────── */
 #if defined(__x86_64__)
 	case SYS_ARCH_OPEN:       ret = sys_open((const char*)arg0, (int)arg1, (mode_t)arg2); break;
@@ -419,8 +539,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_FACCESSAT:  ret = sys_faccessat((int)arg0, (const char*)arg1, (int)arg2, (int)arg3); break;
 	case SYS_ARCH_FACCESSAT2: ret = sys_faccessat((int)arg0, (const char*)arg1, (int)arg2, 0); break;
 	/* ── poll / select ───────────────────────────────────── */
-	case SYS_ARCH_PSELECT6: ret = sys_pselect6((int)arg0, (uint64_t*)arg1, (uint64_t*)arg2, (uint64_t*)arg3, (linux_timespec_t*)arg4, NULL); break;
-	case SYS_ARCH_PPOLL:    ret = sys_ppoll((linux_pollfd_t*)arg0, (uint64_t)arg1, (linux_timespec_t*)arg2, NULL); break;
+	case SYS_ARCH_PSELECT6: ret = sys_pselect6((int)arg0, (uint64_t*)arg1, (uint64_t*)arg2, (uint64_t*)arg3, (linux_timespec_t*)arg4, (void*)arg5); break;
+	case SYS_ARCH_PPOLL:    ret = sys_ppoll((linux_pollfd_t*)arg0, (uint64_t)arg1, (linux_timespec_t*)arg2, (void*)arg3); break;
 	/* ── memory ──────────────────────────────────────────── */
 	case SYS_ARCH_BRK:     ret = sys_brk((uint64_t)arg0); break;
 	case SYS_ARCH_MMAP:
@@ -428,12 +548,15 @@ void syscall_handle(arch_context_t *ctx)
 		break;
 	case SYS_ARCH_MUNMAP:  ret = sys_munmap((uint64_t)arg0, (size_t)arg1); break;
 	case SYS_ARCH_MPROTECT: ret = sys_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
+	case SYS_ARCH_MBIND:         ret = sys_mbind((int)arg2); break;
+	case SYS_ARCH_SET_MEMPOLICY: ret = sys_set_mempolicy((int)arg0); break;
+	case SYS_ARCH_GET_MEMPOLICY: ret = sys_get_mempolicy((int *)arg0, (unsigned long *)arg1, (unsigned long)arg2, (unsigned long)arg4); break;
 	case SYS_ARCH_MADVISE: ret = sys_madvise((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_MSYNC:   ret = sys_msync((uint64_t)arg0, (size_t)arg1, (int)arg2); break;
 	case SYS_ARCH_PRLIMIT64: ret = sys_prlimit64((pid_t)arg0, (int)arg1, (void*)arg2, (void*)arg3); break;
 	/* ── process ─────────────────────────────────────────── */
 	case SYS_ARCH_EXIT:        ret = sys_exit((int)arg0); break;
-	case SYS_ARCH_EXIT_GROUP:  ret = sys_exit((int)arg0); break;
+	case SYS_ARCH_EXIT_GROUP:  ret = sys_exit_group((int)arg0); break;
 	case SYS_ARCH_REBOOT:      ret = sys_reboot((int)arg0, (int)arg1, (int)arg2, (void*)arg3); break;
 	case SYS_ARCH_SYSLOG:      ret = sys_syslog((int)arg0, (char*)arg1, (int)arg2); break;
 	case SYS_ARCH_UTIMENSAT:   ret = sys_utimensat((int)arg0, (const char*)arg1, (const void*)arg2, (int)arg3); break;
@@ -444,7 +567,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETGID:      ret = sys_getgid(); break;
 	case SYS_ARCH_GETEGID:     ret = sys_getegid(); break;
 	case SYS_ARCH_GETTID:      ret = sys_gettid(); break;
-	case SYS_ARCH_GETGROUPS:   ret = sys_getgroups((int)arg0, (uint64_t*)arg1); break;
+	case SYS_ARCH_GETGROUPS:   ret = sys_getgroups((int)arg0, (gid_t*)arg1); break;
 	case SYS_ARCH_SETGROUPS:   ret = sys_setgroups((int)arg0, (const gid_t*)arg1); break;
 	case SYS_ARCH_GETRLIMIT:   ret = sys_getrlimit((int)arg0, (void*)arg1); break;
 	case SYS_ARCH_SETRLIMIT:   ret = sys_setrlimit((int)arg0, (const void*)arg1); break;
@@ -456,13 +579,17 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_GETSID:      ret = sys_getsid((pid_t)arg0); break;
 	case SYS_ARCH_GETPRIORITY: ret = sys_getpriority((int)arg0, (int)arg1); break;
 	case SYS_ARCH_SETPRIORITY: ret = sys_setpriority((int)arg0, (int)arg1, (int)arg2); break;
-	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1); break;
+#if defined(__aarch64__)
+	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1, ctx->sp); break;
+#else
+	case SYS_ARCH_SIGALTSTACK: ret = sys_sigaltstack((const stack_t *)arg0, (stack_t *)arg1, ctx->rsp); break;
+#endif
 	case SYS_ARCH_UMASK:       ret = sys_umask((mode_t)arg0); break;
 	case SYS_ARCH_SET_TID_ADDR:
 		/* ABI: record the clear-on-exit address and return the tid. On
 		 * thread exit the kernel writes 0 there and futex-wakes it. */
 		task_current()->clear_child_tid = (uint32_t *)arg0;
-		ret = (long)task_current()->pid;
+		ret = (long)task_vpid(task_current());
 		break;
 	case SYS_ARCH_KILL:        ret = sys_kill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_TGKILL:     ret = sys_tgkill((pid_t)arg0, (pid_t)arg1, (int)arg2); break;
@@ -470,13 +597,17 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_RT_TGSIGQUEUEINFO: ret = sys_rt_tgsigqueueinfo((pid_t)arg0, (pid_t)arg1, (int)arg2, (const void*)arg3); break;
 	case SYS_ARCH_FUTEX:      ret = sys_futex((uint32_t*)arg0, (int)arg1, (uint32_t)arg2, (linux_timespec_t*)arg3, (uint32_t*)arg4, (uint32_t)arg5); break;
 #if defined(__x86_64__)
-	case SYS_ARCH_GETPGRP:    ret = (long)task_current()->pid; break;
+	case SYS_ARCH_GETPGRP:    ret = sys_getpgrp(); break;
 #endif
 	case SYS_ARCH_SCHED_YIELD: ret = sys_sched_yield(); break;
 	case SYS_ARCH_SCHED_SETAFFINITY: ret = sys_sched_setaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
 	case SYS_ARCH_SCHED_GETAFFINITY: ret = sys_sched_getaffinity((pid_t)arg0, (size_t)arg1, (void*)arg2); break;
 	case SYS_ARCH_SCHED_SETSCHEDULER: ret = sys_sched_setscheduler((pid_t)arg0, (int)arg1, (const void*)arg2); break;
 	case SYS_ARCH_SCHED_GETSCHEDULER: ret = sys_sched_getscheduler((pid_t)arg0); break;
+	case SYS_ARCH_SCHED_GETATTR: ret = sys_sched_getattr((pid_t)arg0, (void *)arg1, (unsigned int)arg2, (unsigned int)arg3); break;
+	case SYS_ARCH_SCHED_SETATTR: ret = sys_sched_setattr((pid_t)arg0, (const void *)arg1, (unsigned int)arg2); break;
+	case SYS_ARCH_KCMP: ret = sys_kcmp((pid_t)arg0, (pid_t)arg1, (int)arg2, (unsigned long)arg3, (unsigned long)arg4); break;
+	case SYS_ARCH_PROCESS_MRELEASE: ret = sys_process_mrelease((int)arg0, (unsigned int)arg1); break;
 	case SYS_ARCH_SCHED_SETPARAM: ret = sys_sched_setparam((pid_t)arg0, (const void*)arg1); break;
 	case SYS_ARCH_SCHED_GETPARAM: ret = sys_sched_getparam((pid_t)arg0, (void*)arg1); break;
 	case SYS_ARCH_SCHED_GET_PRIORITY_MAX: ret = sys_sched_get_priority_max((int)arg0); break;
@@ -504,6 +635,16 @@ void syscall_handle(arch_context_t *ctx)
 #define CLONE_CTID     0x00200000 /* CLONE_CHILD_CLEARTID */
 #define CLONE_CSETTID  0x01000000 /* CLONE_CHILD_SETTID */
 #define CLONE_VFORK    0x00004000
+		/* the child starts straight in iretq and fs_base goes through wrmsr: both
+		 * fault in ring 0 on a non-canonical address */
+		if (!access_ok((void *)arg1, 0)) { ret = -22; break; }
+		if ((flags & CLONE_SETTLS) &&
+#if defined(__aarch64__)
+		    !access_ok((void *)arg3, 0)
+#else
+		    !access_ok((void *)arg4, 0)
+#endif
+		   ) { ret = -1; break; }
 		if (flags & CLONE_VFORK) {
 			ret = sys_vfork((uint64_t)arg1);   /* arg1 = child stack, if any */
 		} else if (flags & CLONE_VM) {
@@ -524,9 +665,9 @@ void syscall_handle(arch_context_t *ctx)
 			 * distinct flags sharing the one ctid argument. */
 			uint32_t *clear_tid = (flags & CLONE_CTID)    ? ctid_arg : NULL;
 			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? ctid_arg : NULL;
-			ret = (long)proc_clone_thread(newsp, tls, clear_tid, ptid, set_tid);
+			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1));
 		} else {
-			ret = (long)proc_fork(flags, 0);
+			ret = (long)proc_fork(flags, (uint64_t)arg1);   /* its own stack, if it gave one */
 		}
 		break;
 	}
@@ -538,6 +679,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_PIDFD_SEND_SIGNAL: ret = sys_pidfd_send_signal((int)arg0, (int)arg1, (void*)arg2, (unsigned int)arg3); break;
 	case SYS_ARCH_CLOSE_RANGE: ret = sys_close_range((unsigned int)arg0, (unsigned int)arg1, (unsigned int)arg2); break;
 	case SYS_ARCH_SECCOMP: ret = sys_seccomp((unsigned int)arg0, (unsigned int)arg1, (uint64_t)arg2); break;
+	case SYS_ARCH_ASESS:   ret = sys_asess((unsigned int)arg0, (int)arg1, (void*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_CLONE3: {
 		/* glibc 2.34+ thread creation. struct clone_args prefix we use: flags,
 		 * pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls. */
@@ -547,6 +689,8 @@ void syscall_handle(arch_context_t *ctx)
 		if (copy_from_user(&ca, (void*)arg0, csz) != 0) { ret = -14; break; }
 		uint64_t flags = ca.flags;
 		uint64_t newsp = ca.stack + ca.stack_size;   /* clone3 gives stack base+size */
+		if (!access_ok((void *)newsp, 0)) { ret = -22; break; }
+		if ((flags & CLONE_SETTLS) && !access_ok((void *)ca.tls, 0)) { ret = -1; break; }
 		if (flags & CLONE_VFORK) {
 			/* posix_spawn: a child sharing nothing but running on its own stack
 			 * until it execs. CLONE_THREAD is what marks a real thread; VFORK
@@ -557,9 +701,9 @@ void syscall_handle(arch_context_t *ctx)
 			uint64_t tls   = (flags & CLONE_SETTLS) ? ca.tls : 0;
 			uint32_t *clear_tid = (flags & CLONE_CTID)    ? (uint32_t*)ca.child_tid : NULL;
 			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? (uint32_t*)ca.child_tid : NULL;
-			ret = (long)proc_clone_thread(newsp, tls, clear_tid, ptid, set_tid);
+			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1));
 		} else {
-			ret = (long)proc_fork(flags, 0);
+			ret = (long)proc_fork(flags, ca.stack ? newsp : 0);
 		}
 		break;
 	}
@@ -619,6 +763,8 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_RECVFROM:    ret = sys_recvfrom((int)arg0, (void*)arg1, (size_t)arg2, (int)arg3, (void*)arg4, (uint32_t*)arg5); break;
 	case SYS_ARCH_SENDMSG:     ret = sys_sendmsg((int)arg0, (const void*)arg1, (int)arg2); break;
 	case SYS_ARCH_RECVMSG:     ret = sys_recvmsg((int)arg0, (void*)arg1, (int)arg2); break;
+	case SYS_ARCH_SENDMMSG:    ret = sys_sendmmsg((int)arg0, (void*)arg1, (uint32_t)arg2, (int)arg3); break;
+	case SYS_ARCH_RECVMMSG:    ret = sys_recvmmsg((int)arg0, (void*)arg1, (uint32_t)arg2, (int)arg3); break;
 	case SYS_ARCH_GETSOCKNAME: ret = sys_getsockname((int)arg0, (void*)arg1, (uint32_t*)arg2); break;
 	case SYS_ARCH_GETPEERNAME: ret = sys_getpeername((int)arg0, (void*)arg1, (uint32_t*)arg2); break;
 	case SYS_ARCH_SETSOCKOPT:  ret = sys_setsockopt((int)arg0, (int)arg1, (int)arg2, (void*)arg3, (uint32_t)arg4); break;
@@ -655,6 +801,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MOUNT:       ret = sys_mount((const char*)arg0, (const char*)arg1, (const char*)arg2, (unsigned long)arg3, (const void*)arg4); break;
 	case SYS_ARCH_UMOUNT2:     ret = sys_umount2((const char*)arg0, (int)arg1); break;
 	case SYS_ARCH_SETHOSTNAME: ret = sys_sethostname((const char*)arg0, (size_t)arg1); break;
+	case SYS_ARCH_RT_SIGTIMEDWAIT: ret = sys_rt_sigtimedwait((const uint64_t *)arg0, (void *)arg1, (const linux_timespec_t *)arg2, (size_t)arg3); break;
 	case SYS_ARCH_TKILL:       ret = sys_tkill((pid_t)arg0, (int)arg1); break;
 	case SYS_ARCH_CLOCK_NANOSLEEP: ret = sys_clock_nanosleep((int)arg0, (int)arg1, (linux_timespec_t*)arg2, (linux_timespec_t*)arg3); break;
 	case SYS_ARCH_WAITID:      ret = sys_waitid((int)arg0, (int)arg1, (void*)arg2, (int)arg3, (void*)arg4); break;
@@ -667,6 +814,38 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_EVENTFD:
 #endif
 	case SYS_ARCH_EVENTFD2:    ret = sys_eventfd2((unsigned int)arg0, (int)arg1); break;
+	case SYS_ARCH_PREADV:     ret = sys_preadv((int)arg0, (const iovec_t *)arg1, (int)arg2, (off_t)arg3); break;
+	case SYS_ARCH_PWRITEV:    ret = sys_pwritev((int)arg0, (const iovec_t *)arg1, (int)arg2, (off_t)arg3); break;
+	case SYS_ARCH_PREADV2:    ret = sys_preadv2((int)arg0, (const iovec_t *)arg1, (int)arg2, (off_t)arg3); break;
+	case SYS_ARCH_PWRITEV2:   ret = sys_pwritev2((int)arg0, (const iovec_t *)arg1, (int)arg2, (off_t)arg3); break;
+	case SYS_ARCH_MINCORE:    ret = sys_mincore((uint64_t)arg0, (size_t)arg1, (uint8_t *)arg2); break;
+	case SYS_ARCH_READAHEAD:  ret = sys_readahead((int)arg0, (off_t)arg1, (size_t)arg2); break;
+	case SYS_ARCH_SYNCFS:     ret = sys_syncfs((int)arg0); break;
+	case SYS_ARCH_FSETXATTR:  ret = sys_fsetxattr((int)arg0, (const char *)arg1, (const void *)arg2, (size_t)arg3, (int)arg4); break;
+	case SYS_ARCH_FLISTXATTR: ret = sys_flistxattr((int)arg0, (char *)arg1, (size_t)arg2); break;
+	case SYS_ARCH_LREMOVEXATTR: ret = sys_removexattr((const char *)arg0, (const char *)arg1); break;
+	case SYS_ARCH_FREMOVEXATTR: ret = sys_fremovexattr((int)arg0, (const char *)arg1); break;
+	case SYS_ARCH_SCHED_RR_GET_INTERVAL: ret = sys_sched_rr_get_interval((pid_t)arg0, (int64_t *)arg1); break;
+	case SYS_ARCH_SETDOMAINNAME: ret = sys_setdomainname((const char *)arg0, (size_t)arg1); break;
+	case SYS_ARCH_IOPRIO_SET: ret = 0; break;
+	case SYS_ARCH_IOPRIO_GET: ret = 0; break;
+	case SYS_ARCH_PKEY_ALLOC: ret = sys_pkey_alloc((unsigned long)arg0, (unsigned long)arg1); break;
+	case SYS_ARCH_PKEY_FREE:  ret = -22; break;
+	case SYS_ARCH_PKEY_MPROTECT: ret = sys_pkey_mprotect((uint64_t)arg0, (size_t)arg1, (int)arg2, (int)arg3); break;
+	case SYS_ARCH_OPENAT2:    ret = sys_openat2((int)arg0, (const char *)arg1, (const void *)arg2, (size_t)arg3); break;
+	case SYS_ARCH_FCHMODAT2:  ret = sys_fchmodat2((int)arg0, (const char *)arg1, (mode_t)arg2, (int)arg3); break;
+	case SYS_ARCH_RESTART_SYSCALL: ret = -4; break;
+#ifdef SYS_ARCH_UTIME
+	case SYS_ARCH_UTIME:      ret = sys_utime((const char *)arg0, (const int64_t *)arg1); break;
+	case SYS_ARCH_UTIMES:     ret = sys_utimes((const char *)arg0, (const ktv_t *)arg1); break;
+	case SYS_ARCH_FUTIMESAT:  ret = sys_futimesat((int)arg0, (const char *)arg1, (const ktv_t *)arg2); break;
+	case SYS_ARCH_SIGNALFD:   ret = sys_signalfd4((int)arg0, (const uint64_t *)arg1, (size_t)arg2, 0); break;
+#endif
+	case SYS_ARCH_TIMER_CREATE:     ret = sys_timer_create((int)arg0, (const void *)arg1, (int *)arg2); break;
+	case SYS_ARCH_TIMER_SETTIME:    ret = sys_timer_settime((int)arg0, (int)arg1, (const kits_t *)arg2, (kits_t *)arg3); break;
+	case SYS_ARCH_TIMER_GETTIME:    ret = sys_timer_gettime((int)arg0, (kits_t *)arg1); break;
+	case SYS_ARCH_TIMER_GETOVERRUN: ret = sys_timer_getoverrun((int)arg0); break;
+	case SYS_ARCH_TIMER_DELETE:     ret = sys_timer_delete((int)arg0); break;
 	case SYS_ARCH_TIMERFD_CREATE:  ret = sys_timerfd_create((int)arg0, (int)arg1); break;
 	case SYS_ARCH_TIMERFD_SETTIME: ret = sys_timerfd_settime((int)arg0, (int)arg1, (linux_itimerspec_t*)arg2, (linux_itimerspec_t*)arg3); break;
 	case SYS_ARCH_TIMERFD_GETTIME: ret = sys_timerfd_gettime((int)arg0, (linux_itimerspec_t*)arg1); break;
@@ -728,14 +907,48 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_MQ_TIMEDRECEIVE: ret = sys_mq_timedreceive((int)arg0,(char*)arg1,(size_t)arg2,(uint32_t*)arg3,(const void*)arg4); break;
 	case SYS_ARCH_MQ_GETSETATTR:   ret = sys_mq_getsetattr((int)arg0,(const mq_attr_t*)arg1,(mq_attr_t*)arg2); break;
 	default:
-		kprintf("syscall: unimplemented %ld (pid=%u)\n",
+		kprintf(KERN_WARN "syscall: unimplemented %ld (pid=%u)\n",
 		        n, task_current()->pid);
 		ret = -38; /* ENOSYS */
 		break;
 	}
 
+	if (fd0_pin) fput(fd0_pin);
+
+	/* Every caller reports a failed walk as ENOENT. A session keeps that answer:
+	 * what it may not search is simply not in its view. */
+	if (ret == -2 && task_current()->walk_denied && !task_current()->asess) ret = -13;
+
+	vfs_walk_done(task_current());
+	if (slowsys_on) {
+		/* a wait is logged only when it ran 500 ms or more, with its arguments */
+		int w = slowsys_waits(n);
+		int64_t e_s, e_ns; mono_time(&e_s, &e_ns);
+		int64_t ms = (e_s - ss_s) * 1000 + (e_ns - ss_ns) / 1000000;
+		if (ms >= (w ? 500 : 150))
+			kprintf(KERN_INFO "slowsys: %s pid=%u tid=%u nr=%ld ret=%ld %ld ms a0=%lx a1=%lx a2=%lx a3=%lx\n",
+			        w ? "wait" : "call", task_current()->tgid, task_current()->pid, n, ret, (long)ms,
+			        arg0, arg1, arg2, arg3);
+		process_t *sc = task_current();
+		sc->ss_exit_ns = (uint64_t)(e_s * 1000000000LL + e_ns); sc->ss_faults = 0; sc->ss_fault_ns = 0; sc->ss_prevnr = (int)n;
+	}
 	CTX_SYSCALL_RET(ctx, ret);
 	task_current()->ctx = ctx;
+	if (ret == -4 && syscall_restartable(n)) {
+		process_t *cur = task_current();
+		cur->sys_intr = 1;
+		cur->sys_arg0 = (uint64_t)arg0;
+	}
+	/* cgroup.freeze: the scheduler stops whoever it picks, so a task that never
+	 * sleeps here would run on. A tick catches one running in user mode. */
+	{
+		process_t *cur = task_current();
+		while (cgroup_frozen(cur->cgroup) && !(cur->sig_pending & (1UL << (SIGKILL - 1)))) {
+			cur->in_freeze = 1;                            /* proc_wake_frozen ends it */
+			task_sleep_if(cgroup_frozen(cur->cgroup));
+			cur->in_freeze = 0;
+		}
+	}
 	task_current()->in_syscall = 0;
 	ptrace_stop_check(ctx, 1);
 }
