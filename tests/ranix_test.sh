@@ -523,6 +523,10 @@ check "c-fscrash-4k"      "OK"                 "$(mkdir -p /mnt2/fsc; timeout 40
 # names, rename across directories, every indirect level, EFBIG (ENOSPC runs on the small images of arac/casper/ev/hd-tur.sh)
 check "c-ext2hard-log-1k" "OK"                 "$(mkdir -p /mnt/hard; timeout 180 /bin/test_ext2hard /mnt/hard nofill 2>&1 | tail -1; rm -rf /mnt/hard)"
 check "c-ext2hard-4k"     "OK"                 "$(mkdir -p /mnt2/hard; timeout 180 /bin/test_ext2hard /mnt2/hard nofill 2>&1 | tail -1; rm -rf /mnt2/hard)"
+# relative symlinks once the dentry cache is full: a first lookup then is not
+# cached, and "../" from a link met that way must start in the link's directory
+DC=$(timeout 240 /bin/test_dcachefull /dev/nvme0n1 /mnt2 2>&1); echo "$DC" | grep -v "^PASS" | sed 's/^/  dcachefull: /'
+check "c-dcachefull"      "OK"                 "$(echo "$DC" | tail -1)"
 umount /mnt2 2>/dev/null
 check "c-mountoffset"     "OK"                 "$(timeout 10 /bin/test_mountoffset /dev/nvme0n1 /mnt3 8388608 ranix-offset-ok 2>&1 | tail -1)"
 fi
