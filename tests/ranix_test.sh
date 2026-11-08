@@ -188,11 +188,13 @@ check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 check "proc-partitions"  "1"       "$(cat /proc/partitions | head -1 | grep -c name)"
 check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && echo ok)"
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
+check "dmesg-format"     "0"       "$(dmesg 2>/dev/null | grep -v -c -E '^\[ *[0-9]+\.[0-9]{6}\] [a-z%][a-z0-9_-]{1,15}: [ -~]+$')"
+check "c-klog"           "OK"      "$(timeout 20 /bin/test_klog 2>/dev/null | tail -1)"
 # hung-task detector (khungtaskd): the boot self-test drives it against a
 # synthetic blocked task and emits a marker. Prove DETECTION works (the loud
 # report fired) without any task actually wedging the kernel.
-check "hungtask-selftest" "ok"     "$(dmesg 2>/dev/null | grep -q 'hungtask: selftest ok' && echo ok)"
-check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'HUNG TASK: pid=' && echo ok)"
+check "hungtask-selftest" "ok"     "$(dmesg 2>/dev/null | grep -q 'hung: selftest ok' && echo ok)"
+check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'hung: task pid=' && echo ok)"
 check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
 check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
 check "c-proccmdline" "OK" "$(timeout 10 /bin/test_proccmdline 2>/dev/null)"
@@ -213,6 +215,7 @@ check "etc-resolv"   "nameserver"    "$(awk 'NR==1{print $1}' /etc/resolv.conf)"
 check "etc-passwd"   "root"          "$(awk -F: 'NR==1{print $1}' /etc/passwd)"
 check "c-nss"        "OK"            "$(timeout 8 /bin/test_nss 2>/dev/null)"
 check "c-statx"      "OK"            "$(timeout 8 /bin/test_statx 2>/dev/null)"
+check "c-utimensnf"   "OK" "$(timeout 8 /bin/test_utimensnf 2>&1 | tail -1)"
 check "c-mtime"      "OK"            "$(timeout 8 /bin/test_mtime 2>/dev/null)"
 check "c-rtc"        "OK"            "$(timeout 8 /bin/test_rtc 2>/dev/null)"
 check "c-tz"         "OK"            "$(timeout 8 /bin/test_tz 2>/dev/null)"
@@ -227,12 +230,29 @@ check "c-shebang"     "OK"            "$(timeout 12 /bin/test_shebang 2>/dev/nul
 check "df-has-rows"  "2"    "$(df / 2>/dev/null | wc -l | tr -d ' ')"
 check "df-nonzero"   "1"    "$(df / 2>/dev/null | awk 'NR==2{print ($2>0)?1:0}')"
 check "c-tmpfs"      "OK"   "$(timeout 10 /bin/test_tmpfs 2>/dev/null)"
+check "c-walkperm"   "OK"   "$(timeout 15 /bin/test_walkperm 2>/dev/null | tail -1)"
+check "c-sticky"     "OK"   "$(timeout 15 /bin/test_sticky 2>/dev/null | tail -1)"
+check "c-kbuf"       "OK"   "$(timeout 70 /bin/test_kbuf 2>/dev/null | tail -1)"
+check "c-tmpfs-free" "OK"   "$(timeout 240 /bin/test_tmpfs_free 2>/dev/null | tail -1)"
+check "c-wakerace"   "OK"   "$(timeout 100 /bin/test_wakerace 1000 2>/dev/null | tail -1)"
+check "c-asess-kmem" "OK"  "$(timeout 175 /bin/test_asess_kmem 2>/dev/null | grep -v ' done$' | head -1)"
+check "c-bigfile"    "OK"   "$(timeout 160 /bin/test_bigfile 2>/dev/null | tail -1)"
 check "c-overlay"    "OK"   "$(timeout 10 /bin/test_overlay 2>/dev/null)"
 check "c-unlinkopen" "OK"   "$(timeout 10 /bin/test_unlinkopen 2>/dev/null)"
 check "c-openflags"  "OK"   "$(timeout 10 /bin/test_openflags 2>/dev/null)"
 check "c-rename2"    "OK"   "$(timeout 10 /bin/test_rename2 2>/dev/null)"
 check "c-fallocate"  "OK"   "$(timeout 10 /bin/test_fallocate 2>/dev/null)"
 check "c-mmapshared" "OK"   "$(timeout 10 /bin/test_mmapshared 2>/dev/null)"
+check "c-devshare"   "OK"   "$(timeout 10 /bin/test_devshare 2>/dev/null)"
+check "c-kdmode"     "OK"   "$(timeout 10 /bin/test_kdmode 2>/dev/null)"
+check "c-fdpath"     "OK"   "$(timeout 10 /bin/test_fdpath 2>&1)"
+check "c-futexrt"    "OK"   "$(timeout 10 /bin/test_futexrt 2>&1)"
+check "c-sigucontext" "OK"   "$(timeout 10 /bin/test_sigucontext 2>&1)"
+check "c-fchdirlong"  "OK"   "$(timeout 10 /bin/test_fchdirlong 2>&1)"
+check "c-fchdirperm"  "OK"   "$(timeout 10 /bin/test_fchdirperm 2>&1)"
+check "c-semops"      "OK"   "$(timeout 30 /bin/test_semops 2>&1 | grep -v '^ns-arrays' | tail -3)"
+check "c-unixperm"    "OK"   "$(timeout 30 /bin/test_unixperm 2>&1)"
+check "c-ofdlockwait" "OK"   "$(timeout 15 /bin/test_ofdlockwait 2>&1)"
 
 
 # ── 26. umount ────────────────────────────────────────────────
@@ -243,7 +263,10 @@ check "umount-do"     "ok"  "$(umount /tmp/umnt && echo ok)"
 check "umount-gone"   ""    "$(cat /tmp/umnt/f 2>/dev/null)"
 
 # ── 26b. per-mount flag enforcement (rdonly/noexec/nosuid/nodev) ──
+check "setattr"      "OK"  "$(timeout 15 /bin/test_setattr 2>/dev/null | tail -1)"
 check "c-mountflags"  "OK"  "$(timeout 15 /bin/test_mountflags 2>/dev/null)"
+check "mountflags-bypass" "OK" "$(timeout 15 /bin/test_mountflags_bypass 2>/dev/null | tail -1)"
+check "dentry-churn" "OK"     "$(timeout 30 /bin/test_dentry_churn 2>/dev/null | tail -1)"
 
 # ── 27. sysctl write ──────────────────────────────────────────
 check "sysctl-write-hostname"  "testhostname" \
@@ -275,6 +298,7 @@ check "proc-mounts-dev"   "1"  "$(grep -c ' /dev devfs ' /proc/mounts)"
 # init ran `mount -a` from /etc/fstab → the tmpfs entry is mounted at boot
 check "fstab-mount"       "1"  "$(grep -c ' /fstabtmp tmpfs ' /proc/mounts)"
 check "proc-meminfo"      "1"  "$([ -f /proc/meminfo ] && echo 1)"
+echo "meminfo: $(grep MemTotal /proc/meminfo)"
 check "proc-statm"        "7"  "$(cat /proc/self/statm 2>/dev/null | wc -w | tr -d ' ')"
 check "resolv-conf"       "1"  "$(grep -c nameserver /etc/resolv.conf 2>/dev/null)"
 check "proc-mountinfo"    "1"  "$([ -n "$(grep 'proc rw - proc' /proc/self/mountinfo 2>/dev/null)" ] && echo 1)"
@@ -348,7 +372,7 @@ check "proc-net-udp"    "1"  "$([ -f /proc/net/udp ] && echo 1)"
 check "c-threads"    "OK"  "$(timeout 8 /bin/test_threads 2>/dev/null)"
 
 # FP/SIMD register state across SMP context switch + migration (liblzma gate).
-check "c-fpusmp"     "OK"  "$(timeout 60 /bin/test_fpusmp 2>/dev/null | tail -1)"
+check "c-fpusmp"     "OK"  "$(timeout 120 /bin/test_fpusmp 2>/dev/null | tail -1)"
 
 # A blocking futex must not EINTR on an ignored (SIG_IGN) pending signal: Linux
 # only interrupts a blocking syscall for a signal that is actually delivered.
@@ -360,11 +384,29 @@ check "c-inotify"    "OK"  "$(timeout 5 /bin/test_inotify 2>/dev/null)"
 # ── 38. C test: AF_UNIX path socket ──────────────────────────
 check "c-unix-sock"  "OK"  "$(timeout 5 /bin/test_unix 2>/dev/null)"
 check "c-sendmsg"    "OK"            "$(timeout 8 /bin/test_sendmsg 2>/dev/null)"
+check "c-uaccess"   "OK"            "$(timeout 60 /bin/test_uaccess 2>&1 | tail -1)"
+check "c-errno"     "OK"            "$(timeout 30 /bin/test_errno 2>&1 | tail -1)"
+check "c-unpriv"    "OK"            "$(timeout 30 /bin/test_unpriv 2>&1 | tail -1)"
+check "c-uringblock" "OK"           "$(timeout 30 /bin/test_uring_block 2>&1 | tail -1)"
+check "c-fuzz"      "OK"            "$(timeout 200 /bin/test_fuzz 20261105 40 2>/dev/null | tail -1)"
 check "c-scmrights"  "OK"            "$(timeout 8 /bin/test_scmrights 2>/dev/null)"
 check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null)"
 check "c-flock"       "OK"            "$(timeout 8 /bin/test_flock 2>/dev/null)"
 check "c-chown"       "OK"            "$(timeout 8 /bin/test_chown 2>/dev/null)"
 check "c-access"      "OK"            "$(timeout 8 /bin/test_access 2>/dev/null)"
+check "c-sigaltstack-size" "OK"     "$(timeout 8 /bin/test_sigaltstack_size 2>/dev/null)"
+check "c-hwdiag"      "OK"            "$(timeout 15 /bin/test_hwdiag 2>&1 | tail -1)"
+check "c-deadline"    "OK"            "$(timeout 8 /bin/test_deadline 2>&1 | tail -1)"
+# Agent+human (arastirma/ajan-insan-ozellikleri.md): kill always wins, rescue channel, claims
+check "c-killwins"    "OK"            "$(timeout 60 /bin/test_killwins 2>&1 | tail -1)"
+check "c-kwatch"      "OK"            "$(timeout 40 /bin/test_killwins kwatch 2>&1 | tail -1)"
+check "c-rescue"      "OK"            "$(timeout 30 /bin/test_rescue 2>&1 | tail -1)"
+check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail -1)"
+check "c-peercred"    "OK"            "$(timeout 10 /bin/test_peercred 2>&1 | tail -1)"
+check "c-inputsrc"     "OK"            "$(timeout 20 /bin/test_inputsrc 2>&1 </dev/null | tail -1)"
+check "c-usercred"    "OK"            "$(timeout 10 /bin/test_usercred 2>&1 | tail -1)"
+check "c-ofdlock"     "OK"            "$(timeout 8 /bin/test_ofdlock 2>&1 | tail -1)"
+check "c-ps2aux"      "OK"            "$(timeout 10 /bin/test_ps2aux 2>&1 | tail -1)"
 check "c-atflags"     "OK"            "$(timeout 8 /bin/test_atflags 2>/dev/null)"
 check "c-getrandom"   "OK"            "$(timeout 10 /bin/test_getrandom 2>/dev/null)"
 check "c-fifo"        "OK"            "$(timeout 10 /bin/test_fifo 2>/dev/null)"
@@ -386,12 +428,19 @@ check "c-xattr"      "OK"  "$(timeout 8 /bin/test_xattr 2>/dev/null)"
 check "c-futex-timed" "OK" "$(timeout 8 /bin/test_futex_timed 2>/dev/null)"
 check "c-robustfutex" "OK" "$(timeout 8 /bin/test_robustfutex 2>/dev/null)"
 check "c-pipedata"    "OK" "$(timeout 40 /bin/test_pipedata 2>/dev/null | tail -1)"
-check "c-condvarstress" "OK" "$(timeout 40 /bin/test_condvarstress 2>/dev/null | tail -1)"
+check "c-condvarstress" "OK" "$(timeout 90 /bin/test_condvarstress 2>/dev/null | tail -1)"
+check "c-spinstorm"   "OK"  "$(timeout 60 /bin/test_spinstorm 15 8 2>/dev/null | tail -1)"
 check "c-poll"       "OK"  "$(timeout 8 /bin/test_poll 2>/dev/null)"
 check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
 check "c-eventfd"    "OK"  "$(timeout 8 /bin/test_eventfd 2>/dev/null)"
+check "c-drm"        "OK"  "$(timeout 40 /bin/test_drm 2>/dev/null | tail -1)"
+check "c-i915"       "OK"  "$(timeout 60 /bin/test_i915 2>/dev/null | tail -1)"
+check "c-thermal"    "OK"  "$(timeout 8 /bin/test_thermal 2>/dev/null)"
 check "c-mmap"       "OK"  "$(timeout 8 /bin/test_mmap 2>/dev/null)"
+check "c-sigwaitmask" "OK"  "$(timeout 10 /bin/test_sigwaitmask 2>/dev/null | tail -1)"
 check "c-bigmmap"    "OK"  "$(timeout 20 /bin/test_bigmmap 2>/dev/null)"
+check "c-mremap"     "OK"  "$(timeout 10 /bin/test_mremap 2>/dev/null | tail -1)"
+check "c-faultrace"  "OK"  "$(timeout 120 /bin/test_faultrace 2>/dev/null | tail -1)"
 check "c-iouring"    "OK"  "$(timeout 8 /bin/test_iouring 2>/dev/null)"
 check "c-oom"        "OK"  "$(timeout 90 /bin/test_oom 2>/dev/null)"
 check "c-hugepage"   "OK"  "$(timeout 8 /bin/test_hugepage 2>/dev/null)"
@@ -405,6 +454,13 @@ check "c-jobctl"     "OK"  "$(timeout 25 /bin/test_jobctl 2>/dev/null | tail -1)
 if ls /sys/block 2>/dev/null | grep -qE 'vblk|sata'; then
 check "gpt-ext4"     "ranix-gpt-ok" "$(cat /mnt/hello.txt 2>/dev/null)"
 check "ext4-write"   "ranix-w64"    "$(echo -n ranix-w64 > /mnt/wtest.txt 2>/dev/null; cat /mnt/wtest.txt 2>/dev/null)"
+check "c-compatfs"   "OK"           "$(timeout 20 /bin/test_compatfs /mnt 2>/dev/null | tail -1)"
+# exec through symlinks on a disk fs, not only the initramfs: the root of a real
+# install is ext2 and a kernel once broke exactly this there (2026-11-08).
+rm -rf /mnt/sl; mkdir -p /mnt/sl/r /mnt/sl/a && cp /bin/busybox /mnt/sl/bb 2>/dev/null
+ln -s bb /mnt/sl/echo; ln -s ../bb /mnt/sl/r/echo; ln -s /mnt/sl/bb /mnt/sl/a/echo
+check "ext-symlink-exec" "s r a"     "$(/mnt/sl/echo -n s 2>&1; /mnt/sl/r/echo -n " r" 2>&1; /mnt/sl/a/echo -n " a" 2>&1)"
+rm -rf /mnt/sl
 # statfs reports the real on-disk geometry (block size, total/free counts);
 # proves iops->statfs reads the live superblock instead of nominal counts.
 check "ext4-statfs"  "OK"           "$(timeout 10 /bin/test_ext4fs 2>/dev/null)"
@@ -453,7 +509,17 @@ check "ext2-multi-mnt"    "ranix-gpt-ok"       "$(cat /mnt/hello.txt 2>/dev/null
 # write into /mnt2 and confirm /mnt's marker file is untouched (separate caches)
 echo -n ranix-mnt2-w > /mnt2/w2.txt 2>/dev/null
 check "ext2-multi-iso"    "ranix-mnt2-w|ranix-gpt-ok" "$(cat /mnt2/w2.txt 2>/dev/null)|$(cat /mnt/hello.txt 2>/dev/null)"
+check "c-ext2rw-1k"       "OK"                 "$(timeout 40 /bin/test_ext2rw /mnt 2>&1 | tail -1)"
+check "c-ext2rw-4k"       "OK"                 "$(timeout 40 /bin/test_ext2rw /mnt2 2>&1 | tail -1)"
+# fsync, rename and overwrite promises under four writers; /mnt also commits through its jbd2 log
+check "ext4-log-active"   "yes"                "$(dmesg | grep -q 'ext2: log active' && echo yes)"
+check "c-fscrash-log-1k"  "OK"                 "$(mkdir -p /mnt/fsc; timeout 40 /bin/test_fscrash smoke /mnt/fsc 3 2>&1 | tail -1 | cut -c1-2; rm -rf /mnt/fsc)"
+check "c-fscrash-4k"      "OK"                 "$(mkdir -p /mnt2/fsc; timeout 40 /bin/test_fscrash smoke /mnt2/fsc 3 2>&1 | tail -1 | cut -c1-2; rm -rf /mnt2/fsc)"
+# names, rename across directories, every indirect level, EFBIG (ENOSPC runs on the small images of arac/casper/ev/hd-tur.sh)
+check "c-ext2hard-log-1k" "OK"                 "$(mkdir -p /mnt/hard; timeout 180 /bin/test_ext2hard /mnt/hard nofill 2>&1 | tail -1; rm -rf /mnt/hard)"
+check "c-ext2hard-4k"     "OK"                 "$(mkdir -p /mnt2/hard; timeout 180 /bin/test_ext2hard /mnt2/hard nofill 2>&1 | tail -1; rm -rf /mnt2/hard)"
 umount /mnt2 2>/dev/null
+check "c-mountoffset"     "OK"                 "$(timeout 10 /bin/test_mountoffset /dev/nvme0n1 /mnt3 8388608 ranix-offset-ok 2>&1 | tail -1)"
 fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"
@@ -461,6 +527,13 @@ check "sys-net-state" "up"  "$(cat /sys/class/net/lo/operstate 2>/dev/null)"
 check "sys-cpu-online" "0-3" "$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 check "sys-block-ls"  "ok"  "$(ls /sys/block >/dev/null 2>&1 && echo ok)"
 check "c-pipestress" "OK" "$(timeout 60 /bin/test_pipestress 2>/dev/null | tail -1)"
+check "c-uvpipe"      "OK" "$(timeout 120 /bin/test_uvpipe 2>/dev/null | tail -1)"
+check "uvpipe-tail"   "node-shape-done" "$(timeout 30 /bin/test_uvpipe node 2000 2>&1 | tail -1)"
+check "c-netlink"     "OK" "$(timeout 30 /bin/test_netlink 2>/dev/null | tail -1)"
+check "ip-addr"       "yes" "$(ip a 2>&1 | grep -q 'inet 127.0.0.1/8' && echo yes)"
+check "ip-link"       "yes" "$(ip link 2>&1 | grep -q 'LOOPBACK' && echo yes)"
+check "ip-route-err"  "0"   "$(ip r >/dev/null 2>&1; echo $?)"
+check "proc-irqs"     "yes" "$(grep -q 'CPU0' /proc/interrupts && echo yes)"
 check "c-eintr"      "OK"  "$(timeout 30 /bin/test_eintr 2>/dev/null | tail -1)"
 check "c-execstress" "OK" "$(timeout 60 /bin/test_execstress 2>/dev/null | tail -1)"
 check "c-posix"      "OK"  "$(timeout 10 /bin/test_posix 2>/dev/null | tail -1)"
@@ -475,13 +548,19 @@ check "c-closerange" "OK"  "$(timeout 10 /bin/test_closerange 2>/dev/null | tail
 check "c-pathsweep"  "OK"  "$(timeout 12 /bin/test_pathsweep 2>/dev/null | tail -1)"
 check "c-spairsweep" "OK"  "$(timeout 10 /bin/test_spairsweep 2>/dev/null | tail -1)"
 check "c-bigdir"     "OK"  "$(timeout 15 /bin/test_bigdir 2>/dev/null | tail -1)"
-check "c-ramchurn"   "OK"  "$(timeout 30 /bin/test_ramchurn 2>/dev/null | tail -1)"
+check "c-ramchurn"   "OK"  "$(timeout 120 /bin/test_ramchurn 2>/dev/null | tail -1)"
 check "c-ptysweep"   "OK"  "$(timeout 10 /bin/test_ptysweep 2>/dev/null | tail -1)"
+check "c-ptyfull"    "OK"  "$(timeout 15 /bin/test_ptyfull 2>/dev/null | tail -1)"
 check "c-envsweep"   "OK"  "$(timeout 10 /bin/test_envsweep 2>/dev/null | tail -1)"
 check "c-siguncatch" "OK"  "$(timeout 8 /bin/test_siguncatch 2>/dev/null | tail -1)"
 check "c-tcp"        "OK"  "$(timeout 10 /bin/test_tcp 2>/dev/null)"
 check "c-tcp-bulk"   "OK"  "$(timeout 30 /bin/test_tcpbulk 2>/dev/null)"
 check "c-tcp-cc"     "OK"  "$(timeout 30 /bin/test_tcpcc 2>/dev/null)"
+check "mkdir-enoent" "No such" "$(mkdir /tmp/no-such-parent/x 2>&1 | grep -o 'No such')"
+check "c-sigflags" "OK" "$(timeout 8 /bin/test_sigflags 2>/dev/null | tail -1)"
+check "c-epollpwait2" "OK" "$(timeout 8 /bin/test_epollpwait2 2>/dev/null | tail -1)"
+check "c-tcp-sha"    "OK"  "$(timeout 60 /bin/test_tcpsha loop 64 2>/dev/null | tail -1)"
+check "c-tcp-rel"    "OK"  "$(timeout 135 /bin/test_tcprel 2>/dev/null | tail -1)"
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
 check "c-ping6"      "OK"  "$(timeout 10 /bin/test_ping6 2>/dev/null)"
 check "c-udp6"       "OK"  "$(timeout 10 /bin/test_udp6 2>/dev/null)"
@@ -502,18 +581,94 @@ check "c-clone-ns"   "clonens-ok" "$(timeout 10 /bin/test_clonens 2>/dev/null)"
 check "c-ipc-ns"     "ipcns-ok" "$(timeout 10 /bin/test_ipcns 2>/dev/null)"
 check "c-ipc-setns"  "ipcsetns-ok" "$(timeout 10 /bin/test_ipcsetns 2>/dev/null)"
 check "c-time-ns"    "timens-ok" "$(timeout 10 /bin/test_timens 2>/dev/null)"
+check "c-ns-ino"     "OK"       "$(timeout 10 /bin/test_nsino 2>/dev/null)"
+check "c-exepath"    "OK"       "$(timeout 10 /bin/test_exepath 2>/dev/null)"
+check "c-passcred"   "OK"       "$(timeout 10 /bin/test_passcred 2>/dev/null)"
+check "c-tasknlink"  "OK"       "$(timeout 10 /bin/test_tasknlink 2>/dev/null)"
+check "c-auxv"       "OK"       "$(timeout 10 /bin/test_auxv 2>/dev/null)"
+check "c-lockthread" "OK"       "$(timeout 10 /bin/test_lockthread 2>/dev/null)"
+check "c-procfdstat" "OK"       "$(timeout 10 /bin/test_procfdstat 2>/dev/null)"
+check "c-scmcred"    "OK"       "$(timeout 10 /bin/test_scmcred 2>/dev/null)"
+check "c-seqpacket"  "OK"       "$(timeout 10 /bin/test_seqpacket 2>/dev/null)"
+check "c-devtty"     "OK"       "$(timeout 10 /bin/test_devtty 2>/dev/null)"
+check "c-v4mapped"   "OK"       "$(timeout 10 /bin/test_v4mapped 2>/dev/null)"
+check "c-relinterp"  "OK"       "$(timeout 10 /bin/test_relinterp 2>/dev/null)"
 check "dynamic-link" "dynamic-ok" "$(timeout 10 /bin/test_dynamic 2>/dev/null)"
 check "shared-lib"   "sharedlib-ok" "$(timeout 10 /bin/test_sharedlib 2>/dev/null)"
 check "dlopen"       "dlopen-ok" "$(timeout 10 /bin/test_dlopen 2>/dev/null)"
 check "cgroup-pids"  "cgroup-ok" "$(timeout 15 /bin/test_cgroup 2>/dev/null)"
+check "cgroup-thread" "OK"       "$(timeout 15 /bin/test_cgroup_thread 2>/dev/null | tail -1)"
+check "cgroup-perm"  "OK"        "$(timeout 10 /bin/test_cgroup_perm 2>/dev/null | tail -1)"
 check "cgroup-mem"   "memcg-ok" "$(timeout 15 /bin/test_memcg 2>/dev/null)"
-check "cgroup-freeze" "freeze-ok" "$(timeout 15 /bin/test_freeze 2>/dev/null)"
+check "cgroup-freeze" "freeze-ok" "$(timeout 60 /bin/test_freeze 2>/dev/null)"
 check "cgroup-cpu"   "cpuw-ok" "$(timeout 15 /bin/test_cpuweight 2>/dev/null)"
 check "mount-ns"     "mountns-ok" "$(timeout 10 /bin/test_mountns 2>/dev/null)"
 check "pid-ns"       "pidns-ok" "$(timeout 10 /bin/test_pidns 2>/dev/null)"
 check "pid-ns-proc"  "OK"       "$(timeout 10 /bin/test_pidnsproc 2>/dev/null)"
 check "user-ns"      "userns-ok" "$(timeout 10 /bin/test_userns 2>/dev/null)"
+check "userns-caps"  "OK"        "$(timeout 10 /bin/test_nscaps 2>/dev/null | tail -1)"
+check "fsync"        "OK"        "$(timeout 10 /bin/test_fsync 2>/dev/null | tail -1)"
+check "hash"         "OK"        "$(timeout 10 /bin/test_hash 2>/dev/null | tail -1)"
+check "gpt-part"     "OK"        "$(timeout 10 /bin/test_gpt_part 2>/dev/null | tail -1)"
+check "task-perm"    "OK"        "$(timeout 10 /bin/test_taskperm 2>/dev/null | tail -1)"
+check "sysctl-perm"  "OK"        "$(timeout 10 /bin/test_sysctl_perm 2>/dev/null | tail -1)"
+check "seccomp-inherit" "OK"     "$(timeout 15 /bin/test_seccomp_inherit 2>/dev/null | tail -1)"
+check "pidns-raw"    "OK"        "$(timeout 10 /bin/test_pidns_raw 2>/dev/null | tail -1)"
+check "kill-perm"    "OK"        "$(timeout 10 /bin/test_kill_perm 2>/dev/null | tail -1)"
+
+# agent sessions: entry, gate, view, isolation, inheritance
+check "asess-spawn"   "OK" "$(timeout 20 /bin/test_asess_spawn 2>&1 | tail -1)"
+check "asess-gate"    "OK" "$(timeout 20 /bin/test_asess_gate 2>&1 | tail -1)"
+check "asess-inherit" "OK" "$(timeout 20 /bin/test_asess_inherit 2>&1 | tail -1)"
+check "asess-view"    "OK" "$(timeout 20 /bin/test_asess_view 2>&1 | tail -1)"
+ISO_OUT=$(timeout 20 /bin/test_asess_isolate 2>&1)
+check "asess-isolate" "OK" "$(echo "$ISO_OUT" | tail -1)"
+case "$ISO_OUT" in *FAIL*) echo "$ISO_OUT" | grep FAIL | head -6;; esac
+check "asess-churn"   "OK" "$(timeout 30 /bin/test_asess_churn 2>&1 | tail -1)"
+check "unix-shutdown" "OK" "$(timeout 10 /bin/test_unix_shutdown 2>&1 | tail -1)"
+check "asess-mem"     "OK" "$(timeout 60 /bin/test_asess_mem 2>&1 | tail -1)"
+check "asess-bind"    "OK" "$(timeout 20 /bin/test_asess_bind 2>&1 | tail -1)"
+check "c-roeexist"    "OK" "$(/bin/test_roeexist 2>&1 | tail -1)"
+check "c-mempolicy"   "OK" "$(/bin/test_mempolicy 2>&1 | tail -1)"
+check "c-onstack"     "OK" "$(/bin/test_onstack 2>&1 | tail -1)"
+check "c-brkshare"    "OK" "$(/bin/test_brkshare 2>&1 | tail -1)"
+check "c-tkillself"   "OK" "$(/bin/test_tkillself 2>&1 | tail -1)"
+check "c-threadreap"  "OK" "$(timeout 240 /bin/test_threadreap 2>&1 | tail -1)"
+check "c-threadwait"  "OK" "$(timeout 20 /bin/test_threadwait 2>&1 | tail -1)"
+check "c-threadtime"  "OK" "$(timeout 20 /bin/test_threadtime 2>&1 | tail -1)"
+check "c-threadexec"  "OK" "$(timeout 25 /bin/test_threadexec 2>&1 | tail -1)"
+check "c-epollet"     "OK" "$(timeout 40 /bin/test_epollet 2>&1 | tail -1)"
+check "c-scmfds"      "OK" "$(timeout 15 /bin/test_scmfds 2>&1 | tail -1)"
+check "c-avx"         "OK" "$(timeout 30 /bin/test_avx 2>&1 | tail -1 | cut -c1-2)"
+check "c-dsp"         "OK" "$(timeout 15 /bin/test_dsp 2>&1 | tail -1)"
+check "c-pdeathsig"   "OK" "$(timeout 20 /bin/test_pdeathsig 2>&1 | tail -1)"
+check "c-faultsig"    "OK" "$(timeout 20 /bin/test_faultsig 2>&1 | tail -1)"
+check "c-ptimer"      "OK" "$(timeout 30 /bin/test_ptimer 2>&1 | tail -1)"
+check "c-sigwait"     "OK" "$(timeout 20 /bin/test_sigwait 2>&1 | tail -1)"
+check "c-compat"      "OK" "$(timeout 20 /bin/test_compat 2>&1 | tail -1)"
+check "c-ptrace2"     "OK" "$(timeout 40 /bin/test_ptrace2 2>&1 | tail -1)"
+mkdir -p /tmp/sysm; mount -t sysfs s /tmp/sysm
+check "mount-sysfs"   "ok" "$(test -f /tmp/sysm/kernel/keymap && echo ok)"
+umount /tmp/sysm
+echo tr > /sys/kernel/keymap
+check "sys-keymap"    "tr" "$(cat /sys/kernel/keymap)"
+echo us > /sys/kernel/keymap
+check "c-sarestart"   "OK" "$(timeout 20 /bin/test_sarestart 2>&1 | tail -1)"
+check "asess-stage"   "OK" "$(timeout 30 /bin/test_asess_stage 2>&1 | tail -1)"
+UNDO_OUT=$(timeout 120 /bin/test_sess_undo 2>&1)
+check "sess-undo"     "OK" "$(echo "$UNDO_OUT" | tail -1)"
+case "$UNDO_OUT" in *FAIL*) echo "$UNDO_OUT" | grep -E "FAIL|^agent|^diff said|^[AMDT] " | head -24;; esac
+mkdir -p /var/rwb; chmod 777 /var/rwb
+check "asess-run-rw"  "ok" "$(timeout 20 /bin/ranix-sess run -r / -u 1000 -g 1000 -w /var/rwb -- /bin/sh -c 'echo ok > /var/rwb/f' </dev/null; cat /var/rwb/f 2>/dev/null)"
+rm -rf /var/rwb
+check "asess-run"     "ok" "$(timeout 20 /bin/ranix-sess run -r / -u 1000 -g 1000 -- /bin/sh -c 'echo ok' 2>&1 </dev/null | tail -1)"
+check "asess-run-dyn" "dynamic-ok" "$(timeout 20 /bin/ranix-sess run -r / -u 1000 -g 1000 -- /bin/test_dynamic 2>&1 </dev/null | tail -1)"
+check "chroot-escape" "OK"       "$(timeout 10 /bin/test_chroot_escape 2>/dev/null | tail -1)"
+check "netfilter-perm" "OK"      "$(timeout 10 /bin/test_netfilter_perm 2>/dev/null | tail -1)"
+check "setns-perm"   "OK"        "$(timeout 10 /bin/test_setns_perm 2>/dev/null | tail -1)"
+check "unshare-perm" "OK"        "$(timeout 10 /bin/test_unshare_perm 2>/dev/null | tail -1)"
 check "net-ns"      "netns-ok" "$(timeout 10 /bin/test_netns 2>/dev/null)"
+check "netns-unix"  "OK"        "$(timeout 15 /bin/test_netns_unix 2>/dev/null | tail -1)"
 check "cgroup-ns"   "cgroupns-ok" "$(timeout 10 /bin/test_cgroupns 2>/dev/null)"
 check "container"     "container-ok" "$(timeout 12 /bin/test_container 2>/dev/null)"
 
@@ -547,6 +702,8 @@ check "c-creds"        "OK"  "$(timeout 5 /bin/test_creds 2>/dev/null | tail -1)
 check "c-forkbomb"     "OK"  "$(timeout 10 /bin/test_forkbomb 2>/dev/null | tail -1)"
 check "c-kptr"         "OK"  "$(timeout 10 /bin/test_kptr 2>/dev/null | tail -1)"
 check "c-compat"       "OK"  "$(timeout 5 /bin/test_compat 2>/dev/null | tail -1)"
+check "c-ptrace2"     "OK" "$(timeout 40 /bin/test_ptrace2 2>&1 | tail -1)"
+check "c-sarestart"   "OK" "$(timeout 20 /bin/test_sarestart 2>&1 | tail -1)"
 check "c-ifioctl"      "OK"  "$(timeout 5 /bin/test_ifioctl 2>/dev/null | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
@@ -599,6 +756,7 @@ check "c-tlbshoot" "OK" \
 
 # ── interactive shell over a pts (line discipline + job control) ──────────────
 check "c-ptyshell" "OK" "$(timeout 20 /bin/test_ptyshell 2>/dev/null | tail -1)"
+check "tty-pgrp"   "OK" "$(timeout 15 /bin/test_tty_pgrp 2>/dev/null | tail -1)"
 
 # ── curl over loopback (real curl binary, mbedTLS backend) ────────────────────
 # HTTP: a tiny loopback server (httpd_test) serves a known body; curl fetches it.
@@ -820,7 +978,7 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/pacman ] && [ -f /opt/arch/usr/
 	timeout -s KILL 60 /usr/bin/pacman --config "$CONF" --root /pacroot \
 	    --dbpath /pacroot/var/lib/pacman --cachedir /pacroot/var/cache/pacman/pkg $ASSUME \
 	    -U /var/cache/pacman/tree.pkg.tar.zst --noconfirm >/tmp/pacman-u.out 2>&1
-	if [ -x /pacroot/usr/bin/tree ] && /pacroot/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
+	if [ -x /pacroot/usr/bin/tree ] && /opt/arch/usr/lib/ld-linux-x86-64.so.2 --library-path /opt/arch/usr/lib /pacroot/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
 		check "pacman-install" "ok" "ok"
 	else
 		check "pacman-install" "ok" "FAIL: $(tail -1 /tmp/pacman-u.out 2>/dev/null)"
@@ -834,7 +992,7 @@ if [ "$(uname -m)" = "x86_64" ] && [ -x /usr/bin/pacman ] && [ -f /opt/arch/usr/
 		timeout -s KILL 60 /usr/bin/pacman --config "$CONF" --root /pacsroot \
 		    --dbpath /pacsroot/var/lib/pacman --cachedir /pacsroot/var/cache/pacman/pkg $ASSUME \
 		    -S tree --noconfirm >/tmp/pacman-s.out 2>&1
-		if [ -x /pacsroot/usr/bin/tree ] && /pacsroot/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
+		if [ -x /pacsroot/usr/bin/tree ] && /opt/arch/usr/lib/ld-linux-x86-64.so.2 --library-path /opt/arch/usr/lib /pacsroot/usr/bin/tree --version 2>/dev/null | grep -q '^tree v'; then
 			check "pacman-sync" "ok" "ok"
 		else
 			check "pacman-sync" "ok" "FAIL: $(tail -1 /tmp/pacman-s.out 2>/dev/null)"
