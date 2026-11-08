@@ -68,13 +68,20 @@ int user_pages_mapped(const void *addr, size_t n)
 	return 1;
 }
 
+#ifdef ARCH_USER_VA_END
+#define USER_VA_END ARCH_USER_VA_END
+#else
+#define USER_VA_END 0x8000000000UL
+#endif
+
 int access_ok(const void *addr, size_t n)
 {
 	uint64_t start = (uint64_t)addr;
 	uint64_t end   = start + n;
 
-	/* User space must be below the kernel virtual offset */
-	if (start >= VIRT_OFFSET || end > VIRT_OFFSET || end < start)
+	/* All of user space sits in page-table slot 0 (see the note in vm.c). On x86_64
+	 * VIRT_OFFSET is the kernel text, with the direct map of all RAM below it. */
+	if (start >= USER_VA_END || end > USER_VA_END || end < start)
 		return 0;
 	return 1;
 }
@@ -117,23 +124,24 @@ long copy_fop_from_user(void *dst, const void *src, size_t n)
 
 long strncpy_from_user(char *dst, const char *src, size_t n)
 {
-	if (!access_ok(src, 1)) return -1;
-	process_t *p = task_current();
-	uint64_t cur_pg = (uint64_t)-1;
-	uaccess_begin();
-	for (size_t i = 0; i < n; i++) {
-		uint64_t pg = ((uint64_t)src + i) & PAGE_MASK;
-		if (pg != cur_pg) {
-			if (p && p->vm && !arch_vm_get_paddr(p->vm->root, pg)) {
-				uaccess_end();
-				return -1;
-			}
-			cur_pg = pg;
+	if (n == 0) return -1;
+	/* Small chunks through the fault-fixed copy: a sibling thread can unmap the
+	 * string at any moment, so a raw byte read here could panic. dst stays
+	 * untouched past the NUL. */
+	char tmp[64];
+	for (size_t done = 0; done < n; ) {
+		uint64_t a = (uint64_t)src + done;
+		size_t chunk = PAGE_SIZE - (a & (PAGE_SIZE - 1));
+		if (chunk > n - done) chunk = n - done;
+		if (chunk > sizeof(tmp)) chunk = sizeof(tmp);
+		if (!access_ok((void *)a, chunk)) return -1;
+		if (__copy_user(tmp, (void *)a, chunk)) return -1;
+		for (size_t i = 0; i < chunk; i++) {
+			dst[done + i] = tmp[i];
+			if (tmp[i] == '\0') return (long)(done + i);
 		}
-		dst[i] = src[i];
-		if (src[i] == '\0') { uaccess_end(); return (long)i; }
+		done += chunk;
 	}
-	uaccess_end();
 	dst[n - 1] = '\0';
 	return (long)n;
 }

@@ -73,6 +73,14 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
 
 	uint64_t f = spin_lock_irq(&vm_lock);
 	uint64_t vaddr = ioremap_vaddr;
+	/* The window runs to the top of the address space and is never given back.
+	 * Past it the cursor wraps to low addresses, whose page tables the kernel
+	 * image shares on x86 (boot pd), and the mapping lands on kernel text. */
+	if (aligned_size >= 0 - vaddr) {
+		spin_unlock_irq(&vm_lock, f);
+		kprintf(KERN_ERR "mm: ioremap window exhausted, %lu bytes refused\n", (unsigned long)aligned_size);
+		return NULL;
+	}
 	ioremap_vaddr += aligned_size;
 	spin_unlock_irq(&vm_lock, f);
 
@@ -91,16 +99,21 @@ void *ioremap(uint64_t phys_addr, size_t size, uint32_t flags)
  * whole user layout — stack top, the 1 GB-hugepage window, and the mmap ceiling
  * below it — must stay inside that slot, or fork would skip and exit would leak
  * the mappings above it (a COW-bypass / page leak). */
+#ifndef ARCH_USER_PT_SLOTS
 _Static_assert(ARCH_USER_STACK_TOP <= 0x8000000000UL,
                "user stack top must stay within page-table slot 0 (512 GB)");
 _Static_assert(HUGE1G_VA_BASE < 0x8000000000UL,
                "1 GB-hugepage window must stay within page-table slot 0 (512 GB)");
+#else
+_Static_assert(ARCH_USER_STACK_TOP < ARCH_USER_VA_END && HUGE1G_VA_BASE < ARCH_USER_STACK_TOP,
+               "user layout must stay inside the user page-table slots");
+#endif
 
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	vaddr &= PAGE_MASK;
 	process_t *p = task_current();
-	if (!p || !p->vm) { kprintf("fault: no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
+	if (!p || !p->vm) { kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
 
 	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 
@@ -135,25 +148,26 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 			}
 		}
 		if (mf) {
-			if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
+			if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
 			void *pg = vm_alloc_page_oom();
 			if (pg) {
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 				if (vm_map(p->vm, vaddr, (uint64_t)pg, mf) == 0) {
-					p->mem_charged += PAGE_SIZE;
 					ret = 0;
 				} else {
 					buddy_free((uint64_t)pg, 0);
-					cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
+					cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 				}
 			} else {
-				cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
+				cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 			}
 		}
 		goto out;
 	}
 
-	if (!is_write) goto out;
+	/* A read that found the page present lost the race to a sibling's fault on
+	 * the same page: the handlers only come here for a not-present read. */
+	if (!is_write) { ret = 0; goto out; }
 
 	/* Find the VMA covering this page. VMA_SHARED is mapped writable directly
 	 * (not COW'd). A write to a page whose VMA lacks VMA_WRITE is a real
@@ -161,6 +175,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	 * ret = -1 and let the caller raise SIGSEGV. Pages with no VMA (heap/brk)
 	 * fall through to the COW path below. */
 	uint32_t cow_exec = 0;   /* preserve executability across the COW remap */
+	int in_vma = 0;
 	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_EXEC) cow_exec = VM_EXEC;
@@ -187,27 +202,28 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 			}
 			if (v->flags & VMA_SHARED) {
 				if (!(v->flags & VMA_WRITE)) goto out;   /* read-only shared: real protection fault */
-				/* A file-backed shared page (not VMA_ANON) is the inode's own buffer,
-				 * kept off teardown's free path — preserve VM_NOFREE when remapping it
-				 * writable so vm_destroy doesn't free a page the file still owns. */
-				uint32_t wf = VM_USER | VM_READ | VM_WRITE | cow_exec;
-				if (!(v->flags & VMA_ANON)) wf |= VM_NOFREE;
-				ret = vm_map(p->vm, vaddr, paddr, wf);
+				ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
 				goto out;
 			}
 			if (!(v->flags & VMA_WRITE)) goto out;
+			in_vma = 1;
 			break;
 		}
 	}
 
 	/* Permission fault on a mapped page — COW */
 	page_t *pg = paddr_to_page(paddr);
-	if (!pg) goto out;
+	if (!pg) {
+		/* No page behind it: device memory has nothing to copy, so a writable
+		 * mapping of it just goes writable. vm_map keeps its cache type. */
+		if (in_vma) ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
+		goto out;
+	}
 
 	if (pg->refcount > 1) {
-		if (cgroup_charge_mem(p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
+		if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
 		void *new_p = vm_pmm_page_oom();
-		if (!new_p) { cgroup_uncharge_mem(p->cgroup, PAGE_SIZE); goto out; }
+		if (!new_p) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); goto out; }
 		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
 #if defined(__aarch64__)
 		if (cow_exec) {
@@ -223,11 +239,10 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 			 * free and shoot the other CPUs down past fault_lock — a sibling spinning
 			 * for the lock IRQ-off must be able to ack the IPI. */
 			cow_old = paddr;
-			p->mem_charged += PAGE_SIZE;
 			ret = 0;
 		} else {
 			pmm_free(new_p);
-			cgroup_uncharge_mem(p->cgroup, PAGE_SIZE);
+			cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 		}
 	} else {
 		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
@@ -240,16 +255,76 @@ out:
 			extern void arch_tlb_flush_range(vm_space_t *, uint64_t, uint64_t);
 			arch_tlb_flush_range(p->vm, vaddr, vaddr + PAGE_SIZE);
 		}
-		pmm_free((void *)cow_old);
+		if (pmm_free((void *)cow_old)) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 	}
 	return ret;
+}
+
+/* Copy between kbuf and another address space, page by page through the direct
+ * map under that space's fault_lock. Nothing is dereferenced by user address, so
+ * an unmapped or read-only target page cannot fault the kernel, and a write
+ * breaks COW in the target rather than reaching its fork relatives. Returns the
+ * bytes copied. Device memory has no direct-map alias and stops the copy. */
+size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write)
+{
+	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+	extern void arch_tlb_flush_range(vm_space_t *, uint64_t, uint64_t);
+	process_t *cur = task_current();
+	size_t done = 0;
+	while (done < n) {
+		uint64_t a = va + done, pgva = a & PAGE_MASK;
+		size_t off = a - pgva, chunk = PAGE_SIZE - off;
+		if (chunk > n - done) chunk = n - done;
+		if (!access_ok((void *)a, chunk)) break;
+
+		uint64_t cow_old = 0;
+		uint64_t lf = spin_lock_irq(&vs->fault_lock);
+		uint64_t pa = arch_vm_get_paddr(vs->root, pgva);
+		page_t *pg = pa ? paddr_to_page(pa) : NULL;
+		if (!pg) { spin_unlock_irq(&vs->fault_lock, lf); break; }
+		if (write) {
+			uint32_t vf = 0;
+			for (vma_t *v = vs->vmas; v; v = v->next)
+				if (pgva >= v->vaddr && pgva < v->vaddr + v->size) { vf = v->flags; break; }
+			if (vf & VMA_HUGE_1G) { spin_unlock_irq(&vs->fault_lock, lf); break; }
+			if (!(vf & VMA_SHARED) && pg->refcount > 1) {
+				void *np = NULL;
+				if (cgroup_charge_mem(vs, cur->cgroup, PAGE_SIZE) == 0) {
+					np = vm_pmm_page_oom();
+					if (!np) cgroup_uncharge_mem(vs, PAGE_SIZE);
+				}
+				if (!np) { spin_unlock_irq(&vs->fault_lock, lf); break; }
+				memcpy((void *)PHYS_TO_VIRT(np), (void *)PHYS_TO_VIRT(pa), PAGE_SIZE);
+				/* stays read-only: the target's own next write takes the normal path */
+				uint32_t mf = VM_USER | VM_READ | ((vf & VMA_EXEC) ? VM_EXEC : 0);
+				if (vm_map(vs, pgva, (uint64_t)np, mf) != 0) {
+					pmm_free(np);
+					cgroup_uncharge_mem(vs, PAGE_SIZE);
+					spin_unlock_irq(&vs->fault_lock, lf);
+					break;
+				}
+				cow_old = pa;
+				pa = (uint64_t)np;
+			}
+			memcpy((uint8_t *)PHYS_TO_VIRT(pa) + off, (uint8_t *)kbuf + done, chunk);
+		} else {
+			memcpy((uint8_t *)kbuf + done, (uint8_t *)PHYS_TO_VIRT(pa) + off, chunk);
+		}
+		spin_unlock_irq(&vs->fault_lock, lf);
+		if (cow_old) {
+			arch_tlb_flush_range(vs, pgva, pgva + PAGE_SIZE);
+			if (pmm_free((void *)cow_old)) cgroup_uncharge_mem(vs, PAGE_SIZE);
+		}
+		done += chunk;
+	}
+	return done;
 }
 
 void vm_activate(void)
 {
 	task_t *t = task_current();
 	if ((uint64_t)t < 0xFFFF000000000000ULL) {
-		kprintf("[DBG] vm_activate: current=%p\n", t);
+		kprintf(KERN_ERR "mm: vm_activate bad current=%p\n", t);
 		kpanic("vm_activate: invalid cpu->current");
 	}
 	if (t->vm) {

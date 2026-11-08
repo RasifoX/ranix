@@ -12,6 +12,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/time.h>
+#include <fcntl.h>
+#include <poll.h>
 
 #define PORT 12357
 
@@ -93,6 +95,28 @@ int main(void)
 		printf("FAIL unknown-opt errno=%d\n", errno); close(sx); return 1;
 	}
 	close(sx);
+
+	/* a refused nonblocking connect: poll says POLLOUT with POLLERR|POLLHUP, and
+	 * SO_ERROR is ECONNREFUSED (libcups looks only at the poll bits) */
+	int c = socket(AF_INET, SOCK_STREAM, 0);
+	fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
+	struct sockaddr_in to = {0};
+	to.sin_family = AF_INET;
+	to.sin_port = htons(PORT + 7);           /* nothing listens there */
+	to.sin_addr.s_addr = htonl(0x7f000001);
+	int cr = connect(c, (struct sockaddr *)&to, sizeof(to));
+	if (cr == 0) { puts("FAIL refused connect succeeded"); return 1; }
+	if (errno == EINPROGRESS) {
+		struct pollfd pf = {c, POLLIN | POLLOUT, 0};
+		if (poll(&pf, 1, 2000) != 1) { puts("FAIL refused connect: poll timed out"); return 1; }
+		if (!(pf.revents & POLLERR) || !(pf.revents & POLLHUP)) {
+			printf("FAIL refused connect revents=%#x, no POLLERR|POLLHUP\n", pf.revents); return 1;
+		}
+		if (getint(c, SOL_SOCKET, SO_ERROR) != ECONNREFUSED) { puts("FAIL refused connect SO_ERROR"); return 1; }
+	} else if (errno != ECONNREFUSED) {
+		printf("FAIL refused connect errno=%d\n", errno); return 1;
+	}
+	close(c);
 
 	puts("OK");
 	return 0;
