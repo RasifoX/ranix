@@ -2165,6 +2165,14 @@ static int fill_net_dev(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* Linux's numbers for the "st" column (include/net/tcp_states.h); ss, netstat and
+ * door listings read LISTEN as 0A. Indexed by our TCP_* (kernel/net/socket.h). */
+static const uint8_t linux_tcp_state[] = {
+	[TCP_CLOSED] = 0x07, [TCP_LISTEN] = 0x0A, [TCP_SYN_SENT] = 0x02, [TCP_SYN_RECV] = 0x03,
+	[TCP_ESTABLISHED] = 0x01, [TCP_FIN_WAIT1] = 0x04, [TCP_FIN_WAIT2] = 0x05,
+	[TCP_CLOSE_WAIT] = 0x08, [TCP_CLOSING] = 0x0B, [TCP_LAST_ACK] = 0x09, [TCP_TIME_WAIT] = 0x06,
+};
+
 static int fill_net_tcp(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
@@ -2190,8 +2198,13 @@ static int fill_net_tcp(char *buf, size_t sz)
 		pb_char(&b, ':');
 		pb_hex4(&b, s->remote_port);
 		pb_str(&b, " ");
-		pb_hex4(&b, (uint16_t)s->tcp_state);
-		pb_str(&b, " 00000000:00000000 00:00000000 00000000     0        0 ");
+		unsigned st = (unsigned)s->tcp_state < sizeof linux_tcp_state ? linux_tcp_state[s->tcp_state] : 0x07;
+		static const char hx[] = "0123456789ABCDEF";
+		pb_char(&b, hx[st >> 4]);
+		pb_char(&b, hx[st & 0xF]);
+		pb_str(&b, " 00000000:00000000 00:00000000 00000000 ");
+		pb_u64col(&b, s->own_uid, 5);       /* who opened it: a door has an owner */
+		pb_str(&b, "        0 ");
 		pb_u64(&b, (uint64_t)(0x10000 + i));
 		pb_str(&b, " 1 0000000000000000 100 0 0 10 0\n");
 		sl++;

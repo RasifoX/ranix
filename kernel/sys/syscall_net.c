@@ -1990,12 +1990,13 @@ static long sys_listen(int fd, int bl)
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
     if (s->type != SOCK_STREAM) return -95; /* EOPNOTSUPP */
+    if (s->domain == AF_UNIX && s->unix_peer) return -22;   /* a connected socket cannot also accept */
+    /* a listener is a door: remember whose (SO_PEERCRED, /proc/net/tcp uid) */
+    process_t *me = task_current();
+    s->own_pid = (int32_t)me->tgid; s->own_uid = me->euid; s->own_gid = me->egid;
     if (s->domain == AF_UNIX) {
-        if (s->unix_peer) return -22;   /* a connected socket cannot also accept */
         s->backlog   = bl;
         s->tcp_state = TCP_LISTEN;
-        process_t *me = task_current();
-        s->own_pid = (int32_t)me->tgid; s->own_uid = me->euid; s->own_gid = me->egid;
         return 0;
     }
     return tcp_listen(s, bl);
