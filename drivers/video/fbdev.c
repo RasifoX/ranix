@@ -87,17 +87,36 @@ static int fbdev_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 		if (copy_to_user((void *)(uintptr_t)arg, &f, sizeof(f)) != 0) return -14;
 		return 0;
 	}
+	if (cmd == 0x80204612) {                   /* FBIOGET_VBLANK */
+		extern int igd_scanline(uint32_t *total);
+		uint32_t total = 0;
+		int line = igd_scanline(&total);
+		if (line < 0) return -25;
+		struct { uint32_t flags, count, vcount, hcount, reserved[4]; } v = {0};
+		v.flags = 0x10;                        /* FB_VBLANK_HAVE_VCOUNT */
+		v.vcount = (uint32_t)line;
+		v.hcount = total;                      /* lines in a frame, not the usual meaning */
+		if (copy_to_user((void *)(uintptr_t)arg, &v, sizeof(v)) != 0) return -14;
+		return 0;
+	}
 	return -25;
 }
 
 static vfs_fops_t fbdev_fops = {
 	.mmap  = fbdev_mmap,
+	/* Device memory, not ours to refcount or free: shared across fork, and
+	 * never handed to the page allocator when a mapping goes away. */
+	.mmap_keep_pages = 1,
+	.mmap_wc = 1,
 	.ioctl = fbdev_ioctl,
 };
 
 void fbdev_init(void)
 {
 	if (global_fb_phys) {
-		devfs_register_device("fb0", S_IFCHR | 0666, 0x1d00, &fbdev_fops);
+		devfs_register_device_gid("fb0", S_IFCHR | 0660, DEVFS_GID_VIDEO, 0x1d00, &fbdev_fops);
+#ifdef __x86_64__
+		{ extern void prof_init(void); prof_init(); }
+#endif
 	}
 }
