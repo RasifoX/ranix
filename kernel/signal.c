@@ -97,9 +97,25 @@ void task_signal(process_t *p, int sig)
 	if (!p || sig <= 0 || sig > NSIG) return;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	p->sig_pending |= (1UL << (sig - 1));
+	if (sig == SIGKILL && !p->kill_posted_at) p->kill_posted_at = kernel_ticks ? kernel_ticks : 1;
 	sig_cont_stop_locked(p, sig);
 	sig_wake_locked(p);
 	spin_unlock_irq(&sched_lock, f);
+}
+
+int fatal_signal_pending(process_t *p)
+{
+	if (!p) return 0;
+	if (p->sig_pending & (1UL << (SIGKILL - 1))) return 1;
+	return p->group_exiting || p->exiting;
+}
+
+int kloop_should_stop(void)
+{
+	process_t *p = task_current();
+	if (!p || !p->pid) return 0;          /* idle / early boot: nothing to kill */
+	cond_resched();
+	return fatal_signal_pending(p);
 }
 
 int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
@@ -191,6 +207,26 @@ void task_signal_group(process_t *leader, int sig)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* exit_group and fatal signals end every thread, not just the caller. A survivor
+ * would pin the shared fd table, and with it the write end of any stdout pipe, so
+ * a reader never sees EOF. Each thread gets the group's status now; SIGKILL only
+ * gets it out of whatever it is blocked in. */
+void task_group_exit(process_t *p, int code, int by_sig)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *head = proctab[0];
+	for (process_t *t = head->next; t && t != head; t = t->next) {
+		if (t == p || t->tgid != p->tgid) continue;
+		t->exit_code     = code;      /* also a zombie leader awaiting wait() */
+		t->killed_by_sig = by_sig;
+		if (t->state == PROC_DEAD || t->state == PROC_ZOMBIE) continue;
+		t->group_exiting = 1;
+		t->sig_pending  |= 1UL << (SIGKILL - 1);
+		sig_wake_locked(t);
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
 void task_signal_pgrp(pid_t pgrp, int sig)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -212,42 +248,78 @@ void task_signal_pgrp(pid_t pgrp, int sig)
 	spin_unlock_irq(&sched_lock, f);
 }
 
-/* sig==0 existence probe for a process group: is any live member present? */
-int task_pgrp_exists(pid_t pgrp)
+/* Does group pgrp have a live member in session sid? */
+int task_pgrp_in_session(pid_t pgrp, pid_t sid)
 {
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	int found = 0;
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-		if (t->pgrp == pgrp && t->state != PROC_DEAD && t->state != PROC_ZOMBIE) { found = 1; break; }
+		if (t->pgrp == pgrp && t->sid == sid && t->state != PROC_DEAD && t->state != PROC_ZOMBIE) { found = 1; break; }
 	}
 	spin_unlock_irq(&sched_lock, f);
 	return found;
 }
 
-/* kill(-1): signal every process except the caller and init. Returns the count
- * of eligible targets (0 → ESRCH). */
-int task_signal_broadcast(process_t *except, int sig)
+int task_in_group(process_t *p, gid_t g)
 {
-	if (sig <= 0 || sig > NSIG) return 0;
-	uint64_t bit = 1UL << (sig - 1);
+	if (p->egid == g) return 1;
+	for (int i = 0; i < p->ngroups && i < 32; i++)
+		if (p->groups[i] == g) return 1;
+	return 0;
+}
+
+/* POSIX kill permission. CAP_KILL counts only from the initial user namespace,
+ * and SIGCONT also passes within a session so a shell can resume a setuid job. */
+int signal_may_send(process_t *s, process_t *t, int sig)
+{
+	if (s->asess && s->asess != t->asess) return 0;
+	if (s->tgid == t->tgid) return 1;
+	if (s->euid == t->uid || s->euid == t->suid || s->uid == t->uid || s->uid == t->suid)
+		return 1;
+	if (capable_task(s, CAP_KILL)) return 1;
+	return sig == SIGCONT && s->sid == t->sid;
+}
+
+/* kill(2) to process group pgrp, or with pgrp == 0 to every process except the
+ * sender's own and its pid namespace's init. Only tasks the sender's namespace
+ * can see count, even for a group that spans namespaces. sig 0 only probes.
+ * Returns 0, -ESRCH (no target) or -EPERM (no target it may signal). */
+int task_kill_many(process_t *s, pid_t pgrp, int sig)
+{
+	pid_namespace_t *ns = current_pid_ns();
+	int seen = 0, sent = 0;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
-	int n = 0;
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
-		if (t == except || t->pid <= 1) continue;
 		if (t->state == PROC_DEAD || t->state == PROC_ZOMBIE) continue;
-		n++;
-		t->sig_pending |= bit;
-		sig_cont_stop_locked(t, sig);
-		if (t->state == PROC_SLEEPING) {
-			t->state = PROC_READY;
-			if (!t->on_cpu) runqueue_add(t);
-			arch_get_cpu_ctx()->need_resched = 1;
+		int nr = task_pid_nr_ns(t, ns);
+		if (!nr) continue;
+		if (pgrp ? t->pgrp != pgrp : (nr == 1 || t->tgid == s->tgid)) continue;
+		seen++;
+		if (!signal_may_send(s, t, sig)) continue;
+		sent++;
+		if (sig) {
+			t->sig_pending |= (1UL << (sig - 1));
+			sig_cont_stop_locked(t, sig);
+			sig_wake_locked(t);
 		}
 	}
 	spin_unlock_irq(&sched_lock, f);
-	return n;
+	return sent ? 0 : seen ? -1 : -3;
+}
+
+/* SIGKILL every member of an agent session. */
+void task_kill_session(struct asess *s)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t->asess != s) continue;
+		t->sig_pending |= 1UL << (SIGKILL - 1);
+		sig_wake_locked(t);
+	}
+	spin_unlock_irq(&sched_lock, f);
 }
 
 /* Signals whose default action stops the process (job control) */
@@ -269,9 +341,10 @@ static void job_stop_self(int sig)
 	spin_unlock_irq(&sched_lock, sf);
 	process_t *par = proc_find(p->ppid);
 	if (par) task_wake(par);
+	proc_wake_waiters(p->ppid);
 	arch_get_cpu_ctx()->wd_where = "sig:stop";
 	while (p->job_stopped && !(p->sig_pending & (1UL << (SIGKILL - 1))))
-		task_sleep_interruptible();
+		task_sleep_if(p->job_stopped && !(p->sig_pending & (1UL << (SIGKILL - 1))));
 	p->job_stopped = 0;
 }
 
@@ -321,6 +394,64 @@ int tty_jobctl_check(void *tty, vfs_fops_t *tty_fops, pid_t fg_pgrp, int sig)
 	return 1;
 }
 
+/* The session holding tty, read from its members' ctty pointers: unlike a field
+ * on the tty, this cannot outlive the session. */
+static int tty_held_elsewhere_locked(void *tty, pid_t sid)
+{
+	process_t *head = proctab[0];
+	for (process_t *t = head->next; t && t != head; t = t->next)
+		if (t->ctty == tty && t->sid != sid &&
+		    t->state != PROC_ZOMBIE && t->state != PROC_DEAD) return 1;
+	return 0;
+}
+
+/* TIOCSCTTY: a session leader without a terminal takes one nobody holds. With
+ * steal set and CAP_SYS_ADMIN it may take one from another session. Returns 1
+ * when the caller already holds tty, 0 when it just took it. */
+int tty_acquire(void *tty, vfs_fops_t *fops, int steal)
+{
+	process_t *p = task_current();
+	if (p->ctty == tty) return 1;
+	if (p->ctty || p->sid != (pid_t)p->pid) return -1; /* EPERM */
+	uint64_t f = spin_lock_irq(&sched_lock);
+	if (tty_held_elsewhere_locked(tty, p->sid)) {
+		if (!steal || !capable_task(p, CAP_SYS_ADMIN)) {
+			spin_unlock_irq(&sched_lock, f);
+			return -1;
+		}
+		process_t *head = proctab[0];
+		for (process_t *t = head->next; t && t != head; t = t->next)
+			if (t->ctty == tty) { t->ctty = NULL; t->ctty_fops = NULL; }
+	}
+	p->ctty = tty;
+	p->ctty_fops = fops;
+	spin_unlock_irq(&sched_lock, f);
+	return 0;
+}
+
+/* TIOCSPGRP: the new foreground group must be a group of the caller's session.
+ * The terminal must be the caller's own, except on the console (need_ctty 0):
+ * init starts its shell there with no controlling terminal. */
+long tty_check_fg(void *tty, int need_ctty, pid_t nr, pid_t *out)
+{
+	process_t *p = task_current();
+	if (nr < 0) return -22; /* EINVAL */
+	if (need_ctty ? p->ctty != tty : p->ctty && p->ctty != tty) return -25; /* ENOTTY */
+	pid_t pgrp = pid_from_user(nr);
+	if (!pgrp) return -3; /* ESRCH */
+	long r = -3;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *head = proctab[0];
+	for (process_t *t = head->next; t && t != head; t = t->next) {
+		if (t->pgrp != pgrp) continue;
+		r = t->sid == p->sid ? 0 : -1; /* EPERM */
+		break;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	if (r == 0) *out = pgrp;
+	return r;
+}
+
 void tty_hangup(void *tty, pid_t fg_pgrp)
 {
 	if (fg_pgrp > 0) {
@@ -342,24 +473,65 @@ static int sig_default_kill(int sig)
 	case 1:  /* SIGHUP  */
 	case 2:  /* SIGINT  */
 	case 3:  /* SIGQUIT */
+	case 4:  /* SIGILL  */
+	case 5:  /* SIGTRAP */
 	case 6:  /* SIGABRT */
+	case 7:  /* SIGBUS  */
 	case 8:  /* SIGFPE  */
 	case 9:  /* SIGKILL */
 	case 11: /* SIGSEGV */
 	case 13: /* SIGPIPE */
 	case 14: /* SIGALRM */
+	case 10: /* SIGUSR1 */
+	case 12: /* SIGUSR2 */
 	case 15: /* SIGTERM */
+	case 16: /* SIGSTKFLT */
+	case 24: /* SIGXCPU */
+	case 25: /* SIGXFSZ */
 	case 26: /* SIGVTALRM */
 	case 27: /* SIGPROF */
+	case 29: /* SIGIO   */
+	case 30: /* SIGPWR  */
+	case 31: /* SIGSYS  */
 		return 1;
 	default:
-		return 0;
+		return sig >= SIGRTMIN;
 	}
 }
+
+#define SA_NODEFER   0x40000000UL
+#define SA_RESTART   0x10000000UL
+
+/* Back up over the syscall instruction, so the task enters the call again on its
+ * way out of the handler. The argument registers are still as the call found them. */
+static void syscall_rewind(arch_context_t *tf, process_t *p)
+{
+#if defined(__x86_64__)
+	tf->rip -= 2;
+	tf->rax  = (uint64_t)(long)p->last_syscall;
+#elif defined(__aarch64__)
+	tf->elr -= 4;
+	tf->regs[0] = p->sys_arg0;
+#endif
+}
+#define SA_ONSTACK   0x08000000UL
+
+/* Where this delivery's frame goes: below sp, or at the top of the alternate stack
+ * for an SA_ONSTACK handler unless already running on it. QEMU's coroutines and any
+ * handler for a stack overflow depend on the frame not landing on the old stack. */
+static uint64_t sig_frame_sp(process_t *p, unsigned long sa_flags, uint64_t sp)
+{
+	uint64_t lo = (uint64_t)p->altstack.ss_sp, size = p->altstack.ss_size;
+	if (!(sa_flags & SA_ONSTACK) || size == 0 || (p->altstack.ss_flags & SS_DISABLE)) return sp;
+	if (sp >= lo && sp - lo < size) return sp;
+	return lo + size;
+}
+#define SA_RESETHAND 0x80000000UL
 
 int task_has_actionable_signal(void)
 {
 	process_t *p = task_current();
+	if (!p->sighand) return 1;           /* exiting: a driver's close must not wait on */
 	uint64_t mask = p->sig_pending & ~p->sig_mask;
 	while (mask) {
 		int sig = __builtin_ctzll(mask) + 1;
@@ -374,7 +546,90 @@ int task_has_actionable_signal(void)
 	return 0;
 }
 
+static void signal_dispatch_one(arch_context_t *tf);
+
+/* Take the lowest signal of `set` pending on p, or left on its thread group when
+ * every thread blocked it. Returns it, 0 if none; *have says si was filled in. */
+int task_dequeue_signal(process_t *p, uint64_t set, sigqueue_t *si, int *have)
+{
+	int sig = 0;
+	*have = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *t = p;
+	if (!(p->sig_pending & set))
+		for (process_t *c = proctab[0]->next; c && c != proctab[0]; c = c->next)
+			if (c->tgid == p->tgid && (c->sig_pending & set)) { t = c; break; }
+	uint64_t ready = t->sig_pending & set;
+	if (ready) {
+		sig = __builtin_ctzl(ready) + 1;
+		if (sig >= SIGRTMIN && sig <= SIGRTMAX) {
+			*have = sigq_pop_locked(t, sig, si);
+			if (!sigq_has_locked(t, sig)) t->sig_pending &= ~(1UL << (sig - 1));
+		} else {
+			t->sig_pending &= ~(1UL << (sig - 1));
+		}
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return sig;
+}
+
+/* The task's own instruction faulted. It cannot go on past the fault, so unlike a
+ * posted signal this one is not optional: blocked or ignored, it takes the default
+ * action. A handler runs as usual, and may fix the cause or longjmp away. */
+void task_force_fault(arch_context_t *tf, int sig, int code, uint64_t addr, uint64_t err, uint64_t trap)
+{
+	process_t *p = task_current();
+	uint64_t bit = 1UL << (sig - 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	sigaction_t *sa = &p->sighand->actions[sig - 1];
+	if ((p->sig_mask & bit) || (uintptr_t)sa->sa_handler == 1) {
+		sa->sa_handler = 0;
+		p->sig_mask &= ~bit;
+	}
+	p->fault_sig  = sig;
+	p->fault_code = code;
+	p->fault_addr = addr;
+	p->fault_err  = err;
+	p->fault_trap = trap;
+	p->sig_pending |= bit;
+	spin_unlock_irq(&sched_lock, f);
+	signal_dispatch(tf);
+}
+
+/* Would this fault end the process? Then its diagnostics are worth logging. */
+int task_fault_fatal(int sig)
+{
+	process_t *p = task_current();
+	void (*h)(int) = p->sighand->actions[sig - 1].sa_handler;
+	return (uintptr_t)h <= 1 || (p->sig_mask & (1UL << (sig - 1)));
+}
+
 void signal_dispatch(arch_context_t *tf)
+{
+	signal_dispatch_one(tf);
+	process_t *p = task_current();
+	/* interrupted by a signal that ran no handler: nobody should see the EINTR */
+	if (p && p->sys_intr) {
+		p->sys_intr = 0;
+		syscall_rewind(tf, p);
+	}
+#if defined(__x86_64__)
+	/* iretq to a non-canonical rip or rsp faults in ring 0, on an address the
+	 * user chose through sigaction, sigreturn, ptrace or clone. */
+	if (p && (tf->cs & 3) == 3 && ((tf->rip | tf->rsp) >> 47)) {
+		p->exit_code = 11; p->killed_by_sig = 1;
+		arch_get_cpu_ctx()->wd_where = "sig:badframe";
+		task_exit();
+	}
+#endif
+	/* also runs on kernel frames, where a sleeping pselect still needs its mask */
+	if (p && p->sig_mask_saved && !p->in_syscall) {   /* nothing was delivered under it */
+		p->sig_mask = p->sig_saved_mask;
+		p->sig_mask_saved = 0;
+	}
+}
+
+static void signal_dispatch_one(arch_context_t *tf)
 {
 	arch_get_cpu_ctx()->wd_where = "signal_dispatch";
 	/* Only deliver signals when returning to user space */
@@ -393,6 +648,8 @@ void signal_dispatch(arch_context_t *tf)
 	/* (Re)arm single-step TF on this user return, independent of signals. */
 	extern void ptrace_apply_singlestep(arch_context_t *);
 	ptrace_apply_singlestep(tf);
+
+	if (p->group_exiting) task_exit();
 
 	uint64_t mask = p->sig_pending & ~p->sig_mask;
 	if (!mask) return;
@@ -429,6 +686,19 @@ void signal_dispatch(arch_context_t *tf)
 		si.si_pid   = 0;
 		si.si_uid   = 0;
 		si.si_value = 0;
+		if (p->fault_sig == sig) {           /* si_addr shares si_pid and si_uid */
+			si.si_code = p->fault_code;
+			si.si_pid  = (pid_t)(uint32_t)p->fault_addr;
+			si.si_uid  = (uid_t)(p->fault_addr >> 32);
+		}
+	}
+
+	/* A traced task shows the tracer each signal first; stops have their own path */
+	if (p->tracer && sig != SIGKILL && !(sig == SIGSTOP || sig_default_stop(sig))) {
+		extern int ptrace_signal_stop(arch_context_t *, int, sigqueue_t *);
+		int s2 = ptrace_signal_stop(tf, sig, &si);
+		if (!s2) return;              /* the tracer dropped it */
+		if (s2 != sig) { sig = s2; si.si_signo = s2; si.si_code = 0; }
 	}
 
 	sigaction_t *sa = &p->sighand->actions[sig - 1];
@@ -450,6 +720,9 @@ void signal_dispatch(arch_context_t *tf)
 		} else {
 			job_stop_self(sig);
 		}
+		/* Sleeping here saved a deeper frame in p->ctx, and the return path
+		 * restores from p->ctx: point it back, or it resumes from a dead frame. */
+		p->ctx = tf;
 		return;
 	}
 
@@ -458,6 +731,7 @@ void signal_dispatch(arch_context_t *tf)
 	if (sig == SIGCONT && (!handler || (uintptr_t)handler == 1)) {
 		process_t *par = proc_find(p->ppid);
 		if (par) task_wake(par);
+		proc_wake_waiters(p->ppid);
 		return;
 	}
 
@@ -478,13 +752,22 @@ void signal_dispatch(arch_context_t *tf)
 	}
 	arch_get_cpu_ctx()->wd_where = "sig:frame";
 
+	if (p->sys_intr) {
+		p->sys_intr = 0;
+		if (sa->sa_flags & SA_RESTART) syscall_rewind(tf, p);
+	}
+
 	/* Deliver to user handler: redirect the trap frame */
 	/* Block this signal during handler execution; save old mask for restore */
-	uint64_t old_mask = p->sig_mask;
-	p->sig_mask |= (1UL << (sig - 1));
+	uint64_t old_mask = p->sig_mask_saved ? p->sig_saved_mask : p->sig_mask;
+	p->sig_mask_saved = 0;
+	if (!(sa->sa_flags & SA_NODEFER)) p->sig_mask |= (1UL << (sig - 1));
 	p->sig_mask |= sa->sa_mask;
 
 	int siginfo_wanted = (sa->sa_flags & 4) != 0;   /* SA_SIGINFO */
+	/* Node's SIGTERM handler resets stdio and re-raises: without the reset it runs
+	 * again for ever, and no SIGTERM ends the process */
+	if (sa->sa_flags & SA_RESETHAND) sa->sa_handler = NULL;
 
 #if defined(__aarch64__)
 	/* Frame layout — 736 bytes, 16-byte aligned:
@@ -504,15 +787,19 @@ void signal_dispatch(arch_context_t *tf)
 	 * so a signal landing mid-copy whose handler clobbers q-regs would resume
 	 * the interrupted op with garbage SIMD state and corrupt memory silently.
 	 */
-	uint64_t usp = (tf->sp - 864) & ~15UL;
+	uint64_t usp = (sig_frame_sp(p, sa->sa_flags, tf->sp) - 864) & ~15UL;
 	/* If the user stack can't hold the frame (bad/overflowed sp), writing it
 	 * would fault in EL1 and panic. Linux force_sigsegv's the task instead. */
-	if (!access_ok((void *)usp, 864) || !user_pages_mapped((void *)usp, 864)) {
+	if (!access_ok((void *)usp, 864)) {   /* a lazy page is fine: copy_to_user below faults it in */
 		p->exit_code = 11; p->killed_by_sig = 1;
 		arch_get_cpu_ctx()->wd_where = "sig:badframe";
 		task_exit();
 	}
-	uaccess_begin();
+	/* Staged in the kernel: a frame on a read-only stack passes the mapped check
+	 * above and would fault on a raw store. */
+	uint8_t kframe[864] __attribute__((aligned(16)));
+	uint64_t uframe = usp;
+	usp = (uint64_t)kframe;
 	*(uint64_t *)(usp +   0) = tf->elr;
 	*(uint64_t *)(usp +   8) = tf->regs[30];
 	*(uint64_t *)(usp +  16) = old_mask;
@@ -535,7 +822,12 @@ void signal_dispatch(arch_context_t *tf)
 		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
 		*(uint64_t *)(info + 24) = si.si_value;
 	}
-	uaccess_end();
+	usp = uframe;
+	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
+		p->exit_code = 11; p->killed_by_sig = 1;
+		arch_get_cpu_ctx()->wd_where = "sig:badframe";
+		task_exit();
+	}
 	tf->sp                   = usp;
 	tf->regs[30]             = sa->sa_restorer ? (uint64_t)sa->sa_restorer
 	                                            : tf->elr;
@@ -569,19 +861,31 @@ void signal_dispatch(arch_context_t *tf)
 	 *   [rsp+152]  orig_r15
 	 *   [rsp+160]  padding × 1
 	 *   [rsp+168]  fxsave area (512 bytes, 16-byte aligned)
-	 *   [rsp+680]  siginfo_t (128 bytes, SA_SIGINFO)  (→ total 808)
+	 *   [rsp+680]  siginfo_t (128 bytes, SA_SIGINFO)
+	 *   [rsp+808]  ucontext_t, Linux x86_64 layout (424 bytes) + 8 pad
+	 *   [rsp+1240] upper halves of ymm0-15 (256 bytes, → total 1496)
 	 * rt_sigreturn reads base = ctx->rsp (= frame_base+8 after handler ret).
+	 * SA_SIGINFO handlers get the ucontext in rdx: JavaScriptCore's GC suspend
+	 * handler reads uc_mcontext.gregs[REG_RSP] and faulted at 0xa0 when it was
+	 * NULL. It is a snapshot: rt_sigreturn restores from the fields above, so
+	 * edits a handler makes to the ucontext are not applied.
 	 * The FP/SSE state must round-trip or a handler's xmm use corrupts the
 	 * interrupted code's vector registers (same class as the aarch64 bug). */
-	uint64_t usp = (tf->rsp & ~15UL) - 808; /* 8-mod-16 entry; usp+168 is 16-aligned */
+	/* 128: the System V red zone, which a handler on the same stack must not touch.
+	 * 8-mod-16 entry; usp+168 is 16-aligned. */
+	uint64_t usp = ((sig_frame_sp(p, sa->sa_flags, tf->rsp - 128) & ~15UL) - 1496);
 	/* Bad/overflowed user sp: writing the frame would fault in the kernel and
 	 * panic. Force-kill with SIGSEGV instead. */
-	if (!access_ok((void *)usp, 808) || !user_pages_mapped((void *)usp, 808)) {
+	if (!access_ok((void *)usp, 1496)) {   /* a lazy page is fine: copy_to_user below faults it in */
 		p->exit_code = 11; p->killed_by_sig = 1;
 		arch_get_cpu_ctx()->wd_where = "sig:badframe";
 		task_exit();
 	}
-	uaccess_begin();
+	/* Staged in the kernel: a frame on a read-only stack passes the mapped check
+	 * above and would fault on a raw store. */
+	uint8_t kframe[1496] __attribute__((aligned(16)));
+	uint64_t uframe = usp;
+	usp = (uint64_t)kframe;
 	*(uint64_t *)(usp +   0) = sa->sa_restorer ? (uint64_t)sa->sa_restorer : tf->rip;
 	*(uint64_t *)(usp +   8) = old_mask;
 	*(uint64_t *)(usp +  16) = tf->rip;
@@ -604,6 +908,7 @@ void signal_dispatch(arch_context_t *tf)
 	*(uint64_t *)(usp + 152) = tf->r15;
 	*(uint64_t *)(usp + 160) = 0;
 	memcpy((void *)(usp + 168), tf->fxsave, sizeof(tf->fxsave));  /* 16-aligned */
+	memcpy((void *)(usp + 1240), tf->ymmh, sizeof(tf->ymmh));
 	if (siginfo_wanted) {
 		uint8_t *info = (uint8_t *)(usp + 680);
 		memset(info, 0, 128);
@@ -614,12 +919,38 @@ void signal_dispatch(arch_context_t *tf)
 		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
 		*(uint64_t *)(info + 24) = si.si_value;
 	}
-	uaccess_end();
+	{
+		/* ucontext_t: flags, link, stack (SS_DISABLE), mcontext gregs[23] in
+		 * REG_R8..REG_CR2 order, fpregs → the fxsave area, sigmask */
+		uint8_t *uc = (uint8_t *)(usp + 808);
+		memset(uc, 0, 432);
+		*(int32_t  *)(uc + 24) = 2;                      /* uc_stack.ss_flags = SS_DISABLE */
+		uint64_t *g = (uint64_t *)(uc + 40);
+		g[0]  = tf->r8;  g[1]  = tf->r9;  g[2]  = tf->r10; g[3]  = tf->r11;
+		g[4]  = tf->r12; g[5]  = tf->r13; g[6]  = tf->r14; g[7]  = tf->r15;
+		g[8]  = tf->rdi; g[9]  = tf->rsi; g[10] = tf->rbp; g[11] = tf->rbx;
+		g[12] = tf->rdx; g[13] = tf->rax; g[14] = tf->rcx; g[15] = tf->rsp;
+		g[16] = tf->rip; g[17] = tf->rflags;
+		g[18] = 0x33;                                    /* csgsfs: user cs */
+		if (p->fault_sig == sig) {
+			g[19] = p->fault_err;  g[20] = p->fault_trap;  g[22] = p->fault_addr;
+			p->fault_sig = 0;
+		}
+		g[21] = old_mask;
+		*(uint64_t *)(uc + 224) = uframe + 168;          /* fpregs */
+		*(uint64_t *)(uc + 296) = old_mask;              /* uc_sigmask */
+	}
+	usp = uframe;
+	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
+		p->exit_code = 11; p->killed_by_sig = 1;
+		arch_get_cpu_ctx()->wd_where = "sig:badframe";
+		task_exit();
+	}
 	tf->rsp                  = usp;
 	tf->rdi                  = (uint64_t)sig;
 	if (siginfo_wanted) {
 		tf->rsi = usp + 680;   /* siginfo_t * */
-		tf->rdx = 0;           /* ucontext * */
+		tf->rdx = usp + 808;   /* ucontext_t * */
 	}
 	tf->rip                  = (uint64_t)handler;
 #endif
