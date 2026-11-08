@@ -527,6 +527,12 @@ check "c-ext2hard-4k"     "OK"                 "$(mkdir -p /mnt2/hard; timeout 1
 # cached, and "../" from a link met that way must start in the link's directory
 DC=$(timeout 240 /bin/test_dcachefull /dev/nvme0n1 /mnt2 2>&1); echo "$DC" | grep -v "^PASS" | sed 's/^/  dcachefull: /'
 check "c-dcachefull"      "OK"                 "$(echo "$DC" | tail -1)"
+check "dcache-warn"       "1"                  "$(dmesg | grep -c "dentries cached, past the limit")"
+# dmesg reads the newest log, whatever the buffer: a small one gets the last
+# lines, a large one all of the ring; /dev/kmsg readers see the same lines
+echo "J-KMSG-MARK" > /dev/kmsg 2>/dev/null
+check "dmesg-newest"      "1 1 1"              "$(dmesg -s 4096 | grep -c J-KMSG-MARK) $(dmesg -s 2000000 | grep -c J-KMSG-MARK) $(dmesg -s 2000000 | grep -c "dentries cached, past the limit")"
+check "kmsg-reader"       "1"                  "$(timeout 10 cat /dev/kmsg 2>/dev/null | grep -c J-KMSG-MARK)"
 umount /mnt2 2>/dev/null
 check "c-mountoffset"     "OK"                 "$(timeout 10 /bin/test_mountoffset /dev/nvme0n1 /mnt3 8388608 ranix-offset-ok 2>&1 | tail -1)"
 fi
