@@ -1094,13 +1094,17 @@ static long sys_syslog(int type, char *buf, int len)
 	if (type != 10 && dmesg_restrict && !capable_task(task_current(), CAP_SYSLOG))
 		return -1;   /* EPERM */
 	if ((type == 2 || type == 3 || type == 4) && buf && len > 0) {
-		uint64_t phys = (uint64_t)buddy_alloc(1);
+		/* as much of the newest log as asked for, up to the whole ring */
+		size_t cap = kprintf_log_len();
+		if ((size_t)len < cap) cap = (size_t)len;
+		int order = 0;
+		while ((4096UL << order) < cap) order++;
+		uint64_t phys = (uint64_t)buddy_alloc(order);
 		if (!phys) return -12;
 		char *tmp = (char *)PHYS_TO_VIRT(phys);
-		size_t cap = (size_t)len < 8192 ? (size_t)len : 8192;
 		size_t n = kprintf_read_log(tmp, cap);
 		long r = copy_to_user(buf, tmp, n) == 0 ? (long)n : -14;
-		buddy_free(phys, 1);
+		buddy_free(phys, order);
 		return r;
 	}
 	if (type == 10)

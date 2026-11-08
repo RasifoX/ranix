@@ -35,10 +35,12 @@ static char   log_buf[LOG_BUF_SIZE];
 static size_t log_head = 0;
 static size_t log_len  = 0;
 
+/* The newest max bytes of the log, as syslog(2) READ_ALL gives them: a reader
+ * with a small buffer wants what just happened, not the boot banner. */
 size_t kprintf_read_log(char *dst, size_t max)
 {
     size_t n = log_len < max ? log_len : max;
-    size_t start = (log_head + LOG_BUF_SIZE - log_len) % LOG_BUF_SIZE;
+    size_t start = (log_head + LOG_BUF_SIZE - n) % LOG_BUF_SIZE;
     if (start + n <= LOG_BUF_SIZE) {
         memcpy(dst, log_buf + start, n);
     } else {
