@@ -44,7 +44,6 @@ typedef struct {
 	int       is_dir;
 } fat_priv_t;
 
-static fat_fs_t g_fat;
 static vfs_iops_t fat_dir_iops;
 static vfs_fops_t fat_file_fops;
 
@@ -202,7 +201,7 @@ static int fat_walk_dir(fat_fs_t *fs, uint32_t dir_clus, int fixed_root,
 }
 
 /* ── lookup ──────────────────────────────────────────────── */
-struct lookup_ctx { const char *want; vfs_inode_t *result; };
+struct lookup_ctx { const char *want; vfs_inode_t *result; fat_fs_t *fs; };
 
 static int lookup_cb(const char *name, const uint8_t *de, void *arg)
 {
@@ -210,14 +209,14 @@ static int lookup_cb(const char *name, const uint8_t *de, void *arg)
 	if (strcmp(name, c->want) != 0) return 0;
 	uint32_t first = ((uint32_t)rd16(de + 20) << 16) | rd16(de + 26);
 	int is_dir = (de[11] & 0x10) != 0;
-	c->result = fat_make_inode(&g_fat, first, rd32(de + 28), is_dir);
+	c->result = fat_make_inode(c->fs, first, rd32(de + 28), is_dir);
 	return 1;
 }
 
 static vfs_inode_t *fat_lookup(vfs_inode_t *dir, const char *name)
 {
 	fat_priv_t *pv = dir->priv;
-	struct lookup_ctx c = { name, NULL };
+	struct lookup_ctx c = { name, NULL, pv->fs };
 	int fixed = (pv->fs->type != 32 && pv->first_clus == 0);
 	fat_walk_dir(pv->fs, pv->first_clus, fixed, lookup_cb, &c);
 	return c.result;
@@ -304,7 +303,9 @@ int fat_mount(vfs_mount_t *mnt, void *data)
 	if (bps != 512) return -1;                       /* we assume 512-byte sectors */
 	if (bpb[510] != 0x55 || bpb[511] != 0xAA) return -1;
 
-	fat_fs_t *fs = &g_fat;
+	fat_fs_t *fs = kmalloc(sizeof(*fs));    /* one per mount: two sticks, or a stick and the ESP */
+	if (!fs) return -1;
+	memset(fs, 0, sizeof(*fs));
 	fs->bdev          = bdev;
 	fs->bytes_per_sec = bps;
 	fs->sec_per_clus  = bpb[13] ? bpb[13] : 1;
@@ -317,7 +318,7 @@ int fat_mount(vfs_mount_t *mnt, void *data)
 	uint32_t fat_sz32 = rd32(bpb + 36);
 	fs->fat_sz   = fat_sz16 ? fat_sz16 : fat_sz32;
 	fs->root_clus = rd32(bpb + 44);
-	if (!fs->num_fats || !fs->fat_sz) return -1;
+	if (!fs->num_fats || !fs->fat_sz) { kfree(fs); return -1; }
 
 	uint32_t tot_sec   = tot16 ? tot16 : tot32;
 	uint32_t root_secs = (fs->root_ent_cnt * 32 + bps - 1) / bps;
@@ -330,12 +331,12 @@ int fat_mount(vfs_mount_t *mnt, void *data)
 
 	uint32_t root_first = (fs->type == 32) ? fs->root_clus : 0;
 	vfs_inode_t *root_vi = fat_make_inode(fs, root_first, 0, 1);
-	if (!root_vi) return -1;
+	if (!root_vi) { kfree(fs); return -1; }
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_vi);
-	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); return -1; }
+	if (!root_dentry) { kfree(root_vi->priv); kfree(root_vi); kfree(fs); return -1; }
 	mnt->root = root_dentry;
 
-	kprintf("fat: mounted FAT%d (clus=%u spc=%u)\n", fs->type, fs->total_clus, fs->sec_per_clus);
+	kprintf(KERN_INFO "fat: fat%d, clus=%u spc=%u\n", fs->type, fs->total_clus, fs->sec_per_clus);
 	return 0;
 }
 
