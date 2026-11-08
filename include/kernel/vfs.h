@@ -117,6 +117,7 @@ typedef struct {
     int               (*statfs)(struct vfs_inode *inode, vfs_statfs_t *out);
     void              (*evict)(struct vfs_inode *inode); /* free a deferred-unlink inode at last close */
     int               (*setattr)(struct vfs_inode *in, const struct vfs_iattr *a);  /* NULL: in-core edit only */
+    void              (*release)(struct vfs_inode *in); /* this in-core copy is being freed; may run under vfs_lock */
 } vfs_iops_t;
 
 /* A metadata change. Every chmod, chown, utimens and xattr write comes through
@@ -304,6 +305,7 @@ int              vfs_bind(mnt_namespace_t *ns, vfs_dentry_t *mp, vfs_dentry_t *d
                           const char *path, unsigned long flags);
 vfs_dentry_t    *vfs_follow_in(mnt_namespace_t *ns, vfs_dentry_t *d);
 int        vfs_umount(const char *path);
+void       vfs_inode_free(vfs_inode_t *in);    /* a lookup result no dentry took; no-op if cached */
 void       vfs_inode_orphan(vfs_inode_t *in);  /* last name gone: iops->evict follows, in time */
 struct process;
 void       vfs_walk_done(struct process *p);

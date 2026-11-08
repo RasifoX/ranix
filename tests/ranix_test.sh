@@ -455,6 +455,10 @@ if ls /sys/block 2>/dev/null | grep -qE 'vblk|sata'; then
 check "gpt-ext4"     "ranix-gpt-ok" "$(cat /mnt/hello.txt 2>/dev/null)"
 check "ext4-write"   "ranix-w64"    "$(echo -n ranix-w64 > /mnt/wtest.txt 2>/dev/null; cat /mnt/wtest.txt 2>/dev/null)"
 check "c-compatfs"   "OK"           "$(timeout 20 /bin/test_compatfs /mnt 2>/dev/null | tail -1)"
+# attribute changes on a disk fs hold for every later path walk (chmod, lchown,
+# a hard link's other name, fchmodat's stray fourth register)
+IC=$(timeout 40 /bin/test_inodecoh /mnt 2>&1); echo "$IC" | grep -v "^PASS" | sed 's/^/  inodecoh: /'
+check "c-inodecoh"   "OK"           "$(echo "$IC" | tail -1)"
 # exec through symlinks on a disk fs, not only the initramfs: the root of a real
 # install is ext2 and a kernel once broke exactly this there (2026-11-08).
 rm -rf /mnt/sl; mkdir -p /mnt/sl/r /mnt/sl/a && cp /bin/busybox /mnt/sl/bb 2>/dev/null

@@ -15,8 +15,12 @@
  *   chmod-widen    dir 0700 -> 0755: nobody must now read DIR/d/f
  *   chown-narrow   file 0600 owned by nobody -> chown root: nobody must get EACCES
  *   symlink-retarget  l -> a, read; then l -> b: a read through l must give b
- * Prints one PASS/FAIL line a case, then OK or FAIL. Runs as root. Not yet in
- * ranix_test.sh: it fails until the VFS keeps one in-memory inode per (sb, ino). */
+ *   chmod-reg4     fchmodat (three arguments) with AT_SYMLINK_NOFOLLOW left in the
+ *                  fourth register, as musl's chmod can: it must chmod, and hold
+ *   fchmodat2-link fchmodat2(AT_SYMLINK_NOFOLLOW) on a symlink: EOPNOTSUPP, target kept
+ *   lchown-dir     lchown of a dir nobody owns to root: nobody must get EACCES
+ *   hardlink-chmod chmod 600 through one name: nobody must get EACCES through the other
+ * Prints one PASS/FAIL line a case, then OK or FAIL. Runs as root. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -130,7 +134,7 @@ int main(int argc, char **argv)
 	int e2 = errno;
 	r = read_as_nobody(f, NULL);
 	if (s2 != 0) printf("     (fchmodat2 rc %ld errno %d)\n", s2, e2);
-	result("chmod-fchmodat2", s2 != 0 || r == 1, "fchmodat2 said yes but nobody still reads through the dir");
+	result("chmod-fchmodat2", s2 == 0 && r == 1, s2 ? "fchmodat2 NOFOLLOW refused a directory" : "nobody still reads through the dir");
 	snprintf(d, sizeof d, "%s/q", g_dir); snprintf(f, sizeof f, "%s/f", d);
 	mkdir(d, 0755);
 	put(f, "secret", 0644);
@@ -179,6 +183,59 @@ int main(int argc, char **argv)
 		if (symlink("b", l) != 0) { }
 		r = read_as_nobody(l, "BBB");
 		result("symlink-retarget", r == 0, r == 3 ? "read through l still gives a's content" : "read through new l failed");
+	}
+
+	/* chmod-reg4: the old fchmodat has no flags; a stray fourth register must not
+	 * turn it into lchmod, which once wrote a copy no path walk saw */
+	snprintf(d, sizeof d, "%s/r4", g_dir); snprintf(f, sizeof f, "%s/f", d);
+	mkdir(d, 0755); chmod(d, 0755); put(f, "secret", 0644);
+	warm(d); warm(f);
+	r = read_as_nobody(f, "secret");
+	if (r != 0) result("chmod-reg4", 0, "setup: nobody could not read before chmod");
+	else {
+		long c4 = syscall(SYS_fchmodat, AT_FDCWD, d, 0700, AT_SYMLINK_NOFOLLOW);
+		struct stat st;
+		int m = stat(d, &st) == 0 ? (int)(st.st_mode & 07777) : -1;
+		r = read_as_nobody(f, NULL);
+		result("chmod-reg4", c4 == 0 && m == 0700 && r == 1,
+		       c4 ? "fchmodat failed" : m != 0700 ? "mode not 0700" : "nobody still reads through the dir");
+	}
+
+	/* fchmodat2-link: a symlink has no mode; the target must not change */
+	snprintf(a, sizeof a, "%s/t2", g_dir); snprintf(l, sizeof l, "%s/t2l", g_dir);
+	put(a, "x", 0644);
+	if (symlink("t2", l) != 0) { }
+	long s3 = syscall(452, AT_FDCWD, l, 0600, AT_SYMLINK_NOFOLLOW);
+	int e3 = errno;
+	struct stat ts;
+	int tm = stat(a, &ts) == 0 ? (int)(ts.st_mode & 07777) : -1;
+	result("fchmodat2-link", s3 == -1 && e3 == EOPNOTSUPP && tm == 0644,
+	       s3 == 0 ? "chmod of a symlink said yes" : tm != 0644 ? "the target's mode changed" : "wrong errno");
+
+	/* lchown-dir: lchown on a directory acts on it, for every later walk */
+	snprintf(d, sizeof d, "%s/o", g_dir); snprintf(f, sizeof f, "%s/f", d);
+	mkdir(d, 0700); chmod(d, 0700); put(f, "secret", 0644);
+	if (chown(d, NOBODY, NOBODY) != 0) { }
+	warm(d); warm(f);
+	r = read_as_nobody(f, "secret");
+	if (r != 0) result("lchown-dir", 0, "setup: nobody could not read inside its own dir");
+	else {
+		long lc = syscall(SYS_lchown, d, 0, 0);
+		r = read_as_nobody(f, NULL);
+		result("lchown-dir", lc == 0 && r == 1, lc ? "lchown failed" : r == 0 ? "nobody still enters a dir lchowned to root" : "unexpected error");
+	}
+
+	/* hardlink-chmod: two names, one file: a chmod through a holds through b */
+	snprintf(a, sizeof a, "%s/h1", g_dir); snprintf(b, sizeof b, "%s/h2", g_dir);
+	put(a, "secret", 0644);
+	if (link(a, b) != 0) { }
+	warm(a); warm(b);
+	r = read_as_nobody(b, "secret");
+	if (r != 0) result("hardlink-chmod", 0, "setup: nobody could not read the second name");
+	else {
+		chmod(a, 0600);
+		r = read_as_nobody(b, NULL);
+		result("hardlink-chmod", r == 1, r == 0 ? "nobody still reads through the other name" : "unexpected error");
 	}
 
 	/* clean up as root */

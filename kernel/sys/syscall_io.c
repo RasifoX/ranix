@@ -562,12 +562,14 @@ static long sys_fchmod(int fd, mode_t m)
 	if (f->mnt_flags & MS_RDONLY) return -30; /* EROFS */
 	return vfs_chmod_inode(f->inode, m);
 }
-static long sys_fchmodat(int d, const char *p, mode_t m, int f)
+/* fchmodat takes three arguments in the Linux ABI: it has no flags, so whatever
+ * a libc left in the fourth register means nothing. fchmodat2 has the flags. */
+static long sys_fchmodat(int d, const char *p, mode_t m)
 {
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, d, p);
 	if (r) return r;
-	return (f & AT_SYMLINK_NOFOLLOW) ? vfs_lchmod(kp, m) : vfs_chmod(kp, m);
+	return vfs_chmod(kp, m);
 }
 static long sys_chown(const char *p, uid_t u, gid_t g)
 {

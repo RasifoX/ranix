@@ -141,9 +141,13 @@ int vfs_inode_removexattr(vfs_inode_t *in, const char *name)
 	return -61; /* ENODATA */
 }
 
-static void vfs_inode_free(vfs_inode_t *in)
+/* Free an in-core inode no dentry, pipe or static table owns. A filesystem
+ * that tracks its copies hears of it through iops->release, so this is the one
+ * way to free a lookup's result. */
+void vfs_inode_free(vfs_inode_t *in)
 {
 	if (!in || in->cached) return; /* cached=1: owned by dentry tree, pipe, or static */
+	if (in->iops && in->iops->release) in->iops->release(in);
 	vfs_inode_free_xattrs(in);
 	if (in->priv && !in->priv_static) kfree(in->priv);
 	kfree(in);
@@ -945,7 +949,7 @@ vfs_dentry_t *vfs_dentry_child(vfs_dentry_t *dir, const char *name)
 	f = spin_lock_irq(&vfs_lock);
 	for (c = dir->child; c && strcmp(c->name, name) != 0; c = c->next) ;
 	if (c) vfs_inode_free(in);
-	else   c = _dentry_create(dir, name, in);
+	else if (!(c = _dentry_create(dir, name, in))) vfs_inode_free(in);   /* unlinked meanwhile */
 	spin_unlock_irq(&vfs_lock, f);
 	return c;
 }
@@ -2585,13 +2589,17 @@ int vfs_chown(const char *path, uid_t uid, gid_t gid)
 }
 
 /* resolve the final path component WITHOUT following a terminal symlink and
- * return its (cached) inode, so chmod/chown can act on the link itself. */
+ * return its inode, so chmod/chown can act on the link itself. The inode is the
+ * cached dentry's, the one every later walk checks: a private copy from lookup
+ * would take the change while the walk kept the old mode and owner. Only below
+ * a directory that caches nothing is it a fresh copy, freed by the caller. */
 static vfs_inode_t *vfs_lresolve(const char *path, int *ro)
 {
 	int len = (int)strlen(path);
 	const char *slash = path + (len > 0 ? len - 1 : 0);
 	while (slash > path && *slash != '/') slash--;
-	if (slash[1] == '\0') {                              /* trailing slash / root */
+	const char *last = slash + 1;
+	if (!*last || !strcmp(last, ".") || !strcmp(last, "..")) {   /* a directory: nothing to not follow */
 		vfs_dentry_t *d = vfs_dentry_resolve(path);
 		if (d) *ro = vfs_dentry_readonly(d);
 		return d ? d->inode : NULL;
@@ -2605,7 +2613,12 @@ static vfs_inode_t *vfs_lresolve(const char *path, int *ro)
 	    !vfs_may_search(parent->inode))
 		return NULL;
 	*ro = vfs_dentry_readonly(parent);
-	return parent->inode->iops->lookup(parent->inode, fname);
+	vfs_inode_t *pin = parent->inode;   /* the next resolve may reuse a volatile dentry */
+	if (!vfs_dentry_is_volatile(parent)) {
+		vfs_dentry_t *c = vfs_dentry_child(parent, fname);
+		if (c) return c->inode;
+	}
+	return pin->iops->lookup(pin, fname);
 }
 
 int vfs_lchown(const char *path, uid_t uid, gid_t gid)
@@ -2615,7 +2628,7 @@ int vfs_lchown(const char *path, uid_t uid, gid_t gid)
 	if (ro) return -30; /* EROFS */
 	if (!in) return -2;
 	int rc = vfs_chown_inode(in, uid, gid);
-	if (!in->cached) kfree(in);
+	if (!in->cached) vfs_inode_free(in);
 	return rc;
 }
 
@@ -2626,7 +2639,7 @@ int vfs_lutimes(const char *path, vfs_iattr_t *a, int explicit_times)
 	if (ro) return -30; /* EROFS */
 	if (!in) return -2;
 	int rc = vfs_utimes_inode(in, a, explicit_times);
-	if (!in->cached) kfree(in);
+	if (!in->cached) vfs_inode_free(in);
 	return rc;
 }
 
@@ -2636,8 +2649,8 @@ int vfs_lchmod(const char *path, mode_t mode)
 	vfs_inode_t *in = vfs_lresolve(path, &ro);
 	if (ro) return -30; /* EROFS */
 	if (!in) return -2;
-	int r = vfs_chmod_inode(in, mode);
-	if (!in->cached) kfree(in);
+	int r = S_ISLNK(in->mode) ? -95 : vfs_chmod_inode(in, mode);   /* EOPNOTSUPP: a link has no mode */
+	if (!in->cached) vfs_inode_free(in);
 	return r;
 }
 
