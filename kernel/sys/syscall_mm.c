@@ -140,13 +140,13 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 	/* RLIMIT_AS: refuse a mapping that would push the address space over the
 	 * soft limit (rlim_set==0 means uninitialized → unlimited). */
-	if (p->rlim_set && p->rlim_cur[9 /*RLIMIT_AS*/] != (uint64_t)-1) {
+	if (p->rlim_set && p->rlim_cur[RLIMIT_AS] != RLIM_INFINITY) {
 		uint64_t used = 0;
 		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
 		spin_unlock_irq(&p->vm->fault_lock, cf);
 		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
-		if (used + req > p->rlim_cur[9]) return -12; /* ENOMEM */
+		if (used + req > p->rlim_cur[RLIMIT_AS]) return -12; /* ENOMEM */
 	}
 
 	/* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already

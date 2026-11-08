@@ -723,16 +723,12 @@ static long sys_setgroups(int size, const gid_t *list) {
 	p->ngroups = size;
 	return 0;
 }
-/* RLIMIT_* indices we treat specially */
-#define RLIMIT_NOFILE 7
-#define RLIMIT_AS     9
-#define RLIM_INFINITY ((uint64_t)-1)
 
 /* seed per-process rlimits on first use: infinite except NOFILE (FD_MAX) */
 static void rlimit_seed(process_t *p)
 {
 	if (p->rlim_set) return;
-	for (int i = 0; i < 16; i++) { p->rlim_cur[i] = RLIM_INFINITY; p->rlim_max[i] = RLIM_INFINITY; }
+	for (int i = 0; i < RLIM_NLIMITS; i++) { p->rlim_cur[i] = RLIM_INFINITY; p->rlim_max[i] = RLIM_INFINITY; }
 	p->rlim_cur[RLIMIT_NOFILE] = FD_MAX;
 	p->rlim_max[RLIMIT_NOFILE] = FD_MAX;
 	if (p->fds) p->rlim_cur[RLIMIT_NOFILE] = p->fds->rlim_nofile;
@@ -741,7 +737,7 @@ static void rlimit_seed(process_t *p)
 
 static long do_setrlimit(process_t *p, int res, uint64_t cur, uint64_t max)
 {
-	if (res < 0 || res >= 16) return -22;            /* EINVAL */
+	if (res < 0 || res >= RLIM_NLIMITS) return -22;  /* EINVAL */
 	rlimit_seed(p);
 	if (max != RLIM_INFINITY && cur > max) return -22;
 	/* raising the hard limit needs privilege; RLIM_INFINITY is the top value, so
@@ -755,12 +751,13 @@ static long do_setrlimit(process_t *p, int res, uint64_t cur, uint64_t max)
 		int n = (cur == RLIM_INFINITY || cur > 0x7FFFFFFFULL) ? 0x7FFFFFFF : (int)cur;
 		p->fds->rlim_nofile = n;
 	}
+	rlimit_store_group(p);   /* the group's limit, not this thread's */
 	return 0;
 }
 
 static long sys_getrlimit(int res, void *rlim) {
 	if (!access_ok(rlim, 16)) return -14;
-	if (res < 0 || res >= 16) return -22;
+	if (res < 0 || res >= RLIM_NLIMITS) return -22;
 	process_t *p = task_current();
 	rlimit_seed(p);
 	uint64_t pair[2] = { p->rlim_cur[res], p->rlim_max[res] };
@@ -844,22 +841,52 @@ static long sys_setgid(gid_t gid)
 	return 0;
 }
 
+/* PRIO_PROCESS with a pid acts on that process, and only if the caller may
+ * control it (task_may_control: not a setuid program the caller started).
+ * PRIO_PGRP/PRIO_USER act on the caller alone, and only when they name its own
+ * group or user (0 = own). */
+static process_t *prio_target(int which, int who, int *err)
+{
+	process_t *cur = task_current();
+	*err = 0;
+	if (which < 0 || which > 2) { *err = -22; return NULL; }
+	if (who == 0) return cur;
+	if (which == 0) {
+		process_t *t = proc_get_user(who);
+		if (!t) { *err = -3; return NULL; }                  /* ESRCH */
+		if (t == cur) proc_put(t);   /* callers hold a reference only on others */
+		return t;
+	}
+	if ((which == 1 && (pid_t)who == cur->pgrp) || (which == 2 && (uid_t)who == cur->uid)) return cur;
+	*err = -3;
+	return NULL;
+}
+
 static long sys_getpriority(int which, int who)
 {
-	(void)which; (void)who;
-	return 20 - task_current()->nice;  /* POSIX: returns 20 - nice */
+	int err;
+	process_t *t = prio_target(which, who, &err);
+	if (!t) return err;
+	long r = 20 - t->nice;  /* POSIX: returns 20 - nice */
+	if (t != task_current()) proc_put(t);
+	return r;
 }
 static long sys_setpriority(int which, int who, int prio)
 {
-	(void)who;
-	if (which < 0 || which > 2) return -22;
+	int err;
+	process_t *t = prio_target(which, who, &err);
+	if (!t) return err;
+	process_t *cur = task_current();
 	/* the raw nice value: only getpriority applies the 20-nice offset */
 	int nice = prio;
 	if (nice < -20) nice = -20;
 	if (nice >  19) nice =  19;
-	if (nice < task_current()->nice && task_current()->euid != 0) return -13;
-	task_current()->nice = nice;
-	return 0;
+	long r = 0;
+	if (t != cur && !task_may_control(t, CAP_SYS_NICE)) r = -1;                   /* EPERM */
+	else if (nice < t->nice && !capable_task(cur, CAP_SYS_NICE)) r = -13;          /* EACCES */
+	else t->nice = nice;
+	if (t != cur) proc_put(t);
+	return r;
 }
 
 static long sys_sigaltstack(const stack_t *uss, stack_t *uoss, uint64_t usp)

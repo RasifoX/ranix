@@ -2,6 +2,7 @@
 #define PROC_H
 
 #include <uapi/types.h>
+#include <kernel/rlimit.h>
 #include <uapi/limits.h>
 #include <asm/context.h>
 #include <kernel/mm/vm.h>
@@ -172,8 +173,8 @@ typedef struct process {
 	uint64_t        brk;
 	/* RLIMIT_* soft/hard pairs (RLIM_NLIMITS=16). NOFILE is enforced via
 	 * fds->rlim_nofile and AS via the mmap path; the rest are store-and-report. */
-	uint64_t        rlim_cur[16];
-	uint64_t        rlim_max[16];
+	uint64_t        rlim_cur[RLIM_NLIMITS];   /* the group's, see kernel/rlimit.h */
+	uint64_t        rlim_max[RLIM_NLIMITS];
 	uint8_t         rlim_set;      /* 0 until first getrlimit/setrlimit seeds defaults */
 	int             mlock_future;  /* mlockall(MCL_FUTURE): lock+prefault later mmaps */
 	pid_t           ppid;
@@ -399,6 +400,7 @@ void       task_exit(void);
 process_t *task_current(void);
 
 int        task_count(void);
+void       copy_creds(process_t *child, const process_t *parent);   /* ids, groups, caps, limits */
 int        proc_count_uid(uid_t uid);      /* live processes owned by ruid (RLIMIT_NPROC) */
 process_t *task_get(int index);
 

@@ -1205,6 +1205,19 @@ int proc_count_uid(uid_t uid)
 	return n;
 }
 
+void rlimit_store_group(process_t *p)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t == p || t->tgid != p->tgid) continue;
+		memcpy(t->rlim_cur, p->rlim_cur, sizeof t->rlim_cur);
+		memcpy(t->rlim_max, p->rlim_max, sizeof t->rlim_max);
+		t->rlim_set = p->rlim_set;
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
 /* zombie reaping / wait helpers (proc_find_zombie/_or_sleep, proc_check_or_sleep, proc_reap) -> kernel/proc.c */
 
 /* Process lifecycle + signal delivery — split out for readability,

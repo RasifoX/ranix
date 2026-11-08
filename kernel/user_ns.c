@@ -180,6 +180,11 @@ int may_create_ns(struct process *p, unsigned long flags)
 int task_may_control(struct process *t, int cap)
 {
 	process_t *cur = task_current(), *tg = (process_t *)t;
-	return cur == tg || cur->euid == tg->uid || cur->euid == tg->euid ||
-	       capable_task((struct process *)cur, cap);
+	/* Linux: the caller's uid must be all three of the target's, and the target
+	 * dumpable. A setuid-root program a user started (uid=user, euid=0) is not
+	 * the user's to renice, re-limit or move. */
+	if (cur == tg || cur->tgid == tg->tgid) return 1;
+	if (cur->euid == tg->uid && cur->euid == tg->euid && cur->euid == tg->suid && tg->dumpable)
+		return 1;
+	return capable_task((struct process *)cur, cap);
 }
