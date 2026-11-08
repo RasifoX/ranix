@@ -220,8 +220,13 @@ struct ext2_fs;
 #define EXT2_PEND_MAX 4096
 typedef struct { uint64_t start; uint32_t len; } ext2_pend_t;
 
+struct ext2_vnode;
+
 /* The in-core inode. A file has one of these however many vfs_inodes reach it
- * (hard links, volatile dentries), so size and block pointers cannot diverge. */
+ * (hard links, volatile dentries), so size and block pointers cannot diverge.
+ * raw is the truth; every vfs_inode made from it is on vnodes, and ino_write
+ * copies a change to all of them, so a chmod through one name holds for every
+ * path walk, whichever copy it finds. */
 typedef struct ext2_inode_priv {
 	struct ext2_fs *fs;
 	ext2_inode_t    raw;
@@ -229,7 +234,14 @@ typedef struct ext2_inode_priv {
 	uint32_t        opens;    /* open files; the last close frees an unlinked file */
 	int             orphan;
 	struct ext2_inode_priv *hnext;
+	struct ext2_vnode *vnodes;   /* live vfs_inodes of this file, under fs->vn_lock */
 } ext2_inode_priv_t;
+
+/* A vfs_inode of ours: the VFS frees it with kfree, so it comes first. */
+typedef struct ext2_vnode {
+	vfs_inode_t        vi;
+	struct ext2_vnode *next;
+} ext2_vnode_t;
 
 typedef struct ext2_fs {
 	block_device_t *bdev;
@@ -274,6 +286,7 @@ typedef struct ext2_fs {
 	mutex_t         lock;
 	mutex_t         flush_lock;
 	mutex_t         io_lock;    /* owns ra_buf */
+	spinlock_t      vn_lock;    /* the vnodes lists; taken under vfs_lock as well */
 	ext2_inode_priv_t *ihash[EXT2_IHASH_SIZE];
 	ext2_inode_priv_t *ifree;
 	uint8_t        *ra_buf;     /* one multi-block transfer, NULL if unavailable */
@@ -1119,36 +1132,68 @@ static void iforget(ext2_fs_t *fs, ext2_inode_priv_t *p)
 	ext2_inode_priv_t **pp = &fs->ihash[p->ino % EXT2_IHASH_SIZE];
 	while (*pp != p) pp = &(*pp)->hnext;
 	*pp = p->hnext;
-	/* a walk may still hold a vfs_inode pointing here, so it is reused, not freed */
+	/* a walk may still hold a vfs_inode pointing here, so it is reused, not freed;
+	 * such a copy of a gone file takes no more updates */
+	uint64_t f = spin_lock_irq(&fs->vn_lock);
+	p->vnodes = NULL;
+	spin_unlock_irq(&fs->vn_lock, f);
 	p->hnext = fs->ifree;
 	fs->ifree = p;
 }
 
-static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
+/* The attributes a vfs_inode copies from the disk inode. */
+static void vn_fill(ext2_fs_t *fs, const ext2_inode_t *raw, vfs_inode_t *vi)
 {
-	ext2_inode_t *raw = &priv->raw;
-	vfs_inode_t *vi = kmalloc(sizeof(*vi));
-	if (!vi) return NULL;
-	memset(vi, 0, sizeof(*vi));
-
-	vi->ino      = priv->ino;
-	vi->mode     = raw->i_mode;
-	vi->uid      = raw->i_uid_lo;
-	vi->gid      = raw->i_gid_lo;
-	vi->size     = ino_size(raw);
-	vi->nlink    = raw->i_links_count;
-	vi->refcount = 1;
-	vi->priv     = priv;
-	vi->priv_static = 1;
-	vi->iops     = &ext2_iops;
-	vi->atime    = raw->i_atime;
-	vi->mtime    = raw->i_mtime;
-	vi->ctime    = raw->i_ctime;
+	vi->mode  = raw->i_mode;
+	vi->uid   = raw->i_uid_lo;
+	vi->gid   = raw->i_gid_lo;
+	vi->size  = ino_size(raw);
+	vi->nlink = raw->i_links_count;
+	vi->atime = raw->i_atime;
+	vi->mtime = raw->i_mtime;
+	vi->ctime = raw->i_ctime;
 	if (has_nsec(fs, raw)) {
 		vi->atime_nsec = raw->i_atime_extra >> 2;
 		vi->mtime_nsec = raw->i_mtime_extra >> 2;
 		vi->ctime_nsec = raw->i_ctime_extra >> 2;
 	}
+}
+
+/* Write p's disk inode and bring every vfs_inode of it up to date. Every
+ * change to raw ends here. Caller holds fs->lock. */
+static int ino_write(ext2_fs_t *fs, ext2_inode_priv_t *p)
+{
+	uint64_t f = spin_lock_irq(&fs->vn_lock);
+	for (ext2_vnode_t *v = p->vnodes; v; v = v->next)
+		vn_fill(fs, &p->raw, &v->vi);
+	spin_unlock_irq(&fs->vn_lock, f);
+	return write_inode(fs, p->ino, &p->raw);
+}
+
+/* iops->release: the VFS is freeing this copy. */
+static void ext2_release(vfs_inode_t *vi)
+{
+	ext2_inode_priv_t *p = vi->priv;
+	uint64_t f = spin_lock_irq(&p->fs->vn_lock);
+	for (ext2_vnode_t **pp = &p->vnodes; *pp; pp = &(*pp)->next)
+		if (&(*pp)->vi == vi) { *pp = (*pp)->next; break; }
+	spin_unlock_irq(&p->fs->vn_lock, f);
+}
+
+static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
+{
+	ext2_inode_t *raw = &priv->raw;
+	ext2_vnode_t *vn = kmalloc(sizeof(*vn));
+	if (!vn) return NULL;
+	memset(vn, 0, sizeof(*vn));
+	vfs_inode_t *vi = &vn->vi;
+
+	vi->ino      = priv->ino;
+	vn_fill(fs, raw, vi);
+	vi->refcount = 1;
+	vi->priv     = priv;
+	vi->priv_static = 1;
+	vi->iops     = &ext2_iops;
 	if (S_ISCHR(vi->mode) || S_ISBLK(vi->mode))
 		vi->rdev = raw->i_block[0] ? raw->i_block[0] : raw->i_block[1];
 	if (S_ISREG(vi->mode)) vi->fops = fs->block_size == PAGE_SIZE ? &ext2_fops_paged : &ext2_fops;
@@ -1170,6 +1215,13 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
 		}
 		vi->priv_static = 1;
 		vi->iops = &ext2_dev_iops;
+	}
+	/* FIFOs and device nodes keep no tie to priv, so they are not on the list */
+	if (vi->iops == &ext2_iops) {
+		uint64_t f = spin_lock_irq(&fs->vn_lock);
+		vn->next = priv->vnodes;
+		priv->vnodes = vn;
+		spin_unlock_irq(&fs->vn_lock, f);
 	}
 
 	uint64_t f = spin_lock_irq(&ext2_ino_lock);
@@ -1620,7 +1672,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 					f->inode->size  = (off_t)sz;
 				}
 			}
-			write_inode(fs, priv->ino, in);   /* a failed alloc may have linked indirects */
+			ino_write(fs, priv);   /* a failed alloc may have linked indirects */
 		}
 		mutex_unlock(&fs->lock);
 		if (!phys) { err = -28; break; }
@@ -1644,7 +1696,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	f->pos = (off_t)pos;
 	ino_stamp(fs, in, f->inode, 1);
-	write_inode(fs, priv->ino, in);
+	ino_write(fs, priv);
 	mutex_unlock(&fs->lock);
 	if (fs->bc_dirty > fs->bc_max / 4) ext2_flush(fs);
 	return done ? (ssize_t)done : err;
@@ -1679,7 +1731,7 @@ static uint64_t ext2_mmap_page(vfs_file_t *f, off_t off, int shared_write)
 				bc_ent_t *z = bnew(fs, phys);
 				if (z) { z->data = 1; bdirty(fs, z); bput(fs, z); }
 			}
-			write_inode(fs, priv->ino, in);
+			ino_write(fs, priv);
 		}
 		mutex_unlock(&fs->lock);
 		if (!phys) return 0;
@@ -1873,7 +1925,7 @@ static int do_truncate(ext2_fs_t *fs, ext2_inode_priv_t *priv, vfs_inode_t *vi, 
 	in->i_size_high = (uint32_t)(len >> 32);
 	if (vi) vi->size = len;
 	ino_stamp(fs, in, vi, 1);
-	return write_inode(fs, priv->ino, in) ? -5 : 0;
+	return ino_write(fs, priv) ? -5 : 0;
 }
 
 /* The last link is gone. An open file keeps its blocks until the last close.
@@ -1891,7 +1943,7 @@ static void ino_release(ext2_fs_t *fs, ext2_inode_priv_t *p)
 		in->i_dtime = fs->last_orphan;
 		fs->last_orphan = p->ino;
 		fs->sb_dirty = 1;
-		write_inode(fs, p->ino, in);
+		ino_write(fs, p);
 		return;
 	}
 	int fast_link = S_ISLNK(in->i_mode) && !in->i_blocks_lo;
@@ -1900,7 +1952,7 @@ static void ino_release(ext2_fs_t *fs, ext2_inode_priv_t *p)
 	int64_t s, ns;
 	ranix_walltime(&s, &ns);
 	in->i_dtime = (uint32_t)s;
-	write_inode(fs, p->ino, in);
+	ino_write(fs, p);
 	free_inode(fs, p->ino, S_ISDIR(in->i_mode));
 	iforget(fs, p);
 }
@@ -1922,7 +1974,7 @@ static void orphan_unlink(ext2_fs_t *fs, ext2_inode_priv_t *p)
 			if (!q) break;
 			if (q->raw.i_dtime == p->ino) {
 				q->raw.i_dtime = next;
-				write_inode(fs, q->ino, &q->raw);
+				ino_write(fs, q);
 				break;
 			}
 			i = q->raw.i_dtime;
@@ -2046,14 +2098,14 @@ static int ext2_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	if (dir_find(fs, &dpriv->raw, name, NULL)) { r = -17; goto out; }
 	ext2_inode_priv_t *p = ino_new(fs, dpriv, (uint16_t)(S_IFREG | (mode & 0xFFF)), 1);
 	if (!p) { r = -28; goto out; }
-	if (write_inode(fs, p->ino, &p->raw) != 0 ||
+	if (ino_write(fs, p) != 0 ||
 	    (r = dir_add_entry(fs, dpriv->ino, &dpriv->raw, p->ino, name, 1 /*EXT2_FT_REG_FILE*/)) != 0) {
 		p->raw.i_links_count = 0;
 		ino_release(fs, p);
 		goto out;
 	}
 	ino_stamp(fs, &dpriv->raw, dir, 1);
-	write_inode(fs, dpriv->ino, &dpriv->raw);
+	ino_write(fs, dpriv);
 	dir->size = dpriv->raw.i_size_lo;
 	r = 0;
 out:
@@ -2101,7 +2153,7 @@ static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 
 	p->raw.i_size_lo = fs->block_size;
 	r = -5;
-	if (write_inode(fs, p->ino, &p->raw) != 0 ||
+	if (ino_write(fs, p) != 0 ||
 	    (r = dir_add_entry(fs, dpriv->ino, &dpriv->raw, p->ino, name, 2 /*EXT2_FT_DIR*/)) != 0) {
 		p->raw.i_links_count = 0;
 		ino_release(fs, p);
@@ -2109,7 +2161,7 @@ static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	}
 	dpriv->raw.i_links_count++;
 	ino_stamp(fs, &dpriv->raw, dir, 1);
-	write_inode(fs, dpriv->ino, &dpriv->raw);
+	ino_write(fs, dpriv);
 	dir->size  = dpriv->raw.i_size_lo;
 	dir->nlink = dpriv->raw.i_links_count;
 	r = 0;
@@ -2148,7 +2200,7 @@ static void drop_link(ext2_fs_t *fs, ext2_inode_priv_t *p)
 	else if (p->raw.i_links_count > 0) p->raw.i_links_count--;
 	ino_stamp(fs, &p->raw, NULL, 0);
 	if (p->raw.i_links_count == 0) ino_release(fs, p);
-	else write_inode(fs, p->ino, &p->raw);
+	else ino_write(fs, p);
 }
 
 /* Point an existing name at another inode, which needs no room in the directory. */
@@ -2203,7 +2255,7 @@ static int ext2_remove(ext2_fs_t *fs, ext2_inode_priv_t *dpriv, vfs_inode_t *dir
 	dir_remove_entry(fs, &dpriv->raw, name);
 	ino_stamp(fs, &dpriv->raw, dir, 1);
 	if (isdir) dpriv->raw.i_links_count--;
-	write_inode(fs, dpriv->ino, &dpriv->raw);
+	ino_write(fs, dpriv);
 	if (dir) { dir->size = dpriv->raw.i_size_lo; dir->nlink = dpriv->raw.i_links_count; }
 	drop_link(fs, p);
 	return 0;
@@ -2261,7 +2313,7 @@ static int ext2_rename(vfs_inode_t *odir, const char *oname, vfs_inode_t *ndir, 
 	ino_stamp(fs, &op->raw, odir, 1);
 	ino_stamp(fs, &np->raw, ndir, 1);
 	ino_stamp(fs, &p->raw, NULL, 0);
-	write_inode(fs, p->ino, &p->raw);
+	ino_write(fs, p);
 
 	if (isdir && op != np) {
 		/* .. is the block's second entry and now names the new parent */
@@ -2281,8 +2333,8 @@ static int ext2_rename(vfs_inode_t *odir, const char *oname, vfs_inode_t *ndir, 
 		odir->nlink = op->raw.i_links_count;
 		ndir->nlink = np->raw.i_links_count;
 	}
-	write_inode(fs, op->ino, &op->raw);
-	if (np != op) write_inode(fs, np->ino, &np->raw);
+	ino_write(fs, op);
+	if (np != op) ino_write(fs, np);
 	odir->size = op->raw.i_size_lo;
 	ndir->size = np->raw.i_size_lo;
 out:
@@ -2307,9 +2359,9 @@ static int ext2_link(vfs_inode_t *dir, const char *name, vfs_inode_t *target)
 		p->raw.i_links_count++;
 		target->nlink = p->raw.i_links_count;
 		ino_stamp(fs, &p->raw, target, 0);
-		write_inode(fs, p->ino, &p->raw);
+		ino_write(fs, p);
 		ino_stamp(fs, &dpriv->raw, dir, 1);
-		write_inode(fs, dpriv->ino, &dpriv->raw);
+		ino_write(fs, dpriv);
 		dir->size = dpriv->raw.i_size_lo;
 	}
 	mutex_unlock(&fs->lock);
@@ -2339,14 +2391,14 @@ static int ext2_mknod(vfs_inode_t *dir, const char *name, mode_t mode, dev_t dev
 		if (maj < 256 && min < 256) p->raw.i_block[0] = maj << 8 | min;
 		else p->raw.i_block[1] = (min & 0xff) | (maj << 8) | ((min & ~0xffu) << 12);
 	}
-	if (write_inode(fs, p->ino, &p->raw) != 0 ||
+	if (ino_write(fs, p) != 0 ||
 	    (r = dir_add_entry(fs, dpriv->ino, &dpriv->raw, p->ino, name, ft)) != 0) {
 		p->raw.i_links_count = 0;
 		ino_release(fs, p);
 		goto out;
 	}
 	ino_stamp(fs, &dpriv->raw, dir, 1);
-	write_inode(fs, dpriv->ino, &dpriv->raw);
+	ino_write(fs, dpriv);
 	dir->size = dpriv->raw.i_size_lo;
 	r = 0;
 out:
@@ -2380,14 +2432,14 @@ static int ext2_symlink(vfs_inode_t *dir, const char *name, const char *target)
 		bput(fs, e);
 	}
 	r = -5;
-	if (write_inode(fs, p->ino, &p->raw) != 0 ||
+	if (ino_write(fs, p) != 0 ||
 	    (r = dir_add_entry(fs, dpriv->ino, &dpriv->raw, p->ino, name, 7 /*EXT2_FT_SYMLINK*/)) != 0) {
 		p->raw.i_links_count = 0;
 		ino_release(fs, p);
 		goto out;
 	}
 	ino_stamp(fs, &dpriv->raw, dir, 1);
-	write_inode(fs, dpriv->ino, &dpriv->raw);
+	ino_write(fs, dpriv);
 	dir->size = dpriv->raw.i_size_lo;
 	r = 0;
 out:
@@ -2411,7 +2463,7 @@ static int ext2_setattr(vfs_inode_t *vi, const vfs_iattr_t *a)
 	if (a->valid & ATTR_ATIME) { in->i_atime = (uint32_t)vi->atime; if (ns) in->i_atime_extra = vi->atime_nsec << 2; }
 	if (a->valid & ATTR_MTIME) { in->i_mtime = (uint32_t)vi->mtime; if (ns) in->i_mtime_extra = vi->mtime_nsec << 2; }
 	if (a->valid & ATTR_CTIME) { in->i_ctime = (uint32_t)vi->ctime; if (ns) in->i_ctime_extra = vi->ctime_nsec << 2; }
-	r = write_inode(fs, priv->ino, in) ? -5 : 0;
+	r = ino_write(fs, priv) ? -5 : 0;
 	mutex_unlock(&fs->lock);
 	return r;
 }
@@ -2613,6 +2665,7 @@ static vfs_iops_t ext2_iops = {
 	.symlink  = ext2_symlink,
 	.truncate = ext2_truncate,
 	.setattr  = ext2_setattr,
+	.release  = ext2_release,
 };
 
 /* ── writeback ───────────────────────────────────────────────── */
@@ -2959,6 +3012,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		fs->free_blocks |= (uint64_t)sb->s_free_blocks_count_hi << 32;
 	fs->free_inodes       = sb->s_free_inodes_count;
 	fs->cache_lock  = (spinlock_t)SPINLOCK_INIT;
+	fs->vn_lock     = (spinlock_t)SPINLOCK_INIT;
 	fs->lock        = (mutex_t)MUTEX_INIT;
 	fs->flush_lock  = (mutex_t)MUTEX_INIT;
 	fs->io_lock     = (mutex_t)MUTEX_INIT;
@@ -3054,7 +3108,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	if (!root_vi) { ext2_kill_sb(fs); return -1; }
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_vi);
-	if (!root_dentry) { kfree(root_vi); ext2_kill_sb(fs); return -1; }
+	if (!root_dentry) { ext2_release(root_vi); kfree(root_vi); ext2_kill_sb(fs); return -1; }
 
 	uint64_t f = spin_lock_irq(&ext2_all_spin);
 	fs->next = ext2_all;

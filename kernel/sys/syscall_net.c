@@ -2162,12 +2162,12 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
     if (!in) { ret = -2; goto out; }
     /* /dev/stdin and friends are devices that also read as links */
     if ((!S_ISLNK(in->mode) && !S_ISCHR(in->mode)) || !in->iops || !in->iops->readlink) {
-        if (!in->cached) kfree(in);
+        vfs_inode_free(in);
         ret = -22; goto out;
     }
 
     int n = in->iops->readlink(in, kbuf, PATH_MAX);
-    if (!in->cached) kfree(in);
+    vfs_inode_free(in);
     if (n < 0) { ret = n; goto out; }
     size_t slen = strlen(kbuf);
     if (slen > bufsiz) slen = bufsiz;

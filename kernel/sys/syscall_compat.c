@@ -190,8 +190,18 @@ static long sys_openat2(int dirfd, const char *path, const void *uhow, size_t si
 	return sys_openat(dirfd, path, (int)how.flags, (mode_t)how.mode);
 }
 
+/* fchmodat with flags. A symlink has no mode of its own: with
+ * AT_SYMLINK_NOFOLLOW naming one it is EOPNOTSUPP, anything else changes. */
 static long sys_fchmodat2(int d, const char *p, mode_t m, int flags)
 {
-	if (flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) return -95;   /* links have no mode here */
-	return sys_fchmodat(d, p, m, 0);
+	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -22;   /* EINVAL */
+	if (flags & AT_EMPTY_PATH) {
+		char t[2];
+		if (strncpy_from_user(t, p, 2) >= 0 && t[0] == '\0') return sys_fchmod(d, m);
+	}
+	if (!(flags & AT_SYMLINK_NOFOLLOW)) return sys_fchmodat(d, p, m);
+	char kp[PATH_MAX];
+	int r = resolve_path(kp, d, p);
+	if (r) return r;
+	return vfs_lchmod(kp, m);
 }

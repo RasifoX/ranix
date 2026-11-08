@@ -1,5 +1,5 @@
-/* *at() flag/dirfd conformance: fchmodat/fchownat AT_SYMLINK_NOFOLLOW act on the
- * link, unlinkat AT_REMOVEDIR is rmdir (and rejects files / non-dirs), and a
+/* *at() flag/dirfd conformance: fchmodat2 AT_SYMLINK_NOFOLLOW on a link is
+ * EOPNOTSUPP and leaves the target alone (a link has no mode, as on Linux), unlinkat AT_REMOVEDIR is rmdir (and rejects files / non-dirs), and a
  * relative path resolves against the dir fd, not the cwd. */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -9,11 +9,16 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
-/* call the raw fchmodat/fchownat syscalls: musl's fchmodat emulates
- * AT_SYMLINK_NOFOLLOW via O_PATH+/proc and may refuse it, hiding the kernel. */
-static int raw_fchmodat(int dfd, const char *p, mode_t m, int f)
+/* call the raw syscalls: musl's fchmodat emulates AT_SYMLINK_NOFOLLOW via
+ * O_PATH+/proc, hiding the kernel. The old fchmodat has no flags argument;
+ * fchmodat2 (452) is the one that takes them. */
+static int raw_fchmodat(int dfd, const char *p, mode_t m)
 {
-	return syscall(SYS_fchmodat, dfd, p, m, f);
+	return syscall(SYS_fchmodat, dfd, p, m);
+}
+static int raw_fchmodat2(int dfd, const char *p, mode_t m, int f)
+{
+	return syscall(452, dfd, p, m, f);
 }
 static int raw_fchownat(int dfd, const char *p, uid_t u, gid_t g, int f)
 {
@@ -28,15 +33,18 @@ int main(void)
 	close(fd);
 	if (symlink("/tmp/atd/real", "/tmp/atd/lnk") != 0) { printf("fail symlink\n"); return 0; }
 
-	/* fchmodat NOFOLLOW must not alter the target's mode */
+	/* fchmodat2 NOFOLLOW on a link: EOPNOTSUPP, and the target's mode stays */
 	chmod("/tmp/atd/real", 0644);
-	if (raw_fchmodat(AT_FDCWD, "/tmp/atd/lnk", 0600, AT_SYMLINK_NOFOLLOW) != 0) { printf("fail fchmodat\n"); return 0; }
+	errno = 0;
+	if (raw_fchmodat2(AT_FDCWD, "/tmp/atd/lnk", 0600, AT_SYMLINK_NOFOLLOW) != -1 || errno != EOPNOTSUPP) {
+		printf("fail fchmodat2-link errno=%d\n", errno); return 0;
+	}
 	struct stat st;
 	if (stat("/tmp/atd/real", &st) != 0 || (st.st_mode & 07777) != 0644) {
 		printf("fail nofollow-chmod mode=%o\n", st.st_mode & 07777); return 0;
 	}
 	/* without NOFOLLOW it follows to the target */
-	if (raw_fchmodat(AT_FDCWD, "/tmp/atd/lnk", 0600, 0) != 0) { printf("fail fchmodat2\n"); return 0; }
+	if (raw_fchmodat(AT_FDCWD, "/tmp/atd/lnk", 0600) != 0) { printf("fail fchmodat2\n"); return 0; }
 	if (stat("/tmp/atd/real", &st) != 0 || (st.st_mode & 07777) != 0600) {
 		printf("fail follow-chmod mode=%o\n", st.st_mode & 07777); return 0;
 	}
