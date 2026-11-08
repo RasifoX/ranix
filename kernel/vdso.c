@@ -2,6 +2,7 @@
  * the shared vvar timekeeping page below it) into every process at exec, and
  * refresh vvar from the timer tick. The user-space half is vdso/vdso.c; the
  * layout contract (VVAR_VADDR/VDSO_VADDR, struct vdso_vvar) is uapi/vdso.h. */
+#include <kernel/board.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vm.h>
@@ -24,6 +25,7 @@ static struct vdso_vvar   *vvar_k;            /* kernel-side view of vvar */
 static uint64_t            vdso_phys[VDSO_MAXPG];
 static int                 vdso_npg;
 static uint32_t            cnt_mult, cnt_shift, cnt_valid;
+uint32_t                   vdso_timens_used;   /* once set, monotonic clocks take the syscall */
 
 static void vdso_update(void);
 
@@ -56,9 +58,16 @@ void vdso_init(void)
 	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
 	if (frq) { cnt_shift = 20; cnt_mult = (uint32_t)((1000000000ULL << 20) / frq); cnt_valid = 1; }
 #else
-	/* x86: no user-readable calibrated counter yet — serve the per-tick base
-	 * (coarse but monotonic). cnt_valid stays 0. */
-	cnt_valid = 0;
+	/* x86: the TSC when it can be trusted, else the per-tick base. */
+	extern uint64_t tsc_mult;
+	extern void tsc_calibrate(void);
+	tsc_calibrate();
+	/* the wall clock was set against the clock monotonic time had then, which may
+	 * have been the tick before the counters were up: set it again against this one */
+	{ extern void rtc_init(void); rtc_init(); }
+	cnt_shift = 28;
+	cnt_mult = (uint32_t)tsc_mult;
+	cnt_valid = tsc_mult != 0;
 #endif
 
 	vdso_update();
@@ -81,7 +90,9 @@ static inline uint64_t hw_counter(void)
 #if defined(__aarch64__)
 	uint64_t c; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(c)); return c;
 #else
-	return 0;
+	uint32_t lo, hi;
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return (uint64_t)hi << 32 | lo;
 #endif
 }
 
@@ -98,7 +109,10 @@ void vdso_time_changed(void) { vdso_update(); }
 static spinlock_t vdso_lock = SPINLOCK_INIT;
 static void vdso_update(void)
 {
+	extern volatile uint64_t kernel_ticks;
 	if (!vvar_k) return;
+	/* between updates the counter carries it; without one, every tick counts */
+	if (cnt_valid && kernel_ticks % (TIMER_HZ / 100)) return;
 	uint64_t f = spin_lock_irq(&vdso_lock);
 	uint64_t cnt = hw_counter();
 	int64_t ms, mn, rs, rn;
@@ -111,6 +125,7 @@ static void vdso_update(void)
 	vvar_k->cnt_mult  = cnt_mult;
 	vvar_k->cnt_shift = cnt_shift;
 	vvar_k->cnt_valid = cnt_valid;
+	vvar_k->timens_used = vdso_timens_used;
 	vvar_k->mono_sec  = ms; vvar_k->mono_nsec = mn;
 	vvar_k->real_sec  = rs; vvar_k->real_nsec = rn;
 	__asm__ volatile("" ::: "memory");

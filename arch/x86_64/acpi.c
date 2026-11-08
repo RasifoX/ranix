@@ -4,6 +4,9 @@
 #include <kernel/smp.h>
 #include <asm/mmu.h>
 #include <asm/io.h>
+#include <kernel/proc.h>
+#include <kernel/board.h>
+#include <kernel/hwdiag.h>
 
 /* ── CMOS / RTC ("BIOS clock") → Unix epoch seconds ───────────── */
 static uint8_t cmos_read(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
@@ -220,6 +223,246 @@ uint64_t hpet_now_ns(void)
 	return (cnt / 1000000ULL) * hpet_period_fs + ((cnt % 1000000ULL) * hpet_period_fs) / 1000000ULL;
 }
 
+/* The TSC, timed against the HPET once. Reading the HPET is an uncached bus cycle
+ * and a syscall around it; a browser asks the time thousands of times a second.
+ * Only an invariant TSC qualifies: it ticks at one rate in every power state. */
+uint64_t tsc_mult;                      /* ns = delta * mult >> 28 */
+static uint64_t tsc0, tsc_ns0;
+
+static inline uint64_t rdtsc_(void)
+{
+	uint32_t lo, hi;
+	__asm__ volatile("lfence; rdtsc" : "=a"(lo), "=d"(hi));
+	return (uint64_t)hi << 32 | lo;
+}
+
+void tsc_calibrate(void)
+{
+	uint32_t a, d;
+	__asm__ volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000007U) : "ebx", "ecx");
+	if (!(d & (1U << 8)) || !hpet_base)
+		return;
+	uint64_t h0 = hpet_now_ns(), t0 = rdtsc_(), h1;
+	do { h1 = hpet_now_ns(); } while (h1 - h0 < 20000000ULL);
+	uint64_t t1 = rdtsc_();
+	if (t1 <= t0)
+		return;
+	tsc0 = t1;
+	tsc_ns0 = h1;
+	uint64_t mult = ((h1 - h0) << 28) / (t1 - t0);
+	/* The CPU can say its TSC rate exactly: crystal times a ratio (CPUID 15h).
+	 * 20 ms against the HPET came out 0.28 % off on Casper, ten seconds an hour.
+	 * The crystal is left out on Sky Lake and Kaby Lake clients: 24 MHz there. */
+	uint32_t eax, ebx, ecx, edx, max;
+	__asm__ volatile("cpuid" : "=a"(max), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
+	if (max >= 0x15) {
+		__asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x15), "c"(0));
+		uint64_t crystal = ecx;
+		if (!crystal) {
+			uint32_t a1, b1, c1, d1;
+			__asm__ volatile("cpuid" : "=a"(a1), "=b"(b1), "=c"(c1), "=d"(d1) : "a"(1));
+			uint32_t fam = (a1 >> 8) & 15, model = ((a1 >> 4) & 15) | ((a1 >> 12) & 0xF0);
+			if (fam == 6 && (model == 0x4E || model == 0x5E || model == 0x8E || model == 0x9E ||
+			                 model == 0xA5 || model == 0xA6))
+				crystal = 24000000;
+		}
+		if (eax && ebx && crystal) {
+			uint64_t hz = crystal * ebx / eax;
+			uint64_t exact = (1000000000ULL << 28) / hz;
+			/* trust it only near the measurement: a hypervisor may report junk */
+			if (exact > mult - mult / 50 && exact < mult + mult / 50) {
+				kprintf(KERN_INFO "tsc: %lu Hz from cpuid (measured %lu)\n", (unsigned long)hz,
+				        (unsigned long)((1000000000ULL << 28) / mult));
+				mult = exact;
+			}
+		}
+	}
+	__sync_synchronize();
+	tsc_mult = mult;
+}
+
+uint64_t tsc_now_ns(void)
+{
+	if (!tsc_mult)
+		return 0;
+	uint64_t delta = rdtsc_() - tsc0;
+	return tsc_ns0 + (uint64_t)(((unsigned __int128)delta * tsc_mult) >> 28);
+}
+
+/* ── FADT reset register ────────────────────────────────────────────────────
+ * Parsed at boot, not at panic: the panic path must not walk firmware tables. */
+#define FADT_FLAGS        112
+#define FADT_RESET_REG    116     /* generic address structure, 12 bytes */
+#define FADT_RESET_VALUE  128
+#define FADT_RESET_SUP    (1u << 10)
+#define GAS_SPACE_MEM     0
+#define GAS_SPACE_IO      1
+
+static int      fadt_reset_ok;
+static uint8_t  fadt_reset_space, fadt_reset_val;
+static uint64_t fadt_reset_addr;
+
+static void fadt_reset_init(struct rsdp *r)
+{
+	uint8_t *f = find_table(r, "FACP");
+	if (!f || ((struct sdt_header *)f)->length <= FADT_RESET_VALUE) return;
+
+	uint32_t flags;
+	memcpy(&flags, f + FADT_FLAGS, sizeof(flags));
+	if (!(flags & FADT_RESET_SUP)) return;
+
+	uint64_t addr;
+	memcpy(&addr, f + FADT_RESET_REG + 4, sizeof(addr));
+	uint8_t space = f[FADT_RESET_REG];
+	if (!addr || (space != GAS_SPACE_IO && space != GAS_SPACE_MEM)) {
+		kprintf(KERN_WARN "acpi: reset register in unsupported space %d\n", space);
+		return;
+	}
+	fadt_reset_space = space;
+	fadt_reset_addr  = addr;
+	fadt_reset_val   = f[FADT_RESET_VALUE];
+	fadt_reset_ok    = 1;
+	kprintf(KERN_DEBUG "acpi: reset register %s 0x%lx value 0x%x\n",
+	        space == GAS_SPACE_IO ? "io" : "mem", addr, fadt_reset_val);
+}
+
+/* ── S5: soft off ──────────────────────────────
+ * The sleep type for S5 is in the DSDT, in AML: Name (_S5_, Package () {a, b, ...}).
+ * A real AML interpreter is not needed to read one constant package. */
+static uint16_t pm1a_cnt, pm1b_cnt, slp_typa, slp_typb;
+static uint32_t smi_cmd;
+static uint8_t  acpi_enable_val;
+static int      s5_ok;
+static uint16_t pm1a_evt;
+static uint8_t  pm1_len;
+
+static int aml_byte(const uint8_t **p, uint8_t *out)
+{
+	const uint8_t *q = *p;
+	if (*q == 0x0A) { *out = q[1]; *p = q + 2; return 1; }   /* BytePrefix */
+	if (*q == 0x00 || *q == 0x01) { *out = *q; *p = q + 1; return 1; }   /* Zero, One */
+	return 0;
+}
+
+static void s5_init(struct rsdp *r)
+{
+	uint8_t *f = find_table(r, "FACP");
+	if (!f || ((struct sdt_header *)f)->length < 76) return;
+	uint32_t dsdt, a, b, smi, evt;
+	memcpy(&evt,  f + 56, 4);
+	if (((struct sdt_header *)f)->length > 88 && evt && evt <= 0xFFFF) {
+		pm1a_evt = (uint16_t)evt;
+		pm1_len = f[88];
+	}
+	memcpy(&dsdt, f + 40, 4);
+	memcpy(&smi,  f + 48, 4);
+	memcpy(&a,    f + 64, 4);
+	memcpy(&b,    f + 68, 4);
+	acpi_enable_val = f[52];
+	if (!dsdt || !a || a > 0xFFFF || b > 0xFFFF) return;
+	struct sdt_header *h = (struct sdt_header *)PHYS_TO_VIRT((uint64_t)dsdt);
+	uint32_t len = h->length;
+	const uint8_t *d = (const uint8_t *)h;
+	for (uint32_t i = sizeof(*h); i + 12 < len; i++) {
+		if (memcmp(d + i, "_S5_", 4) != 0) continue;
+		const uint8_t *p = d + i + 4;
+		if (*p++ != 0x12) continue;              /* PackageOp */
+		p += (*p >> 6) + 1;                      /* PkgLength */
+		p++;                                     /* NumElements */
+		uint8_t ta, tb;
+		if (!aml_byte(&p, &ta) || !aml_byte(&p, &tb)) continue;
+		pm1a_cnt = (uint16_t)a;
+		pm1b_cnt = (uint16_t)b;
+		slp_typa = ta;
+		slp_typb = tb;
+		smi_cmd  = smi;
+		s5_ok    = 1;
+		kprintf(KERN_INFO "acpi: S5 sleep type %u/%u, PM1 control 0x%x\n", ta, tb, a);
+		return;
+	}
+}
+
+static uint16_t inw_port(uint16_t port)
+{
+	uint16_t v;
+	__asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port));
+	return v;
+}
+
+static void outw_port(uint16_t port, uint16_t v)
+{
+	__asm__ volatile("outw %0, %1" :: "a"(v), "Nd"(port));
+}
+
+/* Returns only if the machine did not go off */
+void acpi_poweroff(void)
+{
+	if (!s5_ok) return;
+	if (!(inw_port(pm1a_cnt) & 1) && smi_cmd && acpi_enable_val) {   /* SCI_EN clear: legacy */
+		__asm__ volatile("outb %0, %1" :: "a"(acpi_enable_val), "Nd"((uint16_t)smi_cmd));
+		for (int i = 0; i < 3000000 && !(inw_port(pm1a_cnt) & 1); i++) ;
+	}
+	/* the type first, then the enable: some chipsets take them only in two writes */
+	uint16_t a = (uint16_t)((inw_port(pm1a_cnt) & ~0x3C00u) | (slp_typa << 10));
+	outw_port(pm1a_cnt, a);
+	if (pm1b_cnt) {
+		uint16_t b = (uint16_t)((inw_port(pm1b_cnt) & ~0x3C00u) | (slp_typb << 10));
+		outw_port(pm1b_cnt, b);
+		outw_port(pm1b_cnt, (uint16_t)(b | 0x2000u));
+	}
+	outw_port(pm1a_cnt, (uint16_t)(a | 0x2000u));
+	for (int i = 0; i < 30000000; i++) __asm__ volatile("pause");
+}
+
+/* The power button is a status bit in PM1. Polled: an SCI would need the interrupt
+ * routing that lives in AML. Pressed once, the system is told to shut down in order. */
+#define PM1_PWRBTN 0x0100u
+
+static void acpi_button_thread(void)
+{
+	extern volatile uint64_t kernel_ticks;
+	for (;;) {
+		task_sleep_until(kernel_ticks + TIMER_HZ / 4);
+		if (!(inw_port(pm1a_evt) & PM1_PWRBTN)) continue;
+		outw_port(pm1a_evt, PM1_PWRBTN);
+		kprintf(KERN_INFO "acpi: power button\n");
+		process_t *init = proc_get(1);
+		if (init) {
+			task_signal(init, 30);     /* SIGPWR */
+			proc_put(init);
+		}
+	}
+}
+
+static void acpi_diag(hw_out_t *o)
+{
+	hw_begin(o, "power", "acpi");
+	hw_kv(o, "s5", s5_ok);
+	hw_kv(o, "sci_en", s5_ok ? inw_port(pm1a_cnt) & 1 : 0);
+	hw_kv(o, "smi_cmd", smi_cmd);
+	hw_kv(o, "acpi_enable", acpi_enable_val);
+	hw_kv(o, "pm1_sts", inw_port(pm1a_evt));
+	hw_kv(o, "pm1_en", inw_port((uint16_t)(pm1a_evt + pm1_len / 2)));
+	hw_end(o);
+}
+
+void acpi_button_start(void)
+{
+	if (!pm1a_evt) return;
+	outw_port(pm1a_evt, PM1_PWRBTN);       /* a press from before does not count */
+	hwdiag_register(acpi_diag);
+	proc_create("acpi_button", acpi_button_thread);
+}
+
+void acpi_reset(void)
+{
+	if (!fadt_reset_ok) return;
+	if (fadt_reset_space == GAS_SPACE_IO)
+		outb((uint16_t)fadt_reset_addr, fadt_reset_val);
+	else
+		*(volatile uint8_t *)PHYS_TO_VIRT(fadt_reset_addr) = fadt_reset_val;
+}
+
 /* Returns the number of enabled CPUs from the ACPI MADT, 0 if no MADT. */
 int acpi_detect_cpus(void)
 {
@@ -229,6 +472,8 @@ int acpi_detect_cpus(void)
 	if (!r) return 0;
 
 	hpet_init_from(r);   /* independent of the MADT */
+	fadt_reset_init(r);
+	s5_init(r);
 
 	struct madt *m = find_table(r, "APIC");
 	if (!m) return 0;
