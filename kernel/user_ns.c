@@ -136,6 +136,29 @@ int user_ns_set_map(user_namespace_t *ns, const char *buf, int is_gid)
 	return 0;
 }
 
+/* Who may write a namespace's id map (Linux's new_idmap_permitted): root of the
+ * machine may map anything. Anyone else must hold CAP_SETUID/SETGID in the new
+ * namespace (its creator does until exec), be inside it or its creator in the
+ * parent, and may map exactly one id: their own. */
+int user_ns_map_permitted(struct process *writer, user_namespace_t *ns, const char *buf, int is_gid)
+{
+	process_t *w = (process_t *)writer;
+	int cap = is_gid ? CAP_SETGID : CAP_SETUID;
+	if (!ns || ns == &init_user_ns) return 0;
+	if (capable_task(writer, cap)) return 1;
+	user_namespace_t *wns = w->user_ns ? w->user_ns : &init_user_ns;
+	if (wns != ns && wns != ns->parent) return 0;
+	if (!cap_has(w->cap_effective, cap) || w->euid != ns->owner_uid) return 0;
+	const char *s = buf;
+	parse_u32(&s);
+	uint32_t outside = parse_u32(&s);
+	uint32_t count   = parse_u32(&s);
+	while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+	if (count != 1 || *s) return 0;          /* one line, one id */
+	uint32_t k = is_gid ? make_kgid(ns->parent, outside) : make_kuid(ns->parent, outside);
+	return k == (is_gid ? w->egid : w->euid);
+}
+
 int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid)
 {
 	uid_extent_t *m = is_gid ? ns->gid_map : ns->uid_map;
