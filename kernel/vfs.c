@@ -810,7 +810,15 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 				d = NULL; goto out;
 			}
 			/* Cache only if parent is real (in dentry tree) and caching is allowed */
-			if (!parent_was_volatile && !dir_inode->no_cache && dentry_count < dentry_max_val) {
+			/* Past the limit a name is still cached: with no eviction yet, the
+			 * other choice is the volatile slot, where chroot, bind and a
+			 * chain of first-time names do not work. The limit only warns. */
+			static int warned;
+			if (dentry_count >= dentry_max_val && !warned) {
+				warned = 1;
+				kprintf(KERN_WARN "vfs: %d dentries cached, past the limit (vfs_dentry_max)\n", dentry_count);
+			}
+			if (!parent_was_volatile && !dir_inode->no_cache) {
 				/* Re-check: another task may have added this dentry while unlocked */
 				child = d->child;
 				while (child) {
@@ -898,6 +906,12 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
 			} else {
 				p = work;
+				/* The walk goes on in the link's directory. A link that was not
+				 * cached stood in the volatile slot, and its directory is real. */
+				if (d != &volatile_dentry) {
+					d_is_volatile = 0;
+					if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
+				}
 			}
 			continue;
 		}
