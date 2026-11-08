@@ -1162,7 +1162,7 @@ static long sys_utimensat(int dirfd, const char *path, const void *times, int fl
 
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
-	if (resource < 0 || resource >= 16) return -22;
+	if (resource < 0 || resource >= RLIM_NLIMITS) return -22;
 	if (old_limit && !access_ok(old_limit, 16)) return -14;
 	if (new_limit && !access_ok(new_limit, 16)) return -14;
 	process_t *p = pid ? proc_get_user(pid) : task_current();

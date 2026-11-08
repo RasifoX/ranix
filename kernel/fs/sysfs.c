@@ -291,6 +291,8 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		else return -22;
 		return (ssize_t)len;
 	}
+	/* nr_hugepages reserves physical memory: root's decision, not the mode bits' */
+	if (!sysfs_may_turn(SF_NR_HUGEPAGES)) return -1;
 	long v = 0; size_t i = 0;
 	while (i < n && kbuf[i] >= '0' && kbuf[i] <= '9') { v = v * 10 + (kbuf[i] - '0'); i++; }
 	huge2m_nr_set(v);

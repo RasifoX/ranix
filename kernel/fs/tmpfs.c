@@ -467,6 +467,20 @@ static uint64_t parse_size_opt(const char *opts)
 	return v;
 }
 
+/* "mode=1777": the root directory's permission bits, octal (rootsw mounts /tmp
+ * 1777 and /run 0755). Without it the root is 0755: closed unless asked. */
+static mode_t parse_mode_opt(const char *opts)
+{
+	if (!opts) return 0755;
+	const char *p = strstr(opts, "mode=");
+	if (!p || (p != opts && p[-1] != ',')) return 0755;
+	p += 5;
+	mode_t v = 0;
+	int digits = 0;
+	while (*p >= '0' && *p <= '7' && digits < 5) { v = (mode_t)(v * 8 + (mode_t)(*p - '0')); p++; digits++; }
+	return digits ? (v & 07777) : 0755;
+}
+
 static void tmpfs_get_sb(void *priv)
 {
 	tmpfs_sb_t *sb = priv;
@@ -528,7 +542,7 @@ int tmpfs_mount(vfs_mount_t *mnt, void *data)
 	sb->max_inodes = sb->max_bytes / PAGE_SIZE + 16;       /* one per data page, plus headroom */
 	if (sb->max_inodes < 64) sb->max_inodes = 64;
 
-	vfs_inode_t *root_inode = tmpfs_inode_alloc(sb, S_IFDIR | 0755);
+	vfs_inode_t *root_inode = tmpfs_inode_alloc(sb, S_IFDIR | parse_mode_opt((const char *)data));
 	if (!root_inode) { kfree(sb); return -1; }
 	tmpfs_dir_t *rd = kmalloc(sizeof(*rd));
 	if (!rd) { kfree(root_inode); kfree(sb); return -1; }

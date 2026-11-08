@@ -405,6 +405,7 @@ check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail 
 check "c-peercred"    "OK"            "$(timeout 10 /bin/test_peercred 2>&1 | tail -1)"
 check "c-inputsrc"     "OK"            "$(timeout 20 /bin/test_inputsrc 2>&1 </dev/null | tail -1)"
 check "c-usercred"    "OK"            "$(timeout 10 /bin/test_usercred 2>&1 | tail -1)"
+check "c-credctl"     "OK"            "$(timeout 15 /bin/test_credctl 2>&1 | tail -1)"
 check "c-ofdlock"     "OK"            "$(timeout 8 /bin/test_ofdlock 2>&1 | tail -1)"
 check "c-ps2aux"      "OK"            "$(timeout 10 /bin/test_ps2aux 2>&1 | tail -1)"
 check "c-atflags"     "OK"            "$(timeout 8 /bin/test_atflags 2>/dev/null)"

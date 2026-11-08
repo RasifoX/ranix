@@ -79,6 +79,7 @@ typedef struct {
 
 	uint16_t     win[4];     /* rows, cols, xpix, ypix */
 	pid_t        fg_pgrp;    /* foreground process group (job control) */
+	uid_t        owner;      /* who opened the master: only they (or root) open the slave */
 } pty_t;
 
 static pty_t      ptys[PTY_MAX];
@@ -387,6 +388,7 @@ static int ptmx_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 			p->m2s_h = p->m2s_t = p->s2m_h = p->s2m_t = 0;
 			p->index = i;
 			p->fg_pgrp = 0;
+			p->owner = task_current() ? task_current()->euid : 0;
 			p->line_len = 0; p->eof = 0;
 			p->c_iflag = ICRNL;
 			p->c_oflag = OPOST | ONLCR;
@@ -497,6 +499,11 @@ static int pts_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 	 * master_close + ptmx_open can't free and reuse the slot underneath us. */
 	uint64_t pf = spin_lock_irq(&pool_lock);
 	if (!p->in_use) { spin_unlock_irq(&pool_lock, pf); return -6; }
+	/* Linux grantpt: the slave belongs to whoever opened the master. The node
+	 * itself is 0666 so a non-root terminal (the desktop as its user) gets here;
+	 * this is the gate, not the mode bits. */
+	process_t *me = task_current();
+	if (me && me->euid != 0 && me->euid != p->owner) { spin_unlock_irq(&pool_lock, pf); return -13; }
 	uint64_t f = spin_lock_irq(&p->lock);
 	p->slave_open = 1;
 	spin_unlock_irq(&p->lock, f);
@@ -587,6 +594,7 @@ void pty_init(void)
 		ptys[i].lock = (spinlock_t)SPINLOCK_INIT;
 		names[i][0] = 'p'; names[i][1] = 't'; names[i][2] = 's'; names[i][3] = '/';
 		names[i][4] = (char)('0' + i); names[i][5] = '\0';
-		devfs_register_device(names[i], S_IFCHR | 0620, (136 << 8) | i, &pts_fops);
+		/* 0666: pts_open lets only the master's owner (and root) in */
+		devfs_register_device(names[i], S_IFCHR | 0666, (136 << 8) | i, &pts_fops);
 	}
 }

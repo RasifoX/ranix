@@ -360,13 +360,11 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	/* RLIMIT_NPROC: a non-root caller may not exceed its soft cap on live
 	 * processes owned by its real uid. Only enforced once the limit is set
 	 * (rlim_set), so the default stays unbounded; root is exempt. */
-#define RLIMIT_NPROC 6
 	if (parent->euid != 0 && parent->rlim_set) {
 		uint64_t cap = parent->rlim_cur[RLIMIT_NPROC];
 		if (cap != (uint64_t)-1 && (uint64_t)proc_count_uid(parent->uid) >= cap)
 			return -11;   /* EAGAIN */
 	}
-#undef RLIMIT_NPROC
 
 	void *pcb_phys = buddy_alloc(PCB_ORDER);
 	if (!pcb_phys) return -12;
@@ -392,23 +390,9 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	child->pgrp      = parent->pgrp;
 	child->sid       = parent->sid;
 	child->state     = PROC_READY;
-	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
-	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
-	child->ngroups = parent->ngroups;
-	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
-	child->cap_permitted   = parent->cap_permitted;
-	child->cap_effective   = parent->cap_effective;
-	child->cap_inheritable = parent->cap_inheritable;
-	child->rlim_set = parent->rlim_set;
-	for (int _ri = 0; _ri < 16; _ri++) {
-		child->rlim_cur[_ri] = parent->rlim_cur[_ri];
-		child->rlim_max[_ri] = parent->rlim_max[_ri];
-	}
+	copy_creds(child, parent);   /* pdeathsig is NOT inherited */
 	child->mlock_future = parent->mlock_future;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
-	child->mdwe = parent->mdwe;
-	child->no_new_privs = parent->no_new_privs;  /* sticky; pdeathsig is NOT inherited */
-	child->dumpable  = parent->dumpable;
 	child->reaped    = 0;
 
 	int nlen = 0;
@@ -638,6 +622,26 @@ static void reap_dead_threads(void)
 pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
                            int as_process);
 
+/* Who a new task is and what it may do, the same for fork and for a new thread:
+ * one place, so the two paths cannot drift apart again (a thread once started
+ * with unset, i.e. infinite, limits). */
+void copy_creds(process_t *child, const process_t *parent)
+{
+	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
+	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
+	child->ngroups = parent->ngroups;
+	memcpy(child->groups, parent->groups, sizeof child->groups);
+	child->cap_permitted   = parent->cap_permitted;
+	child->cap_effective   = parent->cap_effective;
+	child->cap_inheritable = parent->cap_inheritable;
+	child->no_new_privs = parent->no_new_privs;   /* sticky */
+	child->mdwe         = parent->mdwe;           /* irreversible */
+	child->dumpable     = parent->dumpable;
+	child->rlim_set     = parent->rlim_set;
+	memcpy(child->rlim_cur, parent->rlim_cur, sizeof child->rlim_cur);
+	memcpy(child->rlim_max, parent->rlim_max, sizeof child->rlim_max);
+}
+
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid)
 {
 	return proc_clone_thread_ex(newsp, tls, ctid, ptid, set_tid, 0);
@@ -660,16 +664,7 @@ pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_
 	child->pgrp         = parent->pgrp;
 	child->sid          = parent->sid;
 	child->state        = PROC_READY;
-	child->uid  = parent->uid;  child->euid = parent->euid; child->suid = parent->suid;
-	child->gid  = parent->gid;  child->egid = parent->egid; child->sgid = parent->sgid;
-	child->ngroups = parent->ngroups;
-	for (int _gi = 0; _gi < parent->ngroups; _gi++) child->groups[_gi] = parent->groups[_gi];
-	child->cap_permitted   = parent->cap_permitted;
-	child->cap_effective   = parent->cap_effective;
-	child->cap_inheritable = parent->cap_inheritable;
-	child->mdwe = parent->mdwe;
-	child->no_new_privs = parent->no_new_privs;
-	child->dumpable     = parent->dumpable;
+	copy_creds(child, parent);   /* limits too: they are the group's */
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 
 	int nlen = 0;
