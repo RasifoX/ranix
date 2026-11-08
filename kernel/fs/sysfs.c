@@ -8,6 +8,10 @@
  * and eth0 appear automatically.
  * ───────────────────────────────────────────────────────────────────────── */
 #include <kernel/vfs.h>
+#include <kernel/proc.h>
+#include <kernel/input.h>
+#include <kernel/sound.h>
+#include <kernel/capabilities.h>
 #include <kernel/hal.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/buddy.h>
@@ -20,13 +24,14 @@
 #include <kernel/kprintf.h>
 
 #include <kernel/nsproxy.h>
+#include <kernel/fs/devfs.h>
 extern int  smp_ncpus;
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
-       SF_BLK_SIZE, SF_BLK_STAT, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
+       SF_BLK_SIZE, SF_BLK_STAT, SF_BLK_RO, SF_BLK_RO_DENIED, SF_BLK_ID, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
        SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
-       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES };
+       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -122,6 +127,21 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		}
 		break;
 	}
+	case SF_BLK_RO: {
+		block_device_t *b = block_device_get(pr->dev);
+		n = put_str(tmp, b && b->ro ? "1\n" : "0\n");
+		break;
+	}
+	case SF_BLK_RO_DENIED: {
+		block_device_t *b = block_device_get(pr->dev);
+		if (b) { n = put_u64(tmp, b->ro_denied); tmp[n++] = '\n'; }
+		break;
+	}
+	case SF_BLK_ID: {
+		block_device_t *b = block_device_get(pr->dev);
+		if (b) n = block_device_ids(b, tmp, 4096);
+		break;
+	}
 	case SF_NET_MTU:   n = put_str(tmp, "1500\n"); break;
 	case SF_NET_STATE: n = put_str(tmp, "up\n");   break;
 	case SF_BLK_SIZE: {
@@ -147,6 +167,24 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case SF_CGROUP_CTRL:  n = put_str(tmp, "cpu memory pids freezer\n"); break;
 	case SF_CGROUP_PROCS: n = put_str(tmp, "1\n"); break;
 	case SF_THP_ENABLED:  n = put_str(tmp, "always [madvise] never\n"); break;
+	case SF_TOUCHPAD: { extern int __attribute__((weak)) ps2_aux_report(char *, int); n = ps2_aux_report ? ps2_aux_report((char *)tmp, 128) : 0; break; }
+	case SF_VOLUME: n = put_u64(tmp, (uint64_t)sound_volume()); tmp[n++] = '\n'; break;
+	case SF_CSTATE: {
+		extern int arch_idle_get(void);
+		n = put_u64(tmp, (uint64_t)arch_idle_get()); tmp[n++] = '\n';
+		break;
+	}
+	case SF_BACKLIGHT: {
+		extern int backlight_get(void);
+		int v = backlight_get();
+		if (v < 0) return -19;
+		n = put_u64(tmp, (uint64_t)v); tmp[n++] = '\n';
+		break;
+	}
+	case SF_KEYMAP: {
+		const char *m = input_keymap == KEYMAP_TR ? "tr\n" : "us\n";
+		n = 3; memcpy(tmp, m, 3); break;
+	}
 	case SF_NR_HUGEPAGES:  n = put_u64(tmp, (uint64_t)huge2m_nr_total()); tmp[n++] = '\n'; break;
 	case SF_FREE_HUGEPAGES: n = put_u64(tmp, (uint64_t)huge2m_nr_free()); tmp[n++] = '\n'; break;
 	case SF_PCI_VENDOR:
@@ -190,13 +228,69 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	return ret;
 }
 
+/* The person's knobs (volume, brightness, touchpad) belong to a group: its
+ * members may turn them without CAP_SYS_ADMIN. */
+static gid_t sysfs_knob_gid(int type)
+{
+	return type == SF_VOLUME ? DEVFS_GID_AUDIO : type == SF_BACKLIGHT ? DEVFS_GID_VIDEO :
+	       type == SF_TOUCHPAD ? DEVFS_GID_INPUT : 0;
+}
+
+static int sysfs_may_turn(int type)
+{
+	process_t *p = task_current();
+	gid_t g = sysfs_knob_gid(type);
+	if (capable_task(p, CAP_SYS_ADMIN)) return 1;
+	if (!g || !p) return 0;
+	if (p->egid == g) return 1;
+	for (int i = 0; i < p->ngroups; i++) if (p->groups[i] == g) return 1;
+	return 0;
+}
+
 static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	sysfs_priv_t *pr = f->inode->priv;
-	if (!pr || pr->type != SF_NR_HUGEPAGES) return -22;
+	if (!pr || (pr->type != SF_BACKLIGHT && pr->type != SF_CSTATE && pr->type != SF_NR_HUGEPAGES && pr->type != SF_KEYMAP && pr->type != SF_VOLUME && pr->type != SF_TOUCHPAD)) return -22;
 	char kbuf[32];
 	size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
 	if (copy_fop_from_user(kbuf, buf, n) != 0) return -14;
+	if (pr->type == SF_VOLUME) {
+		long pct = 0;
+		if (!sysfs_may_turn(SF_VOLUME)) return -1;
+		for (size_t j = 0; j < n && kbuf[j] >= '0' && kbuf[j] <= '9'; j++) pct = pct * 10 + (kbuf[j] - '0');
+		sound_set_volume((int)pct);
+		return (ssize_t)len;
+	}
+	if (pr->type == SF_CSTATE) {
+		extern int arch_idle_set(int);
+		long v = 0;
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
+		for (size_t j = 0; j < n && kbuf[j] >= '0' && kbuf[j] <= '9'; j++) v = v * 10 + (kbuf[j] - '0');
+		int e = arch_idle_set((int)v);
+		return e ? e : (ssize_t)len;
+	}
+	if (pr->type == SF_BACKLIGHT) {
+		extern int backlight_set(int);
+		long pct = 0;
+		if (!sysfs_may_turn(SF_BACKLIGHT)) return -1;
+		for (size_t j = 0; j < n && kbuf[j] >= '0' && kbuf[j] <= '9'; j++) pct = pct * 10 + (kbuf[j] - '0');
+		int e = backlight_set((int)pct);
+		return e ? e : (ssize_t)len;
+	}
+	if (pr->type == SF_TOUCHPAD) {           /* "tap 0" or "tap 1" */
+		extern int syn_tap __attribute__((weak));   /* no PS/2 on arm */
+		if (!sysfs_may_turn(SF_TOUCHPAD)) return -1;
+		if (n < 5 || memcmp(kbuf, "tap ", 4) != 0 || !&syn_tap) return -22;
+		syn_tap = kbuf[4] == '1';
+		return (ssize_t)len;
+	}
+	if (pr->type == SF_KEYMAP) {
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
+		if (n >= 2 && kbuf[0] == 't' && kbuf[1] == 'r') input_keymap = KEYMAP_TR;
+		else if (n >= 2 && kbuf[0] == 'u' && kbuf[1] == 's') input_keymap = KEYMAP_US;
+		else return -22;
+		return (ssize_t)len;
+	}
 	long v = 0; size_t i = 0;
 	while (i < n && kbuf[i] >= '0' && kbuf[i] <= '9') { v = v * 10 + (kbuf[i] - '0'); i++; }
 	huge2m_nr_set(v);
@@ -209,7 +303,11 @@ static vfs_fops_t sysfs_file_fops = { .read = sysfs_file_read, .write = sysfs_fi
 static vfs_inode_t *sysfs_file_rw(int type, int dev)
 {
 	vfs_inode_t *in = sysfs_file(type, dev);
-	if (in) in->mode = S_IFREG | 0644;
+	if (in) {
+		gid_t g = sysfs_knob_gid(type);
+		in->mode = S_IFREG | (g ? 0664 : 0644);
+		in->gid  = g;
+	}
 	return in;
 }
 
@@ -223,13 +321,14 @@ static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "devices") == 0) return sysfs_dir(&sysfs_devices_iops, -1);
 	if (strcmp(name, "fs")      == 0) return sysfs_dir(&sysfs_fs_iops, -1);
 	if (strcmp(name, "bus")     == 0) return sysfs_dir(&sysfs_bus_iops, -1);
+	if (strcmp(name, "dev")     == 0) { extern vfs_inode_t *drm_sysfs_root(const char *); return drm_sysfs_root("dev"); }
 	return NULL;
 }
 static int sysfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "kernel", "class", "block", "devices", "fs", "bus" };
-	if (idx >= 6) return -1;
+	const char *names[] = { "kernel", "class", "block", "devices", "fs", "bus", "dev" };
+	if (idx >= 7) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
@@ -243,6 +342,12 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "mm") == 0) return sysfs_dir(&sysfs_mm_iops, -1);
+	if (strcmp(name, "keymap") == 0) return sysfs_file_rw(SF_KEYMAP, -1);
+	if (strcmp(name, "volume") == 0) return sysfs_file_rw(SF_VOLUME, -1);
+	if (strcmp(name, "touchpad") == 0) return sysfs_file_rw(SF_TOUCHPAD, -1);
+	if (strcmp(name, "backlight") == 0) return sysfs_file_rw(SF_BACKLIGHT, -1);
+	if (strcmp(name, "cstate") == 0) return sysfs_file_rw(SF_CSTATE, -1);
+	if (strcmp(name, "ranix_thermal") == 0) { extern vfs_inode_t *thermal_sysfs_file(void); return thermal_sysfs_file(); }
 	for (unsigned i = 0; i < 3; i++)
 		if (strcmp(kernel_files[i].name, name) == 0)
 			return sysfs_file(kernel_files[i].type, -1);
@@ -251,8 +356,10 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 static int sysfs_kernel_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx > 3) return -1;
+	if (idx > 5) return -1;
 	out->ino = sys_ino_alloc(); out->next_off = idx + 1;
+	if (idx == 4) { out->mode = S_IFREG | 0644; put_str(out->name, "keymap"); out->name[6] = '\0'; return 0; }
+	if (idx == 5) { out->mode = S_IFREG | 0644; put_str(out->name, "volume"); out->name[6] = '\0'; return 0; }
 	if (idx == 3) { out->mode = S_IFDIR | 0555; put_str(out->name, "mm"); out->name[2] = '\0'; return 0; }
 	out->mode = S_IFREG | 0444;
 	put_str(out->name, kernel_files[idx].name);
@@ -469,14 +576,16 @@ static vfs_inode_t *sysfs_class_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "net") == 0) return sysfs_dir(&sysfs_net_iops, -1);
+	if (strcmp(name, "drm") == 0) { extern vfs_inode_t *drm_sysfs_root(const char *); return drm_sysfs_root("class/drm"); }
 	return NULL;
 }
 static int sysfs_class_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx != 0) return -1;
-	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
-	put_str(out->name, "net"); out->name[3] = '\0';
+	const char *names[] = { "net", "drm" };
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	put_str(out->name, names[idx]); out->name[3] = '\0';
 	return 0;
 }
 
@@ -550,9 +659,12 @@ static vfs_inode_t *sysfs_blockdev_lookup(vfs_inode_t *dir, const char *name)
 	int d = pr ? pr->dev : 0;
 	if (strcmp(name, "size") == 0) return sysfs_file(SF_BLK_SIZE, d);
 	if (strcmp(name, "stat") == 0) return sysfs_file(SF_BLK_STAT, d);
+	if (strcmp(name, "ro") == 0) return sysfs_file(SF_BLK_RO, d);
+	if (strcmp(name, "ro_denied") == 0) return sysfs_file(SF_BLK_RO_DENIED, d);
+	if (strcmp(name, "id") == 0) return sysfs_file(SF_BLK_ID, d);
 	return NULL;
 }
-static const char *blockdev_files[] = { "size", "stat" };
+static const char *blockdev_files[] = { "size", "stat", "ro", "ro_denied", "id" };
 static int sysfs_blockdev_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
@@ -594,18 +706,44 @@ static int sysfs_system_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 static const struct { const char *name; int type; } cpu_files[] = {
 	{ "online", SF_CPU_ONLINE }, { "possible", SF_CPU_POSSIBLE },
 };
+/* cpu0, cpu1, ...: programs count CPUs by these directories (stress-ng, lscpu) */
+static vfs_inode_t *sysfs_cpun_lookup(vfs_inode_t *dir, const char *name) { (void)dir; (void)name; return NULL; }
+static int sysfs_cpun_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out) { (void)dir; (void)idx; (void)out; return -1; }
+static vfs_iops_t sysfs_cpun_iops = { .lookup = sysfs_cpun_lookup, .readdir = sysfs_cpun_readdir };
+
 static vfs_inode_t *sysfs_cpu_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
+	extern int smp_ncpus;
 	for (unsigned i = 0; i < 2; i++)
 		if (strcmp(cpu_files[i].name, name) == 0) return sysfs_file(cpu_files[i].type, -1);
+	if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && name[3] >= '0' && name[3] <= '9') {
+		int n = 0;
+		for (const char *c = name + 3; *c; c++) {
+			if (*c < '0' || *c > '9') return NULL;
+			n = n * 10 + (*c - '0');
+		}
+		if (n < smp_ncpus) return sysfs_dir(&sysfs_cpun_iops, n);
+	}
 	return NULL;
 }
 static int sysfs_cpu_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx >= 2) return -1;
-	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	extern int smp_ncpus;
+	if (idx >= 2 + (uint32_t)smp_ncpus) return -1;
+	out->ino = sys_ino_alloc(); out->next_off = idx + 1;
+	if (idx >= 2) {
+		uint32_t n = idx - 2, k = 3;
+		out->mode = S_IFDIR | 0555;
+		put_str(out->name, "cpu");
+		if (n >= 100) out->name[k++] = (char)('0' + n / 100);
+		if (n >= 10) out->name[k++] = (char)('0' + n / 10 % 10);
+		out->name[k++] = (char)('0' + n % 10);
+		out->name[k] = '\0';
+		return 0;
+	}
+	out->mode = S_IFREG | 0444;
 	put_str(out->name, cpu_files[idx].name); out->name[strlen(cpu_files[idx].name)] = '\0';
 	return 0;
 }

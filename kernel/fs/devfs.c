@@ -9,6 +9,7 @@
 #include <kernel/tty/fb_tty.h>
 #include <kernel/proc.h>
 #include <kernel/capabilities.h>
+#include <kernel/asess.h>
 
 /*
  * devfs — virtual device filesystem at /dev.
@@ -55,7 +56,7 @@ static ssize_t zero_read(vfs_file_t *f, void *buf, size_t len)
 	size_t done = 0;
 	while (done < len) {
 		size_t n = len - done < sizeof(z) ? len - done : sizeof(z);
-		if (copy_to_user((uint8_t *)buf + done, z, n) != 0) break;
+		if (copy_fop_to_user((uint8_t *)buf + done, z, n) != 0) break;
 		done += n;
 	}
 	return (ssize_t)done;
@@ -91,7 +92,7 @@ static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 	while (done < len) {
 		size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
 		csprng_bytes(tmp, n);
-		if (copy_to_user((uint8_t *)buf + done, tmp, n) != 0) break;
+		if (copy_fop_to_user((uint8_t *)buf + done, tmp, n) != 0) break;
 		done += n;
 	}
 	return (ssize_t)done;
@@ -103,8 +104,8 @@ static vfs_fops_t urandom_fops = {
 };
 
 /* ── /dev/kmsg ───────────────────────────────────────────────── */
-/* Reads drain the kernel log ring (one read() returns the whole buffer once,
- * then EOF until more is logged), so `dmesg` shows the boot log; writes append
+/* Reads walk the kernel log ring a line at a time, then EOF until more is logged,
+ * so `dmesg` shows the boot log; writes append
  * to the same ring via kprintf (the printk(3)/logger path). */
 
 /* dmesg_restrict (/proc/sys/kernel/dmesg_restrict): when set, only a privileged
@@ -116,7 +117,7 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 {
 	if (dmesg_restrict) {
 		process_t *c = task_current();
-		if (c && c->euid != 0 && !cap_has(c->cap_effective, CAP_SYS_ADMIN))
+		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN))
 			return -1;   /* EPERM */
 	}
 	size_t total = kprintf_log_len();
@@ -124,12 +125,48 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 	char *tmp = kmalloc(total ? total : 1);
 	if (!tmp) return -12;
 	size_t got = kprintf_read_log(tmp, total);
-	size_t avail = (got > (size_t)f->pos) ? got - (size_t)f->pos : 0;
-	size_t n = avail < len ? avail : len;
-	if (n && copy_fop_to_user(buf, tmp + f->pos, n) != 0) { kfree(tmp); return -14; }
+	if ((size_t)f->pos >= got) { kfree(tmp); return 0; }
+	/* One record a read, "level,seq,usec,flags;text\n": util-linux dmesg parses this. */
+	char *l = tmp + f->pos, *end = l;
+	char *stop = tmp + got;
+	while (end < stop && *end != '\n') end++;
+	size_t ll = (size_t)(end - l);
+	uint64_t us = 0;
+	if (ll > 15 && l[0] == '[') {                  /* "[    1.234000] text" */
+		size_t i = 1;
+		uint64_t sec = 0, frac = 0;
+		while (i < ll && l[i] == ' ') i++;
+		while (i < ll && l[i] >= '0' && l[i] <= '9') sec = sec * 10 + (uint64_t)(l[i++] - '0');
+		if (i < ll && l[i] == '.') i++;
+		while (i < ll && l[i] >= '0' && l[i] <= '9') frac = frac * 10 + (uint64_t)(l[i++] - '0');
+		us = sec * 1000000 + frac;
+		if (i + 2 <= ll && l[i] == ']' && l[i + 1] == ' ') {
+			l += i + 2;
+			ll -= i + 2;
+		}
+	}
+	char head[48];
+	size_t h = 0;
+	head[h++] = '6'; head[h++] = ',';
+	char dig[24];
+	int nd;
+	uint64_t vals[2] = {(uint64_t)f->pos, us};
+	for (int k = 0; k < 2; k++) {
+		uint64_t v = vals[k];
+		nd = 0;
+		do { dig[nd++] = (char)('0' + v % 10); v /= 10; } while (v);
+		while (nd) head[h++] = dig[--nd];
+		head[h++] = ',';
+	}
+	head[h++] = '-'; head[h++] = ';';
+	if (h + ll + 1 > len) { kfree(tmp); return -22; }
+	char nl = '\n';
+	if (copy_fop_to_user(buf, head, h) != 0 ||
+	    copy_fop_to_user((char *)buf + h, l, ll) != 0 ||
+	    copy_fop_to_user((char *)buf + h + ll, &nl, 1) != 0) { kfree(tmp); return -14; }
+	f->pos += (off_t)(end - (tmp + f->pos)) + 1;
 	kfree(tmp);
-	f->pos += (off_t)n;
-	return (ssize_t)n;
+	return (ssize_t)(h + ll + 1);
 }
 
 static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
@@ -140,7 +177,7 @@ static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 	while (done < len) {
 		size_t n = len - done < sizeof(kb) ? len - done : sizeof(kb);
 		if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) break;
-		for (size_t i = 0; i < n; i++) kprintf("%c", kb[i]);
+		for (size_t i = 0; i < n; i++) kprintf(KERN_CONT "%c", kb[i]);
 		done += n;
 	}
 	return (ssize_t)done;
@@ -202,7 +239,7 @@ static int rtc_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 	struct rtc_time r;
 	memset(&r, 0, sizeof(r));
 	epoch_to_rtc(s, &r);
-	return copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r));
+	return copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r)) ? -14 : 0;
 }
 
 static vfs_fops_t rtc_fops = {
@@ -216,6 +253,7 @@ typedef struct devfs_entry {
 	dev_t               rdev;
 	struct devfs_entry *next;
 	void               *priv;
+	gid_t               gid;     /* owning group; uid is always root */
 } devfs_entry_t;
 
 /* ── /dev/stdin, /dev/stdout, /dev/stderr fd-proxy devices ──── */
@@ -292,8 +330,17 @@ void devfs_register_device_priv(const char *name, mode_t mode, dev_t rdev,
 	e->rdev = rdev;
 	e->fops = fops;
 	e->priv = priv;
+	e->gid  = 0;
 	e->next = devfs_list;
 	devfs_list = e;
+}
+
+void devfs_register_device_gid(const char *name, mode_t mode, gid_t gid, dev_t rdev,
+                               vfs_fops_t *fops)
+{
+	devfs_register_device_priv(name, mode, rdev, fops, NULL);
+	for (devfs_entry_t *e = devfs_list; e; e = e->next)
+		if (strcmp(e->name, name) == 0) { e->gid = gid; return; }
 }
 
 void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
@@ -327,6 +374,7 @@ static vfs_inode_t *devfs_inode_for(const devfs_entry_t *e)
 	in->ino = dev_ino_next++;
 	spin_unlock_irq(&dev_ino_lock, f);
 	in->mode    = e->mode;
+	in->gid     = e->gid;
 	in->nlink   = 1;
 	in->rdev    = e->rdev;
 	in->refcount= 1;
@@ -566,6 +614,8 @@ static int devfs_stat(vfs_inode_t *in, vfs_stat_t *out)
 	out->ino   = in->ino;
 	out->mode  = in->mode;
 	out->nlink = 1;
+	out->uid   = in->uid;
+	out->gid   = in->gid;
 	out->rdev  = in->rdev;
 	out->size  = 0;
 	return 0;
@@ -579,12 +629,46 @@ static vfs_iops_t devfs_root_iops = {
 	.stat    = devfs_stat,
 };
 
+/* The /dev of an agent session. The list applies to the mount, not to the caller,
+ * and each mount keeps its own dentries, so a name cached by the host's /dev
+ * cannot answer a lookup here. tty, ptmx and pts are left out: PTYs are one pool
+ * shared with the host, and /dev/pts/N would reach host terminals. */
+static int devfs_session_allows(const char *name)
+{
+	static const char *const allowed[] = {
+		"null", "zero", "full", "random", "urandom", "fd", "stdin", "stdout", "stderr",
+	};
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
+		if (strcmp(allowed[i], name) == 0) return 1;
+	return 0;
+}
+
+static vfs_inode_t *devfs_session_lookup(vfs_inode_t *dir, const char *name)
+{
+	return devfs_session_allows(name) ? devfs_lookup(dir, name) : NULL;
+}
+
+static int devfs_session_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	uint32_t seen = 0;
+	for (uint32_t i = 0; devfs_readdir(dir, i, out) == 0; i++)
+		if (devfs_session_allows(out->name) && seen++ == idx) {
+			out->next_off = idx + 1;
+			return 0;
+		}
+	return -1;
+}
+
+static vfs_iops_t devfs_session_iops = {
+	.lookup  = devfs_session_lookup,
+	.readdir = devfs_session_readdir,
+	.stat    = devfs_stat,
+};
+
 /* ── mount ────────────────────────────────────────────────────── */
 
 int devfs_mount(vfs_mount_t *mnt, void *data)
 {
-	(void)data;
-
 	vfs_inode_t *root_inode = kmalloc(sizeof(*root_inode));
 	if (!root_inode) return -1;
 	memset(root_inode, 0, sizeof(*root_inode));
@@ -592,14 +676,15 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->mode    = S_IFDIR | 0755;
 	root_inode->nlink   = 2;
 	root_inode->refcount= 1;
-	root_inode->iops    = &devfs_root_iops;
+	root_inode->iops    = data && strcmp(data, ASESS_MOUNT_OPT) == 0 ? &devfs_session_iops
+	                                                                  : &devfs_root_iops;
 	root_inode->fops    = &devfs_dir_fops;
 
 	vfs_dentry_t *root_dentry = vfs_dentry_create(NULL, "/", root_inode);
 	if (!root_dentry) { kfree(root_inode); return -1; }
 
 	mnt->root = root_dentry;
-	return 0;
+	return vfs_simple_sb(mnt, NULL);
 }
 
 void devfs_register(void)
