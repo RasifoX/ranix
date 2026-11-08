@@ -24,10 +24,22 @@
 #define SCHED_RR      2
 
 #define NSIG           64
-#define SIGRTMIN       34
+#define SIGRTMIN       32    /* libc keeps 32-34: musl sends SIGTIMER as a queued signal */
 #define SIGRTMAX       64
 #define SIGKILL        9
 #define SIGSTOP        19    /* uncatchable + unblockable, like SIGKILL */
+#ifndef SIGILL
+#define SIGILL         4
+#endif
+#ifndef SIGTRAP
+#define SIGTRAP        5
+#endif
+#ifndef SIGBUS
+#define SIGBUS         7
+#endif
+#ifndef SIGFPE
+#define SIGFPE         8
+#endif
 #define SIGSEGV        11
 #define SIGTERM        15
 #define SIGCHLD        17
@@ -116,16 +128,20 @@ typedef struct process {
 	uint64_t        cutime_ticks;   /* reaped children's user time (times(2)) */
 	uint64_t        cstime_ticks;   /* reaped children's system time */
 	int             nice;          /* -20..19, default 0 */
+	int             oom_score_adj; /* -1000 (never) .. 1000, /proc/PID/oom_score_adj; inherited */
+	int             uname_linux;   /* uname says "Linux": Linux-only programs (Java checks os.name); inherited, kept on exec */
 	struct cpumask *cpu_affinity;  /* sched_setaffinity mask; NULL = all CPUs */
 	int             sched_policy;  /* SCHED_NORMAL/FIFO/RR */
 	int             rt_priority;   /* 1..99 for FIFO/RR, 0 for NORMAL */
 	int             seccomp_mode;  /* 0 off, 1 strict, 2 filter */
-	void           *seccomp_filter;  /* SECCOMP_MODE_FILTER program (sock_filter[]) */
-	unsigned        seccomp_flen;    /* filter instruction count */
+	struct seccomp_filter *seccomp_filter;  /* newest filter of the chain; holds a reference */
 
 	/* ── signals ─────────────────────────────── */
 	uint64_t        sig_pending;
 	uint64_t        sig_mask;             /* per-thread blocked mask */
+	uint64_t        sig_saved_mask;       /* mask to return to, once sig_mask_saved */
+	int             sig_mask_saved;       /* sigsuspend/pselect: sig_mask is temporary until the
+	                                       * signal it let in is delivered or the syscall ends */
 	struct sighand *sighand;              /* signal dispositions, shared across a thread group */
 	struct sigqueue *sigq_head;           /* queued RT siginfo, FIFO per signo, lowest signo first */
 	struct sigqueue *sigq_tail;
@@ -139,7 +155,18 @@ typedef struct process {
 	uint64_t        ptimer_value;     /* ITIMER_PROF: user+sys-CPU ticks until SIGPROF */
 	uint64_t        ptimer_interval;
 	int             in_syscall;       /* 1 while executing a syscall (kernel CPU time) */
+	uint8_t         sys_intr;             /* the syscall just ending returned EINTR, restartable */
+	uint64_t        sys_arg0;             /* its first argument, which aarch64's return overwrites */
+	int             fault_sig;            /* a synchronous fault's signal, until delivered */
+	int             fault_code;           /* si_code */
+	uint64_t        fault_addr, fault_err, fault_trap;
+	uint8_t         in_freeze;        /* stopped by cgroup.freeze on the way to user mode */
+	uint8_t         in_wait;          /* asleep in wait: any thread of the group may be woken by a child */
 	int             last_syscall;     /* arch syscall number last entered (watchdog/diag) */
+	uint64_t        ss_exit_ns;       /* ranix.slowsys: last syscall exit, time in faults since, */
+	uint64_t        ss_fault_ns;      /*   and their count: where user time between syscalls went */
+	uint32_t        ss_faults;
+	int             ss_prevnr;
 
 	/* ── process metadata ────────────────────── */
 	uint64_t        brk;
@@ -163,6 +190,7 @@ typedef struct process {
 	int             ngroups;
 	int             dumpable;  /* 0=not dumpable, 1=dumpable (default) */
 	int             no_new_privs; /* prctl(PR_SET_NO_NEW_PRIVS): sticky, inherited */
+	uint8_t         mdwe;              /* PR_SET_MDWE: refuse W+X mappings; inherited, irreversible */
 	int             pdeathsig;    /* prctl(PR_SET_PDEATHSIG): signal on parent death */
 	uid_t           fsuid;     /* filesystem uid; fs_uid_set==0 → follows euid */
 	gid_t           fsgid;
@@ -176,6 +204,7 @@ typedef struct process {
 	uint64_t        cap_inheritable;
 	int             exit_code;
 	int             killed_by_sig; /* non-zero if exited due to signal */
+	int             group_exiting; /* a sibling ended the group; exit status already set */
 
 	/* ── open files ──────────────────────────── */
 	fd_table_t     *fds;
@@ -192,15 +221,23 @@ typedef struct process {
 	 * threads of a process see one VMA list — see vma_add/vma_clip. */
 
 	/* ── vfork ───────────────────────────────── */
-	pid_t           vfork_parent;  /* -1 if not a vfork child */
 	int             reaped;        /* 1 if waitpid has already returned this child */
 
 	/* ── arch TLS base (FS_BASE on x86_64, TPIDR_EL0 on AArch64) ── */
 	uint64_t        tls_base;
+	uint64_t        user_gs_base;   /* x86_64 arch_prctl(ARCH_SET_GS); Wine keeps its TEB here */
 
 	/* ── wait queue tracking ──────────────────── */
 	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
 	uint64_t        wake_deadline;     /* tick to wake at (0 = none); for timed sleeps */
+	uint64_t        poll_seen, poll_seen_any;   /* event counts when this task last armed */
+#define POLL_KEYS 16
+	const void     *poll_keys[POLL_KEYS];       /* what its poll is watching */
+	uint64_t        poll_kseen[POLL_KEYS];
+	int             poll_nk;                    /* -1: everything */
+	pid_t           vfork_waiter;               /* a vfork child: the parent waiting for its exec or exit */
+	volatile int    vfork_pending;              /* a vfork parent: the child has not let go yet */
+	int             oom_victim;                 /* killed for memory, not gone yet */
 	int             on_cpu;            /* 1 when currently executing on a CPU, protects against wake-up race condition */
 	int             in_rq;             /* 1 when queued in a CPU runqueue (guards double-enqueue) */
 
@@ -219,6 +256,11 @@ typedef struct process {
 	int             ptrace_stop;          /* 0=running, 1=entry stop, 2=exit stop */
 	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
 	int             ptrace_in_syscall;    /* currently sleeping in ptrace_do_stop */
+	int             ptrace_options;       /* PTRACE_SETOPTIONS bits */
+	int             ptrace_inject;        /* signal to deliver after a signal-delivery-stop */
+	int             ptrace_event;         /* PTRACE_EVENT_ to report at the end of this syscall */
+	uint64_t        ptrace_msg;           /* PTRACE_GETEVENTMSG */
+	sigqueue_t      ptrace_si;            /* PTRACE_GETSIGINFO */
 	int             ptrace_stop_sig;      /* WSTOPSIG for the current ptrace-stop (0 → SIGTRAP) */
 	int             single_step;          /* PTRACE_SINGLESTEP: trap after each insn (TF on user return) */
 	void           *uctx;                 /* last trap frame entered from ring3 (ptrace task_pt_regs) */
@@ -250,12 +292,19 @@ typedef struct process {
 	struct { struct pid_namespace *ns; int nr; } pidnrs[PIDNS_MAX_LEVEL];
 	int                   pid_levels;
 	struct user_namespace *user_ns;
+	vfs_dentry_t    resolved;      /* volatile result of the last path resolve */
+	int             exiting;       /* in task_exit: a pending SIGKILL has done its job */
 	struct net_namespace  *net_ns;
 
 	/* cgroup membership (NULL = root cgroup) */
 	void           *cgroup;
 	struct cgroup_namespace *cgroup_ns;
-	long            mem_charged;   /* bytes charged to the cgroup memory controller */
+
+	struct asess   *asess;         /* agent session; set before the task can run, cleared only at exit */
+	int             walk_denied;   /* this syscall's path walk stopped at a directory it may not search */
+	int             walking;       /* this syscall has walked a path; see the deferred frees in vfs.c */
+	char           *walk_anchor[2]; /* this syscall's dirfd paths; see walk_anchored in vfs.c */
+	uint32_t        walk_gen;
 
 	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */
 	uint32_t        refcount;      /* outstanding proc_get pins; PCB freed once 0 and pcb_dead */
@@ -263,8 +312,18 @@ typedef struct process {
 
 	/* ── hung-task detector (khungtaskd) ──────────────────────── */
 	uint8_t         hung_watch;        /* 1 = an uninterruptible block the detector must time out */
-	uint64_t        hung_run_ticks;    /* p->ticks at the last progress check (frozen ⇒ no progress) */
+	uint64_t        hung_switches;     /* dispatch count: short-lived wakeups progress without being on-CPU at a tick */
+	uint64_t        hung_run_ticks;    /* ticks+dispatches at the last progress check (frozen ⇒ no progress) */
 	uint64_t        hung_stall_start;  /* kernel_ticks when the current no-progress window opened (0 = none) */
+	/* kill-always-wins watch: kernel_ticks when SIGKILL was first posted (0 = never),
+	 * and when the last "ignored SIGKILL" report went out */
+	uint64_t        kill_posted_at;
+	uint64_t        kill_reported_at;
+
+	/* the auxiliary vector exec gave the image, for /proc/<pid>/auxv: gdb finds
+	 * a PIE's load address (AT_PHDR, AT_ENTRY) and ld.so (AT_BASE) there */
+	uint64_t        saved_auxv[48];
+	uint32_t        saved_auxv_len;    /* bytes, AT_NULL pair included */
 } process_t;
 
 /* scheduler */
@@ -278,6 +337,17 @@ void       yield(void);
 void       task_sleep(void);
 void       task_sleep_until(uint64_t deadline);
 void       task_sleep_interruptible(void);
+/* Sleep once if cond still holds, tested under sched_lock with interrupts off.
+ * Whoever makes it false and then wakes the task cannot fall between the test and
+ * the sleep, as with an unlocked check before task_sleep_interruptible(). cond must
+ * not take sched_lock. Use it in a loop. */
+extern spinlock_t sched_lock;
+void task_sleep_locked(uint64_t irq_flags);
+#define task_sleep_if(cond) do { \
+	uint64_t f_ = spin_lock_irq(&sched_lock); \
+	if (cond) task_sleep_locked(f_); \
+	else spin_unlock_irq(&sched_lock, f_); \
+} while (0)
 /* Lower the sched_tick deadline-sweep gate to `deadline` (ticks). Callers that
  * arm p->wake_deadline must call this so the sweep doesn't sleep past it. */
 void       sched_note_wake_deadline(uint64_t deadline);
@@ -288,11 +358,22 @@ void       task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags);
 void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);
 int        task_has_actionable_signal(void);
+/* Kill-always-wins (docs: arastirma/ajan-insan-ozellikleri.md). fatal_signal_pending:
+ * p must die (SIGKILL posted, its group is exiting). kloop_should_stop: for long or
+ * data-driven kernel loops; yields when the tick asks and returns 1 when the caller
+ * must abandon the loop (return -EINTR). Call it at least once per iteration of any
+ * loop whose bound comes from user data. */
+int        fatal_signal_pending(process_t *p);
+int        kloop_should_stop(void);
 void       task_signal(process_t *p, int sig);
 void       task_signal_group(process_t *leader, int sig);
+void       task_group_exit(process_t *p, int code, int by_sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
-int        task_pgrp_exists(pid_t pgrp);
-int        task_signal_broadcast(process_t *except, int sig);
+int        task_pgrp_in_session(pid_t pgrp, pid_t sid);
+int        signal_may_send(process_t *sender, process_t *t, int sig);
+int        task_in_group(process_t *p, gid_t g);   /* egid or a supplementary group */
+int        task_kill_many(process_t *sender, pid_t pgrp, int sig);
+void       task_kill_session(struct asess *s);
 /* sigqueue(2)/rt_sigqueueinfo: deliver an RT signal carrying si_value.
  * thread_directed != 0 targets the exact thread `p`; otherwise it is process-
  * directed (any eligible thread of p's group). Returns 0 or -EAGAIN on overflow. */
@@ -307,7 +388,12 @@ int        tty_jobctl_check(void *tty, vfs_fops_t *tty_fops, pid_t fg_pgrp, int 
 /* SIGHUP+SIGCONT a foreground group and detach the ctty of any process whose
  * controlling terminal is `tty`. */
 void       tty_hangup(void *tty, pid_t fg_pgrp);
+int        tty_acquire(void *tty, vfs_fops_t *fops, int steal);  /* 0 taken, 1 already held, -1 EPERM */
+long       tty_check_fg(void *tty, int need_ctty, pid_t nr, pid_t *out);
 void       signal_dispatch(arch_context_t *tf);
+void       task_force_fault(arch_context_t *tf, int sig, int code, uint64_t addr, uint64_t err, uint64_t trap);
+int        task_fault_fatal(int sig);
+int        task_dequeue_signal(process_t *p, uint64_t set, sigqueue_t *si, int *have);
 void       task_exit(void);
 
 process_t *task_current(void);
@@ -323,13 +409,21 @@ void       proc_set_cmdline(process_t *p, const char *block, uint32_t len); /* r
 void       vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags);
 void       vma_clip(process_t *p, uint64_t va, uint64_t len);
 pid_t      proc_fork(uint64_t clone_flags, uint64_t newsp);
-pid_t      proc_vfork(void);
-void       proc_vfork_exec_notify(void);
+pid_t      proc_fork_asess(struct asess *s);   /* fork with the child inside s; see asess_spawn */
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);
+pid_t      proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
+                                int as_process);
+int        proc_move_cgroup(process_t *t, void *cg);  /* 0, -1 at pids.max, -3 no live thread */
 process_t *proc_find(pid_t pid);           /* lookup, no reference — safe only under sched_lock or for an existence check */
+process_t *proc_find_child(pid_t ppid, struct pid_namespace *ns, int nr);
 process_t *proc_get(pid_t pid);            /* lookup + pin (get_task_struct); release with proc_put */
 void       proc_hold(process_t *p);        /* pin a process you already hold a live reference to */
 void       proc_put(process_t *p);         /* drop a proc_get/proc_hold pin (NULL-safe) */
+process_t *proc_get_user(pid_t nr);        /* proc_get for a pid as the caller's pid namespace numbers it */
+pid_t      pid_from_user(pid_t nr);        /* global pid of a caller-visible number; 0 if it has none */
+pid_t      pid_to_user(pid_t global);      /* the caller's number for a global pid; 0 if it has none */
+void       seccomp_fork(process_t *child, process_t *parent);
+void       seccomp_put(struct seccomp_filter *f);
 vm_space_t *proc_get_vm(pid_t pid);        /* pin a target's address space (/proc/<pid>/mem); release with vm_destroy */
 vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid);  /* + sample euid (process_vm_readv access check) */
 fd_table_t *proc_get_fds(pid_t pid);       /* pin a target's fd table (/proc/<pid>/fd); release with fd_table_put */
@@ -345,7 +439,11 @@ enum { PROC_NS_UTS = 0, PROC_NS_IPC, PROC_NS_TIME, PROC_NS_MNT, PROC_NS_PID,
 void      *proc_get_ns(pid_t pid, int kind);
 int        proc_thread_count(pid_t tgid);
 void       proc_wait(pid_t pid);
+int        proc_root_under(const void *top);
 void       proc_reap(process_t *child);
+void       proc_wake_waiters(pid_t tgid);
+void       proc_wake_frozen(void);
+void       proc_wake_tracer(process_t *p);
 void       proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive);
 
 /* set by sys_vfork so the asm syscall path reschedules after handler */
