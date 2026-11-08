@@ -4,6 +4,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
 #include <kernel/proc.h>
+#include <kernel/cgroup.h>
 
 /* ── global socket table (dynamic) ──────────────────────── */
 
@@ -64,7 +65,7 @@ socket_t *sock_alloc(int domain, int type, int proto)
     s->proto  = proto;
     s->tcp_state = TCP_CLOSED;
     s->recv_lock = (spinlock_t)SPINLOCK_INIT;
-    s->net_ns    = current_net_ns();
+    s->net_ns    = net_ns_get(current_net_ns());   /* the fd may outlive every process in it */
     s->so_rcvbuf = 65536;
     s->so_sndbuf = 65536;
     return s;
@@ -87,6 +88,8 @@ void sock_put(socket_t *s)
     skb_t *skb = s->recv_head;
     while (skb) { skb_t *n = skb->next; skb_free(skb); skb = n; }
     if (s->type == SOCK_STREAM) { extern void tcp_sock_free(socket_t *); tcp_sock_free(s); }
+    net_ns_put(s->net_ns);
+    cgroup_file_release(s->cg, sizeof(*s));
     kfree(s);
 }
 
@@ -97,13 +100,77 @@ void sock_free(socket_t *s)
     sock_put(s);   /* drop the alive reference; frees once no lookup holds it */
 }
 
+int sock_own(socket_t *s)
+{
+    return cgroup_charge_file(&s->cg, 0, sizeof(*s)) ? -12 : 0;
+}
+
+/* A stream's receive window goes through whatever the budget says, or a session
+ * at its limit could not so much as report that: the overshoot stops at one window
+ * per socket, and past it the budget refuses. Datagrams have no such need. */
+static int sock_stream_room(const socket_t *s)
+{
+    return s->type == SOCK_STREAM && s->rcv_buffered < s->so_rcvbuf;
+}
+
+/* From receive paths with no meaningful current task. */
+int sock_charge_skb(socket_t *s, skb_t *skb)
+{
+    if (!s->cg) return 0;
+    if (cgroup_charge_to(s->cg, SKB_TRUESIZE(skb), sock_stream_room(s)) != 0) return -1;
+    skb->cg = s->cg;
+    return 0;
+}
+
+void sock_queue_skb(socket_t *s, skb_t *skb)
+{
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    skb->next = NULL;
+    if (s->recv_tail) s->recv_tail->next = skb;
+    else              s->recv_head = skb;
+    s->recv_tail = skb;
+    s->rcv_buffered += skb->len;
+    process_t *w = s->recv_waiter;
+    s->recv_waiter = NULL;
+    spin_unlock_irq(&s->recv_lock, f);
+    if (w) task_wake(w);
+    poll_notify_key(s);
+}
+
 /* ── AF_UNIX send ────────────────────────────────────────── */
 
+/* who sent it: the receiver may ask (SO_PASSCRED). Chromium's zygote learns
+ * its children's pids this way and CHECKs that it did. */
+static void unix_skb_cred(skb_t *skb)
+{
+    process_t *p = task_current();
+    skb->cred_pid = p ? (int32_t)p->tgid : 0;
+    skb->cred_uid = p ? p->uid : 0;
+    skb->cred_gid = p ? p->gid : 0;
+}
+
+/* The sender pays, not the receiver: a session must not be able to fill a host
+ * process's queue for free. -11 when its budget is spent; returns what it took. */
 int unix_send(socket_t *s, const void *data, uint16_t len)
 {
     socket_t *peer = s->unix_peer;
-    if (!peer) return -32; /* EPIPE */
-    sock_tcp_deliver(peer, data, len);
+    if (!peer || s->unix_wr_shut) return -32; /* EPIPE */
+    if (!len) return 0;
+    /* a datagram (or seqpacket) is one message, whole: a stream is cut to skbs */
+    int whole = s->type != SOCK_STREAM;
+    skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
+    if (!skb) return -12;
+    if (!whole && len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    memcpy(skb->data, data, len);
+    skb->len = len;
+    unix_skb_cred(skb);
+    void *cg = cgroup_current();
+    if (cgroup_charge_to(cg, SKB_TRUESIZE(skb), sock_stream_room(peer)) != 0) {
+        skb_free(skb);
+        return -11;
+    }
+    skb->cg = cg;
+    sock_queue_skb(peer, skb);
     return (int)len;
 }
 
@@ -112,13 +179,21 @@ int unix_send(socket_t *s, const void *data, uint16_t len)
 int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int nfiles)
 {
     socket_t *peer = s->unix_peer;
-    if (!peer) return -32; /* EPIPE */
-    skb_t *skb = skb_alloc();
+    if (!peer || s->unix_wr_shut) return -32; /* EPIPE */
+    int whole = s->type != SOCK_STREAM;
+    skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
     if (!skb) return -12;  /* ENOMEM */
-    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
+    if (!whole && len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     if (len) memcpy(skb->data, data, len);
     skb->len = len;
+    unix_skb_cred(skb);
     if (nfiles > SKB_SCM_MAX) nfiles = SKB_SCM_MAX;
+    void *cg = cgroup_current();
+    if (cgroup_charge_to(cg, SKB_TRUESIZE(skb), sock_stream_room(peer)) != 0) {
+        skb_free(skb);
+        return -11;
+    }
+    skb->cg = cg;
     for (int i = 0; i < nfiles; i++) skb->scm_files[i] = files[i];
     skb->scm_nfiles = (uint8_t)nfiles;
 
@@ -131,6 +206,7 @@ int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int
     peer->recv_waiter = NULL;
     spin_unlock_irq(&peer->recv_lock, f);
     if (w) task_wake(w);
+    poll_notify_key(peer);   /* a poll()/epoll waiter hears it too, as for plain data */
     return (int)len;
 }
 
@@ -174,6 +250,8 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
     }
     skb->len = total;
 
+    if (sock_charge_skb(found, skb) != 0) { skb_free(skb); sock_put(found); return; }
+
     uint64_t sf = spin_lock_irq(&found->recv_lock);
     skb->next = NULL;
     if (found->recv_tail) found->recv_tail->next = skb;
@@ -184,7 +262,7 @@ void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *da
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
-    poll_notify();
+    poll_notify_key(found);
     sock_put(found);
 }
 
@@ -214,6 +292,8 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
     skb->len    = len;
     skb->src_ip6 = *src;
 
+    if (sock_charge_skb(found, skb) != 0) { skb_free(skb); sock_put(found); return; }
+
     uint64_t sf = spin_lock_irq(&found->recv_lock);
     skb->next = NULL;
     if (found->recv_tail) found->recv_tail->next = skb;
@@ -224,7 +304,7 @@ void sock_icmp6_deliver(struct net_namespace *ns, const in6_addr_t *src,
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
-    poll_notify();
+    poll_notify_key(found);
     sock_put(found);
 }
 
@@ -255,6 +335,8 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
     skb->src_ip6  = *src;
     skb->src_port = src_port;
 
+    if (sock_charge_skb(found, skb) != 0) { skb_free(skb); sock_put(found); return; }
+
     uint64_t sf = spin_lock_irq(&found->recv_lock);
     skb->next = NULL;
     if (found->recv_tail) found->recv_tail->next = skb;
@@ -265,7 +347,7 @@ void sock_udp6_deliver(struct net_namespace *ns, const in6_addr_t *src, uint16_t
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
-    poll_notify();
+    poll_notify_key(found);
     sock_put(found);
 }
 
@@ -278,7 +360,7 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
         socket_t *s = gsock[i];
         if (!s) continue;
         if (s->net_ns != ns) continue;
-        if (s->type != SOCK_DGRAM) continue;
+        if (s->type != SOCK_DGRAM || s->domain == AF_NETLINK) continue;
         if (s->local_port != dst_port) continue;
         found = s;
         sock_hold(s);
@@ -295,6 +377,8 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
     skb->src_ip   = src_ip;
     skb->src_port = src_port;
 
+    if (sock_charge_skb(found, skb) != 0) { skb_free(skb); sock_put(found); return; }
+
     uint64_t sf = spin_lock_irq(&found->recv_lock);
     skb->next = NULL;
     if (found->recv_tail) found->recv_tail->next = skb;
@@ -305,6 +389,6 @@ void sock_udp_deliver(struct net_namespace *ns, uint32_t src_ip, uint16_t src_po
     spin_unlock_irq(&found->recv_lock, sf);
 
     if (waiter) task_wake(waiter);
-    poll_notify();
+    poll_notify_key(found);
     sock_put(found);
 }

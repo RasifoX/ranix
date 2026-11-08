@@ -1,3 +1,4 @@
+#include <kernel/smp.h>
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/capabilities.h>
@@ -17,7 +18,11 @@
 #include <kernel/hal.h>
 
 #include <kernel/nsproxy.h>
+#include <kernel/asess.h>
 #include <kernel/cgroup.h>
+#include <kernel/irq.h>
+#include <kernel/hwdiag.h>
+#include <kernel/ksyms.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -88,11 +93,33 @@ static int fill_cpuinfo(char *buf, size_t sz)
 		pb_str(&b, "CPU revision\t: 3\n\n");
 #else
 		pb_str(&b, "processor\t: "); pb_u64(&b, i); pb_char(&b, '\n');
-		pb_str(&b, "vendor_id\t: GenuineRanix\n");
-		pb_str(&b, "cpu family\t: 6\n");
-		pb_str(&b, "model\t\t: 0\n");
-		pb_str(&b, "model name\t: Ranix Virtual CPU\n");
-		pb_str(&b, "stepping\t: 0\n");
+		{
+			uint32_t r[12], a, bx, c, d;
+#define CPUID(l) __asm__ volatile("cpuid" : "=a"(a), "=b"(bx), "=c"(c), "=d"(d) : "a"(l), "c"(0))
+			char v[13], br[49];
+			CPUID(0);
+			((uint32_t *)v)[0] = bx; ((uint32_t *)v)[1] = d; ((uint32_t *)v)[2] = c;
+			v[12] = 0;
+			pb_str(&b, "vendor_id\t: "); pb_str(&b, v); pb_char(&b, '\n');
+			CPUID(1);
+			uint32_t fam = (a >> 8) & 15, mod = (a >> 4) & 15;
+			if (fam == 15) fam += (a >> 20) & 0xFF;
+			if (fam == 6 || fam >= 15) mod |= (a >> 12) & 0xF0;
+			uint32_t step = a & 15;
+			pb_str(&b, "cpu family\t: "); pb_u64(&b, fam); pb_char(&b, '\n');
+			pb_str(&b, "model\t\t: "); pb_u64(&b, mod); pb_char(&b, '\n');
+			for (uint32_t l = 0; l < 3; l++) {
+				CPUID(0x80000002 + l);
+				r[l * 4] = a; r[l * 4 + 1] = bx; r[l * 4 + 2] = c; r[l * 4 + 3] = d;
+			}
+			memcpy(br, r, 48);
+			br[48] = 0;
+			char *bp = br;
+			while (*bp == ' ') bp++;
+			pb_str(&b, "model name\t: "); pb_str(&b, bp); pb_char(&b, '\n');
+			pb_str(&b, "stepping\t: "); pb_u64(&b, step); pb_char(&b, '\n');
+#undef CPUID
+		}
 		pb_str(&b, "cpu MHz\t\t: 1000.000\n");
 		pb_str(&b, "cache size\t: 4096 KB\n");
 		pb_str(&b, "bogomips\t: 2000.00\n\n");
@@ -145,17 +172,23 @@ static int fill_stat(char *buf, size_t sz)
 	extern volatile uint64_t kernel_ticks;
 	extern int smp_ncpus;
 	pb_t b = {buf, sz};
+	uint64_t tb = 0, ti = 0;
+	for (int i = 0; i < smp_ncpus; i++)
+		if (all_cpus[i]) { tb += all_cpus[i]->busy_ticks; ti += all_cpus[i]->idle_ticks; }
+	(void)kernel_ticks;
 	pb_str(&b, "cpu  ");
-	pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
+	pb_u64(&b, TICKS_USER(tb)); pb_str(&b, " 0 0 "); pb_u64(&b, TICKS_USER(ti)); pb_str(&b, " 0 0 0 0\n");
 	for (int i = 0; i < smp_ncpus; i++) {
 		pb_str(&b, "cpu"); pb_u64(&b, i); pb_str(&b, " ");
-		pb_u64(&b, kernel_ticks); pb_str(&b, " 0 0 0 0 0 0 0\n");
+		pb_u64(&b, TICKS_USER(all_cpus[i] ? all_cpus[i]->busy_ticks : 0)); pb_str(&b, " 0 0 ");
+		pb_u64(&b, TICKS_USER(all_cpus[i] ? all_cpus[i]->idle_ticks : 0)); pb_str(&b, " 0 0 0 0\n");
 	}
 	pb_str(&b, "intr 0\n");
 	pb_str(&b, "ctxt 0\n");
 	pb_str(&b, "btime 0\n");          /* boot epoch — vmstat/uptime read these */
 	pb_str(&b, "processes "); pb_u64(&b, (uint64_t)task_count()); pb_char(&b, '\n');
-	pb_str(&b, "procs_running 1\n");
+	extern int sched_running_now(void);
+	pb_str(&b, "procs_running "); pb_u64(&b, (uint64_t)sched_running_now()); pb_char(&b, '\n');
 	pb_str(&b, "procs_blocked 0\n");
 	return (int)(sz - b.rem);
 }
@@ -163,11 +196,60 @@ static int fill_stat(char *buf, size_t sz)
 static int fill_loadavg(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
-	pb_str(&b, "0.00 0.00 0.00 1/");
+	extern uint64_t load_avg[3];
+	extern int sched_running_now(void);
+	for (int i = 0; i < 3; i++) {
+		uint64_t v = load_avg[i] * 100 / 1024;
+		pb_u64(&b, v / 100);
+		pb_char(&b, '.');
+		pb_char(&b, (char)('0' + v / 10 % 10));
+		pb_char(&b, (char)('0' + v % 10));
+		pb_char(&b, ' ');
+	}
+	pb_u64(&b, (uint64_t)sched_running_now());
+	pb_char(&b, '/');
 	pb_u64(&b, (uint64_t)task_count());
 	pb_str(&b, " ");
 	pb_u64(&b, (uint64_t)task_current()->pid);
 	pb_char(&b, '\n');
+	return (int)(sz - b.rem);
+}
+
+static void pb_u64_right(pb_t *b, uint64_t v, int width)
+{
+	int digits = 1;
+	for (uint64_t t = v; t >= 10; t /= 10) digits++;
+	while (width-- > digits) pb_char(b, ' ');
+	pb_u64(b, v);
+}
+
+/* IRQ numbers are the arch's own (vectors on x86), labelled by handler symbol */
+static int fill_interrupts(char *buf, size_t sz)
+{
+	extern int smp_ncpus;
+	pb_t b = {buf, sz};
+	int cpus = smp_ncpus < 32 ? smp_ncpus : 32;
+	pb_str(&b, "    ");
+	for (int c = 0; c < cpus; c++) {
+		pb_str(&b, "       CPU");
+		pb_u64(&b, (uint64_t)c);
+	}
+	pb_char(&b, '\n');
+	for (uint32_t irq = 0; irq < 128; irq++) {
+		uint64_t handler = 0, total = 0, off = 0;
+		for (int c = 0; c < cpus; c++) total += irq_stat(irq, c, &handler);
+		if (!handler && !total) continue;
+		pb_u64_right(&b, irq, 3);
+		pb_char(&b, ':');
+		for (int c = 0; c < cpus; c++) {
+			uint64_t unused;
+			pb_u64_right(&b, irq_stat(irq, c, &unused), 11);
+		}
+		const char *name = handler ? ksym_lookup(handler, &off) : NULL;
+		pb_str(&b, "   ");
+		pb_str(&b, name ? name : "unhandled");
+		pb_char(&b, '\n');
+	}
 	return (int)(sz - b.rem);
 }
 
@@ -190,6 +272,15 @@ static uint64_t proc_vm_bytes(process_t *p)
 	return total;
 }
 
+/* Resident: what the space was charged for (pages faulted in or allocated up front),
+ * less its page tables. Reserved but untouched ranges cost nothing and count nothing. */
+static uint64_t proc_rss_bytes(process_t *p)
+{
+	if (!p->vm) return 0;
+	long n = p->vm->mem_charged - p->vm->pt_charged;
+	return n > 0 ? (uint64_t)n : 0;
+}
+
 static int fill_proc_status(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
@@ -203,6 +294,11 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_str(&b, "Tgid:\t"); pb_u64(&b, p->tgid ? p->tgid : p->pid); pb_char(&b, '\n');
 	pb_str(&b, "Pid:\t");  pb_u64(&b, p->pid); pb_char(&b, '\n');
 	pb_str(&b, "PPid:\t"); pb_u64(&b, p->ppid); pb_char(&b, '\n');
+	pb_str(&b, "TracerPid:\t"); pb_u64(&b, (uint64_t)p->tracer); pb_char(&b, '\n');
+	pb_str(&b, "PtraceStop:\t"); pb_u64(&b, (uint64_t)p->ptrace_stop); pb_char(&b, ' ');
+	pb_u64(&b, (uint64_t)p->ptrace_stop_reported); pb_char(&b, ' ');
+	pb_u64(&b, (uint64_t)p->ptrace_in_syscall); pb_char(&b, ' ');
+	pb_u64(&b, (uint64_t)p->ptrace_opts); pb_char(&b, '\n');
 	pb_str(&b, "Uid:\t");
 	pb_u64(&b, p->uid);  pb_char(&b, '\t');
 	pb_u64(&b, p->euid); pb_char(&b, '\t');
@@ -220,10 +316,11 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	}
 	pb_char(&b, '\n');
 	uint64_t vm_kb = proc_vm_bytes(p) / 1024;
+	uint64_t rss_kb = proc_rss_bytes(p) / 1024;
 	pb_str(&b, "VmPeak:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "VmSize:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
-	pb_str(&b, "VmHWM:\t");  pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
-	pb_str(&b, "VmRSS:\t");  pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
+	pb_str(&b, "VmHWM:\t");  pb_u64(&b, rss_kb); pb_str(&b, " kB\n");
+	pb_str(&b, "VmRSS:\t");  pb_u64(&b, rss_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "Threads:\t"); pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, '\n');
 	uint64_t sigign = 0, sigcgt = 0;
 	for (int _i = 0; p->sighand && _i < NSIG; _i++) {
@@ -259,10 +356,10 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	pb_u64(&b, (uint64_t)p->pgrp); pb_char(&b, ' ');            /* 5: pgrp */
 	pb_u64(&b, (uint64_t)p->sid);  pb_char(&b, ' ');            /* 6: session */
 	pb_str(&b, "0 -1 0 0 0 0 0 ");                              /* 7-13: tty_nr tpgid flags flt counters */
-	pb_u64(&b, p->utime_ticks);  pb_char(&b, ' ');              /* 14: utime  */
-	pb_u64(&b, p->stime_ticks);  pb_char(&b, ' ');              /* 15: stime  */
-	pb_u64(&b, p->cutime_ticks); pb_char(&b, ' ');              /* 16: cutime */
-	pb_u64(&b, p->cstime_ticks); pb_char(&b, ' ');              /* 17: cstime */
+	pb_u64(&b, TICKS_USER(p->utime_ticks));  pb_char(&b, ' ');              /* 14: utime  */
+	pb_u64(&b, TICKS_USER(p->stime_ticks));  pb_char(&b, ' ');              /* 15: stime  */
+	pb_u64(&b, TICKS_USER(p->cutime_ticks)); pb_char(&b, ' ');              /* 16: cutime */
+	pb_u64(&b, TICKS_USER(p->cstime_ticks)); pb_char(&b, ' ');              /* 17: cstime */
 	if (prio < 0) { pb_char(&b, '-'); pb_u64(&b, (uint64_t)(-prio)); }       else pb_u64(&b, (uint64_t)prio);
 	pb_char(&b, ' ');                                           /* 18: priority */
 	if (p->nice < 0) { pb_char(&b, '-'); pb_u64(&b, (uint64_t)(-p->nice)); } else pb_u64(&b, (uint64_t)p->nice);
@@ -271,21 +368,58 @@ static int fill_proc_stat(char *buf, size_t sz, int pid)
 	uint64_t vm_bytes = proc_vm_bytes(p);
 	pb_str(&b, "0 ");                                           /* 21: itrealvalue */
 	pb_u64(&b, p->start_tick);   pb_char(&b, ' ');              /* 22: starttime (ticks since boot) */
-	pb_u64(&b, vm_bytes ? vm_bytes : p->brk); pb_char(&b, ' '); /* 23: vsize (bytes) */
-	pb_u64(&b, vm_bytes / PAGE_SIZE); pb_char(&b, ' ');         /* 24: rss (pages) */
+	pb_u64(&b, vm_bytes); pb_char(&b, ' '); /* 23: vsize (bytes) */
+	pb_u64(&b, proc_rss_bytes(p) / PAGE_SIZE); pb_char(&b, ' '); /* 24: rss (pages) */
 	pb_str(&b, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");  /* 25-52 */
 	proc_put(p);
 	return (int)(sz - b.rem);
 }
 
+/* /proc/PID/auxv — the auxiliary vector its image started with, binary. */
+static int fill_proc_auxv(char *buf, size_t sz, int pid)
+{
+	if (!proc_may_access(pid)) return 0;
+	process_t *p = find_proc(pid);
+	if (!p) return 0;
+	size_t n = p->saved_auxv_len;
+	if (n > sz) n = sz;
+	memcpy(buf, p->saved_auxv, n);
+	proc_put(p);
+	return (int)n;
+}
+
 /* /proc/PID/statm — size resident shared text lib data dt, all in pages. */
+/* What a task is blocked in: "nr arg0 arg1 arg2", or "running" in user mode. */
+static int fill_proc_syscall(char *buf, size_t sz, int pid)
+{
+	process_t *p = find_proc(pid);
+	pb_t b = {buf, sz};
+	process_t *me = task_current();
+	if (!p) return 0;
+	if (me->euid == 0 || me->euid == p->euid) {
+		arch_context_t *c = p->uctx;
+		if (!p->in_syscall || !c) {
+			pb_str(&b, "running\n");
+		} else {
+			pb_u64(&b, (uint64_t)p->last_syscall);     pb_char(&b, ' ');
+			pb_u64(&b, (uint64_t)CTX_SYSCALL_ARG0(c)); pb_char(&b, ' ');
+			pb_u64(&b, (uint64_t)CTX_SYSCALL_ARG1(c)); pb_char(&b, ' ');
+			pb_u64(&b, (uint64_t)CTX_SYSCALL_ARG2(c)); pb_char(&b, '\n');
+		}
+	}
+	proc_put(p);
+	return (int)(sz - b.rem);
+}
+
 static int fill_proc_statm(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
 	pb_t b = {buf, sz};
 	uint64_t vmpg = p ? proc_vm_bytes(p) / PAGE_SIZE : 0;
-	uint64_t size = vmpg ? vmpg : (p && p->brk ? p->brk / PAGE_SIZE : 64);
-	uint64_t res  = size;   /* resident == mapped (no per-page accounting) */
+	uint64_t size = vmpg ? vmpg : (p && p->vm && p->vm->brk ? p->vm->brk / PAGE_SIZE : 64);
+	/* resident: the pages this space was charged for, not what it reserved; a
+	 * browser reserving terabytes for its sandbox is not using them */
+	uint64_t res  = p ? proc_rss_bytes(p) / PAGE_SIZE : size;
 	pb_u64(&b, size);                  pb_char(&b, ' ');   /* size     */
 	pb_u64(&b, res);                   pb_str(&b, " 0 1 0 ");/* resident shared text lib */
 	pb_u64(&b, size > 1 ? size - 1 : 0); pb_str(&b, " 0\n"); /* data dt */
@@ -339,7 +473,10 @@ static int fill_proc_filesystems(char *buf, size_t sz)
 		const char *name = vfs_fstype_name(i);
 		if (!name) break;
 		/* block-backed filesystems omit the "nodev" tag */
-		if (strcmp(name, "ext2") != 0) pb_str(&b, "nodev");
+		static const char *const BLK[] = {"ext2", "ext4", "vfat", "fat", "msdos", "exfat", "ntfs", "iso9660", "iso", NULL};
+		int blk = 0;
+		for (int k = 0; BLK[k]; k++) blk |= !strcmp(name, BLK[k]);
+		if (!blk) pb_str(&b, "nodev");
 		pb_char(&b, '\t');
 		pb_str(&b, name);
 		pb_char(&b, '\n');
@@ -403,7 +540,11 @@ typedef struct {
 #define PROC_F_P_MAPS    13
 #define PROC_F_P_COMM    14
 #define PROC_F_P_STATM   19
+#define PROC_F_P_SYSCALL 96
+#define PROC_F_P_AUXV    97
 #define PROC_F_P_MOUNTINFO 25
+#define PROC_F_P_OOMADJ  98
+#define PROC_F_P_OOMSCORE 99
 #define PROC_F_NET_DEV   20
 #define PROC_F_NET_TCP   21
 #define PROC_F_NET_UDP   22
@@ -414,6 +555,7 @@ typedef struct {
 /* /proc/sys entries */
 #define PROC_F_SYS_HZ            30
 #define PROC_F_SYS_HOSTNAME      31
+#define PROC_F_SYS_OSTYPE        26
 #define PROC_F_SYS_DOMAINNAME    32
 #define PROC_F_SYS_OVERCOMMIT    33
 #define PROC_F_SYS_NGROUPS_MAX   34
@@ -425,12 +567,19 @@ typedef struct {
 #define PROC_F_SYS_RMEM_MAX      40
 #define PROC_F_SYS_WMEM_MAX      41
 #define PROC_F_SYS_NFILE         42
+#define PROC_F_SYS_DENTRY        50
 #define PROC_F_SYS_RANDOMIZE_VA  43
 #define PROC_F_SYS_CORE_PATTERN  44
 #define PROC_F_SYS_KPTR_RESTRICT  45
 #define PROC_F_SYS_DMESG_RESTRICT 46
 #define PROC_F_SYS_MAX_MAP_COUNT  47
 #define PROC_F_SYS_SWAPPINESS     48
+#define PROC_F_INTERRUPTS         49
+#define PROC_F_ASESS_STATUS       90
+#define PROC_F_ASESS_TASKS        91
+#define PROC_F_ASESS_DENIED       92
+#define PROC_F_HWDIAG             93
+#define PROC_F_SYS_RANIX_DEADLINE 94
 
 /* kernel.kptr_restrict: 0 = show kernel pointers, 1 = hide from non-root, 2 =
  * hide from all. Default 1. No raw kernel pointer reaches /proc today, so this
@@ -459,7 +608,7 @@ static int fill_partitions(char *buf, size_t sz)
 	int n = block_device_count();
 	for (int i = 0; i < n; i++) {
 		block_device_t *d = block_device_get(i);
-		if (!d) continue;
+		if (!d || !d->size_blocks) continue;   /* a pulled disk, a partition no longer there */
 		pb_str(&b, "   8 "); pb_u64(&b, (uint64_t)i); pb_str(&b, " ");
 		pb_u64(&b, d->size_blocks / 2); pb_str(&b, " ");
 		pb_str(&b, d->name); pb_char(&b, '\n');
@@ -493,6 +642,9 @@ static int fill_vmstat(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+static int fill_asess_status(uint64_t id, char *buf, size_t sz);
+static int fill_asess_tasks(uint64_t id, char *buf, size_t sz);
+static int fill_asess_denied(uint64_t id, char *buf, size_t sz);
 static int fill_net_dev(char *buf, size_t sz);
 static int fill_net_tcp(char *buf, size_t sz);
 static int fill_net_udp(char *buf, size_t sz);
@@ -519,6 +671,8 @@ static const struct {
 	{ "vmstat",   PROC_F_VMSTAT   },
 	{ "partitions", PROC_F_PARTITIONS },
 	{ "diskstats", PROC_F_DISKSTATS },
+	{ "interrupts", PROC_F_INTERRUPTS },
+	{ "hwdiag",   PROC_F_HWDIAG   },
 };
 #define ROOT_FILES_N ((int)(sizeof(root_files) / sizeof(root_files[0])))
 
@@ -533,12 +687,19 @@ static const struct {
 	{ "maps",    PROC_F_P_MAPS    },
 	{ "comm",    PROC_F_P_COMM    },
 	{ "statm",   PROC_F_P_STATM   },
+	{ "syscall", PROC_F_P_SYSCALL },
+	{ "auxv",    PROC_F_P_AUXV    },
 	{ "mountinfo", PROC_F_P_MOUNTINFO },
+	{ "oom_score_adj", PROC_F_P_OOMADJ },
+	{ "oom_score", PROC_F_P_OOMSCORE },
 };
 #define PID_FILES_N ((int)(sizeof(pid_files) / sizeof(pid_files[0])))
 
 /* ── virtual file ops ────────────────────────────────────────── */
 
+/* drivers/watchdog/wdog_core.c, x86_64 only */
+extern unsigned wdog_deadline_left(void) __attribute__((weak));
+extern int wdog_deadline_set(unsigned secs) __attribute__((weak));
 #define PROCFS_BUF_SIZE 4096
 
 static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
@@ -559,6 +720,11 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_UPTIME:   n = fill_uptime(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_STAT:     n = fill_stat(tmp,     PROCFS_BUF_SIZE); break;
 	case PROC_F_LOADAVG:  n = fill_loadavg(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_INTERRUPTS: n = fill_interrupts(tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_HWDIAG:   n = hwdiag_fill(tmp,   PROCFS_BUF_SIZE); break;
+	case PROC_F_ASESS_STATUS: n = fill_asess_status((uint64_t)pr->pid, tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_ASESS_TASKS:  n = fill_asess_tasks((uint64_t)pr->pid, tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_ASESS_DENIED: n = fill_asess_denied((uint64_t)pr->pid, tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_CMDLINE:  n = fill_cmdline(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_FILESYSTEMS: n = fill_proc_filesystems(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_MODULES:  n = fill_modules(tmp,  PROCFS_BUF_SIZE); break;
@@ -569,6 +735,34 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_P_STATUS: n = fill_proc_status(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STAT:   n = fill_proc_stat(tmp,   PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_STATM:  n = fill_proc_statm(tmp,  PROCFS_BUF_SIZE, pr->pid); break;
+	case PROC_F_P_OOMADJ:
+	case PROC_F_P_OOMSCORE: {
+		process_t *p = find_proc(pr->pid);
+		long v = 0;
+		if (p) {
+			if (pr->type == PROC_F_P_OOMADJ) v = p->oom_score_adj;
+			else {                              /* 0..2000: share of memory plus the adjustment */
+				extern uint64_t buddy_total_pages(void);
+				uint64_t tot = buddy_total_pages() * 4096UL;
+				v = tot ? (long)((uint64_t)proc_rss_bytes(p) * 1000 / tot) : 0;
+				v += p->oom_score_adj;
+				if (v < 0) v = 0;
+				if (p->oom_score_adj <= -1000) v = 0;
+			}
+			proc_put(p);
+		}
+		char nb[24]; int k = 0, neg = v < 0; unsigned long u = neg ? (unsigned long)-v : (unsigned long)v;
+		char rv[24]; int r = 0;
+		do { rv[r++] = (char)('0' + u % 10); u /= 10; } while (u);
+		if (neg) nb[k++] = '-';
+		while (r) nb[k++] = rv[--r];
+		nb[k++] = '\n';
+		memcpy(tmp, nb, (size_t)k);
+		n = k;
+		break;
+	}
+	case PROC_F_P_SYSCALL: n = fill_proc_syscall(tmp, PROCFS_BUF_SIZE, pr->pid); break;
+	case PROC_F_P_AUXV:   n = fill_proc_auxv(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_MOUNTINFO: n = (int)vfs_proc_mountinfo(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_P_CMDLINE:n = fill_proc_cmdline(tmp, PROCFS_BUF_SIZE, pr->pid); break;
 	case PROC_F_P_MAPS:   n = fill_proc_maps(tmp,    PROCFS_BUF_SIZE, pr->pid); break;
@@ -580,6 +774,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_UNIX:  n = fill_net_unix(tmp,  PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_OSTYPE:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, task_current()->uname_linux ? "Linux" : "Ranix"); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->nodename); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DOMAINNAME:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->domainname); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_OVERCOMMIT:   { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -591,10 +786,12 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_WMEM_DEFAULT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"212992\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RMEM_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"134217728\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_WMEM_MAX:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"134217728\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_DENTRY:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)vfs_dentry_count()); pb_str(&b,"\t0\t45\t0\t0\t0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_NFILE:        { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"4096\t0\t65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_CORE_PATTERN: { extern char core_pattern[128]; pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -620,13 +817,37 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 	procfs_inode_priv_t *pr = f->inode->priv;
 	if (!pr) return -1;
 
+	if (pr->type == PROC_F_P_OOMADJ) {
+		char tmp[16];
+		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -14;
+		tmp[n] = '\0';
+		int neg = tmp[0] == '-', i = neg, v = 0;
+		if (tmp[i] < '0' || tmp[i] > '9') return -22;
+		for (; tmp[i] >= '0' && tmp[i] <= '9'; i++) v = v * 10 + (tmp[i] - '0');
+		if (neg) v = -v;
+		if (v < -1000 || v > 1000) return -22;
+		process_t *p = find_proc(pr->pid);
+		if (!p) return -3;
+		process_t *me = task_current();
+		/* anyone may make themselves a likelier victim; lowering takes root */
+		int ok = (me->euid == 0) || ((me->euid == p->uid) && v >= p->oom_score_adj);
+		if (ok) p->oom_score_adj = v;
+		proc_put(p);
+		return ok ? (ssize_t)len : -13;
+	}
+
 	if (pr->type == PROC_F_SYS_HOSTNAME) {
 		if (len == 0 || len >= 65) return -22;
 		char tmp[65];
-		if (copy_from_user(tmp, buf, len) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
 		size_t n = len;
 		if (n > 0 && tmp[n-1] == '\n') n--;
 		if (n >= 65) return -22;
+		process_t *wr = task_current();
+		if (!capable_task(wr, CAP_SYS_ADMIN) &&
+		    !(cap_has(wr->cap_effective, CAP_SYS_ADMIN) && wr->uts_ns && wr->uts_ns != &init_uts_ns))
+			return -1; /* EPERM */
 		if (n > 0) {
 			uts_namespace_t *ns = current_uts();
 			memcpy(ns->nodename, tmp, n);
@@ -636,21 +857,39 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	if (pr->type == PROC_F_SYS_CORE_PATTERN) {
 		extern char core_pattern[128];
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
 		if (len == 0 || len >= 128) return -22;
 		char tmp[128];
-		if (copy_from_user(tmp, buf, len) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
 		size_t n = len;
 		if (n > 0 && tmp[n-1] == '\n') n--;
 		memcpy(core_pattern, tmp, n);
 		core_pattern[n] = '\0';
 		return (ssize_t)len;
 	}
+	if (pr->type == PROC_F_SYS_RANIX_DEADLINE) {
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
+		char tmp[16];
+		if (len == 0 || len >= sizeof(tmp)) return -22;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
+		size_t n = len;
+		if (tmp[n-1] == '\n') n--;
+		if (n == 0 || n > 9) return -22;
+		unsigned v = 0;
+		for (size_t i = 0; i < n; i++) {
+			if (tmp[i] < '0' || tmp[i] > '9') return -22;
+			v = v * 10 + (unsigned)(tmp[i] - '0');
+		}
+		if (!wdog_deadline_set) return -38; /* ENOSYS: no deadline on this arch */
+		int r = wdog_deadline_set(v);
+		return r ? r : (ssize_t)len;
+	}
 	if (pr->type == PROC_F_SYS_KPTR_RESTRICT || pr->type == PROC_F_SYS_DMESG_RESTRICT) {
 		process_t *c = task_current();
-		if (c && c->euid != 0 && !cap_has(c->cap_effective, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		char tmp[16];
 		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
-		if (copy_from_user(tmp, buf, n) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -14;
 		tmp[n] = '\0';
 		int v = (tmp[0] >= '0' && tmp[0] <= '9') ? tmp[0] - '0' : 0;
 		if (pr->type == PROC_F_SYS_KPTR_RESTRICT) { if (v > 2) v = 2; kptr_restrict = v; }
@@ -681,9 +920,7 @@ static uint64_t proc_ino_alloc(void)
 }
 
 /* ── /proc/<pid>/mem — cross-process memory R/W (gdb) ────────────────────────
- * The file offset is the virtual address in the target's address space. We
- * briefly switch to the target's page tables to copy, like ptrace PEEKDATA. */
-extern void arch_vm_switch(uint64_t root, unsigned asid);
+ * The file offset is the virtual address in the target's address space. */
 
 static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 {
@@ -691,28 +928,25 @@ static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 	if (!proc_may_access(pr->pid)) return -1;   /* EPERM — ptrace gate */
 	vm_space_t *vm = proc_get_vm(pr->pid);   /* pinned; vm_destroy to release */
 	if (!vm) return -3;   /* ESRCH */
-	process_t *cur = task_current();
 	uint64_t vaddr = (uint64_t)f->pos;
 	char tmp[256];
 	size_t done = 0;
 	while (done < len) {
 		size_t n = len - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+		size_t got;
 		if (write) {
 			if (copy_from_user(tmp, (char *)ubuf + done, n) != 0) break;
-			arch_vm_switch((uint64_t)vm->root, vm->asid);
-			memcpy((void *)(vaddr + done), tmp, n);
-			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+			got = vm_access_remote(vm, vaddr + done, tmp, n, 1);
 		} else {
-			arch_vm_switch((uint64_t)vm->root, vm->asid);
-			memcpy(tmp, (void *)(vaddr + done), n);
-			arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
-			if (copy_to_user((char *)ubuf + done, tmp, n) != 0) break;
+			got = vm_access_remote(vm, vaddr + done, tmp, n, 0);
+			if (got && copy_to_user((char *)ubuf + done, tmp, got) != 0) break;
 		}
-		done += n;
+		done += got;
+		if (got < n) break;
 	}
 	f->pos += (long)done;
 	vm_destroy(vm);   /* drop our pin */
-	return (ssize_t)done;
+	return done ? (ssize_t)done : (len ? -5 : 0);   /* EIO: nothing mapped there */
 }
 
 static ssize_t procfs_mem_read(vfs_file_t *f, void *buf, size_t len)
@@ -745,7 +979,7 @@ static vfs_inode_t *procfs_inode_file(int pid, int type)
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino     = proc_ino_alloc();
-	in->mode    = S_IFREG | 0444;
+	in->mode    = S_IFREG | (type == PROC_F_P_OOMADJ ? 0644 : 0444);
 	in->nlink   = 1;
 	in->refcount= 1;
 	in->fops    = &procfs_fops;
@@ -942,10 +1176,11 @@ static const char *ns_kinds[] = { "uts", "ipc", "time", "mnt", "pid", "user", "n
 
 typedef struct { int pid; int kind; } procfs_nslink_priv_t;
 
-static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+/* Identity of pid's namespace of this kind (pid 0 = caller); 0 if gone. */
+static unsigned long nslink_inum(int pid, int kind, const char **prefix_out)
 {
-	procfs_nslink_priv_t *pp = in->priv;
-	if (!pp) return -1;
+	procfs_nslink_priv_t tmp = { pid, kind };
+	procfs_nslink_priv_t *pp = &tmp;
 
 	/* Pin the target's ns of this kind, snapshot its inum, then drop the pin —
 	 * so a concurrent exit can never free the ns out from under the read. */
@@ -965,7 +1200,7 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 		}
 	} else {
 		void *ns = proc_get_ns((pid_t)pp->pid, pp->kind);
-		if (!ns) return -1;
+		if (!ns) return 0;
 		switch (pp->kind) {
 		case NS_IPC:    prefix = "ipc:[";    inum = ((ipc_namespace_t *)ns)->inum;  ipc_ns_put(ns);  break;
 		case NS_TIME:   prefix = "time:[";   inum = ((time_namespace_t *)ns)->inum; time_ns_put(ns); break;
@@ -977,6 +1212,17 @@ static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 		default:        prefix = "uts:[";    inum = ((uts_namespace_t *)ns)->inum;  uts_ns_put(ns);  break;
 		}
 	}
+	if (prefix_out) *prefix_out = prefix;
+	return inum;
+}
+
+static int procfs_nslink_readlink(vfs_inode_t *in, char *buf, size_t sz)
+{
+	procfs_nslink_priv_t *pp = in->priv;
+	if (!pp) return -1;
+	const char *prefix = "";
+	unsigned long inum = nslink_inum(pp->pid, pp->kind, &prefix);
+	if (!*prefix) return -1;
 
 	char tmp[40]; int i = 0;
 	for (const char *s = prefix; *s; s++) tmp[i++] = *s;
@@ -1237,7 +1483,11 @@ static vfs_inode_t *procfs_nslink_inode(int pid, int kind)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino      = proc_ino_alloc();
+	/* Like Linux nsfs: the inode number is the namespace's identity, so
+	 * stat() on /proc/A/ns/mnt and /proc/B/ns/mnt agree when A and B share
+	 * it (gdb's linux_ns_same relies on this). */
+	unsigned long nsid = nslink_inum(pid, kind, NULL);
+	in->ino      = nsid ? nsid : proc_ino_alloc();
 	in->mode     = S_IFLNK | 0777;
 	in->nlink    = 1;
 	in->refcount = 1;
@@ -1340,7 +1590,7 @@ static ssize_t procfs_timens_off_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -14;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }
@@ -1356,7 +1606,7 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 
 	char kb[128];
 	if (len >= sizeof(kb)) len = sizeof(kb) - 1;
-	if (copy_from_user(kb, buf, len) != 0) { if (pid) proc_put(p); return -14; }
+	if (copy_fop_from_user(kb, buf, len) != 0) { if (pid) proc_put(p); return -14; }
 	kb[len] = '\0';
 
 	const char *s = kb;
@@ -1375,6 +1625,7 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 		if (neg2) nsec = -nsec;
 		while (*s && *s != '\n') s++;
 
+		{ extern uint32_t vdso_timens_used; vdso_timens_used = 1; }
 		if (first == 'm') { p->time_ns_new->mono_sec = sec; p->time_ns_new->mono_nsec = nsec; }
 		else if (first == 'b') { p->time_ns_new->boot_sec = sec; p->time_ns_new->boot_nsec = nsec; }
 	}
@@ -1499,6 +1750,151 @@ static vfs_inode_t *procfs_cgroup_inode(int pid)
 	return in;
 }
 
+/* ── /proc/asess/<id>/, /proc/<pid>/asess/ ───────────────────── */
+
+static int fill_asess_status(uint64_t id, char *buf, size_t sz)
+{
+	static const char *const states[] = { "created", "running", "dead" };
+	asess_view_t v;
+	if (asess_view(id, &v) != 0) return 0;
+	pb_t b = { buf, sz };
+	pb_str(&b, "id: ");        pb_u64(&b, v.id);        pb_char(&b, '\n');
+	pb_str(&b, "label: ");     pb_str(&b, v.label);     pb_char(&b, '\n');
+	pb_str(&b, "state: ");     pb_str(&b, states[v.state]); pb_char(&b, '\n');
+	pb_str(&b, "uid: ");       pb_u64(&b, v.uid);       pb_char(&b, '\n');
+	pb_str(&b, "tasks: ");     pb_u64(&b, v.tasks);     pb_char(&b, '\n');
+	pb_str(&b, "max_tasks: "); pb_u64(&b, v.max_tasks); pb_char(&b, '\n');
+	pb_str(&b, "denied: ");    pb_u64(&b, v.denied);    pb_char(&b, '\n');
+	pb_str(&b, "mem_cur: ");   pb_u64(&b, (uint64_t)v.mem_cur); pb_char(&b, '\n');
+	pb_str(&b, "mem_max: ");   pb_u64(&b, (uint64_t)v.mem_max); pb_char(&b, '\n');
+	return (int)(sz - b.rem);
+}
+
+/* one line per task, numbered as the reader's pid namespace numbers it */
+static int fill_asess_tasks(uint64_t id, char *buf, size_t sz)
+{
+	asess_view_t v;
+	if (asess_view(id, &v) != 0) return 0;
+	pb_t b = { buf, sz };
+	pid_namespace_t *ns = current_pid_ns();
+	int n = task_count();
+	for (int i = 0; i < n; i++) {
+		process_t *p = task_get(i);
+		if (!p || asess_id_of(p) != id) continue;
+		int nr = task_pid_nr_ns(p, ns);
+		if (nr) { pb_u64(&b, (uint64_t)nr); pb_char(&b, '\n'); }
+	}
+	return (int)(sz - b.rem);
+}
+
+static int fill_asess_denied(uint64_t id, char *buf, size_t sz)
+{
+	asess_view_t v;
+	if (asess_view(id, &v) != 0) return 0;
+	pb_t b = { buf, sz };
+	for (uint32_t i = 0; i < v.nrecent; i++) {
+		pb_str(&b, "rule=gate syscall="); pb_u64(&b, (uint64_t)v.recent[i].nr);
+		pb_str(&b, " pid=");              pb_u64(&b, (uint64_t)v.recent[i].pid);
+		pb_char(&b, '\n');
+	}
+	return (int)(sz - b.rem);
+}
+
+static const struct { const char *name; int type; } asess_files[] = {
+	{ "status", PROC_F_ASESS_STATUS },
+	{ "tasks",  PROC_F_ASESS_TASKS  },
+	{ "denied", PROC_F_ASESS_DENIED },
+};
+#define ASESS_FILES_N ((int)(sizeof(asess_files) / sizeof(asess_files[0])))
+
+static vfs_inode_t *procfs_asessdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	for (int i = 0; pp && i < ASESS_FILES_N; i++)
+		if (strcmp(name, asess_files[i].name) == 0)
+			return procfs_inode_file(pp->pid, asess_files[i].type);
+	return NULL;
+}
+
+static int procfs_asessdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= (uint32_t)ASESS_FILES_N) return -1;
+	const char *n = asess_files[idx].name;
+	int nlen = 0; while (n[nlen]) nlen++;
+	out->ino      = proc_ino_alloc();
+	out->mode     = S_IFREG | 0444;
+	out->next_off = idx + 1;
+	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
+	return 0;
+}
+
+static vfs_iops_t procfs_asessdir_iops = {
+	.lookup  = procfs_asessdir_lookup,
+	.readdir = procfs_asessdir_readdir,
+};
+
+static vfs_inode_t *procfs_asessdir_inode(uint64_t id)
+{
+	asess_view_t v;
+	if (!id || asess_view(id, &v) != 0) return NULL;
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFDIR | 0555;
+	in->nlink    = 2;
+	in->refcount = 1;
+	in->iops     = &procfs_asessdir_iops;
+	in->fops     = &procfs_dir_fops;
+	in->no_cache = 1;
+	procfs_fddir_priv_t *pp = kmalloc(sizeof(*pp));
+	if (!pp) { kfree(in); return NULL; }
+	pp->pid  = (int)id;
+	in->priv = pp;
+	return in;
+}
+
+static vfs_inode_t *procfs_asessroot_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	uint64_t id = 0;
+	const char *p = name;
+	while (*p >= '0' && *p <= '9') id = id * 10 + (uint64_t)(*p++ - '0');
+	return *p || p == name ? NULL : procfs_asessdir_inode(id);
+}
+
+static int procfs_asessroot_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	uint64_t id = asess_nth_visible(idx);
+	if (!id) return -1;
+	char rev[20]; int r = 0, n = 0;
+	do { rev[r++] = (char)('0' + id % 10); id /= 10; } while (id);
+	while (r) out->name[n++] = rev[--r];
+	out->name[n] = '\0';
+	out->ino      = proc_ino_alloc();
+	out->mode     = S_IFDIR | 0555;
+	out->next_off = idx + 1;
+	return 0;
+}
+
+static vfs_iops_t procfs_asessroot_iops = {
+	.lookup  = procfs_asessroot_lookup,
+	.readdir = procfs_asessroot_readdir,
+};
+
+static vfs_inode_t *procfs_asessroot_inode(void)
+{
+	static vfs_inode_t d;
+	if (!d.ino) {
+		d.ino = 0xb000; d.mode = S_IFDIR | 0555; d.nlink = 2; d.refcount = 1;
+		d.iops = &procfs_asessroot_iops; d.fops = &procfs_dir_fops;
+		d.no_cache = 1; d.cached = 1;
+	}
+	return &d;
+}
+
 static vfs_inode_t *procfs_taskdir_inode(int pid);
 
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
@@ -1522,6 +1918,12 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_cgroup_inode(pid);
 	if (strcmp(name, "mem") == 0)
 		return procfs_mem_inode(pid);
+	if (strcmp(name, "asess") == 0) {
+		process_t *t = pid ? proc_get((pid_t)pid) : task_current();
+		uint64_t id = t ? asess_id_of(t) : 0;
+		if (pid) proc_put(t);
+		return procfs_asessdir_inode(id);
+	}
 	for (int i = 0; i < PID_LINKS_N; i++) {
 		if (strcmp(pid_links[i], name) == 0)
 			return procfs_pidlink_inode(pid, i);
@@ -1625,7 +2027,10 @@ static vfs_inode_t *procfs_taskdir_lookup(vfs_inode_t *dir, const char *name)
 	}
 	process_t *t = proc_get((pid_t)tid);
 	if (!t) return NULL;
-	int ok = (t->tgid == (pid_t)pp->pid);
+	/* a thread that has exited is gone from task/, though its slot may wait
+	 * to be reaped: Chromium stops a thread and polls for task/<tid> to vanish */
+	int ok = (t->tgid == (pid_t)pp->pid) && t->state != PROC_DEAD &&
+	         (t->state != PROC_ZOMBIE || t->pid == t->tgid);
 	proc_put(t);
 	if (!ok) return NULL;
 	vfs_inode_t *in = procfs_piddir_inode(tid);
@@ -1662,9 +2067,20 @@ static int procfs_taskdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *
 	}
 	return -1;
 }
+/* nlink is 2 + live threads, as on Linux: Chromium's sandbox tells "one
+ * thread left" by st_nlink == 3 and waits for a stopped thread to leave. */
 static int procfs_taskdir_stat(vfs_inode_t *in, vfs_stat_t *out)
 {
-	out->ino = in->ino; out->mode = in->mode; out->nlink = 2; out->size = 0;
+	procfs_piddir_priv_t *pp = in->priv;
+	int tgid = pp ? pp->pid : 0;
+	int cnt = task_count(), n = 0;
+	for (int i = 0; i < cnt; i++) {
+		process_t *p = task_get(i);
+		if (!p || p->tgid != (pid_t)tgid) continue;
+		if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) continue;
+		n++;
+	}
+	out->ino = in->ino; out->mode = in->mode; out->nlink = 2 + (n ? n : 1); out->size = 0;
 	return 0;
 }
 static vfs_iops_t procfs_taskdir_iops = {
@@ -1708,17 +2124,43 @@ static void pb_hex4(pb_t *b, uint16_t v)
 	pb_char(b, hx[(v      ) & 0xF]);
 }
 
+/* Right-justified columns; a value wider than the column still prints whole. */
+static void pb_col(pb_t *b, const char *s, int width)
+{
+	int n = (int)strlen(s);
+	while (n++ < width) pb_char(b, ' ');
+	pb_str(b, s);
+}
+
+static void pb_u64col(pb_t *b, uint64_t v, int width)
+{
+	char tmp[21];
+	pb_t t = {tmp, sizeof(tmp) - 1};
+	pb_u64(&t, v);
+	tmp[sizeof(tmp) - 1 - t.rem] = '\0';
+	pb_col(b, tmp, width);
+}
+
 static int fill_net_dev(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
 	pb_str(&b, "Inter-|   Receive                                                |  Transmit\n");
 	pb_str(&b, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
-	/* lo */
-	pb_str(&b, "    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n");
-	/* eth0 */
-	netdev_t *dev = net_dev(0);
-	if (dev) {
-		pb_str(&b, "  eth0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n");
+	for (int i = 0; ; i++) {
+		netdev_t *dev = net_dev(i);
+		if (!dev) break;
+		pb_col(&b, dev->name, 6);
+		pb_char(&b, ':');
+		pb_u64col(&b, dev->rx_bytes, 8);
+		pb_u64col(&b, dev->rx_packets, 8);
+		pb_u64col(&b, 0, 5);                 /* errs */
+		pb_u64col(&b, dev->rx_dropped, 5);
+		pb_str(&b, "    0     0          0         0");   /* fifo..multicast */
+		pb_u64col(&b, dev->tx_bytes, 9);
+		pb_u64col(&b, dev->tx_packets, 8);
+		pb_u64col(&b, 0, 5);                 /* errs */
+		pb_u64col(&b, dev->tx_dropped, 5);
+		pb_str(&b, "    0     0       0          0\n");   /* fifo..compressed */
 	}
 	return (int)(sz - b.rem);
 }
@@ -1943,7 +2385,7 @@ static vfs_inode_t *procfs_netdir_inode(void)
 typedef struct { const char *name; int type; } procfs_sysfile_t;
 
 static procfs_sysfile_t sys_kernel_files[] = {
-	{ "ostype",        PROC_F_SYS_HOSTNAME    }, /* returns the hostname */
+	{ "ostype",        PROC_F_SYS_OSTYPE      }, /* uname's sysname, as on Linux */
 	{ "hostname",      PROC_F_SYS_HOSTNAME    },
 	{ "domainname",    PROC_F_SYS_DOMAINNAME  },
 	{ "ngroups_max",   PROC_F_SYS_NGROUPS_MAX },
@@ -1952,8 +2394,9 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "core_pattern",  PROC_F_SYS_CORE_PATTERN },
 	{ "kptr_restrict",  PROC_F_SYS_KPTR_RESTRICT  },
 	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
+	{ "ranix_deadline", PROC_F_SYS_RANIX_DEADLINE },
 };
-#define SYS_KERNEL_N 9
+#define SYS_KERNEL_N 10
 
 /* /proc/sys/vm — overcommit_memory lives here in Linux (not under kernel.*) */
 static procfs_sysfile_t sys_vm_files[] = {
@@ -1975,8 +2418,9 @@ static procfs_sysfile_t sys_net_core_files[] = {
 static procfs_sysfile_t sys_fs_files[] = {
 	{ "file-max",    PROC_F_SYS_FILE_MAX },
 	{ "file-nr",     PROC_F_SYS_NFILE    },
+	{ "dentry-state", PROC_F_SYS_DENTRY  },
 };
-#define SYS_FS_N 2
+#define SYS_FS_N 3
 
 /* forward declarations */
 static vfs_inode_t *procfs_sysdir_inode(void);
@@ -1990,7 +2434,8 @@ static vfs_inode_t *procfs_sysfile_inode(int type)
 	vfs_inode_t *in = procfs_inode_file(-1, type);
 	if (in && (type == PROC_F_SYS_HOSTNAME ||
 	           type == PROC_F_SYS_KPTR_RESTRICT ||
-	           type == PROC_F_SYS_DMESG_RESTRICT))
+	           type == PROC_F_SYS_DMESG_RESTRICT ||
+	           type == PROC_F_SYS_RANIX_DEADLINE))
 		in->mode = S_IFREG | 0644;
 	return in;
 }
@@ -2275,6 +2720,9 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "sys") == 0)
 		return procfs_sysdir_inode();
 
+	if (strcmp(name, "asess") == 0)
+		return procfs_asessroot_inode();
+
 	/* static files */
 	for (int i = 0; i < ROOT_FILES_N; i++)
 		if (strcmp(root_files[i].name, name) == 0)
@@ -2343,22 +2791,33 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	}
 	idx--;
 
+	if (idx == 0) {
+		out->ino      = 0xb000;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 4;
+		memcpy(out->name, "asess", 6);
+		return 0;
+	}
+	idx--;
+
 	/* per-process dirs: the idx-th process visible in the caller's pid namespace,
 	 * named by its pid as seen in that namespace (vnr). */
 	pid_namespace_t *cur_ns = current_pid_ns();
-	int live = 0;
-	for (int i = 0; i < n_proc; i++) {
+	/* idx is the cookie of the last call: a place in the task table, so a
+	 * listing is one pass and not one pass per entry */
+	for (int i = (int)idx; i < n_proc; i++) {
 		process_t *p = task_get(i);
 		if (!p) continue;
+		if (p->tgid && p->tgid != p->pid) continue;  /* threads: /proc/<pid>/task */
 		int vnr = task_pid_nr_ns(p, cur_ns);
 		if (vnr <= 0) {
 			if (cur_ns != &init_pid_ns) continue;   /* not visible in this ns */
 			vnr = (int)p->pid;                      /* root ns sees every task */
 		}
-		if (live == (int)idx) {
+		{
 			out->ino      = 0x8000 + (uint64_t)vnr * 100 + 50;
 			out->mode     = S_IFDIR | 0555;
-			out->next_off = ROOT_FILES_N + 3 + idx + 1;
+			out->next_off = ROOT_FILES_N + 4 + (uint32_t)i + 1;
 			char tmp[16]; int ti = 0;
 			uint32_t v = (uint32_t)vnr;
 			if (v == 0) { tmp[ti++] = '0'; }
@@ -2366,7 +2825,6 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 			memcpy(out->name, tmp, ti); out->name[ti] = '\0';
 			return 0;
 		}
-		live++;
 	}
 	return -1;
 }
@@ -2386,12 +2844,45 @@ static vfs_iops_t procfs_root_iops = {
 	.stat    = procfs_root_stat,
 };
 
+/* The /proc of an agent session: pid directories of its namespace, and only the
+ * host-wide files a program needs in order to run. The kernel command line and
+ * the disk, module and interrupt tables stay out. */
+static int procfs_session_allows(const char *name)
+{
+	static const char *const allowed[] = {
+		"self", "sys", "version", "cpuinfo", "meminfo", "mounts", "uptime", "stat",
+		"loadavg", "filesystems",
+	};
+	if (name[0] >= '0' && name[0] <= '9') return 1;
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
+		if (strcmp(allowed[i], name) == 0) return 1;
+	return 0;
+}
+
+static vfs_inode_t *procfs_session_lookup(vfs_inode_t *dir, const char *name)
+{
+	return procfs_session_allows(name) ? procfs_root_lookup(dir, name) : NULL;
+}
+
+static int procfs_session_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	/* the root's cookies, filtered: the next call goes on where this one stopped */
+	for (uint32_t i = idx; procfs_root_readdir(dir, i, out) == 0; i = out->next_off)
+		if (procfs_session_allows(out->name))
+			return 0;
+	return -1;
+}
+
+static vfs_iops_t procfs_session_iops = {
+	.lookup  = procfs_session_lookup,
+	.readdir = procfs_session_readdir,
+	.stat    = procfs_root_stat,
+};
+
 /* ── mount ───────────────────────────────────────────────── */
 
 int procfs_mount(vfs_mount_t *mnt, void *data)
 {
-	(void)data;
-
 	vfs_inode_t *root_inode = kmalloc(sizeof(*root_inode));
 	if (!root_inode) return -1;
 	memset(root_inode, 0, sizeof(*root_inode));
@@ -2399,7 +2890,8 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 	root_inode->mode     = S_IFDIR | 0555;
 	root_inode->nlink    = 2;
 	root_inode->refcount = 1;
-	root_inode->iops     = &procfs_root_iops;
+	root_inode->iops     = data && strcmp(data, ASESS_MOUNT_OPT) == 0 ? &procfs_session_iops
+	                                                                  : &procfs_root_iops;
 	root_inode->fops     = &procfs_dir_fops;
 	root_inode->no_cache = 1; /* PID dirs are dynamic — never cache children */
 
@@ -2407,7 +2899,7 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 	if (!root_dentry) { kfree(root_inode); return -1; }
 
 	mnt->root = root_dentry;
-	return 0;
+	return vfs_simple_sb(mnt, NULL);
 }
 
 void procfs_register(void)
