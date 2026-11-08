@@ -10,12 +10,14 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <kernel/tick.h>
+void pic8259_mask(uint32_t irq);
 #include <kernel/board.h>
 #include <kernel/sync.h>
 #include <kernel/irq.h>
 #include <kernel/cpumask.h>
 
 /* LAPIC register offsets */
+#define LAPIC_ID         0x020
 #define LAPIC_EOI        0x0B0
 #define LAPIC_SPIV       0x0F0
 #define LAPIC_LVT_TIMER  0x320
@@ -27,6 +29,10 @@
 
 #define LVT_TIMER_PERIODIC 0x20000
 #define LVT_MASKED         0x10000
+#define LAPIC_LVT_LINT0    0x350
+#define LAPIC_LVT_LINT1    0x360
+#define LVT_DM_EXTINT      0x700
+#define LVT_DM_NMI         0x400
 #define VEC_LAPIC_TIMER    0xF1
 
 /* ICR delivery mode bits */
@@ -57,6 +63,10 @@ static void lapic_init_bsp(void)
 	lapic = (volatile uint32_t *)ioremap(LAPIC_PHYS, 0x1000,
 	                                     VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
 	lapic_write(LAPIC_SPIV, lapic_read(LAPIC_SPIV) | 0x100 | 0xFF);
+	/* Firmware is free to leave these masked. The 8259 reaches the BSP only
+	 * through LINT0 as ExtINT, so without this no legacy IRQ arrives. */
+	lapic_write(LAPIC_LVT_LINT0, LVT_DM_EXTINT);
+	lapic_write(LAPIC_LVT_LINT1, LVT_DM_NMI);
 }
 
 static void io_delay(void)
@@ -92,8 +102,35 @@ static void lapic_timer_calibrate(void)
 	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
 
 	lapic_timer_initcnt = 0xFFFFFFFF - remaining;
+	/* From Sky Lake on, the local timer runs from the core crystal, which CPUID 15h
+	 * names (or which is 24 MHz on the clients that leave it out). One PIT period
+	 * measured it 0.4 % off on Casper: every sleep and the uptime ran slow. */
+	{
+		uint32_t a, b, c, d, max;
+		__asm__ volatile("cpuid" : "=a"(max), "=b"(b), "=c"(c), "=d"(d) : "a"(0));
+		uint64_t crystal = 0;
+		if (max >= 0x15) {
+			__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x15), "c"(0));
+			crystal = c;
+			if (!crystal && a && b) {
+				uint32_t a1, b1, c1, d1;
+				__asm__ volatile("cpuid" : "=a"(a1), "=b"(b1), "=c"(c1), "=d"(d1) : "a"(1));
+				uint32_t fam = (a1 >> 8) & 15, model = ((a1 >> 4) & 15) | ((a1 >> 12) & 0xF0);
+				if (fam == 6 && (model == 0x4E || model == 0x5E || model == 0x8E || model == 0x9E ||
+				                 model == 0xA5 || model == 0xA6))
+					crystal = 24000000;
+			}
+		}
+		uint32_t exact = crystal ? (uint32_t)(crystal / 16 / TIMER_HZ) : 0;
+		uint32_t m = lapic_timer_initcnt;
+		if (exact && exact > m - m / 50 && exact < m + m / 50) {
+			kprintf(KERN_INFO "timer: lapic from the %lu Hz crystal (measured %u)\n",
+			        (unsigned long)crystal, m);
+			lapic_timer_initcnt = exact;
+		}
+	}
 	irq_restore(flags);
-	kprintf("LAPIC timer: %u ticks per %d Hz\n", lapic_timer_initcnt, TIMER_HZ);
+	kprintf(KERN_INFO "timer: lapic %u ticks per %d Hz\n", lapic_timer_initcnt, TIMER_HZ);
 }
 
 /* Start this CPU's periodic local timer. Calibrates lazily on first use. */
@@ -107,10 +144,33 @@ void lapic_timer_start(void)
 	lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt);
 }
 
-/* Vector 0xF1 handler — per-CPU scheduler tick. */
+void arch_tick_slow(int slow)
+{
+	if (lapic && lapic_timer_initcnt)
+		lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt * (slow ? TICK_SLOW : 1));
+}
+
+/* Move the BSP's global tick from the PIT to its LAPIC timer, so the tick
+ * survives chipsets that gate the 8254 and shares one path with the APs. On any
+ * failure the PIT stays in charge. */
+void lapic_bsp_tick_takeover(void)
+{
+	if (!lapic) lapic_init_bsp();
+	lapic_timer_calibrate();
+	if (!lapic_timer_initcnt || lapic_timer_initcnt == 0xFFFFFFFF) {
+		lapic_timer_initcnt = 0;
+		kprintf(KERN_WARN "timer: lapic calibration failed, keeping pit tick\n");
+		return;
+	}
+	pic8259_mask(0);
+	lapic_timer_start();
+}
+
+/* Vector 0xF1 handler — scheduler tick. The BSP's carries the global tick. */
 void lapic_timer_irq(void)
 {
-	tick_notify_local();
+	if (arch_get_cpu_ctx()->cpu_id == 0) tick_notify();
+	else tick_notify_local();
 	lapic_write(LAPIC_EOI, 0);
 }
 
@@ -196,7 +256,15 @@ void arch_secondary_init(int cpu_id)
 	__asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
 	cr4_val |= (3ULL << 9);
+	/* The entry stubs touch ymm on every CPU once the boot CPU has switched AVX on */
+	extern void arch_pat_init(void), arch_hwp_init(void);
+	arch_pat_init();
+	arch_hwp_init();
+	extern uint8_t avx_on;
+	if (avx_on) cr4_val |= (1ULL << 18);
 	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
+	if (avx_on)
+		__asm__ volatile("xsetbv" :: "a"(7), "d"(0), "c"(0));
 
 	/* Enable AP LAPIC so it can receive IPIs */
 	if (lapic)
@@ -210,6 +278,16 @@ void arch_secondary_init(int cpu_id)
 	 * task on a secondary is never preempted and never returns to the kernel to
 	 * take a pending signal. */
 	lapic_timer_start();
+}
+
+void lapic_eoi(void)
+{
+	lapic_write(LAPIC_EOI, 0);
+}
+
+uint32_t lapic_self_id(void)
+{
+	return lapic_read(LAPIC_ID) >> 24;
 }
 
 void arch_smp_ipi_send(int cpu_id)
@@ -284,6 +362,22 @@ void arch_tlb_shootdown_all(void)
 	 * cannot deadlock us (each would otherwise spin IRQ-off, neither able to ack
 	 * the other). The 0xF2 handler is lock-free, so taking it mid-spin is safe. */
 	uint64_t f = irq_save();
+	/* Turning IRQs on under a caller's IRQ-off spinlock lets the timer tick
+	 * take that same lock on this CPU. Callers must drop such locks first. */
+	{
+		extern int spin_held_count(void);
+		extern void spin_note_violation(void *lock, void *pc);
+		if (!(f & 0x200) && spin_held_count() > 0) {
+			spin_note_violation(&tlb_shoot_lock, __builtin_return_address(0));
+			static int told;
+			if (told++ < 3) {          /* who holds what: the note alone names only us */
+				extern void spin_dump_held(void);
+				kprintf(KERN_ERR "tlb: shootdown with IRQs off under a lock, from %p %p\n",
+				        __builtin_return_address(0), __builtin_return_address(1));
+				spin_dump_held();
+			}
+		}
+	}
 	irq_enable();
 	spin_lock(&tlb_shoot_lock);
 
@@ -318,7 +412,7 @@ void arch_tlb_shootdown_all(void)
 	while (!cpumask_empty(&tlb_ack_mask)) {
 		__asm__ volatile("pause" ::: "memory");
 		if (++t > 5000000000UL) {
-			kprintf("tlb shootdown: stuck, %d acks pending\n",
+			kprintf(KERN_ERR "smp: tlb shootdown stuck, %d acks pending\n",
 			        cpumask_weight(&tlb_ack_mask));
 			break;
 		}
