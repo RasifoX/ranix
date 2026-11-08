@@ -676,18 +676,200 @@ static void rp_pop(char *rp, int *rl)
 	rp[*rl] = '\0';
 }
 
-static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, char *rp)
+/* One path walk. d is where it stands. A name its directory keeps out of the
+ * dentry cache stands in volatile_dentry, and the walk owns its inode
+ * (prev_volatile) until the next step. f holds the irq flags of vfs_lock while
+ * the walk has it. */
+typedef struct {
+	vfs_dentry_t *d;
+	vfs_dentry_t *proc_root;   /* the task's root: ".." stops here */
+	vfs_dentry_t *root_top;    /* what is mounted on proc_root, if anything */
+	int           d_is_volatile;
+	vfs_inode_t  *prev_volatile;
+	vfs_dentry_t  volatile_dentry;
+	char         *rp;
+	int           rl;
+	uint64_t      f;
+} walk_t;
+
+/* Step w to "..". Caller holds vfs_lock; this may drop and retake it. */
+static void walk_dotdot(walk_t *w)
 {
-	int rl = 0;
-	if (rp) rp[0] = '\0';
-	walk_begin();
-	uint64_t f = spin_lock_irq(&vfs_lock);
-	if (!path || path[0] != '/') {
-		spin_unlock_irq(&vfs_lock, f);
+	if (w->d_is_volatile && w->d->inode && w->d->inode->dotdot_lookup) {
+		/* below a no_cache directory the real parent can be many hops up */
+		vfs_inode_t *dir = w->d->inode;
+		spin_unlock_irq(&vfs_lock, w->f);
+		vfs_inode_t *up = dir->iops->lookup(dir, "..");
+		w->f = spin_lock_irq(&vfs_lock);
+		if (up) {
+			if (w->prev_volatile) vfs_inode_free(w->prev_volatile);
+			w->prev_volatile = up;
+			w->volatile_dentry.inode = up;
+			rp_pop(w->rp, &w->rl);
+			return;
+		}
+	}
+	if (w->d_is_volatile) {
+		/* step back to real parent */
+		w->d = w->volatile_dentry.parent;
+		w->d_is_volatile = 0;
+		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+		rp_pop(w->rp, &w->rl);
+	} else if (w->d != w->proc_root && w->d != w->root_top && w->d->parent) {
+		vfs_dentry_t *mp = bind_mountpoint(w->d);
+		w->d = mp ? mp->parent : w->d->parent;
+		rp_pop(w->rp, &w->rl);
+	}
+}
+
+/* The child called name of the directory w stands in: from the dentry cache, or
+ * looked up and cached, or, where the directory allows no caching, in the
+ * volatile slot. Caller holds vfs_lock. NULL: no such name, and the lock is
+ * dropped. */
+static vfs_dentry_t *walk_lookup(walk_t *w, const char *name)
+{
+	vfs_dentry_t *d = w->d;
+	vfs_dentry_t *child = NULL;
+
+	/* look in dentry children first (skip if parent marks children volatile) */
+	if (!w->d_is_volatile && (!d->inode || !d->inode->no_cache)) {
+		child = d->child;
+		while (child && strcmp(child->name, name) != 0) child = child->next;
+	}
+	if (child) {
+		/* Found in dentry cache; free any prior volatile inode */
+		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+		w->d_is_volatile = 0;
+		return child;
+	}
+
+	if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
+		spin_unlock_irq(&vfs_lock, w->f);
+		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
 		return NULL;
 	}
-	if (!root_dentry) {
-		spin_unlock_irq(&vfs_lock, f);
+	vfs_inode_t *dir_inode = d->inode;
+	int parent_was_volatile = w->d_is_volatile;
+	spin_unlock_irq(&vfs_lock, w->f);
+	/* dir_inode may equal prev_volatile — do NOT free until after lookup */
+	vfs_inode_t *in = dir_inode->iops->lookup(dir_inode, name);
+	/* Now free the parent volatile inode (lookup is done with it) */
+	if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+	w->f = spin_lock_irq(&vfs_lock);
+	if (!in) {
+		spin_unlock_irq(&vfs_lock, w->f);
+		return NULL;
+	}
+	/* Cache only if parent is real (in dentry tree) and caching is allowed */
+	/* Past the limit a name is still cached: with no eviction yet, the
+	 * other choice is the volatile slot, where chroot, bind and a
+	 * chain of first-time names do not work. The limit only warns. */
+	static int warned;
+	if (dentry_count >= dentry_max_val && !warned) {
+		warned = 1;
+		kprintf(KERN_WARN "vfs: %d dentries cached, past the limit (vfs_dentry_max)\n", dentry_count);
+	}
+	if (!parent_was_volatile && !dir_inode->no_cache) {
+		/* Re-check: another task may have added this dentry while unlocked */
+		child = d->child;
+		while (child && strcmp(child->name, name) != 0) child = child->next;
+		if (!child) {
+			child = _dentry_create(d, name, in);
+			if (!child) {
+				vfs_inode_free(in);
+				spin_unlock_irq(&vfs_lock, w->f);
+				return NULL;
+			}
+		} else {
+			vfs_inode_free(in);
+		}
+		w->d_is_volatile = 0;
+		return child;
+	}
+	/* volatile: reuse the walk's one volatile dentry */
+	/* in->cached: keep as-is; dynamic inodes are 0 via memset; static must stay 1 */
+	w->volatile_dentry.inode   = in;
+	/* a chain of volatile hops reuses this dentry: keep the real parent */
+	w->volatile_dentry.parent  = d == &w->volatile_dentry ? w->volatile_dentry.parent : d;
+	w->volatile_dentry.child   = NULL;
+	w->volatile_dentry.next    = NULL;
+	w->volatile_dentry.name[0] = '\0';
+	w->prev_volatile = in;
+	w->d_is_volatile = 1;
+	return &w->volatile_dentry;
+}
+
+/* child is a symlink met at the name ending at end, in work. Put its target in
+ * place of the names walked so far and point *pp at where the walk goes on.
+ * Caller holds vfs_lock. -1: the walk fails, and the lock is dropped. */
+static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *end,
+                        const char **pp, unsigned long *mflags, int *depth)
+{
+	if (++*depth > 8 || !child->inode->iops || !child->inode->iops->readlink) {
+		spin_unlock_irq(&vfs_lock, w->f);
+		return -1;
+	}
+	if (mflags) {
+		const char *rest = end;
+		while (*rest == '/') rest++;
+		if (!*rest) *mflags |= dentry_mnt_flags(w->d);
+	}
+	char target[256];
+	/* readlink may read the disk and sleep on its lock: not under vfs_lock.
+	 * The inode stays (this walk holds its generation), as for lookup. */
+	vfs_inode_t *lin = child->inode;
+	spin_unlock_irq(&vfs_lock, w->f);
+	int lrc = lin->iops->readlink(lin, target, sizeof(target));
+	w->f = spin_lock_irq(&vfs_lock);
+	if (lrc != 0) {
+		spin_unlock_irq(&vfs_lock, w->f);
+		return -1;
+	}
+	/* splice: work = target + remaining(end) */
+	int tlen = strlen(target);
+	int rlen = strlen(end);
+	if (tlen + rlen + 2 >= PATH_MAX) {
+		spin_unlock_irq(&vfs_lock, w->f);
+		return -1;
+	}
+	/* end points into work: move the rest before the target lands */
+	if (rlen > 0) {
+		int gap = end[0] != '/';
+		memmove(work + tlen + gap, end, rlen + 1);
+		if (gap) work[tlen] = '/';
+	} else {
+		work[tlen] = '\0';
+	}
+	memcpy(work, target, tlen);
+	if (target[0] == '/') {
+		if (w->rp) { w->rl = 0; w->rp[0] = '\0'; }   /* an absolute target starts over at the root */
+		w->d = w->proc_root;
+		*pp = work + 1;
+		w->d_is_volatile = 0;
+		/* Absolute symlink restart — free any volatile context */
+		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+	} else {
+		*pp = work;
+		/* The walk goes on in the link's directory. A link that was not
+		 * cached stood in the volatile slot, and its directory is real. */
+		if (w->d != &w->volatile_dentry) {
+			w->d_is_volatile = 0;
+			if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+		}
+	}
+	return 0;
+}
+
+static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, char *rp)
+{
+	walk_t w;
+	w.rp = rp;
+	w.rl = 0;
+	if (rp) rp[0] = '\0';
+	walk_begin();
+	w.f = spin_lock_irq(&vfs_lock);
+	if (!path || path[0] != '/' || !root_dentry) {
+		spin_unlock_irq(&vfs_lock, w.f);
 		return NULL;
 	}
 
@@ -695,30 +877,29 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 	 * (PATH_MAX): a stack array this large would blow the kernel stack once
 	 * overlayfs lookup re-enters this resolver. */
 	char *work = kmalloc(PATH_MAX);
-	if (!work) { spin_unlock_irq(&vfs_lock, f); return NULL; }
+	if (!work) { spin_unlock_irq(&vfs_lock, w.f); return NULL; }
 	int wi = 0;
 	while (wi < PATH_MAX - 1 && path[wi]) { work[wi] = path[wi]; wi++; }
-	if (path[wi]) { kfree(work); spin_unlock_irq(&vfs_lock, f); return NULL; }
+	if (path[wi]) { kfree(work); spin_unlock_irq(&vfs_lock, w.f); return NULL; }
 	work[wi] = '\0';
 
 	/* chroot: an absolute path is relative to the process's own root, not the
 	 * global one. NULL ->root means it sees "/" as the global root. */
 	process_t *_cur = task_current();
-	vfs_dentry_t *proc_root = (_cur && _cur->root) ? (vfs_dentry_t *)_cur->root : root_dentry;
+	w.proc_root = (_cur && _cur->root) ? (vfs_dentry_t *)_cur->root : root_dentry;
 
 	/* a mount's root has ->parent set to outside the mount, so a process root that
 	 * is a mountpoint is left through this dentry, not through proc_root */
-	vfs_dentry_t *root_top = follow_mounts(proc_root);
-	vfs_dentry_t *d = root_top;
+	w.root_top = follow_mounts(w.proc_root);
+	w.d = w.root_top;
+	w.d_is_volatile = 0;
+	w.prev_volatile = NULL;
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
-	int d_is_volatile = 0;          /* d points to volatile_dentry (not in dentry tree) */
-	vfs_inode_t  *prev_volatile = NULL; /* previous volatile inode to free after lookup */
-	vfs_dentry_t  volatile_dentry;     /* stable for entire function; reused each volatile hop */
-	vfs_dentry_t *reached = d;
+	vfs_dentry_t *reached = w.d;
 
 	while (*p) {
-		reached = d;
+		reached = w.d;
 		/* skip consecutive slashes */
 		while (*p == '/') p++;
 		if (!*p) break;
@@ -736,31 +917,7 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 		/* handle . and .. */
 		if (len == 1 && tmp[0] == '.') { p = end; continue; }
 		if (len == 2 && tmp[0] == '.' && tmp[1] == '.') {
-			if (d_is_volatile && d->inode && d->inode->dotdot_lookup) {
-				/* below a no_cache directory the real parent can be many hops up */
-				vfs_inode_t *dir = d->inode;
-				spin_unlock_irq(&vfs_lock, f);
-				vfs_inode_t *up = dir->iops->lookup(dir, "..");
-				f = spin_lock_irq(&vfs_lock);
-				if (up) {
-					if (prev_volatile) vfs_inode_free(prev_volatile);
-					prev_volatile = up;
-					volatile_dentry.inode = up;
-					rp_pop(rp, &rl);
-					p = end; continue;
-				}
-			}
-			if (d_is_volatile) {
-				/* step back to real parent */
-				d = volatile_dentry.parent;
-				d_is_volatile = 0;
-				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-				rp_pop(rp, &rl);
-			} else if (d != proc_root && d != root_top && d->parent) {
-				vfs_dentry_t *mp = bind_mountpoint(d);
-				d = mp ? mp->parent : d->parent;
-				rp_pop(rp, &rl);
-			}
+			walk_dotdot(&w);
 			p = end; continue;
 		}
 
@@ -769,181 +926,55 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 		 * filesystem's lookup op may reinterpret the inode's private data by type
 		 * (ramfs reads it as a dir entry list), so calling it on a regular file
 		 * walks file bytes as a pointer chain and faults. Reject here. */
-		if (d->inode && !S_ISDIR(d->inode->mode)) {
-			spin_unlock_irq(&vfs_lock, f);
-			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			d = NULL; goto out;
+		if ((w.d->inode && !S_ISDIR(w.d->inode->mode)) ||
+		    (!walk_anchored(work, end) && !vfs_may_search(w.d->inode))) {
+			spin_unlock_irq(&vfs_lock, w.f);
+			if (w.prev_volatile) { vfs_inode_free(w.prev_volatile); w.prev_volatile = NULL; }
+			w.d = NULL; goto out;
 		}
 
-		if (!walk_anchored(work, end) && !vfs_may_search(d->inode)) {
-			spin_unlock_irq(&vfs_lock, f);
-			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			d = NULL; goto out;
-		}
-
-		/* look in dentry children first (skip if parent marks children volatile) */
-		vfs_dentry_t *child = NULL;
-		if (!d_is_volatile && (!d->inode || !d->inode->no_cache)) {
-			child = d->child;
-			while (child) {
-				if (strcmp(child->name, tmp) == 0) break;
-				child = child->next;
-			}
-		}
-
-		if (!child) {
-			if (!d->inode || !d->inode->iops || !d->inode->iops->lookup) {
-				spin_unlock_irq(&vfs_lock, f);
-				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-				d = NULL; goto out;
-			}
-			vfs_inode_t *dir_inode = d->inode;
-			int parent_was_volatile = d_is_volatile;
-			spin_unlock_irq(&vfs_lock, f);
-			/* dir_inode may equal prev_volatile — do NOT free until after lookup */
-			vfs_inode_t *in = dir_inode->iops->lookup(dir_inode, tmp);
-			/* Now free the parent volatile inode (lookup is done with it) */
-			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			f = spin_lock_irq(&vfs_lock);
-			if (!in) {
-				spin_unlock_irq(&vfs_lock, f);
-				d = NULL; goto out;
-			}
-			/* Cache only if parent is real (in dentry tree) and caching is allowed */
-			/* Past the limit a name is still cached: with no eviction yet, the
-			 * other choice is the volatile slot, where chroot, bind and a
-			 * chain of first-time names do not work. The limit only warns. */
-			static int warned;
-			if (dentry_count >= dentry_max_val && !warned) {
-				warned = 1;
-				kprintf(KERN_WARN "vfs: %d dentries cached, past the limit (vfs_dentry_max)\n", dentry_count);
-			}
-			if (!parent_was_volatile && !dir_inode->no_cache) {
-				/* Re-check: another task may have added this dentry while unlocked */
-				child = d->child;
-				while (child) {
-					if (strcmp(child->name, tmp) == 0) break;
-					child = child->next;
-				}
-				if (!child) {
-					child = _dentry_create(d, tmp, in);
-					if (!child) {
-						vfs_inode_free(in);
-						spin_unlock_irq(&vfs_lock, f);
-						d = NULL; goto out;
-					}
-				} else {
-					vfs_inode_free(in);
-				}
-				d_is_volatile = 0;
-			} else {
-				/* volatile: reuse stable volatile_dentry (function-scoped) */
-				/* in->cached: keep as-is; dynamic inodes are 0 via memset; static must stay 1 */
-				volatile_dentry.inode   = in;
-				/* a chain of volatile hops reuses this dentry: keep the real parent */
-				volatile_dentry.parent  = d == &volatile_dentry ? volatile_dentry.parent : d;
-				volatile_dentry.child   = NULL;
-				volatile_dentry.next    = NULL;
-				volatile_dentry.name[0] = '\0';
-				child        = &volatile_dentry;
-				prev_volatile = in;
-				d_is_volatile = 1;
-			}
-		} else {
-			/* Found in dentry cache; free any prior volatile inode */
-			if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			d_is_volatile = 0;
-		}
+		vfs_dentry_t *child = walk_lookup(&w, tmp);
+		if (!child) { w.d = NULL; goto out; }
 
 		/* follow symlinks — except magic links that are also openable
 		 * objects (nsfs-style, e.g. /proc/<pid>/ns/uts): those carry fops,
 		 * so resolve to the link itself and let open() act on the object
 		 * rather than following its text. */
 		if (S_ISLNK(child->inode->mode) && !child->inode->fops) {
-			if (++symlink_depth > 8 ||
-			    !child->inode->iops || !child->inode->iops->readlink) {
-				spin_unlock_irq(&vfs_lock, f);
-				d = NULL; goto out;
-			}
-			if (mflags) {
-				const char *rest = end;
-				while (*rest == '/') rest++;
-				if (!*rest) *mflags |= dentry_mnt_flags(d);
-			}
-			char target[256];
-			/* readlink may read the disk and sleep on its lock: not under vfs_lock.
-			 * The inode stays (this walk holds its generation), as for lookup above. */
-			vfs_inode_t *lin = child->inode;
-			spin_unlock_irq(&vfs_lock, f);
-			int lrc = lin->iops->readlink(lin, target, sizeof(target));
-			f = spin_lock_irq(&vfs_lock);
-			if (lrc != 0) {
-				spin_unlock_irq(&vfs_lock, f);
-				d = NULL; goto out;
-			}
-			/* splice: work = target + remaining(end) */
-			int tlen = strlen(target);
-			int rlen = strlen(end);
-			if (tlen + rlen + 2 >= PATH_MAX) {
-				spin_unlock_irq(&vfs_lock, f);
-				d = NULL; goto out;
-			}
-			/* end points into work: move the rest before the target lands */
-			if (rlen > 0) {
-				int gap = end[0] != '/';
-				memmove(work + tlen + gap, end, rlen + 1);
-				if (gap) work[tlen] = '/';
-			} else {
-				work[tlen] = '\0';
-			}
-			memcpy(work, target, tlen);
-			if (target[0] == '/') {
-				if (rp) { rl = 0; rp[0] = '\0'; }   /* an absolute target starts over at the root */
-				d = proc_root;
-				p = work + 1;
-				d_is_volatile = 0;
-				/* Absolute symlink restart — free any volatile context */
-				if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-			} else {
-				p = work;
-				/* The walk goes on in the link's directory. A link that was not
-				 * cached stood in the volatile slot, and its directory is real. */
-				if (d != &volatile_dentry) {
-					d_is_volatile = 0;
-					if (prev_volatile) { vfs_inode_free(prev_volatile); prev_volatile = NULL; }
-				}
+			if (walk_symlink(&w, child, work, end, &p, mflags, &symlink_depth) != 0) {
+				w.d = NULL; goto out;
 			}
 			continue;
 		}
 
-		d = follow_mounts(child);
-		rp_push(rp, &rl, tmp, (int)len);
+		w.d = follow_mounts(child);
+		rp_push(rp, &w.rl, tmp, (int)len);
 		p = end;
 	}
 
 	/* prev_volatile (if set) is the FINAL component's inode — freed by vfs_close */
-	spin_unlock_irq(&vfs_lock, f);
+	spin_unlock_irq(&vfs_lock, w.f);
 out:
 	if (mflags) {
-		f = spin_lock_irq(&vfs_lock);
-		*mflags |= dentry_mnt_flags(d ? d : reached);
+		uint64_t f = spin_lock_irq(&vfs_lock);
+		*mflags |= dentry_mnt_flags(w.d ? w.d : reached);
 		spin_unlock_irq(&vfs_lock, f);
 	}
 	kfree(work);
 	if (rp) {
-		if (!d || rl < 0) rp[0] = '\0';
-		else if (rl == 0) { rp[0] = '/'; rp[1] = '\0'; }
+		if (!w.d || w.rl < 0) rp[0] = '\0';
+		else if (w.rl == 0) { rp[0] = '/'; rp[1] = '\0'; }
 	}
 	/* volatile_dentry dies with this frame; callers keep reading d->inode */
-	if (d == &volatile_dentry) {
+	if (w.d == &w.volatile_dentry) {
 		vfs_dentry_t *slot = volatile_slot();
-		slot->inode  = volatile_dentry.inode;
-		slot->parent = volatile_dentry.parent;
+		slot->inode  = w.volatile_dentry.inode;
+		slot->parent = w.volatile_dentry.parent;
 		slot->child  = NULL;
 		slot->next   = NULL;
-		d = slot;
+		w.d = slot;
 	}
-	return d;
+	return w.d;
 }
 
 /* The cached dentry of name in dir, following neither symlinks nor mounts. NULL
