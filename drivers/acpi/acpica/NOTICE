@@ -1,0 +1,14 @@
+ACPICA (ACPI Component Architecture), imported unchanged.
+
+Origin:   acpica-unix 20230628, Ubuntu noble source package
+          acpica-unix_20230628.orig.tar.gz
+          sha256 02292a8ea5efdbde16b88b23f620ae4170c5ae0a41e69ab62de9e2ffeda3c21f
+Licence:  every file is "Copyright (C) 2000 - 2023, Intel Corp." under the
+          BSD-style licence in its header, with GPL-2.0 as an alternative.
+          Ranix takes it under the BSD-style terms (the first option); the
+          headers stay as they are.
+Taken:    source/components/{dispatcher,events,executer,hardware,namespace,
+          parser,resources,tables,utilities}/*.c, source/include/*.h and
+          source/include/platform/{acenv,acenvex,acgcc,acgccex}.h.
+Left out: compiler, debugger, disassembler, tools, os_specific, other platforms.
+Changes:  none. The Ranix OS layer (acranix.h, osl) will be new files beside it.
