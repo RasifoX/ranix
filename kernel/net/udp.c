@@ -4,6 +4,9 @@
 #include <kernel/net/net.h>
 #include <kernel/net/socket.h>
 #include <kernel/lib/string.h>
+#include <uapi/rescue.h>
+
+int rescue_udp_rx(netdev_t *dev, uint32_t src_ip, uint16_t src_port, const uint8_t *data, uint16_t len);
 
 void udp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
 {
@@ -17,6 +20,12 @@ void udp_rx(netdev_t *dev, skb_t *skb, ip_hdr_t *iph)
     if (skb->len < payload_len) { skb_free(skb); return; }
     skb->len = payload_len;
 
+    /* kernel/rescue.c: answered here, in the RX path, so it works with userspace wedged */
+    if (dst_port == RESCUE_PORT &&
+        rescue_udp_rx(dev, ntohl(iph->src), src_port, skb->data, payload_len)) {
+        skb_free(skb);
+        return;
+    }
     sock_udp_deliver(dev->net_ns, ntohl(iph->src), src_port, dst_port, skb->data, payload_len);
     skb_free(skb);
 }

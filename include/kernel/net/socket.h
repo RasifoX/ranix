@@ -12,6 +12,8 @@ typedef struct process process_t;
 #define AF_UNIX     1
 #define AF_INET     2
 #define AF_INET6    10
+#define AF_NETLINK  16
+#define NETLINK_ROUTE 0
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 #define SOCK_RAW    3
@@ -57,6 +59,16 @@ typedef struct {
     char     sun_path[108];
 } __attribute__((packed)) sockaddr_un_t;
 
+/* sockaddr_nl */
+typedef struct {
+    uint16_t nl_family;
+    uint16_t nl_pad;
+    uint32_t nl_pid;        /* port id; 0 is the kernel */
+    uint32_t nl_groups;
+} sockaddr_nl_t;
+
+typedef struct { void *base; uint64_t len; } k_iovec;
+
 typedef struct socket {
     int       type;         /* SOCK_STREAM / SOCK_DGRAM */
     int       domain;       /* AF_INET */
@@ -71,6 +83,7 @@ typedef struct socket {
     in6_addr_t remote_ip6;
 
     netdev_t *dev;
+    void     *cg;           /* cgroup paying for the socket and what it receives */
 
     /* recv queue */
     spinlock_t  recv_lock;
@@ -90,6 +103,12 @@ typedef struct socket {
     uint8_t     snd_wscale;     /* window scale the peer advertised */
     uint8_t     sack_ok;        /* both ends negotiated SACK (RFC 2018) */
     uint8_t     ts_ok;          /* both ends negotiated timestamps (RFC 7323) */
+    uint8_t     rcv_refused;    /* in-order data refused for budget: window reads 0 */
+    uint8_t     orphan;         /* no file holds it: tcp_tick frees it when it ends */
+    uint8_t     poll_out_blocked; /* tcp_send said -11: poll waits on an opening */
+    uint8_t     probes;         /* zero-window probes unanswered */
+    uint8_t     persist_n;      /* zero-window probes sent, for the backoff */
+    uint16_t    snd_mss;        /* payload of a full segment on this connection */
     uint32_t    ts_recent;      /* peer's latest TSval, echoed back as TSecr */
     process_t  *connect_waiter; /* blocking connect() / send() */
     uint8_t     connect_inprog; /* nonblocking connect() in flight (EINPROGRESS) */
@@ -112,6 +131,9 @@ typedef struct socket {
     uint8_t     in_recovery;    /* fast-recovery (RFC 6582 NewReno) in progress */
     uint8_t     cc_cubic;       /* congestion algorithm: 1 = CUBIC, 0 = NewReno */
     uint32_t    recover;        /* NewReno recovery point: snd_nxt when loss detected */
+    uint32_t    rtx_next;       /* recovery has resent everything before this */
+    uint64_t    persist_deadline; /* next zero-window probe */
+    uint64_t    linger_deadline;  /* TIME_WAIT, or an orphan's FIN_WAIT2, ends */
 
     /* CUBIC state (RFC 8312); windows in bytes */
     uint32_t    cubic_wmax;     /* window just before the last reduction (W_max) */
@@ -129,9 +151,6 @@ typedef struct socket {
     uint32_t    rttvar;         /* RTT variance */
     uint32_t    rto;            /* current retransmit timeout */
 
-    /* FIN teardown: process sleeping in close() waiting for CLOSED/TIME_WAIT */
-    process_t  *close_waiter;
-
     /* socket options (setsockopt/getsockopt) */
     uint8_t   so_reuseaddr;
     uint8_t   so_reuseport;
@@ -142,11 +161,32 @@ typedef struct socket {
     uint32_t  rcv_timeo;        /* SO_RCVTIMEO in ticks, 0 = block forever */
     uint32_t  snd_timeo;        /* SO_SNDTIMEO in ticks, 0 = block forever */
     int       so_error;         /* pending error, read-and-cleared by SO_ERROR */
+    uint8_t   so_passcred;      /* SO_PASSCRED as set; read back by getsockopt (crashpad checks it) */
+    /* An AF_INET6 socket speaking IPv4 to ::ffff:a.b.c.d (RFC 4291 mapped):
+     * it runs as AF_INET, and names read back as mapped IPv6. Java opens every
+     * socket as IPv6 (Gradle's daemon, the JDT language server). */
+    uint8_t   v4mapped;
+    uint8_t   v6only;           /* IPV6_V6ONLY: a "::" listener takes no IPv4 */
+    uint8_t   unix_seqpacket;   /* AF_UNIX SOCK_SEQPACKET (kept as SOCK_DGRAM): EOF when the peer goes */
 
     /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;
+    int            unix_rd_eof;   /* shutdown: reads end once the queue drains */
+    int            unix_wr_shut;  /* shutdown: sends fail */
     char           unix_path[108];  /* bound path; [0]=='\0' → abstract namespace */
     int            unix_path_len;   /* 0 = not bound, >0 = length of unix_path */
+    /* SO_PEERCRED: the peer's credentials, fixed when the connection was made
+     * (connect, socketpair), like Linux. own_*: this end's, set at listen() so a
+     * connecting client can be given the server's. */
+    uint8_t        pc_set;
+    int32_t        pc_pid;        /* global tgid */
+    uint32_t       pc_uid, pc_gid;
+    int32_t        own_pid;
+    uint32_t       own_uid, own_gid;
+
+    /* AF_NETLINK */
+    uint32_t  nl_pid;           /* bound port id, 0 until bind() or first send */
+    uint32_t  nl_groups;        /* joined multicast groups (nothing is sent to them) */
 
     struct net_namespace *net_ns;   /* network namespace this socket lives in */
 } socket_t;
@@ -179,7 +219,17 @@ extern int        gsock_cap;
 extern spinlock_t gsock_lock;
 
 /* TCP data delivery */
-void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
+int  sock_tcp_deliver(socket_t *s, const void *data, uint16_t len);
+int  sock_own(socket_t *s);                         /* the caller's cgroup pays for s */
+int  sock_charge_skb(socket_t *s, skb_t *skb);      /* to s's owner; nonzero: drop it */
+void sock_queue_skb(socket_t *s, skb_t *skb);
+
+/* AF_NETLINK */
+#define NETLINK_SEND_MAX 32768
+int  netlink_bind(socket_t *s, uint32_t pid, uint32_t groups);
+int  netlink_request(socket_t *s, const void *buf, size_t len);
+long netlink_recv(socket_t *s, const k_iovec *iov, uint64_t niov, int flags,
+                  int nonblock, int *out_flags);
 
 /* AF_UNIX send */
 int unix_send(socket_t *s, const void *data, uint16_t len);

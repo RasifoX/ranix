@@ -1,3 +1,4 @@
+#include <kernel/board.h>
 #include <kernel/proc.h>
 #include <kernel/nsproxy.h>
 #include <kernel/pid_namespace.h>
@@ -5,6 +6,7 @@
 #include <kernel/capabilities.h>
 #include <kernel/net/net.h>
 #include <kernel/cgroup.h>
+#include <kernel/asess.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>
 #include <kernel/bug.h>
@@ -65,6 +67,8 @@ static int proctab_ensure(void)
  * that reused the number. Only after the space fills do we wrap and reuse. */
 #define PID_MAX 32768
 static int last_pid = 0;
+/* Exited threads nobody waits for; the next task created releases them. */
+static int dead_threads = 0;
 static int alloc_pid(void)
 {
 	if (proc_cnt < PID_MAX && proctab_ensure() == 0) {
@@ -78,6 +82,50 @@ static int alloc_pid(void)
 		if (!proctab[i]) { last_pid = i; return i; }
 	}
 	return -1;
+}
+
+static void runqueue_add(process_t *p);
+
+/* Any thread of a group may be asleep in wait for its children. sched_lock held. */
+static void wake_group_waiters(pid_t tgid)
+{
+	for (process_t *c = proctab[0]->next; c && c != proctab[0]; c = c->next)
+		if (c->tgid == tgid && c->in_wait && c->state == PROC_SLEEPING) {
+			c->state = PROC_READY;
+			if (!c->on_cpu) runqueue_add(c);
+		}
+}
+
+/* A thaw: each sleeper rechecks its own cgroup, so waking too many is harmless. */
+void proc_wake_frozen(void)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	for (process_t *c = proctab[0]->next; c && c != proctab[0]; c = c->next)
+		if (c->in_freeze && c->state == PROC_SLEEPING) {
+			c->state = PROC_READY;
+			if (!c->on_cpu) runqueue_add(c);
+		}
+	spin_unlock_irq(&sched_lock, f);
+}
+
+/* A tracer waits like a parent, and is usually not one */
+void proc_wake_tracer(process_t *p)
+{
+	if (!p->tracer) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *t = (p->tracer > 0 && (int)p->tracer < proc_cnt) ? proctab[p->tracer] : NULL;
+	if (t && t->state == PROC_SLEEPING) {
+		t->state = PROC_READY;
+		if (!t->on_cpu) runqueue_add(t);
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
+void proc_wake_waiters(pid_t tgid)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	wake_group_waiters(tgid);
+	spin_unlock_irq(&sched_lock, f);
 }
 
 #define KSTACK_CANARY 0xDEADBEEFCAFEBABEULL
@@ -188,7 +236,7 @@ static void sched_watchdog(void)
 	static unsigned n;
 	static int warm;
 
-	if ((++n & 0xFF) != 0) return;   /* ~every 256 ticks (2.56s @100Hz) */
+	if (++n % (TIMER_HZ * 5 / 2) != 0) return;   /* every 2.5 s */
 
 	if (warm < 2) {
 		warm++;
@@ -211,7 +259,7 @@ static void sched_watchdog(void)
 		/* require sustained freeze across sweeps: a transient TCG host-starvation
 		 * stall resolves and resets; a real IRQ-off deadlock stays frozen. */
 		if (frozen[i] >= 3) {
-			kprintf("WATCHDOG: cpu%d wedged, where=%s pid=%d (%s)\n",
+			kprintf(KERN_ERR "sched: cpu%d wedged, where=%s pid=%d (%s)\n",
 			        i, c->wd_where ? c->wd_where : "?",
 			        (int)cur->pid, cur->name);
 			kpanic("cpu wedged (watchdog)");
@@ -226,9 +274,11 @@ void tick_notify(void)
 	sched_tick();
 	/* Global callbacks (tcp_tick, timerfd_tick) run on CPU0 only */
 	if (arch_get_cpu_ctx()->cpu_id == 0) {
-		for (int i = 1; i < tick_cb_cnt; i++)
-			tick_cbs[i]();
+		/* sched_tick ran above; its slot depends on who registered first */
+		for (int i = 0; i < tick_cb_cnt; i++)
+			if (tick_cbs[i] != sched_tick) tick_cbs[i]();
 		sched_watchdog();
+		{ extern void spin_report_bad_unlocks(void); spin_report_bad_unlocks(); }
 		/* khungtaskd: sweep every 512 ticks (~5s @100Hz). The timeout it checks
 		 * is much larger (20s), so a coarse sweep loses no responsiveness. */
 		static unsigned ht;
@@ -245,12 +295,32 @@ void sched_tick_local(void)
 	process_t *current = task_current();
 	if (!current) return;
 	current->ticks++;
+	cpu_context_t *cc = arch_get_cpu_ctx();
+	if (current->pid != 0) {
+		cc->busy_ticks++;
+		cc->idle_run = 0;
+	} else {
+		cc->idle_ticks += cc->tick_slow ? TICK_SLOW : 1;
+		/* Nothing to do for a while: wake less often, so the core can really sleep.
+		 * Not the BSP, its tick is the clock. */
+		if (cc->cpu_id != 0 && !cc->tick_slow && ++cc->idle_run >= 8) {
+			cc->tick_slow = 1;
+			arch_tick_slow(1);
+		}
+	}
 	itimer_charge_cpu(current);
+	{ extern void kwatch_tick_local(process_t *cur, cpu_context_t *cc); kwatch_tick_local(current, cc); }
 	if (current->pid != 0) {
 		if (--current->ticks_remaining <= 0)
 			arch_get_cpu_ctx()->need_resched = 1;
-	} else if (arch_get_cpu_ctx()->rq_head) {
-		arch_get_cpu_ctx()->need_resched = 1;
+	} else {
+		/* Idle: anything queued anywhere is work this CPU could steal */
+		extern int smp_ncpus;
+		for (int i = 0; i < smp_ncpus; i++)
+			if (all_cpus[i] && all_cpus[i]->rq_head) {
+				arch_get_cpu_ctx()->need_resched = 1;
+				break;
+			}
 	}
 }
 
@@ -266,7 +336,7 @@ static void sched_watchdog_remote(void)
 	static unsigned frozen[MAX_CPUS];
 	static unsigned n, warm;
 
-	if ((++n & 0x7F) != 0) return;
+	if (++n % (TIMER_HZ * 5 / 4) != 0) return;
 	if (warm < 2) {
 		warm++;
 		for (int i = 0; i < smp_ncpus; i++)
@@ -280,7 +350,7 @@ static void sched_watchdog_remote(void)
 		if (cur && cur->pid != 0 && c->wd_ticks == last_seen[i]) frozen[i]++;
 		else frozen[i] = 0;
 		if (frozen[i] >= 3) {
-			kprintf("WATCHDOG: cpu%d wedged in %s, pid=%d (%s) syscall=%d\n",
+			kprintf(KERN_ERR "sched: cpu%d wedged in %s, pid=%d (%s) syscall=%d\n",
 			        i, c->wd_where ? c->wd_where : "?",
 			        cur ? (int)cur->pid : -1, cur ? cur->name : "-",
 			        cur ? cur->last_syscall : -1);
@@ -313,9 +383,72 @@ volatile uint64_t kernel_ticks  = 0;
 static volatile uint64_t sched_next_wake;
 static int               sched_itimer_armed;
 
+/* Timed sleepers in a min-heap by deadline, so the tick wakes the due ones without
+ * walking every process under sched_lock: with thousands of processes that walk,
+ * once a tick, held the lock all other CPUs need. Entries are not removed when a
+ * sleeper wakes early; a popped entry counts only if its task, found again by pid,
+ * is the same one and still has a deadline that has come. Full: the old walk takes
+ * over until the heap has drained. */
+#define DH_CAP 16384
+extern cpu_context_t *all_cpus[];
+static struct dh_ent { process_t *t; uint64_t d; int pid; } dh[DH_CAP];
+static int dh_n, dh_over;
+static spinlock_t dh_lock = SPINLOCK_INIT;
+
+static void dh_push(process_t *t, uint64_t d)
+{
+	uint64_t f = spin_lock_irq(&dh_lock);
+	if (dh_n >= DH_CAP) { dh_over = 1; spin_unlock_irq(&dh_lock, f); return; }
+	int i = dh_n++;
+	while (i > 0) {
+		int up = (i - 1) / 2;
+		if (dh[up].d <= d) break;
+		dh[i] = dh[up];
+		i = up;
+	}
+	dh[i] = (struct dh_ent){t, d, (int)t->pid};
+	spin_unlock_irq(&dh_lock, f);
+}
+
+/* Take up to max due entries. Caller holds sched_lock (dh_lock nests inside). */
+static int dh_pop_due(uint64_t now, struct dh_ent *out, int max)
+{
+	int n = 0;
+	uint64_t f = spin_lock_irq(&dh_lock);
+	while (dh_n && dh[0].d <= now && n < max) {
+		out[n++] = dh[0];
+		struct dh_ent last = dh[--dh_n];
+		int i = 0;
+		for (;;) {
+			int a = 2 * i + 1, b = a + 1, m = i;
+			uint64_t md = last.d;
+			if (a < dh_n && dh[a].d < md) { m = a; md = dh[a].d; }
+			if (b < dh_n && dh[b].d < md) { m = b; }
+			if (m == i) break;
+			dh[i] = dh[m];
+			i = m;
+		}
+		if (dh_n) dh[i] = last;
+	}
+	if (!dh_n) dh_over = 0;
+	spin_unlock_irq(&dh_lock, f);
+	return n;
+}
+
 void sched_note_wake_deadline(uint64_t deadline)
 {
 	if (!deadline) return;
+	process_t *me = task_current();
+	if (me && me->pid) dh_push(me, deadline);
+	/* a slow BSP would wake this sleeper up to a slow tick late */
+	cpu_context_t *b = all_cpus[0];
+	if (b && b->tick_slow && deadline <= kernel_ticks + 2 * TICK_SLOW) {
+		b->need_resched = 1;
+		if (arch_get_cpu_ctx() != b) {
+			extern void smp_ipi_resched(int);
+			smp_ipi_resched(0);
+		}
+	}
 	uint64_t cur;
 	do {
 		cur = sched_next_wake;
@@ -334,11 +467,12 @@ void sched_itimer_account(uint64_t old_val, uint64_t new_val)
 static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
 {
 	if ((uint64_t)p < 0xFFFF000000000000ULL) {
-		kprintf("[DBG] cpu_rq_add: bad p=%p cpu%d\n", p, (int)cpu->cpu_id);
+		kprintf(KERN_ERR "sched: cpu_rq_add bad p=%p cpu%d\n", p, (int)cpu->cpu_id);
 		kpanic("cpu_rq_add: invalid process ptr");
 	}
 	if (p->in_rq) return;   /* already queued — guard against double-enqueue corruption */
 	p->in_rq = 1;
+	cpu->rq_n++;
 	p->sched_next = NULL;
 	if (!cpu->rq_tail) {
 		cpu->rq_head = cpu->rq_tail = p;
@@ -357,14 +491,15 @@ static process_t *cpu_rq_pop(cpu_context_t *cpu)
 	if (!cpu->rq_head) return NULL;
 	process_t *p = cpu->rq_head;
 	if ((uint64_t)p < 0xFFFF000000000000ULL) {
-		kprintf("[DBG] cpu_rq_pop: bad head %p on cpu%d rq_tail=%p\n",
+		kprintf(KERN_ERR "sched: cpu_rq_pop bad head %p on cpu%d rq_tail=%p\n",
 		        p, (int)cpu->cpu_id, cpu->rq_tail);
 		cpu->rq_head = cpu->rq_tail = NULL;
+		cpu->rq_n = 0;
 		kpanic("cpu_rq_pop: corrupt rq_head");
 	}
 	process_t *nxt = p->sched_next;
 	if (nxt && (uint64_t)nxt < 0xFFFF000000000000ULL) {
-		kprintf("[DBG] cpu_rq_pop: bad sched_next %p in proc pid=%lld cpu%d\n",
+		kprintf(KERN_ERR "sched: cpu_rq_pop bad sched_next %p in proc pid=%lld cpu%d\n",
 		        nxt, (long long)p->pid, (int)cpu->cpu_id);
 		kpanic("cpu_rq_pop: corrupt sched_next");
 	}
@@ -372,6 +507,7 @@ static process_t *cpu_rq_pop(cpu_context_t *cpu)
 	if (!cpu->rq_head) cpu->rq_tail = NULL;
 	p->sched_next = NULL;
 	p->in_rq = 0;
+	cpu->rq_n--;
 	return p;
 }
 
@@ -394,6 +530,7 @@ static process_t *cpu_rq_steal(cpu_context_t *cpu, int self_id)
 		if (cpu->rq_tail == p) cpu->rq_tail = prev;
 		p->sched_next = NULL;
 		p->in_rq = 0;
+		cpu->rq_n--;
 		return p;
 	}
 	return NULL;
@@ -402,9 +539,7 @@ static process_t *cpu_rq_steal(cpu_context_t *cpu, int self_id)
 /* Count processes in a CPU's runqueue */
 static int cpu_rq_len(cpu_context_t *cpu)
 {
-	int n = 0;
-	for (process_t *p = cpu->rq_head; p; p = p->sched_next) n++;
-	return n;
+	return cpu->rq_n;
 }
 
 /* Pick the least-loaded online CPU the task is allowed on (both arches —
@@ -418,7 +553,9 @@ static cpu_context_t *pick_cpu(process_t *p)
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
 		if (!c || !c->online || !cpu_allowed(p, i)) continue;
-		int l = cpu_rq_len(c);
+		/* What it is running counts: an idle CPU beats one whose queue is merely empty */
+		process_t *cur = c->current;
+		int l = cpu_rq_len(c) * 2 + (cur && cur->pid != 0);
 		if (!best || l < best_len) { best = c; best_len = l; }
 	}
 	if (!best) best = arch_get_cpu_ctx();   /* mask excludes all online CPUs: fall back */
@@ -499,6 +636,7 @@ void sched_init(void)
 	p->next  = p;
 	p->kstack = idle_kstack;
 	p->ticks_remaining = sched_quantum_val;
+	p->umask = 022;   /* pid 1 inherits this; 0 would make every file world-writable */
 	memcpy(p->name, "idle", 5);
 
 	uint8_t *sp_top = idle_kstack + KSTACK_SIZE;
@@ -515,6 +653,7 @@ void sched_init(void)
 	cpu->magic        = 0xCAFEBABE;
 	cpu->rq_head      = NULL;
 	cpu->rq_tail      = NULL;
+	cpu->rq_n         = 0;
 	cpu->online       = 1;
 	cpu->need_resched = 0;
 	cpu->idle         = p;
@@ -522,7 +661,7 @@ void sched_init(void)
 
 	proctab_grow();
 	proctab[0] = p;
-	proc_cnt   = 1;
+	proc_cnt   = 2;   /* pid 1 stays free for init; kernel threads start before it */
 
 	{
 		char buf[16];
@@ -580,15 +719,89 @@ static void itimer_charge_cpu(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* Load: tasks running or waiting to run, as an exponential average in 1/1024ths,
+ * sampled every 5 s the way Linux does. */
+uint64_t load_avg[3];
+int sched_running_now(void)
+{
+	extern int smp_ncpus;
+	int n = 0;
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c) continue;
+		if (c->rq_head) n++;             /* no walk: this runs in the tick, unlocked */
+		process_t *t = c->current;
+		if (t && t->pid != 0) n++;
+	}
+	return n;
+}
+
+static void load_sample(void)
+{
+	static const uint64_t EXP[3] = {943, 1006, 1019};   /* e^(-5/60), /300, /900, in 1/1024 */
+	uint64_t now = (uint64_t)sched_running_now() * 1024;
+	for (int i = 0; i < 3; i++)
+		load_avg[i] = (load_avg[i] * EXP[i] + now * (1024 - EXP[i])) / 1024;
+}
+
+/* The BSP's tick is the clock, so it was never slowed; but at 1 kHz it keeps the
+ * whole package out of its deep sleep states. With every CPU idle, nothing due
+ * within a slow tick and no itimer counting, it runs TICK_SLOW times slower and
+ * kernel_ticks moves TICK_SLOW at a time (kept aligned, so modulo users still
+ * fire). Anything that needs it sooner brings it back. */
+static int bsp_may_slow(void)
+{
+	extern int smp_ncpus;
+	if (dh_over || sched_itimer_armed || kernel_ticks % TICK_SLOW) return 0;
+	for (int i = 0; i < smp_ncpus; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (!c) continue;
+		if (c->rq_head || (c->current && c->current->pid)) return 0;
+	}
+	int ok;
+	uint64_t f = spin_lock_irq(&dh_lock);
+	ok = !dh_n || dh[0].d > kernel_ticks + 2 * TICK_SLOW;
+	spin_unlock_irq(&dh_lock, f);
+	return ok;
+}
+
+static void bsp_fast(cpu_context_t *c)
+{
+	if (!c->tick_slow) return;
+	c->tick_slow = 0;
+	c->idle_run = 0;
+	arch_tick_slow(0);
+}
+
+void sched_bsp_wake(void)            /* from the BSP's idle loop, on need_resched */
+{
+	bsp_fast(arch_get_cpu_ctx());
+}
+
 void sched_tick(void)
 {
-	kernel_ticks++;
+	{
+		cpu_context_t *bc = arch_get_cpu_ctx();
+		kernel_ticks += bc->tick_slow ? TICK_SLOW : 1;
+		if (bc->tick_slow && !bsp_may_slow()) bsp_fast(bc);
+		else if (!bc->tick_slow && (!task_current() || !task_current()->pid)) {
+			if (++bc->idle_run >= 32 && bsp_may_slow()) {
+				bc->tick_slow = 1;
+				arch_tick_slow(1);
+			}
+		} else {
+			bc->idle_run = 0;
+		}
+	}
+	if (kernel_ticks % (5 * TIMER_HZ) == 0)
+		load_sample();
 	arch_get_cpu_ctx()->wd_ticks++;   /* watchdog heartbeat (timer-IRQ driven) */
 	process_t *current = task_current();
 	if (!current) return;
 
 	current->ticks++;
 	itimer_charge_cpu(current);
+	{ extern void kwatch_tick_local(process_t *cur, cpu_context_t *cc); kwatch_tick_local(current, arch_get_cpu_ctx()); }
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 
@@ -604,7 +817,22 @@ void sched_tick(void)
 	 * blanket is gone — every blocking primitive is event-driven (woken by its
 	 * producer) or deadline-armed. */
 	int do_itimer   = sched_itimer_armed > 0;
-	int do_deadline = sched_next_wake && kernel_ticks >= sched_next_wake;
+	int do_deadline = dh_over && sched_next_wake && kernel_ticks >= sched_next_wake;
+	if (!dh_over) {
+		struct dh_ent due[64];
+		int n = dh_pop_due(kernel_ticks, due, 64);
+		for (int i = 0; i < n; i++) {
+			process_t *t = due[i].t;
+			if (due[i].pid <= 0 || due[i].pid >= proc_cnt || proctab[due[i].pid] != t) continue;
+			if (!t->wake_deadline || kernel_ticks < t->wake_deadline) continue;
+			t->wake_deadline = 0;
+			if (t->state == PROC_SLEEPING) {
+				t->state = PROC_READY;
+				if (!t->on_cpu) runqueue_add(t);
+				arch_get_cpu_ctx()->need_resched = 1;
+			}
+		}
+	}
 	if (do_itimer || do_deadline) {
 		uint64_t next_wake = 0;   /* recompute the deadline gate while we walk */
 		process_t *sentinel = proctab[0];
@@ -684,6 +912,29 @@ void sched_requeue_prev(void)
 void schedule(void)
 {
 	arch_get_cpu_ctx()->wd_where = "schedule";
+	{	/* switching away with a spinlock held: the lock goes to sleep with the task,
+		 * and is released later on whatever CPU it wakes up on. Name the lock. */
+		extern int spin_held_count(void);
+		extern void spin_dump_held(void);
+		static int told;
+		process_t *me = task_current();
+		if (me && me->pid && told < 2 && spin_held_count() > 0) {
+			told++;
+			kprintf(KERN_ERR "sched: pid %d (%s) leaves the CPU holding a spinlock\n",
+			        (int)me->pid, me->name);
+			spin_dump_held();
+			uint64_t *fp = (uint64_t *)__builtin_frame_address(0);
+			for (int k = 0; k < 12 && fp && (uint64_t)fp >= 0xFFFF000000000000UL && !((uint64_t)fp & 7); k++) {
+				uint64_t ret = fp[1], off = 0;
+				extern const char *ksym_lookup(uint64_t, uint64_t *);
+				const char *sy = ksym_lookup(ret, &off);
+				kprintf(KERN_ERR "  %s+0x%lx\n", sy ? sy : "?", (unsigned long)off);
+				uint64_t *nx = (uint64_t *)fp[0];
+				if (nx <= fp) break;
+				fp = nx;
+			}
+		}
+	}
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *prev = task_current();
 
@@ -693,6 +944,14 @@ void schedule(void)
 	/* Always pass prev to sched_requeue_prev to clear on_cpu */
 	cpu->pending_requeue = prev;
 
+	/* SIGKILL can land after a task decided to sleep and before it marked itself:
+	 * sig_wake_locked saw it running and woke nobody. Under sched_lock this check
+	 * and that wake cannot miss each other. task_exit may still wait on I/O. */
+	if (prev->state == PROC_SLEEPING && !prev->exiting &&
+	    (prev->sig_pending & (1UL << (SIGKILL - 1)))) {
+		prev->state = PROC_RUNNING;
+		prev->sleeping_on_queue = 0;
+	}
 	if (prev->state == PROC_RUNNING) {
 		prev->state = PROC_READY;
 	}
@@ -731,7 +990,7 @@ void schedule(void)
 		next = _cpu->idle ? _cpu->idle : &idle_proc;
 	}
 	if ((uint64_t)next < 0xFFFF000000000000ULL) {
-		kprintf("[DBG] schedule: bad next=%p prev=%p cpu%d rq_head=%p rq_tail=%p\n",
+		kprintf(KERN_ERR "sched: bad next=%p prev=%p cpu%d rq_head=%p rq_tail=%p\n",
 		        next, prev, (int)arch_get_cpu_ctx()->cpu_id,
 		        arch_get_cpu_ctx()->rq_head, arch_get_cpu_ctx()->rq_tail);
 		kpanic("schedule: invalid next process");
@@ -762,16 +1021,19 @@ void schedule(void)
 		cpu->dying_kstack_order = kstack_order_val;
 		prev->kstack = NULL;
 		prev->state  = PROC_ZOMBIE;
-		if (prev->ppid > 0 && (int)prev->ppid < proc_cnt) {
+		if (prev->pid != prev->tgid && !prev->tracer) dead_threads++;
+		if ((prev->pid == prev->tgid || prev->tracer) && prev->ppid > 0 && (int)prev->ppid < proc_cnt) {
 			process_t *pp = proctab[prev->ppid];
 			if (pp && pp->state == PROC_SLEEPING) {
 				pp->state = PROC_READY;
 				if (!pp->on_cpu) runqueue_add(pp);
 			}
+			wake_group_waiters(prev->ppid);
 		}
 	}
 
 	cpu->current = next;
+	next->hung_switches++;
 	/* IMPORTANT: update the syscall kstack pointer */
 	cpu->kstack_top = next->kstack + kstack_size_val;
 	smp_mb();
@@ -782,6 +1044,17 @@ void schedule(void)
 }
 
 void yield(void)      { arch_yield(); }
+
+/* For long loops in the kernel, which is not preemptible: give the CPU up if the
+ * tick says someone is waiting for it. Only where no spinlock is held. */
+void cond_resched(void)
+{
+	cpu_context_t *c = arch_get_cpu_ctx();
+	if (c->need_resched && task_current() && task_current()->pid) {
+		c->need_resched = 0;
+		arch_yield();
+	}
+}
 void task_sleep(void) {
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *c = task_current();
@@ -803,6 +1076,16 @@ void task_sleep_interruptible(void) {
 	arch_yield();
 }
 
+/* Caller holds sched_lock, taken with irq_flags, and has checked its condition. */
+void task_sleep_locked(uint64_t irq_flags)
+{
+	process_t *c = task_current();
+	c->sleeping_on_queue = 1;
+	c->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, irq_flags);
+	arch_yield();
+}
+
 /* Mark SLEEPING (sleeping_on_queue=1) then drop `lock`, atomically against a
  * waker holding the same lock. The caller has published its wakeup handle (a
  * waiter field) under `lock`; the waker wakes it with task_wake. IRQs stay
@@ -812,6 +1095,8 @@ void task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags) {
 	uint64_t sf = spin_lock_irq(&sched_lock);
 	c->sleeping_on_queue = 1;
 	c->state = PROC_SLEEPING;
+	/* a signal already pending woke nobody: see sleep_on_locked */
+	if (task_has_actionable_signal()) { c->state = PROC_READY; c->sleeping_on_queue = 0; }
 	spin_unlock_irq(&sched_lock, sf);
 	spin_unlock_irq(lock, lock_flags);
 	arch_yield();
