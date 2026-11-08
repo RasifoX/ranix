@@ -37,16 +37,30 @@ int mbr_probe(block_device_t *dev)
 	if (!sec_phys) return -1;
 	uint8_t *sector = (uint8_t *)PHYS_TO_VIRT(sec_phys);   /* CPU-side buffer */
 
-	if (dev->read(dev, 0, sector, 1) != 0) {
+	if (block_read(dev, 0, sector, 1) != 0) {
 		buddy_free(sec_phys, 0);
 		return -1;
 	}
 
 	mbr_t *mbr = (mbr_t *)sector;
-	if (mbr->signature != MBR_SIGNATURE) {
+	/* A volume boot record ends in the same signature, and its code would read as
+	 * partition entries: an NTFS or BitLocker filesystem without a table. */
+	if (mbr->signature != MBR_SIGNATURE ||
+	    memcmp(sector + 3, "NTFS    ", 8) == 0 || memcmp(sector + 3, "-FVE-FS-", 8) == 0) {
 		buddy_free(sec_phys, 0);
 		return -1;
 	}
+	/* A FAT or exFAT stick without a table (a "superfloppy") also ends in 55AA, its
+	 * boot code where the entries would be. A real entry's first byte is a boot
+	 * flag, 0 or 0x80; code almost never gives four of those. */
+	int flags_ok = 1;
+	for (int i = 0; i < MBR_PARTS; i++)
+		if (mbr->parts[i].status & 0x7F) flags_ok = 0;
+	if (!flags_ok || memcmp(sector + 3, "EXFAT   ", 8) == 0) {
+		buddy_free(sec_phys, 0);
+		return -1;
+	}
+	uint32_t scale = dev->lba_size > BLOCK_SIZE ? dev->lba_size / BLOCK_SIZE : 1;
 
 	int found = 0;
 	for (int i = 0; i < MBR_PARTS; i++) {
@@ -54,9 +68,14 @@ int mbr_probe(block_device_t *dev)
 		if (e->lba_size == 0 || e->type == 0) continue;
 		if (e->type == MBR_TYPE_GPT) continue;   /* protective MBR — GPT owns it */
 
-		block_device_t *pd = block_partition_add(dev, e->lba_start, e->lba_size, found);
+		uint64_t start = (uint64_t)e->lba_start * scale, size = (uint64_t)e->lba_size * scale;
+		if (!e->lba_start || start >= dev->size_blocks || size > dev->size_blocks - start) {
+			kprintf(KERN_WARN "mbr: %s entry %d outside the disk, skipped\n", dev->name, i);
+			continue;
+		}
+		block_device_t *pd = block_partition_add(dev, start, size, found, NULL);
 		if (!pd) break;
-		kprintf("mbr: %s type=0x%02x start=%u size=%u\n",
+		kprintf(KERN_INFO "mbr: %s type=0x%02x start=%u size=%u\n",
 		        pd->name, e->type, e->lba_start, e->lba_size);
 		found++;
 	}
