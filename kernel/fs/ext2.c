@@ -291,6 +291,13 @@ typedef struct ext2_fs {
 	ext2_inode_priv_t *ifree;
 	uint8_t        *ra_buf;     /* one multi-block transfer, NULL if unavailable */
 	int             ra_order;
+	/* Who keeps it: the mount table entries that show it and the files open on
+	 * it. When both are gone it is sealed (dead), and freed once no path walk
+	 * can still be holding a pointer into it. Under ref_lock. */
+	spinlock_t      ref_lock;
+	uint32_t        mounts, opens;
+	int             dead;
+	vfs_deferred_t  gone;
 	struct ext2_fs *next;
 } ext2_fs_t;
 
@@ -1085,7 +1092,9 @@ static uint64_t inode_map_block(ext2_fs_t *fs, ext2_inode_t *in, uint32_t logica
 static uint64_t   ext2_ino_counter = 0;
 static spinlock_t ext2_ino_lock    = SPINLOCK_INIT;
 static vfs_iops_t ext2_iops, ext2_fifo_iops, ext2_dev_iops;
-static vfs_fops_t ext2_fops, ext2_fops_paged;
+static vfs_fops_t ext2_fops, ext2_fops_paged, ext2_dir_fops;
+static int  ext2_hold(ext2_fs_t *fs);
+static void ext2_drop(ext2_fs_t *fs, uint32_t *count);
 extern void fifo_init_inode(vfs_inode_t *in);
 
 /* Past the triple indirect tree an index would run off its page. */
@@ -1197,6 +1206,7 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
 	if (S_ISCHR(vi->mode) || S_ISBLK(vi->mode))
 		vi->rdev = raw->i_block[0] ? raw->i_block[0] : raw->i_block[1];
 	if (S_ISREG(vi->mode)) vi->fops = fs->block_size == PAGE_SIZE ? &ext2_fops_paged : &ext2_fops;
+	if (S_ISDIR(vi->mode)) vi->fops = &ext2_dir_fops;
 	if (S_ISFIFO(vi->mode)) {   /* priv is the pipe from here on, not ours */
 		fifo_init_inode(vi);
 		vi->priv_static = 0;
@@ -1989,13 +1999,15 @@ static int ext2_open(vfs_inode_t *vi, vfs_file_t *f, int flags)
 	ext2_inode_priv_t *priv = vi->priv;
 	ext2_fs_t *fs = priv->fs;
 	int r = 0;
-	(void)f;
+	if (ext2_hold(fs)) return -2;   /* unmounted since the walk found it */
 	mutex_lock(&fs->lock);
 	priv->opens++;
 	if ((flags & O_TRUNC) && (flags & 3) && ino_size(&priv->raw))
 		r = do_truncate(fs, priv, vi, 0);
 	if (r) priv->opens--;
 	mutex_unlock(&fs->lock);
+	if (r) ext2_drop(fs, &fs->opens);
+	else f->priv = fs;              /* counted: its close uncounts it */
 	return r;
 }
 
@@ -2009,6 +2021,24 @@ static int ext2_close(vfs_file_t *f)
 		ino_release(fs, priv);
 	}
 	mutex_unlock(&fs->lock);
+	if (f->priv == fs) ext2_drop(fs, &fs->opens);
+	return 0;
+}
+
+/* An open directory keeps the filesystem too: getdents and fchdir go on using it. */
+static int ext2_dir_open(vfs_inode_t *vi, vfs_file_t *f, int flags)
+{
+	ext2_fs_t *fs = ((ext2_inode_priv_t *)vi->priv)->fs;
+	(void)flags;
+	if (ext2_hold(fs)) return -2;
+	f->priv = fs;
+	return 0;
+}
+
+static int ext2_dir_close(vfs_file_t *f)
+{
+	ext2_fs_t *fs = ((ext2_inode_priv_t *)f->inode->priv)->fs;
+	if (f->priv == fs) ext2_drop(fs, &fs->opens);
 	return 0;
 }
 
@@ -2476,6 +2506,12 @@ static vfs_fops_t ext2_fops = {
 	.seek  = ext2_seek,
 };
 
+/* the rest is the VFS's: read gives EISDIR, getdents goes through iops */
+static vfs_fops_t ext2_dir_fops = {
+	.open  = ext2_dir_open,
+	.close = ext2_dir_close,
+};
+
 /* Pages are blocks, so mapping needs no copy. */
 static vfs_fops_t ext2_fops_paged = {
 	.open  = ext2_open,
@@ -2768,10 +2804,9 @@ static void ext2_flushd(void)
 
 /* ── mount ───────────────────────────────────────────────────── */
 
-static void ext2_kill_sb(void *priv)
+/* Out of the flusher's list, everything on disk, marked clean. */
+static void ext2_shut(ext2_fs_t *fs)
 {
-	ext2_fs_t *fs = priv;
-	if (!fs) return;
 	mutex_lock(&ext2_all_lock);
 	uint64_t f = spin_lock_irq(&ext2_all_spin);
 	for (ext2_fs_t **pp = &ext2_all; *pp; pp = &(*pp)->next)
@@ -2779,6 +2814,25 @@ static void ext2_kill_sb(void *priv)
 	spin_unlock_irq(&ext2_all_spin, f);
 	mutex_unlock(&ext2_all_lock);
 	ext2_seal(fs);
+}
+
+/* What a copy of a gone filesystem's inode can still do: nothing. */
+static vfs_iops_t ext2_gone_iops;
+
+static void ext2_free(ext2_fs_t *fs)
+{
+	/* Copies of its inodes can outlive it: in the dentries it leaves behind, or
+	 * in a file whose close came last and is still being taken down. They keep
+	 * their attributes and lose every operation, so none reaches back here. */
+	uint64_t f = spin_lock_irq(&fs->vn_lock);
+	for (int i = 0; i < EXT2_IHASH_SIZE; i++)
+		for (ext2_inode_priv_t *p = fs->ihash[i]; p; p = p->hnext)
+			for (ext2_vnode_t *v = p->vnodes; v; v = v->next) {
+				v->vi.iops = &ext2_gone_iops;
+				v->vi.fops = NULL;
+				v->vi.priv = NULL;
+			}
+	spin_unlock_irq(&fs->vn_lock, f);
 	while (fs->lru_head) {
 		bc_ent_t *e = fs->lru_head;
 		lru_unlink(fs, e);
@@ -2803,6 +2857,78 @@ static void ext2_kill_sb(void *priv)
 	kfree(fs->pend);
 	kfree(fs->hash);
 	kfree(fs);
+}
+
+static void ext2_free_deferred(vfs_deferred_t *d)
+{
+	ext2_free((ext2_fs_t *)((char *)d - __builtin_offsetof(ext2_fs_t, gone)));
+}
+
+/* One more file open on fs; -1 once it is going. */
+static int ext2_hold(ext2_fs_t *fs)
+{
+	uint64_t f = spin_lock_irq(&fs->ref_lock);
+	int dead = fs->dead;
+	if (!dead) fs->opens++;
+	spin_unlock_irq(&fs->ref_lock, f);
+	return dead ? -1 : 0;
+}
+
+/* One mount entry or open file fewer (count is &fs->mounts or &fs->opens). The
+ * last one seals the filesystem; its memory waits for the walks that may still
+ * point into it. fs must not be touched after this. */
+static void ext2_drop(ext2_fs_t *fs, uint32_t *count)
+{
+	uint64_t f = spin_lock_irq(&fs->ref_lock);
+	(*count)--;
+	int last = !fs->mounts && !fs->opens;
+	if (last) fs->dead = 1;
+	spin_unlock_irq(&fs->ref_lock, f);
+	if (!last) return;
+	ext2_shut(fs);
+	fs->gone.fn = ext2_free_deferred;
+	vfs_defer(&fs->gone);
+}
+
+/* A namespace copy or a bind shows the filesystem once more. */
+static void ext2_get_sb(void *priv)
+{
+	ext2_fs_t *fs = priv;
+	uint64_t f = spin_lock_irq(&fs->ref_lock);
+	fs->mounts++;
+	spin_unlock_irq(&fs->ref_lock, f);
+}
+
+static void ext2_kill_sb(void *priv)
+{
+	if (priv) ext2_drop(priv, &((ext2_fs_t *)priv)->mounts);
+}
+
+/* A block of the cache mapped into some process: the page has a holder besides
+ * the cache. */
+static int ext2_mapped(ext2_fs_t *fs)
+{
+	int mapped = 0;
+	uint64_t f = spin_lock_irq(&fs->cache_lock);
+	for (bc_ent_t *e = fs->lru_head; e && !mapped; e = e->lnext) {
+		page_t *pg = paddr_to_page(VIRT_TO_PHYS((uint64_t)e->buf));
+		mapped = pg && pg->refcount > 1;
+	}
+	spin_unlock_irq(&fs->cache_lock, f);
+	return mapped;
+}
+
+/* umount of the last entry showing fs, while a file is open or a page mapped:
+ * EBUSY, as Linux. Another entry still showing it keeps it alive, so that umount
+ * may go. Called under vfs_lock: spinlocks only. O(cached blocks). */
+static int ext2_busy(void *priv)
+{
+	ext2_fs_t *fs = priv;
+	int mapped = ext2_mapped(fs);
+	uint64_t f = spin_lock_irq(&fs->ref_lock);
+	int busy = fs->mounts == 1 && (fs->opens || mapped);
+	spin_unlock_irq(&fs->ref_lock, f);
+	return busy;
 }
 
 /* Find the log. Returns 0 with fs->jmap set, 1 if there is none we can use. */
@@ -2981,6 +3107,8 @@ static ext2_fs_t *ext2_fs_new(block_device_t *bdev, const ext2_super_t *sb, uint
 	fs->lock        = (mutex_t)MUTEX_INIT;
 	fs->flush_lock  = (mutex_t)MUTEX_INIT;
 	fs->io_lock     = (mutex_t)MUTEX_INIT;
+	fs->ref_lock    = (spinlock_t)SPINLOCK_INIT;
+	fs->mounts      = 1;   /* the mount being made; a failed one drops it */
 	fs->hash = kmalloc(sizeof(*fs->hash) << EXT2_HASH_BITS);
 	if (!fs->hash) { kfree(fs); return NULL; }
 	memset(fs->hash, 0, sizeof(*fs->hash) << EXT2_HASH_BITS);
@@ -3137,6 +3265,8 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 
 	mnt->priv    = fs;
 	mnt->kill_sb = ext2_kill_sb;
+	mnt->get_sb  = ext2_get_sb;
+	mnt->busy    = ext2_busy;
 	mnt->root    = root_dentry;
 	if (bdev->ro) {
 		mnt->flags  |= MS_RDONLY;

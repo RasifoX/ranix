@@ -523,6 +523,10 @@ check "c-fscrash-4k"      "OK"                 "$(mkdir -p /mnt2/fsc; timeout 40
 # names, rename across directories, every indirect level, EFBIG (ENOSPC runs on the small images of arac/casper/ev/hd-tur.sh)
 check "c-ext2hard-log-1k" "OK"                 "$(mkdir -p /mnt/hard; timeout 180 /bin/test_ext2hard /mnt/hard nofill 2>&1 | tail -1; rm -rf /mnt/hard)"
 check "c-ext2hard-4k"     "OK"                 "$(mkdir -p /mnt2/hard; timeout 180 /bin/test_ext2hard /mnt2/hard nofill 2>&1 | tail -1; rm -rf /mnt2/hard)"
+# umount while a file, a directory or a mapped page is in use: EBUSY, and the
+# filesystem keeps working; a namespace copy keeps its view after the umount
+UB=$(timeout 120 /bin/test_umountbusy /dev/nvme0n1 /mnt2 2>&1); echo "$UB" | grep -v "^PASS" | sed 's/^/  umountbusy: /'
+check "c-umountbusy"      "OK"                 "$(echo "$UB" | tail -1)"
 # relative symlinks once the dentry cache is full: a first lookup then is not
 # cached, and "../" from a link met that way must start in the link's directory
 DC=$(timeout 240 /bin/test_dcachefull /dev/nvme0n1 /mnt2 2>&1); echo "$DC" | grep -v "^PASS" | sed 's/^/  dcachefull: /'
@@ -642,6 +646,9 @@ case "$ISO_OUT" in *FAIL*) echo "$ISO_OUT" | grep FAIL | head -6;; esac
 check "asess-churn"   "OK" "$(timeout 30 /bin/test_asess_churn 2>&1 | tail -1)"
 check "unix-shutdown" "OK" "$(timeout 10 /bin/test_unix_shutdown 2>&1 | tail -1)"
 check "asess-mem"     "OK" "$(timeout 60 /bin/test_asess_mem 2>&1 | tail -1)"
+# ".." at a bind root goes back the way the walk came in (chroot and debian-run binds)
+BD=$(timeout 20 /bin/test_binddotdot /tmp/bt 2>&1); echo "$BD" | grep -v "^PASS" | sed 's/^/  binddotdot: /'
+check "c-binddotdot" "OK" "$(echo "$BD" | tail -1)"
 check "asess-bind"    "OK" "$(timeout 20 /bin/test_asess_bind 2>&1 | tail -1)"
 check "c-roeexist"    "OK" "$(/bin/test_roeexist 2>&1 | tail -1)"
 check "c-mempolicy"   "OK" "$(/bin/test_mempolicy 2>&1 | tail -1)"

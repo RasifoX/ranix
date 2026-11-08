@@ -12,7 +12,7 @@
 
 static vfs_dentry_t *root_dentry = NULL;
 static vfs_dentry_t *follow_mounts(vfs_dentry_t *d);
-static vfs_dentry_t *bind_mountpoint(vfs_dentry_t *d);
+static vfs_mount_t *mount_on(mnt_namespace_t *ns, vfs_dentry_t *d);
 
 vfs_inotify_fn_t vfs_inotify_hook = NULL;
 
@@ -161,7 +161,7 @@ void vfs_inode_free(vfs_inode_t *in)
  * What is retired waits in new, moves to old when the previous generation has
  * drained, and goes when the one after it has: two tasks taking turns in a walk
  * cannot hold it up, as they could with a single count. */
-typedef struct { vfs_inode_t *in; vfs_dentry_t *de; } grave_t;
+typedef struct { vfs_inode_t *in; vfs_dentry_t *de; vfs_deferred_t *call; } grave_t;
 
 static spinlock_t grave_lock = SPINLOCK_INIT;
 static uint32_t   walk_gen, walkers[2];
@@ -193,6 +193,12 @@ static void grave_free(grave_t g)
 		g.de = d->grave_next;
 		kfree(d);
 	}
+	/* last: a filesystem freed here may be what the inodes above evicted into */
+	while (g.call) {
+		vfs_deferred_t *c = g.call;
+		g.call = c->next;
+		c->fn(c);
+	}
 }
 
 static void grave_advance(void)
@@ -222,6 +228,16 @@ static void walk_begin(void)
 	p->walk_gen = walk_gen;
 	walkers[walk_gen & 1]++;
 	spin_unlock_irq(&grave_lock, f);
+}
+
+void vfs_defer(vfs_deferred_t *d)
+{
+	walk_begin();   /* the caller, too, may use what fn frees until its syscall ends */
+	uint64_t f = spin_lock_irq(&grave_lock);
+	d->next = grave_new.call;
+	grave_new.call = d;
+	spin_unlock_irq(&grave_lock, f);
+	grave_advance();
 }
 
 /* Paths are walked as strings from the root, but a task reaches its cwd and an
@@ -680,6 +696,8 @@ static void rp_pop(char *rp, int *rl)
  * dentry cache stands in volatile_dentry, and the walk owns its inode
  * (prev_volatile) until the next step. f holds the irq flags of vfs_lock while
  * the walk has it. */
+#define WALK_MNT_MAX 16
+
 typedef struct {
 	vfs_dentry_t *d;
 	vfs_dentry_t *proc_root;   /* the task's root: ".." stops here */
@@ -690,7 +708,35 @@ typedef struct {
 	char         *rp;
 	int           rl;
 	uint64_t      f;
+	/* The mounts the walk came in through, innermost last: ".." at the root of
+	 * one of them goes back out at its mountpoint. A bind's root keeps its real
+	 * parent, so a walk that reached the same directory by its own path leaves
+	 * by that parent instead. Dentries, not mounts: an umount meanwhile cannot
+	 * free them under the walk. */
+	struct { vfs_dentry_t *root, *mp; } mnt[WALK_MNT_MAX];
+	int           nmnt;
 } walk_t;
+
+/* Step from d into whatever is mounted on it, as follow_mounts does, and note
+ * each mount entered. Deeper than the stack, the oldest entry goes: a mount's
+ * root still leads out through its ->parent, only a bind so far down would be
+ * left the way of its source. Caller holds vfs_lock. */
+static vfs_dentry_t *walk_enter_mounts(walk_t *w, vfs_dentry_t *d)
+{
+	mnt_namespace_t *ns = current_mnt_ns();
+	vfs_mount_t *m;
+	for (int guard = 0; guard < 64 && (m = mount_on(ns, d)); guard++) {
+		if (w->nmnt == WALK_MNT_MAX) {
+			memmove(&w->mnt[0], &w->mnt[1], sizeof(w->mnt[0]) * (WALK_MNT_MAX - 1));
+			w->nmnt--;
+		}
+		w->mnt[w->nmnt].root = m->root;
+		w->mnt[w->nmnt].mp   = d;
+		w->nmnt++;
+		d = m->root;
+	}
+	return d;
+}
 
 /* Step w to "..". Caller holds vfs_lock; this may drop and retake it. */
 static void walk_dotdot(walk_t *w)
@@ -715,10 +761,16 @@ static void walk_dotdot(walk_t *w)
 		w->d_is_volatile = 0;
 		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
 		rp_pop(w->rp, &w->rl);
-	} else if (w->d != w->proc_root && w->d != w->root_top && w->d->parent) {
-		vfs_dentry_t *mp = bind_mountpoint(w->d);
-		w->d = mp ? mp->parent : w->d->parent;
-		rp_pop(w->rp, &w->rl);
+	} else if (w->d != w->proc_root && w->d != w->root_top) {
+		/* out of each mount whose root this is, the way the walk came in */
+		vfs_dentry_t *up = w->d;
+		int n = w->nmnt;
+		while (n && up == w->mnt[n - 1].root) up = w->mnt[--n].mp;
+		if (up->parent) {
+			w->d = up->parent;
+			w->nmnt = n;
+			rp_pop(w->rp, &w->rl);
+		}
 	}
 }
 
@@ -844,6 +896,7 @@ static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *
 	if (target[0] == '/') {
 		if (w->rp) { w->rl = 0; w->rp[0] = '\0'; }   /* an absolute target starts over at the root */
 		w->d = w->proc_root;
+		w->nmnt = 0;
 		*pp = work + 1;
 		w->d_is_volatile = 0;
 		/* Absolute symlink restart — free any volatile context */
@@ -894,6 +947,7 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 	w.d = w.root_top;
 	w.d_is_volatile = 0;
 	w.prev_volatile = NULL;
+	w.nmnt = 0;
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
 	vfs_dentry_t *reached = w.d;
@@ -947,7 +1001,7 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 			continue;
 		}
 
-		w.d = follow_mounts(child);
+		w.d = walk_enter_mounts(&w, child);
 		rp_push(rp, &w.rl, tmp, (int)len);
 		p = end;
 	}
@@ -1130,31 +1184,26 @@ void mnt_ns_put(mnt_namespace_t *ns)
 	kfree(ns);
 }
 
-/* If d is a mountpoint in the current namespace, return the mount's root
- * (following stacked mounts). Caller holds vfs_lock. */
+/* The newest mount on d in ns, or NULL. Caller holds vfs_lock. */
+static vfs_mount_t *mount_on(mnt_namespace_t *ns, vfs_dentry_t *d)
+{
+	for (vfs_mount_t *m = ns->mounts; m; m = m->next)
+		if (m->mountpoint == d) return m;
+	return NULL;
+}
+
+/* If d is a mountpoint in ns, return the mount's root (following stacked
+ * mounts). Caller holds vfs_lock. */
 static vfs_dentry_t *follow_mounts_in(mnt_namespace_t *ns, vfs_dentry_t *d)
 {
-	int moved = 1, guard = 0;
-	while (moved && guard++ < 64) {
-		moved = 0;
-		for (vfs_mount_t *m = ns->mounts; m; m = m->next)
-			if (m->mountpoint == d) { d = m->root; moved = 1; break; }
-	}
+	vfs_mount_t *m;
+	for (int guard = 0; guard < 64 && (m = mount_on(ns, d)); guard++) d = m->root;
 	return d;
 }
 
 static vfs_dentry_t *follow_mounts(vfs_dentry_t *d)
 {
 	return follow_mounts_in(current_mnt_ns(), d);
-}
-
-/* A bind's root keeps its real ->parent, which belongs to the tree it was taken
- * from, so ".." leaves it through the mountpoint instead. Caller holds vfs_lock. */
-static vfs_dentry_t *bind_mountpoint(vfs_dentry_t *d)
-{
-	for (vfs_mount_t *m = current_mnt_ns()->mounts; m; m = m->next)
-		if (m->root == d && m->pin_root && m->mountpoint) return m->mountpoint;
-	return NULL;
 }
 
 int vfs_mount(const char *path, const char *fstype, void *data)
@@ -1189,6 +1238,7 @@ static vfs_mount_t *mount_alloc(const char *path, const char *fstype, void *data
 	mnt->priv       = data;
 	mnt->kill_sb    = NULL;
 	mnt->get_sb     = NULL;
+	mnt->busy       = NULL;
 	mnt->pin_root   = 0;
 	mnt->ro_lock    = 0;
 	mnt->mountpoint = NULL;
@@ -1273,6 +1323,7 @@ static void mount_hold_tree(vfs_mount_t *m, vfs_dentry_t *d)
 		m->priv    = src->priv;
 		m->get_sb  = src->get_sb;
 		m->kill_sb = src->kill_sb;
+		m->busy    = src->busy;
 		m->get_sb(m->priv);
 	}
 	m->sdev = src ? src->sdev : __atomic_add_fetch(&sdev_next, 1, __ATOMIC_SEQ_CST);
@@ -1526,6 +1577,8 @@ int vfs_umount(const char *path)
 	if (mnt->pin_root) root->pins--;
 	int busy = dentry_tree_pinned(root);
 	if (mnt->pin_root) root->pins++;
+	/* open files and mapped pages; the boot root's state outlives its entry */
+	if (!busy && mnt->busy && root != root_dentry) busy = mnt->busy(mnt->priv);
 	if (busy) { spin_unlock_irq(&vfs_lock, f); return -16; } /* EBUSY */
 
 	if (prev) prev->next = mnt->next;
@@ -1918,9 +1971,9 @@ again:;
 		if (f->lpath) memcpy(f->lpath, rp, rl + 1);
 	}
 
-	/* The file holds the inode from here, and opening a FIFO can block for good. */
+	/* held from here; only an open that may block for good (FIFO, device) leaves the walk */
 	atomic_fetch_add32((volatile uint32_t *)&inode->open_refs, 1);
-	vfs_walk_done(task_current());
+	if (!S_ISREG(inode->mode) && !S_ISDIR(inode->mode)) vfs_walk_done(task_current());
 
 	int orc = (inode->fops && inode->fops->open) ? inode->fops->open(inode, f, flags) : 0;
 	if (orc != 0) {
