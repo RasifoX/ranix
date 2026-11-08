@@ -29,23 +29,29 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 {
 	int r = copy_path_from_user(out, upath);
 	if (r) return r;
+	/* "" names nothing; joined onto the base it would silently mean the cwd */
+	if (!out[0]) return -2;
 	if (out[0] == '/') { path_trim_trailing_slash(out); return 0; }
 	process_t *p = task_current();
 	const char *base;
+	vfs_file_t *f = NULL;   /* pinned: base points into it, a sibling may close dirfd */
 	if (dirfd == AT_FDCWD) {
 		base = p->cwd;
 	} else {
-		vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
-		if (!f || !f->inode) return -9;             /* EBADF */
-		if (!S_ISDIR(f->inode->mode)) return -20;   /* ENOTDIR */
-		if (f->path[0] != '/') return -9;
+		f = (p && p->fds) ? fget(p->fds, dirfd) : NULL;
+		if (!f) return -9;                                      /* EBADF */
+		if (!f->inode)                { fput(f); return -9; }
+		if (!S_ISDIR(f->inode->mode)) { fput(f); return -20; }  /* ENOTDIR */
+		if (f->path[0] != '/')        { fput(f); return -9; }
 		base = f->path;
+		vfs_walk_anchor(p, base);
 	}
 	int blen = strlen(base), plen = strlen(out);
-	if (blen + 1 + plen >= PATH_MAX) return -36;
+	if (blen + 1 + plen >= PATH_MAX) { fput(f); return -36; }
 	char *tmp = kmalloc(PATH_MAX);
-	if (!tmp) return -12;
+	if (!tmp) { fput(f); return -12; }
 	memcpy(tmp, base, blen);
+	fput(f);
 	if (blen == 0 || tmp[blen - 1] != '/') tmp[blen++] = '/';
 	memcpy(tmp + blen, out, plen);
 	tmp[blen + plen] = '\0';
@@ -60,9 +66,8 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 static long sys_mkdir(const char *path, mode_t mode)
 {
 	char kp[PATH_MAX];
-	int r = copy_path_from_user(kp, path);
+	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
-	path_trim_trailing_slash(kp);
 	return vfs_mkdir(kp, mode);
 }
 
@@ -74,38 +79,45 @@ static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 	return vfs_mkdir(kp, mode);
 }
 
-/* A directory holds only "." and ".." (readdir idx 0,1) when empty. */
+/* A directory holds only "." and ".." when empty. The cursor belongs to the
+ * filesystem (a byte offset on ext2), so step by next_off as getdents does. */
 static int dir_is_empty(const char *kp)
 {
 	vfs_dirent_t de;
-	return vfs_readdir(kp, 2, &de) != 0;
+	for (uint32_t idx = 0; vfs_readdir(kp, idx, &de) == 0; idx = de.next_off)
+		if (strcmp(de.name, ".") != 0 && strcmp(de.name, "..") != 0) return 0;
+	return 1;
 }
 
 static long sys_unlink(const char *path)
 {
 	char kp[PATH_MAX];
-	int r = copy_path_from_user(kp, path);
+	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
+	vfs_stat_t vs = {0};
+	if (vfs_lstat(kp, &vs) != 0) return -2;         /* ENOENT */
+	if (S_ISDIR(vs.mode)) return -21;               /* EISDIR */
 	r = vfs_unlink(kp);
-	return r == -30 ? -30 : (r == 0 ? 0 : -2);
+	return r == -30 || r == -16 || r == -13 || r == -1 ? r : (r == 0 ? 0 : -2);
 }
 
 static long sys_unlinkat(int dirfd, const char *path, int flags)
 {
+	if (flags & ~AT_REMOVEDIR) return -22;
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
-	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	vfs_stat_t vs = {0};
 	if (vfs_lstat(kp, &vs) != 0) return -2;         /* ENOENT */
 	if (flags & AT_REMOVEDIR) {
 		if (!S_ISDIR(vs.mode)) return -20;          /* ENOTDIR */
+		if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 		if (!dir_is_empty(kp)) return -39;          /* ENOTEMPTY */
 	} else {
 		if (S_ISDIR(vs.mode)) return -21;           /* EISDIR */
 	}
 	r = vfs_unlink(kp);
-	return r == -30 ? -30 : (r == 0 ? 0 : -2);
+	return r == -30 || r == -16 || r == -13 || r == -1 ? r : (r == 0 ? 0 : -2);
 }
 
 /* rename takes two paths; stage them on the heap so the kernel-stack frame
@@ -118,7 +130,7 @@ static long sys_rename(const char *old, const char *new)
 	if (!kn) { kfree(ko); return -12; }
 	long ret;
 	int r;
-	if ((r = copy_path_from_user(ko, old)) || (r = copy_path_from_user(kn, new)))
+	if ((r = resolve_path(ko, AT_FDCWD, old)) || (r = resolve_path(kn, AT_FDCWD, new)))
 		ret = r;
 	else
 		ret = vfs_rename(ko, kn);
@@ -145,15 +157,15 @@ static long sys_renameat(int olddirfd, const char *old, int newdirfd, const char
 static long sys_rmdir(const char *path)
 {
 	char kp[PATH_MAX];
-	int r = copy_path_from_user(kp, path);
+	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
-	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	vfs_stat_t vs = {0};
 	if (vfs_lstat(kp, &vs) != 0) return -2;     /* ENOENT */
 	if (!S_ISDIR(vs.mode)) return -20;          /* ENOTDIR */
+	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	if (!dir_is_empty(kp)) return -39;          /* ENOTEMPTY */
 	r = vfs_unlink(kp);
-	return r == -30 ? -30 : (r == 0 ? 0 : -2);
+	return r == -30 || r == -16 || r == -13 || r == -1 ? r : (r == 0 ? 0 : -2);
 }
 
 /* ── stat syscalls ───────────────────────────────────────── */
@@ -161,7 +173,7 @@ static long sys_rmdir(const char *path)
 static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
 {
 	memset(st, 0, sizeof(*st));
-	st->st_dev     = 1;
+	st->st_dev     = vs->sdev ? ((vs->sdev & 0xff) | ((uint64_t)(vs->sdev & ~0xffu) << 12)) : 1;
 	st->st_mode    = vs->mode;
 	st->st_ino     = vs->ino;
 	st->st_size    = (int64_t)vs->size;
@@ -176,6 +188,34 @@ static void fill_linux_stat(linux_stat_t *st, const vfs_stat_t *vs)
 	st->st_ctime_sec = vs->ctime; st->st_ctime_nsec = vs->ctime_nsec;
 }
 
+static long sys_fstat(int fd, linux_stat_t *st);
+
+/* stat() through /proc/<self>/fd/N of a file with no path (pipe, socket,
+ * eventfd, memfd): the link names no file to follow, so stat the open file
+ * itself, as Linux's magic links do. Chromium's sandbox fstatat()s every
+ * entry of /proc/self/fd and CHECKs that it works. -2 when kp is not one. */
+static long proc_fd_stat(const char *kp, linux_stat_t *st)
+{
+	const char *p = kp;
+	process_t *cur = task_current();
+	if (strncmp(p, "/proc/", 6) != 0) return -2;
+	p += 6;
+	if (strncmp(p, "self/fd/", 8) == 0) {
+		p += 8;
+	} else {
+		long pid = 0;
+		while (*p >= '0' && *p <= '9') pid = pid * 10 + (*p++ - '0');
+		if (pid != task_vpid(cur) && pid != (long)cur->tgid) return -2;
+		if (strncmp(p, "/fd/", 4) != 0) return -2;
+		p += 4;
+	}
+	int n = 0;
+	if (*p < '0' || *p > '9') return -2;
+	while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
+	if (*p || !fd_get(cur->fds, n)) return -2;
+	return sys_fstat(n, st);
+}
+
 static long sys_stat_path(const char *path, linux_stat_t *st)
 {
 	if (!st) return -14;
@@ -183,10 +223,10 @@ static long sys_stat_path(const char *path, linux_stat_t *st)
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	vfs_stat_t vs = {0};
-	if (vfs_stat(kp, &vs) != 0) return -2;
+	if (vfs_stat(kp, &vs) != 0) return proc_fd_stat(kp, st);
 	linux_stat_t ks;
 	fill_linux_stat(&ks, &vs);
-	return copy_to_user(st, &ks, sizeof(ks));
+	return copy_to_user(st, &ks, sizeof(ks)) ? -14 : 0;
 }
 
 /* lstat: same as stat but does not follow a final symlink. */
@@ -200,7 +240,7 @@ static long sys_lstat_path(const char *path, linux_stat_t *st)
 	if (vfs_lstat(kp, &vs) != 0) return -2;
 	linux_stat_t ks;
 	fill_linux_stat(&ks, &vs);
-	return copy_to_user(st, &ks, sizeof(ks));
+	return copy_to_user(st, &ks, sizeof(ks)) ? -14 : 0;
 }
 
 static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int flags)
@@ -216,16 +256,17 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 	if (r) return r;
 	vfs_stat_t vs = {0};
 	int sr = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lstat(kp, &vs) : vfs_stat(kp, &vs);
-	if (sr != 0) return -2;
+	if (sr != 0) return (flags & AT_SYMLINK_NOFOLLOW) ? -2 : proc_fd_stat(kp, st);
 	linux_stat_t ks;
 	fill_linux_stat(&ks, &vs);
-	return copy_to_user(st, &ks, sizeof(ks));
+	return copy_to_user(st, &ks, sizeof(ks)) ? -14 : 0;
 }
 
 /* R_OK=4 W_OK=2 X_OK=1 happen to equal the rwx permission bits. access() uses
  * the REAL uid/gid (faccessat with AT_EACCESS would use effective — minor). */
 static long access_check(const char *kp, int mode, int use_eff)
 {
+	if (mode & ~7) return -22;
 	vfs_stat_t vs = {0};
 	if (vfs_stat(kp, &vs) != 0) return -2;          /* ENOENT */
 	if (mode == 0) return 0;                        /* F_OK: exists */
@@ -266,25 +307,34 @@ static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 
 static long sys_truncate(const char *path, off_t len)
 {
+	if (len < 0) return -22;
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, AT_FDCWD, path);
 	if (r) return r;
 	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
 	vfs_dentry_t *de = vfs_dentry_resolve(kp);
 	if (!de || !de->inode) return -2;
+	if (vfs_dentry_readonly(de)) return -30; /* EROFS */
 	vfs_inode_t *in = de->inode;
+	if (S_ISDIR(in->mode)) return -21;       /* EISDIR */
+	r = vfs_may_write(in);
+	if (r) return r;
 	if (!in->iops || !in->iops->truncate) return -22;
 	return in->iops->truncate(in, len);
 }
 
 static long sys_ftruncate(int fd, off_t len)
 {
+	if (len < 0) return -22;
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);   /* pinned: a truncate can block on the disk */
 	if (!f) return -9;
 	vfs_inode_t *in = f->inode;
-	if (!in->iops || !in->iops->truncate) return -22;
-	return in->iops->truncate(in, len);
+	long r = -22;
+	if ((f->flags & 3) != O_RDONLY && !S_ISDIR(in->mode) && in->iops && in->iops->truncate)
+		r = in->iops->truncate(in, len);
+	fput(f);
+	return r;
 }
 
 /* ── getdents64 ──────────────────────────────────────────── */
@@ -301,14 +351,15 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 {
 	if (!access_ok(buf, bufsize)) return -14;
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
+	vfs_file_t *f = fget(p->fds, fd);   /* pinned: readdir can block on the disk */
 	if (!f) return -9;
 	vfs_inode_t *inode = f->inode;
-	if (!S_ISDIR(inode->mode)) return -20;
-	if (!inode->iops || !inode->iops->readdir) return -95;
+	if (!S_ISDIR(inode->mode)) { fput(f); return -20; }
+	if (!inode->iops || !inode->iops->readdir) { fput(f); return -95; }
+	if (!bufsize) { fput(f); return -22; }
 
 	uint8_t *kbuf = kmalloc(bufsize > 4096 ? 4096 : bufsize);
-	if (!kbuf) return -12;
+	if (!kbuf) { fput(f); return -12; }
 	size_t bufcap = bufsize > 4096 ? 4096 : bufsize;
 
 	size_t  offset = 0;
@@ -317,10 +368,20 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 
 	while (1) {
 		vfs_dirent_t vde;
-		if (inode->iops->readdir(inode, idx, &vde) != 0) break;
+		int rrc = inode->iops->readdir(inode, idx, &vde);
+		if (rrc != 0) {
+			/* -1 is the end; anything else is a directory that could not be read
+			 * whole, and a caller copying a tree must hear of it */
+			if (rrc != -1 && !total) total = rrc;
+			break;
+		}
 		int namelen = strlen(vde.name);
 		size_t reclen = (19 + namelen + 1 + 7) & ~7UL;
-		if (offset + reclen > bufcap) break;
+		if (offset + reclen > bufcap) {
+			/* 0 would read as end of directory */
+			if (!total) total = -22;
+			break;
+		}
 
 		uint8_t *e = kbuf + offset;
 		memset(e, 0, reclen);
@@ -340,9 +401,9 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 	}
 
 	f->pos = (off_t)idx;
-	if (total > 0)
-		copy_to_user(buf, kbuf, offset);
+	if (total > 0 && copy_to_user(buf, kbuf, offset) != 0) total = -14;
 	kfree(kbuf);
+	fput(f);
 	return total;
 }
 
@@ -351,9 +412,10 @@ static long sys_getdents64(int fd, void *buf, size_t bufsize)
 static long sys_dup(int oldfd)
 {
 	process_t  *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, oldfd);
+	vfs_file_t *f = fget(p->fds, oldfd);
 	if (!f) return -9;
 	int newfd = fd_alloc(p->fds, f);
+	fput(f);
 	if (newfd < 0) return -24;
 	fd_set_cloexec(p->fds, newfd, 0);
 	return newfd;
@@ -363,17 +425,21 @@ static long sys_dup2(int oldfd, int newfd)
 {
 	if (newfd < 0) return -9;
 	process_t *p = task_current();
-	vfs_file_t *src = p->fds ? fd_get(p->fds, oldfd) : NULL;
+	vfs_file_t *src = p->fds ? fget(p->fds, oldfd) : NULL;
 	if (!src) return -9;
-	if (oldfd == newfd) return newfd;
+	if (oldfd == newfd) { fput(src); return newfd; }
+	if (newfd >= p->fds->rlim_nofile) { fput(src); return -9; }
 	if (fd_get(p->fds, newfd)) vfs_close(newfd);
-	if (fd_alloc_at(p->fds, src, newfd) < 0) return -24;
+	int r = fd_alloc_at(p->fds, src, newfd);
+	fput(src);
+	if (r < 0) return -24;
 	fd_set_cloexec(p->fds, newfd, 0);
 	return newfd;
 }
 
 static long sys_dup3(int oldfd, int newfd, int flags)
 {
+	if (oldfd == newfd || (flags & ~O_CLOEXEC)) return -22;
 	long r = sys_dup2(oldfd, newfd);
 	if (r >= 0) {
 		process_t *p = task_current();
@@ -387,12 +453,61 @@ static long sys_dup3(int oldfd, int newfd, int flags)
 #define F_SETFD    2
 #define F_GETFL    3
 #define F_SETFL    4
+#define SETFL_MASK (O_APPEND | O_NONBLOCK)
 #define F_DUPFD_CLOEXEC 1030
 #define F_GETLK    5
 #define F_SETLK    6
 #define F_SETLKW   7
 typedef struct { int16_t l_type; int16_t l_whence; int32_t _p; int64_t l_start; int64_t l_len; int32_t l_pid; int32_t _p2; } k_flock;
 #define FD_CLOEXEC 1
+
+/* F_GETLK/F_SETLK/F_SETLKW and the F_OFD_ forms on a pinned file */
+static long fcntl_lock(vfs_file_t *f, int cmd, uint64_t arg)
+{
+	if (!f->inode) return -9;
+	k_flock fl;
+	if (copy_from_user(&fl, (const void *)arg, sizeof(fl)) != 0) return -14;
+	/* OFD locks belong to the open file, so a fork child or a dup shares them
+	 * and a second open() of the same file conflicts even in one process. */
+	int ofd = cmd >= 36;
+	if (ofd && fl.l_pid != 0) return -22;
+	if (ofd) cmd = (cmd == 36) ? F_GETLK : (cmd == 37) ? F_SETLK : F_SETLKW;
+	if (fl.l_whence < 0 || fl.l_whence > 2 || fl.l_type < 0 || fl.l_type > 2) return -22;
+	int64_t start = fl.l_start, end;
+	/* an off_t that does not fit is EOVERFLOW, as on Linux; a wrapped sum
+	 * would otherwise name some other range */
+	if (fl.l_whence == 1 && __builtin_add_overflow(start, (int64_t)f->pos, &start)) return -75;
+	if (fl.l_whence == 2 && __builtin_add_overflow(start, (int64_t)f->inode->size, &start)) return -75;
+	if (fl.l_len == 0) end = 0x7FFFFFFFFFFFFFFFLL;
+	else if (fl.l_len > 0) { if (__builtin_add_overflow(start, fl.l_len - 1, &end)) return -75; }
+	else { end = start - 1; if (__builtin_add_overflow(start, fl.l_len, &start)) return -22; } /* POSIX: range ends at start */
+	if (start < 0 || end < start) return -22;
+	/* a record lock belongs to the process, not the thread that took it (Linux:
+	 * the files_struct). SQLite runs queries on worker threads; per-thread
+	 * owners made VS Code's own threads lock each other out (SQLITE_BUSY). */
+	long pid = ofd ? (long)(uintptr_t)f : (long)task_current()->tgid;
+	if (cmd == F_GETLK) {
+		int t = (fl.l_type == 1) ? 1 : 0; int64_t s = start, e = end, hp = 0; int hpid = 0;
+		(void)hp;
+		if (vfs_posix_getlk(f->inode, pid, &t, &s, &e, &hpid)) {
+			fl.l_type = (int16_t)t; fl.l_start = s;
+			fl.l_len  = (e == 0x7FFFFFFFFFFFFFFFLL) ? 0 : (e - s + 1);
+			fl.l_pid  = hpid;
+		} else {
+			fl.l_type = 2; /* F_UNLCK: range is free */
+		}
+		return copy_to_user((void *)arg, &fl, sizeof(fl)) == 0 ? 0 : -14;
+	}
+	if (fl.l_type == 2) { vfs_posix_unlock(f->inode, pid, start, end); return 0; } /* F_UNLCK */
+	int type = (fl.l_type == 1) ? 1 : 0;   /* F_WRLCK : F_RDLCK */
+	for (;;) {
+		int r = vfs_posix_setlk(f->inode, pid, type, start, end);
+		if (r == 0) return 0;
+		if (cmd != F_SETLKW) return r;     /* F_SETLK: EAGAIN on conflict */
+		yield();
+		if (task_has_actionable_signal()) return -4; /* EINTR */
+	}
+}
 
 static long sys_fcntl(int fd, int cmd, uint64_t arg)
 {
@@ -401,9 +516,11 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 	case F_DUPFD:
 	case F_DUPFD_CLOEXEC: {
 		/* dup to first fd >= arg */
-		vfs_file_t *f = fd_get(p->fds, fd);
+		if ((int)arg < 0) return -22;
+		vfs_file_t *f = fget(p->fds, fd);
 		if (!f) return -9;
 		int nfd = fd_alloc_from(p->fds, f, (int)arg);
+		fput(f);
 		if (nfd < 0) return -24;
 		if (cmd == F_DUPFD_CLOEXEC) fd_set_cloexec(p->fds, nfd, 1);
 		return nfd;
@@ -425,44 +542,30 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 	case F_SETFL: {
 		vfs_file_t *f = fd_get(p->fds, fd);
 		if (!f) return -9;
-		f->flags = (f->flags & ~0xFFF) | ((int)arg & 0xFFF);
+		/* the access mode is fixed at open: pipe_close keys off it to tell a
+		 * reader from a writer */
+		f->flags = (f->flags & ~SETFL_MASK) | ((int)arg & SETFL_MASK);
 		return 0;
 	}
 	case F_GETLK:
 	case F_SETLK:
-	case F_SETLKW: {
-		vfs_file_t *f = fd_get(p->fds, fd);
-		if (!f || !f->inode) return -9;
-		k_flock fl;
-		if (copy_from_user(&fl, (const void *)arg, sizeof(fl)) != 0) return -14;
-		int64_t start = fl.l_start;
-		if (fl.l_whence == 1) start += (int64_t)f->pos;             /* SEEK_CUR */
-		else if (fl.l_whence == 2) start += (int64_t)f->inode->size; /* SEEK_END */
-		int64_t end = (fl.l_len == 0) ? 0x7FFFFFFFFFFFFFFFLL : (start + fl.l_len - 1);
-		int pid = (int)p->pid;
-		if (cmd == F_GETLK) {
-			int t = (fl.l_type == 1) ? 1 : 0; int64_t s = start, e = end, hp = 0; int hpid = 0;
-			(void)hp;
-			if (vfs_posix_getlk(f->inode, pid, &t, &s, &e, &hpid)) {
-				fl.l_type = (int16_t)t; fl.l_start = s;
-				fl.l_len  = (e == 0x7FFFFFFFFFFFFFFFLL) ? 0 : (e - s + 1);
-				fl.l_pid  = hpid;
-			} else {
-				fl.l_type = 2; /* F_UNLCK: range is free */
-			}
-			return copy_to_user((void *)arg, &fl, sizeof(fl)) == 0 ? 0 : -14;
-		}
-		if (fl.l_type == 2) { vfs_posix_unlock(f->inode, pid, start, end); return 0; } /* F_UNLCK */
-		int type = (fl.l_type == 1) ? 1 : 0;   /* F_WRLCK : F_RDLCK */
-		for (;;) {
-			int r = vfs_posix_setlk(f->inode, pid, type, start, end);
-			if (r == 0) return 0;
-			if (cmd != F_SETLKW) return r;     /* F_SETLK: EAGAIN on conflict */
-			yield();
-			if (task_has_actionable_signal()) return -4; /* EINTR */
-		}
+	case F_SETLKW:
+	case 36: case 37: case 38: {                  /* F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW */
+		/* pinned: F_SETLKW sleeps, and a sibling close() must not free the
+		 * file under it (an OFD lock taken after that would outlive it) */
+		vfs_file_t *f = fget(p->fds, fd);
+		if (!f) return -9;
+		long r = fcntl_lock(f, cmd, arg);
+		fput(f);
+		return r;
 	}
-	default: return 0;
+	/* Linux commands whose absence no caller can act on stay quiet no-ops. An
+	 * unknown one is EINVAL, and a bad fd is EBADF for every command. */
+	case 8: case 9: case 10: case 11:             /* F_SETOWN..F_GETSIG */
+	case 1024: case 1025: case 1026:              /* leases, F_NOTIFY */
+	case 1031: case 1032: case 1033: case 1034:   /* pipe size, seals */
+		return fd_get(p->fds, fd) ? 0 : -9;
+	default: return fd_get(p->fds, fd) ? -22 : -9;
 	}
 }
 
@@ -510,6 +613,7 @@ static long sys_chdir(const char *path)
 	if (!S_ISDIR(st.mode)) return -20;          /* ENOTDIR */
 	path_normalize(kp);
 	process_t *p = task_current();
+	if (p->euid && access_check(kp, 1, 1)) return -13; /* EACCES */
 	int n = strlen(kp);
 	if ((size_t)(n + 1) > sizeof(p->cwd)) return -36;
 	memcpy(p->cwd, kp, (size_t)(n + 1));
@@ -526,6 +630,7 @@ static long sys_chroot(const char *path)
 	vfs_dentry_t *d = vfs_dentry_resolve(kp);
 	if (!d || !d->inode) return -2;             /* ENOENT */
 	if (!S_ISDIR(d->inode->mode)) return -20;   /* ENOTDIR */
+	if (vfs_dentry_is_volatile(d)) return -22;  /* EINVAL: p->root outlives it */
 	p->root = d;
 	/* cwd is now relative to the new root; reset to "/" so a path that pointed
 	 * outside the jail can't be reached (simple, escape-safe). */
@@ -549,6 +654,7 @@ static long sys_pivot_root(const char *new_root, const char *put_old)
 	vfs_dentry_t *dn = vfs_dentry_resolve(knew);
 	if (!dn || !dn->inode) { ret = -2; goto pr_out; }          /* ENOENT */
 	if (!S_ISDIR(dn->inode->mode)) { ret = -20; goto pr_out; } /* ENOTDIR */
+	if (vfs_dentry_is_volatile(dn)) { ret = -22; goto pr_out; } /* p->root outlives it */
 	vfs_dentry_t *dold = vfs_dentry_resolve(kold);
 	if (!dold || !dold->inode || !S_ISDIR(dold->inode->mode)) { ret = -22; goto pr_out; }
 	/* put_old must lie at or under new_root (as Linux requires) */
@@ -572,7 +678,7 @@ static long sys_getcwd(char *buf, size_t size)
 	process_t *p = task_current();
 	int n = strlen(p->cwd);
 	if ((size_t)(n + 1) > size) return -34; /* ERANGE */
-	copy_to_user(buf, p->cwd, n + 1);
+	if (copy_to_user(buf, p->cwd, n + 1) != 0) return -14;
 	return (long)(n + 1);
 }
 
@@ -590,8 +696,8 @@ static long sys_getppid(void)
 	proc_put(parent);
 	return r;
 }
-static long sys_gettid(void)  { return (long)task_current()->pid; }
-static long sys_getgroups(int size, uint64_t *list) {
+static long sys_gettid(void)  { return (long)task_vpid(task_current()); }
+static long sys_getgroups(int size, gid_t *list) {
 	process_t *p = task_current();
 	int n = p->ngroups;
 	if (size == 0) return n;
@@ -637,11 +743,11 @@ static long do_setrlimit(process_t *p, int res, uint64_t cur, uint64_t max)
 {
 	if (res < 0 || res >= 16) return -22;            /* EINVAL */
 	rlimit_seed(p);
-	if (cur != RLIM_INFINITY && max != RLIM_INFINITY && cur > max) return -22;
-	/* raising the hard limit needs privilege */
-	if (max != p->rlim_max[res] &&
-	    (p->rlim_max[res] == RLIM_INFINITY || (max != RLIM_INFINITY && max > p->rlim_max[res])) &&
-	    p->euid != 0)
+	if (max != RLIM_INFINITY && cur > max) return -22;
+	/* raising the hard limit needs privilege; RLIM_INFINITY is the top value, so
+	 * lowering from it is always allowed. The caller's, not the target's, for
+	 * prlimit on another task. */
+	if (max > p->rlim_max[res] && task_current()->euid != 0)
 		return -1;                                   /* EPERM */
 	p->rlim_cur[res] = cur;
 	p->rlim_max[res] = max;
@@ -666,16 +772,16 @@ static long sys_setrlimit(int res, const void *rlim) {
 	if (copy_from_user(pair, rlim, 16)) return -14;
 	return do_setrlimit(task_current(), res, pair[0], pair[1]);
 }
-static long sys_getpgrp(void) { return (long)task_current()->pgrp; }
+static long sys_getpgrp(void) { return (long)pid_to_user(task_current()->pgrp); }
 static long sys_getpgid(pid_t pid) {
-	process_t *p = pid ? proc_get(pid) : task_current();
-	long r = p ? (long)p->pgrp : -3;
+	process_t *p = pid ? proc_get_user(pid) : task_current();
+	long r = p ? (long)pid_to_user(p->pgrp) : -3;
 	if (pid) proc_put(p);
 	return r;
 }
 static long sys_getsid(pid_t pid) {
-	process_t *p = pid ? proc_get(pid) : task_current();
-	long r = p ? (long)p->sid : -3;
+	process_t *p = pid ? proc_get_user(pid) : task_current();
+	long r = p ? (long)pid_to_user(p->sid) : -3;
 	if (pid) proc_put(p);
 	return r;
 }
@@ -685,14 +791,29 @@ static long sys_setsid(void) {
 	p->sid  = (pid_t)p->pid;
 	p->ctty = NULL;
 	p->ctty_fops = NULL;
-	return (long)p->pid;
+	return (long)task_vpid(p);
 }
+/* POSIX: only the caller or a child in its session, never a session leader, and
+ * only into a group of that session. */
 static long sys_setpgid(pid_t pid, pid_t pgid) {
-	process_t *p = pid ? proc_get(pid) : task_current();
+	process_t *cur = task_current();
+	if (pgid < 0) return -22;
+	process_t *p = pid ? proc_get_user(pid) : cur;
 	if (!p) return -3;
-	p->pgrp = pgid ? pgid : (pid_t)p->pid;
+	process_t *par = proc_get(p->ppid);
+	pid_t pgrp = pgid ? pid_from_user(pgid) : (pid_t)p->pid;
+	long r = 0;
+	if (p->tgid != cur->tgid && (!par || par->tgid != cur->tgid))
+		r = -3;
+	else if (p->sid != cur->sid || p->sid == (pid_t)p->pid)
+		r = -1;
+	else if (pgrp != (pid_t)p->pid && (!pgrp || !task_pgrp_in_session(pgrp, p->sid)))
+		r = -1;
+	else
+		p->pgrp = pgrp;
+	proc_put(par);
 	if (pid) proc_put(p);
-	return 0;
+	return r;
 }
 static long sys_setuid(uid_t uid)
 {
@@ -730,31 +851,40 @@ static long sys_getpriority(int which, int who)
 }
 static long sys_setpriority(int which, int who, int prio)
 {
-	(void)which; (void)who;
-	int nice = 20 - prio;
+	(void)who;
+	if (which < 0 || which > 2) return -22;
+	/* the raw nice value: only getpriority applies the 20-nice offset */
+	int nice = prio;
 	if (nice < -20) nice = -20;
 	if (nice >  19) nice =  19;
+	if (nice < task_current()->nice && task_current()->euid != 0) return -13;
 	task_current()->nice = nice;
 	return 0;
 }
 
-static long sys_sigaltstack(const stack_t *uss, stack_t *uoss)
+static long sys_sigaltstack(const stack_t *uss, stack_t *uoss, uint64_t usp)
 {
 	process_t *p = task_current();
+	uint64_t lo = (uint64_t)p->altstack.ss_sp;
+	int on = p->altstack.ss_size && usp >= lo && usp - lo < p->altstack.ss_size;
 	if (uoss) {
-		if (copy_to_user(uoss, &p->altstack, sizeof(stack_t)) != 0)
+		stack_t o = p->altstack;
+		o.ss_flags = on ? SS_ONSTACK : (o.ss_size ? 0 : SS_DISABLE);
+		if (copy_to_user(uoss, &o, sizeof(stack_t)) != 0)
 			return -14;
 	}
 	if (uss) {
 		stack_t ss;
 		if (copy_from_user(&ss, uss, sizeof(stack_t)) != 0)
 			return -14;
+		if (on) return -1;   /* EPERM: cannot swap the stack being run on */
 		if (ss.ss_flags & SS_DISABLE) {
 			p->altstack.ss_flags = SS_DISABLE;
 			p->altstack.ss_sp    = NULL;
 			p->altstack.ss_size  = 0;
 		} else {
-			if (!ss.ss_sp || ss.ss_size < 2048) return -22;
+			if (!ss.ss_sp) return -22;
+			if (ss.ss_size < 2048) return -12; /* ENOMEM: < MINSIGSTKSZ */
 			p->altstack = ss;
 		}
 	}

@@ -11,6 +11,7 @@
 #include <kernel/board.h>
 
 extern volatile uint64_t kernel_ticks;
+int net_drop_hit(void);
 
 #define IP_MTU       1500
 #define IP_MF        0x2000   /* more fragments */
@@ -129,6 +130,15 @@ void ip_rx(netdev_t *dev, skb_t *skb)
 
     uint8_t ihl = (iph->ver_ihl & 0x0f) * 4;
     if (ihl < 20 || skb->len < ihl) { skb_free(skb); return; }
+    /* Ethernet pads a frame to 60 bytes: a bare 40-byte ACK arrives with 6 zero
+     * bytes after it, which are not data. Untrimmed they were taken as the
+     * first 6 bytes of the stream (servers that send no TCP timestamps, e.g.
+     * Microsoft's edge: TLS saw 00 00 00 00 00 "wrong version number"). */
+    {
+        uint16_t tot = ntohs(iph->tot_len);
+        if (tot < ihl || tot > skb->len) { skb_free(skb); return; }
+        skb->len = tot;
+    }
 
     uint32_t dst = ntohl(iph->dst);
     if (dst != dev->ip && dst != 0xffffffff && dst != (dev->ip | ~dev->mask) &&
@@ -169,6 +179,8 @@ static int ip_xmit(netdev_t *dev, skb_t *skb, uint32_t dst_ip)
         memcpy(eh->dst, dev->mac, 6);
         memcpy(eh->src, dev->mac, 6);
         eh->type = htons(ETH_P_IP);
+        netdev_count_tx(dev, skb->len);
+        if (net_drop_hit()) { skb_free(skb); return 0; }   /* this is the loopback path */
         netdev_rx_enqueue(dev, skb);
         return 0;
     }
@@ -176,12 +188,12 @@ static int ip_xmit(netdev_t *dev, skb_t *skb, uint32_t dst_ip)
     if ((dst_ip & dev->mask) != (dev->ip & dev->mask))
         nexthop = dev->gw;
     uint8_t dst_mac[6];
-    if (arp_lookup(dev, nexthop, dst_mac) != 0) { skb_free(skb); return -1; }
+    if (arp_lookup(dev, nexthop, dst_mac) != 0) { arp_hold(dev, nexthop, skb); return 0; }
     eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
     memcpy(eh->dst, dst_mac, 6);
     memcpy(eh->src, dev->mac, 6);
     eh->type = htons(ETH_P_IP);
-    return dev->tx(dev, skb);
+    return netdev_tx(dev, skb);
 }
 
 /* Split a payload larger than the MTU into IP fragments. */

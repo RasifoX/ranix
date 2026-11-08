@@ -1,3 +1,5 @@
+#include <kernel/board.h>
+#include <kernel/cgroup.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/ipv6.h>
@@ -10,13 +12,16 @@
 #include <kernel/proc.h>
 
 extern volatile uint64_t kernel_ticks;
-extern uint32_t TIMER_HZ;
 void task_wake(process_t *p);
 
-#define TCP_RTO_INIT    100   /* 1s before the first RTT sample (RFC 6298 §2.1) */
-#define TCP_RTO_MIN     20    /* 200ms floor */
-#define TCP_RTO_MAX     6000  /* 60s ceiling */
-#define TCP_MSS        (uint16_t)(SKB_DATA_MAX - sizeof(tcp_hdr_t) - sizeof(ip_hdr_t) - 14)
+#define TCP_RTO_INIT    TIMER_HZ   /* 1s before the first RTT sample (RFC 6298 §2.1) */
+#define TCP_RTO_MIN     (TIMER_HZ / 5)   /* 200ms floor */
+#define TCP_RTO_MAX     (60 * TIMER_HZ)  /* 60s ceiling */
+#define TCP_MSS        1460u  /* IPv4 on a 1500-byte MTU; a segment must fit one frame */
+#define TCP_MSS6       1440u
+#define TCP_OPT_TS     12u    /* the timestamp option on every data segment */
+#define TCP_FIN_LINGER (30u * TIMER_HZ)  /* orphan in FIN_WAIT2: the peer may never close */
+#define TCP_TIME_WAIT_TICKS (5u * TIMER_HZ)  /* well short of 2MSL: gsock[] is scanned per packet */
 
 /* unacked send-queue segment; defined early so tcp_tx_seg can read the OOO list */
 typedef struct tcp_seg {
@@ -56,6 +61,12 @@ static uint16_t tcp_cksum(uint32_t src, uint32_t dst,
     return ~(uint16_t)acc;
 }
 
+static uint32_t tcp_rwnd(const socket_t *s)
+{
+    if (s->rcv_refused) return 0;   /* the budget said no: promising room invites loss */
+    return (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+}
+
 /* ── raw segment transmit ────────────────────────────────── */
 
 static int tcp_tx_seg(socket_t *s, uint8_t flags,
@@ -77,8 +88,9 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     uint32_t tsval = htonl((uint32_t)kernel_ticks);
     uint32_t tsecr = htonl(s->ts_recent);
     if (flags & TCP_SYN) {
+        uint32_t mss = s->domain == AF_INET6 ? TCP_MSS6 : TCP_MSS;
         opts[optlen++] = 2; opts[optlen++] = 4;
-        opts[optlen++] = (uint8_t)(TCP_MSS >> 8); opts[optlen++] = (uint8_t)TCP_MSS;
+        opts[optlen++] = (uint8_t)(mss >> 8); opts[optlen++] = (uint8_t)mss;
         opts[optlen++] = 4; opts[optlen++] = 2;   /* SACK-permitted */
         opts[optlen++] = 8; opts[optlen++] = 10;  /* timestamp */
         memcpy(opts + optlen, &tsval, 4); optlen += 4;
@@ -91,7 +103,7 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
             memcpy(opts + optlen, &tsval, 4); optlen += 4;
             memcpy(opts + optlen, &tsecr, 4); optlen += 4;
         }
-        if ((flags & TCP_ACK) && s->sack_ok && s->ooo_head) {
+        if ((flags & TCP_ACK) && !dlen && s->sack_ok && s->ooo_head) {
             opts[optlen++] = 1; opts[optlen++] = 1;   /* NOP, NOP — align SACK */
             int li = optlen; opts[optlen++] = 5; opts[optlen++] = 0;
             int nb = 0;
@@ -119,7 +131,7 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
     th->flags    = flags;
 
     /* advertised window: raw on the SYN, scaled afterwards */
-    uint32_t rwnd = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
+    uint32_t rwnd = tcp_rwnd(s);
     if (!(flags & TCP_SYN)) rwnd >>= s->rcv_wscale;
     th->window   = htons((uint16_t)(rwnd > 65535 ? 65535 : rwnd));
 
@@ -151,7 +163,7 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
 #define CUBIC_C_DEN  5000000000ULL
 #define CUBIC_BETA   7u     /* W_max multiplier on loss, /10 */
 #define CUBIC_BETA_SCALE 10u
-#define TICK_MS      10u    /* one timer tick, ms (the 100Hz the RTO consts assume) */
+#define TICK_MS      (1000u / TIMER_HZ)    /* one timer tick, ms */
 
 /* Serialises every TCP state-machine mutation — RX processing (tcp_rx, tcp_tick)
  * and the syscalls (connect/send/close) — so a close() and an incoming FIN can't
@@ -168,6 +180,7 @@ static uint32_t seg_span(const tcp_seg_t *g)
 
 /* serial comparison: is a <= b in 32-bit sequence space (RFC 1982) */
 static int seq_le(uint32_t a, uint32_t b) { return (int32_t)(b - a) >= 0; }
+static int seq_lt(uint32_t a, uint32_t b) { return (int32_t)(b - a) > 0; }
 
 /* Fold a round-trip sample (sent at sent_tick) into srtt/rttvar/rto (RFC 6298). */
 static void tcp_rtt_update(socket_t *s, uint64_t sent_tick)
@@ -186,19 +199,21 @@ static void tcp_rtt_update(socket_t *s, uint64_t sent_tick)
     s->rto = rto;
 }
 
-/* Record a just-transmitted segment so it can be retransmitted until acked. */
-static void seg_enqueue(socket_t *s, uint8_t flags, uint32_t seq,
-                        const void *data, uint16_t len)
+/* Record a segment so it can be retransmitted until acked. Nonzero: not recorded,
+ * so the caller must not count it as sent. */
+static int seg_enqueue(socket_t *s, uint8_t flags, uint32_t seq,
+                       const void *data, uint16_t len)
 {
     tcp_seg_t *g = kmalloc(sizeof(*g) + len);
-    if (!g) return;   /* untracked: simply won't be retransmitted */
+    if (!g) return -1;
     g->next = NULL; g->seq = seq; g->len = len; g->flags = flags;
-    g->resent = 0; g->sent_tick = kernel_ticks;
+    g->resent = 0; g->sacked = 0; g->sent_tick = kernel_ticks;
     if (len) memcpy(g->data, data, len);
     if (s->rto == 0) s->rto = TCP_RTO_INIT;
     if (s->unacked_tail) s->unacked_tail->next = g;
     else { s->unacked_head = g; s->retx_deadline = kernel_ticks + s->rto; }
     s->unacked_tail = g;
+    return 0;
 }
 
 /* Drop every queued segment (connection reset / teardown). */
@@ -210,6 +225,7 @@ static void seg_clear(socket_t *s)
     s->retx_deadline = 0;
     s->retx_count    = 0;
     s->dup_acks      = 0;
+    s->persist_deadline = 0;
 }
 
 /* ── congestion control: CUBIC (default) + NewReno ───────── */
@@ -348,19 +364,30 @@ static void tcp_cc_init(socket_t *s)
     if (!s->snd_wnd) s->snd_wnd = TCP_RCV_WND;
 }
 
-/* Retransmit the oldest unacked segment the peer has NOT SACKed. */
+/* Retransmit the oldest unacked segment the peer has not SACKed and this recovery
+ * has not resent yet. */
 static void tcp_retransmit_one(socket_t *s)
 {
     tcp_seg_t *g = s->unacked_head;
-    while (g && g->sacked) g = g->next;
+    while (g && (g->sacked || seq_lt(g->seq, s->rtx_next))) g = g->next;
     if (!g) return;
     tcp_tx_seg(s, g->flags, g->seq, s->rcv_nxt, g->len ? g->data : NULL, g->len);
     g->resent = 1;
+    s->rtx_next = g->seq + seg_span(g);
+}
+
+/* As above, only for a real hole: something after it has been SACKed. */
+static void tcp_retransmit_hole(socket_t *s)
+{
+    tcp_seg_t *g = s->unacked_head;
+    while (g && (g->sacked || seq_lt(g->seq, s->rtx_next))) g = g->next;
+    for (tcp_seg_t *q = g; q; q = q->next)
+        if (q->sacked) { tcp_retransmit_one(s); return; }
 }
 
 /* ── out-of-order receive buffer ─────────────────────────── */
 
-#define TCP_OOO_MAX  32   /* segments buffered ahead of rcv_nxt */
+#define TCP_OOO_MAX  (TCP_RCV_WND / TCP_MSS + 8)   /* the whole window after one loss */
 
 static void tcp_ooo_insert(socket_t *s, uint32_t seq, const void *data, uint16_t len)
 {
@@ -371,7 +398,7 @@ static void tcp_ooo_insert(socket_t *s, uint32_t seq, const void *data, uint16_t
         pp = &(*pp)->next; count++;
     }
     for (tcp_seg_t *q = *pp; q; q = q->next) count++;
-    if (count >= TCP_OOO_MAX) return;    /* bound the buffer */
+    if (count >= (int)TCP_OOO_MAX) return;    /* bound the buffer */
 
     tcp_seg_t *g = kmalloc(sizeof(*g) + len);
     if (!g) return;
@@ -388,10 +415,14 @@ static void tcp_ooo_drain(socket_t *s)
         if (seq_le(g->seq + g->len, s->rcv_nxt)) {   /* stale: already delivered */
             s->ooo_head = g->next; kfree(g); continue;
         }
-        if (g->seq != s->rcv_nxt) break;             /* still a gap */
+        if (seq_lt(s->rcv_nxt, g->seq)) break;       /* still a gap */
+        /* may overlap what is already in: a peer need not resend on the old edges */
+        uint16_t off = (uint16_t)(s->rcv_nxt - g->seq);
+        uint16_t want = g->len - off;
+        uint16_t n = sock_tcp_deliver(s, g->data + off, want);
+        s->rcv_nxt += n;
+        if (n < want) { s->rcv_refused = 1; break; }
         s->ooo_head = g->next;
-        s->rcv_nxt += g->len;
-        sock_tcp_deliver(s, g->data, g->len);
         kfree(g);
     }
 }
@@ -428,33 +459,43 @@ void tcp_listener_abort(socket_t *ls)
     }
 }
 
+static int tcp_can_rx(const socket_t *s)
+{
+    return s->tcp_state == TCP_ESTABLISHED || s->tcp_state == TCP_FIN_WAIT1 ||
+           s->tcp_state == TCP_FIN_WAIT2;
+}
+
 /* The app drained n bytes from the recv buffer; the advertised window grows.
  * If it reopened from (near) zero, send a window-update ACK so a sender that
  * stalled on a full window resumes. */
 void tcp_rx_consumed(socket_t *s, uint32_t n)
 {
     if (s->type != SOCK_STREAM) return;
+    uint64_t f = spin_lock_irq(&s->recv_lock);
     uint32_t before = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
     s->rcv_buffered = (n > s->rcv_buffered) ? 0 : s->rcv_buffered - n;
     uint32_t after = (TCP_RCV_WND > s->rcv_buffered) ? TCP_RCV_WND - s->rcv_buffered : 0;
-    if (s->tcp_state == TCP_ESTABLISHED && before < TCP_MSS && after >= TCP_MSS)
+    spin_unlock_irq(&s->recv_lock, f);
+    if (s->domain == AF_UNIX || !tcp_can_rx(s)) return;
+
+    /* Reassembled data refused for want of budget can go now. Nothing else would
+     * retry it: the sender does not resend what the receiver has SACKed. */
+    uint64_t tl = spin_lock_irq(&tcp_lock);
+    uint32_t was = s->rcv_nxt;
+    int refused = s->rcv_refused;
+    s->rcv_refused = 0;
+    tcp_ooo_drain(s);
+    if (s->rcv_nxt != was || (refused && !s->rcv_refused) ||
+        (before < TCP_MSS && after >= TCP_MSS))
         tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+    spin_unlock_irq(&tcp_lock, tl);
 }
 
-/* Wake the connect()/accept()/close() sleeper. The caller has already updated
- * tcp_state (and any accept queue), so a waiter that re-checks its condition
+/* Wake the connect()/send() sleeper. The caller has already updated tcp_state,
+ * the send window and any accept queue, so a waiter that re-checks its condition
  * under recv_lock after we release it sees the new state — the read+clear here
  * happening-after the state write makes a lost wakeup structurally impossible,
  * without locking the whole TCP state machine. */
-static void tcp_wake_close(socket_t *s)
-{
-    uint64_t f = spin_lock_irq(&s->recv_lock);
-    process_t *w = s->close_waiter;
-    s->close_waiter = NULL;
-    spin_unlock_irq(&s->recv_lock, f);
-    if (w) task_wake(w);
-}
-
 static void tcp_wake_connect(socket_t *s)
 {
     uint64_t f = spin_lock_irq(&s->recv_lock);
@@ -462,6 +503,60 @@ static void tcp_wake_connect(socket_t *s)
     s->connect_waiter = NULL;
     spin_unlock_irq(&s->recv_lock, f);
     if (w) task_wake(w);
+}
+
+static void tcp_wake_recv(socket_t *s)
+{
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    process_t *w = s->recv_waiter;
+    s->recv_waiter = NULL;
+    spin_unlock_irq(&s->recv_lock, f);
+    if (w) task_wake(w);
+    poll_notify_key(s);
+}
+
+/* The connection is over; err is left for the next syscall to report. */
+static void tcp_closed(socket_t *s, int err)
+{
+    if (err) s->so_error = err;
+    s->tcp_state = TCP_CLOSED;
+    s->linger_deadline = 0;
+    seg_clear(s);
+    tcp_wake_connect(s);
+    tcp_wake_recv(s);
+}
+
+/* Room for a full segment, or for anything at all when nothing is in flight: no
+ * ACK is coming then to open more. */
+int tcp_can_send(const socket_t *s)
+{
+    if (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT) return 0;
+    uint32_t in_flight = s->snd_nxt - s->snd_una;
+    uint32_t wnd = s->cwnd < s->snd_wnd ? s->cwnd : s->snd_wnd;
+    if (in_flight >= wnd) return 0;
+    return !in_flight || wnd - in_flight >= s->snd_mss;
+}
+
+/* Sleep until tcp_send can make progress or the connection has an answer. The
+ * timeout is a backstop; every path that opens the window wakes this. */
+int tcp_send_wait(socket_t *s)
+{
+    process_t *cur = task_current();
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    if (tcp_can_send(s) || (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT &&
+                            s->tcp_state != TCP_SYN_SENT)) {
+        spin_unlock_irq(&s->recv_lock, f);
+        return 0;
+    }
+    s->connect_waiter = cur;
+    cur->wake_deadline = kernel_ticks + TIMER_HZ;
+    sched_note_wake_deadline(cur->wake_deadline);
+    task_sleep_unlock(&s->recv_lock, f);
+    cur->wake_deadline = 0;
+    f = spin_lock_irq(&s->recv_lock);
+    if (s->connect_waiter == cur) s->connect_waiter = NULL;
+    spin_unlock_irq(&s->recv_lock, f);
+    return task_has_actionable_signal() ? -4 : 0;
 }
 
 /* ── port allocation ─────────────────────────────────────── */
@@ -492,6 +587,7 @@ socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t lo
         if (s->local_port  != local_port)  continue;
         if (s->remote_port != remote_port) continue;
         if (s->remote_ip   != remote_ip)   continue;
+        if (s->tcp_state == TCP_CLOSED)    continue;   /* gets the peer a RST */
         (void)local_ip;
         sock_hold(s);
         spin_unlock_irq(&gsock_lock, f);
@@ -514,6 +610,7 @@ socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
         if (s->local_port  != local_port)  continue;
         if (s->remote_port != remote_port) continue;
         if (!in6_eq(&s->remote_ip6, remote_ip6)) continue;
+        if (s->tcp_state == TCP_CLOSED) continue;
         sock_hold(s);
         spin_unlock_irq(&gsock_lock, f);
         return s;
@@ -537,32 +634,42 @@ socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int dom
         spin_unlock_irq(&gsock_lock, f);
         return s;
     }
+    /* none for IPv4: an IPv6 listener on "::" takes it too, unless IPV6_V6ONLY */
+    if (domain == AF_INET) {
+        static const in6_addr_t any6;
+        for (int i = 0; i < gsock_cap; i++) {
+            socket_t *s = gsock[i];
+            if (!s || s->net_ns != ns || s->type != SOCK_STREAM) continue;
+            if (s->domain != AF_INET6 || s->v6only || s->tcp_state != TCP_LISTEN) continue;
+            if (s->local_port != local_port) continue;
+            if (memcmp(&s->local_ip6, &any6, sizeof(any6)) != 0) continue;
+            sock_hold(s);
+            spin_unlock_irq(&gsock_lock, f);
+            return s;
+        }
+    }
     spin_unlock_irq(&gsock_lock, f);
     return NULL;
 }
 
 /* ── data delivery to socket recv queue ─────────────────── */
 
-void sock_tcp_deliver(socket_t *s, const void *data, uint16_t len)
+/* Bytes queued, from the front of data: the caller acknowledges only those. A
+ * segment reassembled from IP fragments can be longer than one skb. */
+int sock_tcp_deliver(socket_t *s, const void *data, uint16_t len)
 {
-    if (!len) return;
-    skb_t *skb = skb_alloc();
-    if (!skb) return;
-    if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
-    memcpy(skb->data, data, len);
-    skb->len = len;
-
-    extern void spin_lock_irq_fn(void *);  /* not needed — use macro */
-    uint64_t f = spin_lock_irq(&s->recv_lock);
-    skb->next = NULL;
-    if (s->recv_tail) s->recv_tail->next = skb;
-    else              s->recv_head = skb;
-    s->recv_tail = skb;
-    s->rcv_buffered += len;
-    process_t *w = s->recv_waiter;
-    s->recv_waiter = NULL;
-    spin_unlock_irq(&s->recv_lock, f);
-    if (w) task_wake(w);
+    uint16_t done = 0;
+    while (done < len) {
+        skb_t *skb = skb_alloc();
+        if (!skb) break;
+        uint16_t n = len - done > SKB_DATA_MAX ? SKB_DATA_MAX : len - done;
+        memcpy(skb->data, (const uint8_t *)data + done, n);
+        skb->len = n;
+        if (sock_charge_skb(s, skb) != 0) { skb_free(skb); break; }
+        sock_queue_skb(s, skb);
+        done += n;
+    }
+    return done;
 }
 
 /* ── RST sender ──────────────────────────────────────────── */
@@ -644,6 +751,30 @@ static int tcp_opt_wscale(const tcp_hdr_t *th, uint8_t hlen)
     return -1;
 }
 
+/* The peer's MSS from a SYN, or the RFC 1122 default when it sent none. */
+static uint32_t tcp_opt_mss(const tcp_hdr_t *th, uint8_t hlen)
+{
+    const uint8_t *o   = (const uint8_t *)th + sizeof(tcp_hdr_t);
+    const uint8_t *end = (const uint8_t *)th + hlen;
+    while (o < end) {
+        if (o[0] == 0) break;
+        if (o[0] == 1) { o++; continue; }
+        if (o + 1 >= end || o[1] < 2 || o + o[1] > end) break;
+        if (o[0] == 2 && o[1] == 4) return ((uint32_t)o[2] << 8) | o[3];
+        o += o[1];
+    }
+    return 536;
+}
+
+/* Payload of a full segment on this connection, once ts_ok is settled. */
+static void tcp_set_mss(socket_t *s, uint32_t peer_mss)
+{
+    uint32_t ours = s->domain == AF_INET6 ? TCP_MSS6 : TCP_MSS;
+    uint32_t mss = peer_mss < ours ? peer_mss : ours;
+    if (s->ts_ok) mss -= TCP_OPT_TS;
+    s->snd_mss = mss < 64 ? 64 : mss;
+}
+
 /* Did this SYN carry the SACK-permitted option (RFC 2018)? */
 static int tcp_opt_sack_perm(const tcp_hdr_t *th, uint8_t hlen)
 {
@@ -705,6 +836,116 @@ static void tcp_process_sack(socket_t *s, const tcp_hdr_t *th, uint8_t hlen)
     }
 }
 
+/* Everything an ACK says, in any state past the handshake: 3 duplicate ACKs trigger
+ * fast retransmit and the NewReno fast-recovery loop (RFC 5681 §3.2, RFC 6582). */
+static void tcp_ack_in(socket_t *s, uint32_t ack, const tcp_hdr_t *th, uint8_t hlen,
+                       int has_ts, uint32_t tsecr, uint16_t dlen, uint8_t flags)
+{
+    uint32_t old_wnd = s->snd_wnd;
+    uint32_t wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
+
+    if (s->sack_ok && hlen > sizeof(tcp_hdr_t)) tcp_process_sack(s, th, hlen);
+    if (seq_lt(s->snd_una, ack) && seq_le(ack, s->snd_nxt)) {   /* new data acked */
+        uint32_t acked = ack - s->snd_una;
+        s->snd_una = ack;
+        /* only here: a duplicate echoes an old TSval and would undo the backoff */
+        if (s->ts_ok && has_ts && tsecr) tcp_rtt_update(s, tsecr);
+        if (s->in_recovery) {
+            /* 2 is recovery from an RTO: slow start, not a deflating fast recovery */
+            int rto = s->in_recovery == 2;
+            seg_ack(s, ack, rto ? acked : 0);
+            if (seq_le(s->recover, ack)) {        /* full ACK → leave recovery */
+                s->in_recovery = 0;
+                s->dup_acks = 0;
+                if (!rto) s->cwnd = s->ssthresh;  /* deflate (RFC 6582 §3.2 step 6) */
+            } else if (rto) {
+                tcp_retransmit_one(s);
+                tcp_retransmit_one(s);
+            } else {                              /* partial ACK: resend next, deflate */
+                tcp_retransmit_one(s);
+                s->cwnd = (s->cwnd > acked) ? s->cwnd - acked : TCP_MSS;
+                if (acked >= TCP_MSS) s->cwnd += TCP_MSS;
+            }
+        } else {
+            s->dup_acks = 0;
+            seg_ack(s, ack, acked);
+        }
+    } else if (ack == s->snd_una && dlen == 0 && s->unacked_head && wnd == old_wnd &&
+               !(flags & (TCP_SYN | TCP_FIN))) {
+        if (s->in_recovery) {
+            if (s->in_recovery == 1) s->cwnd += TCP_MSS;   /* inflate per extra dup-ACK */
+            tcp_retransmit_hole(s);
+        } else if (++s->dup_acks == 3) {
+            tcp_cc_on_loss(s);
+            s->recover     = s->snd_nxt;      /* recovery point (NewReno) */
+            s->in_recovery = 1;
+            s->cwnd        = s->ssthresh + 3u * TCP_MSS;
+            s->rtx_next    = s->unacked_head->seq;
+            tcp_retransmit_one(s);
+        }
+    }
+    s->snd_wnd = wnd;
+    s->probes  = 0;
+    if (!wnd) {
+        if (s->unacked_head) s->retx_count = 0;   /* full, not gone: keeps retrying */
+    } else {
+        s->persist_deadline = 0;
+        s->persist_n = 0;
+        if (!old_wnd && s->unacked_head) {        /* no need to wait out a backed-off RTO */
+            s->rtx_next = s->unacked_head->seq;
+            tcp_retransmit_one(s);
+            s->retx_deadline = kernel_ticks + s->rto;
+        }
+    }
+    if (s->poll_out_blocked && tcp_can_send(s)) { s->poll_out_blocked = 0; poll_notify_key(s); }
+    tcp_wake_connect(s);
+}
+
+static void tcp_enter_time_wait(socket_t *s)
+{
+    s->tcp_state = TCP_TIME_WAIT;
+    s->linger_deadline = kernel_ticks + TCP_TIME_WAIT_TICKS;
+    seg_clear(s);
+}
+
+/* The peer has acknowledged everything, our FIN included if one went out. */
+static void tcp_fin_acked(socket_t *s)
+{
+    switch (s->tcp_state) {
+    case TCP_FIN_WAIT1:
+        seg_clear(s);
+        s->tcp_state = TCP_FIN_WAIT2;
+        if (s->orphan) s->linger_deadline = kernel_ticks + TCP_FIN_LINGER;
+        break;
+    case TCP_CLOSING:  tcp_enter_time_wait(s); break;
+    case TCP_LAST_ACK: tcp_closed(s, 0);       break;
+    default: break;
+    }
+}
+
+/* In-sequence and future data. Everything is answered with an ACK, which also
+ * tells the peer of a refusal through the window it carries. */
+static void tcp_rx_data(socket_t *s, uint32_t seq, const uint8_t *data, uint16_t len)
+{
+    if (seq_lt(seq, s->rcv_nxt)) {      /* a retransmission may reach past rcv_nxt */
+        uint32_t old = s->rcv_nxt - seq;
+        data += old < len ? old : len;
+        len  -= old < len ? (uint16_t)old : len;
+        seq   = s->rcv_nxt;
+    }
+    uint32_t room = TCP_RCV_WND > s->rcv_buffered ? TCP_RCV_WND - s->rcv_buffered : 0;
+    if (seq == s->rcv_nxt) {
+        if (len > room) len = (uint16_t)room;
+        uint16_t n = (uint16_t)sock_tcp_deliver(s, data, len);
+        s->rcv_nxt += n;
+        s->rcv_refused = n < len;
+        if (!s->rcv_refused) tcp_ooo_drain(s);
+    } else if (len && (seq - s->rcv_nxt) + len <= TCP_RCV_WND) {
+        tcp_ooo_insert(s, seq, data, len);
+    }
+    tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+}
+
 static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 {
     if (skb->len < (uint16_t)sizeof(tcp_hdr_t)) { skb_free(skb); return; }
@@ -721,6 +962,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
     uint8_t  flags    = th->flags;
     int      syn_ws   = (flags & TCP_SYN) ? tcp_opt_wscale(th, hlen) : -1;
     int      syn_sack = (flags & TCP_SYN) ? tcp_opt_sack_perm(th, hlen) : 0;
+    uint32_t syn_mss  = (flags & TCP_SYN) ? tcp_opt_mss(th, hlen) : 0;
     uint8_t  rx_hlen  = hlen;   /* keep for SACK-block parsing after skb_pull */
     uint32_t rx_tsval = 0, rx_tsecr = 0;
     int      rx_has_ts = tcp_opt_ts(th, hlen, &rx_tsval, &rx_tsecr);
@@ -730,6 +972,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
     uint16_t dlen = skb->len;
 
     /* find socket */
+find:;
     socket_t *s = v6
         ? tcp_sock_find6(dev->net_ns, dst_port, &key->src6, src_port)
         : tcp_sock_find(dev->net_ns, key->dst4, dst_port, src_ip, src_port);
@@ -741,11 +984,20 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             /* incoming SYN → create new socket, send SYN-ACK */
             socket_t *ns = sock_alloc(key->family, SOCK_STREAM, IP_PROTO_TCP);
             if (!ns) { skb_free(skb); sock_put(ls); return; }
+            /* this runs on no task of the listener's: it pays for its connections */
+            if (cgroup_charge_to(ls->cg, sizeof(*ns), 0) != 0) {
+                sock_put(ns); skb_free(skb); sock_put(ls); return;
+            }
+            ns->cg = ls->cg;
+            /* sock_alloc took the namespace of whichever task runs this RX path */
+            net_ns_put(ns->net_ns);
+            ns->net_ns      = net_ns_get(dev->net_ns);
             ns->dev         = dev;
             if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
             else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
             ns->local_port  = dst_port;
             ns->remote_port = src_port;
+            if (!v6 && (ls->domain == AF_INET6 || ls->v4mapped)) ns->v4mapped = 1;
             ns->rcv_nxt     = seq + 1;
             ns->snd_nxt     = 0x12340000;
             ns->snd_una     = ns->snd_nxt;
@@ -754,11 +1006,14 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
             if (syn_sack) ns->sack_ok = 1;
             if (rx_has_ts) { ns->ts_ok = 1; ns->ts_recent = rx_tsval; }
+            tcp_set_mss(ns, syn_mss);
             tcp_cc_init(ns);
+            ns->orphan = 1;      /* TCP's own until it reaches the accept queue */
             sock_register(ns);
 
             tcp_tx_seg(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, ns->rcv_nxt, NULL, 0);
-            seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0);
+            if (seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0) != 0)
+                ns->tcp_state = TCP_CLOSED;
             ns->snd_nxt++;
 
             skb_free(skb); sock_put(ls); return;
@@ -778,16 +1033,8 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 
     /* RST handling */
     if (flags & TCP_RST) {
-        if (s->tcp_state == TCP_SYN_SENT || s->tcp_state == TCP_SYN_RECV)
-            s->so_error = 111;   /* ECONNREFUSED — surfaced via SO_ERROR */
-        s->tcp_state = TCP_CLOSED;
-        seg_clear(s);
-        tcp_wake_connect(s);
-        uint64_t lf = spin_lock_irq(&s->recv_lock);
-        process_t *w = s->recv_waiter; s->recv_waiter = NULL;
-        spin_unlock_irq(&s->recv_lock, lf);
-        if (w) task_wake(w);
-        tcp_wake_close(s);
+        int syn = s->tcp_state == TCP_SYN_SENT || s->tcp_state == TCP_SYN_RECV;
+        tcp_closed(s, syn ? 111 /* ECONNREFUSED */ : 104 /* ECONNRESET */);
         spin_unlock_irq(&tcp_lock, tl);
         sock_put(s);
         skb_free(skb); return;
@@ -804,6 +1051,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
             if (syn_sack) s->sack_ok = 1;
             if (rx_has_ts) { s->ts_ok = 1; s->ts_recent = rx_tsval; }
+            tcp_set_mss(s, syn_mss);
             s->tcp_state  = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
@@ -813,6 +1061,11 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
         break;
 
     case TCP_SYN_RECV:
+        /* A repeated SYN means our SYN-ACK never arrived: send it again. */
+        if ((flags & TCP_SYN) && !(flags & TCP_ACK)) {
+            tcp_tx_seg(s, TCP_SYN | TCP_ACK, s->snd_nxt - 1, s->rcv_nxt, NULL, 0);
+            break;
+        }
         /* expecting ACK of SYN-ACK */
         if ((flags & TCP_ACK) && ack == s->snd_nxt) {
             s->snd_una   = ack;
@@ -825,6 +1078,7 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
             if (ls) {
                 /* enqueue on the listener's accept list and wake the acceptor —
                  * all under ls->recv_lock so it can't race accept()'s dequeue */
+                s->orphan = 0;
                 uint64_t af = spin_lock_irq(&ls->recv_lock);
                 s->accept_head = NULL; /* reuse field as list link */
                 if (!ls->accept_head) ls->accept_head = s;
@@ -834,134 +1088,69 @@ static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
                 ls->accept_waiter = NULL;
                 spin_unlock_irq(&ls->recv_lock, af);
                 if (aw) task_wake(aw);
+                poll_notify_key(ls);
+            } else {                    /* the listener went away during the handshake */
+                tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+                tcp_closed(s, 0);
+                break;
             }
             sock_put(ls);
-        }
-        break;
-
-    case TCP_ESTABLISHED:
-        if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
-        /* ACK advances snd_una; 3 duplicate ACKs trigger fast retransmit and the
-         * NewReno fast-recovery loop (RFC 5681 §3.2, RFC 6582). */
-        if (flags & TCP_ACK) {
-            if (s->sack_ok && rx_hlen > sizeof(tcp_hdr_t)) tcp_process_sack(s, th, rx_hlen);
-            if (s->ts_ok && rx_has_ts && rx_tsecr)        /* RTT from echoed timestamp (no Karn) */
-                tcp_rtt_update(s, rx_tsecr);
-            if (!seq_le(ack, s->snd_una)) {           /* ack > snd_una: new data acked */
-                uint32_t acked = ack - s->snd_una;
-                uint32_t old_una = s->snd_una;
-                s->snd_una = ack;
-                if (s->in_recovery) {
-                    seg_ack(s, ack, 0);               /* free acked segments, no cwnd growth */
-                    if (seq_le(s->recover, ack)) {    /* full ACK → leave fast recovery */
-                        s->in_recovery = 0;
-                        s->dup_acks = 0;
-                        s->cwnd = s->ssthresh;        /* deflate (RFC 6582 §3.2 step 6) */
-                    } else {                          /* partial ACK: resend next, deflate */
-                        tcp_retransmit_one(s);
-                        uint32_t dec = ack - old_una;
-                        s->cwnd = (s->cwnd > dec) ? s->cwnd - dec : TCP_MSS;
-                        if (dec >= TCP_MSS) s->cwnd += TCP_MSS;
-                    }
-                } else {
-                    s->dup_acks = 0;
-                    seg_ack(s, ack, acked);
-                }
-            } else if (ack == s->snd_una && dlen == 0 && s->unacked_head &&
-                       !(flags & (TCP_SYN | TCP_FIN))) {
-                if (s->in_recovery) {
-                    s->cwnd += TCP_MSS;               /* inflate per extra dup-ACK */
-                } else if (++s->dup_acks == 3) {
-                    tcp_cc_on_loss(s);
-                    s->recover     = s->snd_nxt;      /* recovery point (NewReno) */
-                    s->in_recovery = 1;
-                    s->cwnd        = s->ssthresh + 3u * TCP_MSS;
-                    tcp_retransmit_one(s);
-                }
-            }
-            s->snd_wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
-            tcp_wake_connect(s);
-        }
-        /* deliver data, reassembling out-of-order arrivals */
-        if (dlen > 0) {
-            if (seq == s->rcv_nxt) {
-                s->rcv_nxt += dlen;
-                sock_tcp_deliver(s, skb->data, dlen);
-                tcp_ooo_drain(s);
-            } else if (!seq_le(seq, s->rcv_nxt)) {   /* seq > rcv_nxt: future, buffer it */
-                tcp_ooo_insert(s, seq, skb->data, dlen);
-            }
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        }
-        /* FIN from remote */
-        if (flags & TCP_FIN) {
-            s->rcv_nxt++;
-            s->tcp_state = TCP_CLOSE_WAIT;
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            /* wake blocked recv — sock_read_vfs sees CLOSE_WAIT and returns 0 */
-            uint64_t lf = spin_lock_irq(&s->recv_lock);
-            process_t *rw = s->recv_waiter;
-            s->recv_waiter = NULL;
-            spin_unlock_irq(&s->recv_lock, lf);
-            if (rw) task_wake(rw);
-        }
-        break;
-
-    case TCP_CLOSE_WAIT:
-        if ((flags & TCP_ACK) && !seq_le(ack, s->snd_una)) {
-            uint32_t acked = ack - s->snd_una;
-            s->snd_una = ack;
-            seg_ack(s, ack, acked);
-            s->snd_wnd = (uint32_t)ntohs(th->window) << s->snd_wscale;
-            tcp_wake_connect(s);
-        }
-        break;
-
-    case TCP_LAST_ACK:
-        if ((flags & TCP_ACK) && ack == s->snd_nxt) {
-            s->tcp_state = TCP_CLOSED;
-            seg_clear(s);
-            tcp_wake_close(s);
-        }
-        break;
-
-    case TCP_FIN_WAIT1:
-        if (flags & TCP_ACK) {
-            if (ack == s->snd_nxt) {
-                seg_clear(s);
-                s->tcp_state = TCP_FIN_WAIT2;
-            }
-        }
-        /* simultaneous close */
-        if (flags & TCP_FIN) {
-            s->rcv_nxt++;
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            s->tcp_state = (s->tcp_state == TCP_FIN_WAIT2) ? TCP_TIME_WAIT : TCP_CLOSING;
-            if (s->tcp_state == TCP_TIME_WAIT) tcp_wake_close(s);
-        }
-        break;
-
-    case TCP_FIN_WAIT2:
-        if (flags & TCP_FIN) {
-            s->rcv_nxt++;
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            s->tcp_state = TCP_TIME_WAIT;
-            tcp_wake_close(s);
-        }
-        break;
-
-    case TCP_CLOSING:
-        if ((flags & TCP_ACK) && ack == s->snd_nxt) {
-            seg_clear(s);
-            s->tcp_state = TCP_TIME_WAIT;
-            tcp_wake_close(s);
+            /* The handshake ACK may carry the peer's first bytes. */
+            if (dlen > 0 || (flags & TCP_FIN)) goto established;
         }
         break;
 
     case TCP_TIME_WAIT:
-        /* re-ACK any FIN we see */
-        if (flags & TCP_FIN) {
+        /* a new connection on the tuple ends the wait for it */
+        if ((flags & TCP_SYN) && !(flags & TCP_ACK) && s->orphan) {
+            s->tcp_state = TCP_CLOSED;
+            s->orphan = 0;
+            spin_unlock_irq(&tcp_lock, tl);
+            sock_free(s);
+            sock_put(s);
+            goto find;
+        }
+        /* fall through */
+    case TCP_ESTABLISHED:
+    case TCP_CLOSE_WAIT:
+    case TCP_FIN_WAIT1:
+    case TCP_FIN_WAIT2:
+    case TCP_CLOSING:
+    case TCP_LAST_ACK:
+    established:
+        if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
+        if (flags & TCP_ACK) {
+            tcp_ack_in(s, ack, th, rx_hlen, rx_has_ts, rx_tsecr, dlen, flags);
+            if (ack == s->snd_nxt) tcp_fin_acked(s);
+            if (s->tcp_state == TCP_CLOSED) break;
+        }
+        if (!tcp_can_rx(s)) {
+            /* past the peer's FIN: anything more with a length is a retransmission */
+            if (dlen || (flags & TCP_FIN) || seq_lt(seq, s->rcv_nxt))
+                tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+            break;
+        }
+        if (dlen) {
+            /* nobody will read it; left unanswered the peer retransmits to no end */
+            if (s->orphan && seq_lt(s->rcv_nxt, seq + dlen)) {
+                tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+                tcp_closed(s, 0);
+                break;
+            }
+            tcp_rx_data(s, seq, skb->data, dlen);
+        } else if (seq_lt(seq, s->rcv_nxt)) {
+            /* a window probe: only an answer tells the prober the window */
             tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        }
+        /* FIN from remote: only in order, or it ends the stream before data it
+         * follows; the peer sends it again */
+        if ((flags & TCP_FIN) && seq + dlen == s->rcv_nxt) {
+            s->rcv_nxt++;
+            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+            if (s->tcp_state == TCP_ESTABLISHED)      s->tcp_state = TCP_CLOSE_WAIT;
+            else if (s->tcp_state == TCP_FIN_WAIT1)   s->tcp_state = TCP_CLOSING;
+            else                                      tcp_enter_time_wait(s);
+            tcp_wake_recv(s);   /* a blocked recv sees EOF and returns 0 */
         }
         break;
 
@@ -1039,6 +1228,7 @@ int tcp_connect(socket_t *s)
                                       * SYN-ACK racing in (fast net thread) matches */
     s->rcv_nxt   = 0;
     s->snd_wnd   = 1024;
+    s->rtx_next  = s->snd_una;
     s->tcp_state = TCP_SYN_SENT;
     spin_unlock_irq(&tcp_lock, tl);
     sock_register(s);
@@ -1051,8 +1241,12 @@ int tcp_connect(socket_t *s)
         if (rc == -1) net_poll();
     }
     tl = spin_lock_irq(&tcp_lock);
-    if (s->tcp_state == TCP_SYN_SENT)   /* still connecting — SYN-ACK may have raced in */
-        seg_enqueue(s, TCP_SYN, s->snd_una, NULL, 0);
+    if (s->tcp_state == TCP_SYN_SENT &&   /* still connecting — SYN-ACK may have raced in */
+        seg_enqueue(s, TCP_SYN, s->snd_una, NULL, 0) != 0) {
+        tcp_closed(s, 12);
+        spin_unlock_irq(&tcp_lock, tl);
+        return -12;
+    }
     spin_unlock_irq(&tcp_lock, tl);
     return 0;
 }
@@ -1060,41 +1254,89 @@ int tcp_connect(socket_t *s)
 int tcp_send(socket_t *s, const void *data, uint16_t len)
 {
     uint64_t tl = spin_lock_irq(&tcp_lock);
-    if (s->tcp_state != TCP_ESTABLISHED) { spin_unlock_irq(&tcp_lock, tl); return -107; }
+    if (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT) {
+        int rc = -32;                   /* EPIPE: ours is shut, or it is over */
+        if (s->tcp_state == TCP_SYN_SENT) rc = -11;
+        else if (s->tcp_state == TCP_CLOSED) {
+            if (s->so_error) { rc = -s->so_error; s->so_error = 0; }
+            else if (!s->snd_nxt) rc = -107;   /* never connected */
+        }
+        spin_unlock_irq(&tcp_lock, tl);
+        return rc;
+    }
 
     /* effective window = min(congestion, peer-advertised); send while it has room */
     uint32_t in_flight = s->snd_nxt - s->snd_una;
     uint32_t wnd = s->cwnd < s->snd_wnd ? s->cwnd : s->snd_wnd;
-    if (in_flight >= wnd) { spin_unlock_irq(&tcp_lock, tl); return -11; }
+    if (in_flight >= wnd) {
+        /* nothing out means no ACK and no RTO will ever reopen a closed window */
+        if (!in_flight && !s->persist_deadline)
+            s->persist_deadline = kernel_ticks + (s->rto ? s->rto : TCP_RTO_INIT);
+        s->poll_out_blocked = 1;
+        spin_unlock_irq(&tcp_lock, tl);
+        return -11;
+    }
 
     uint32_t room = wnd - in_flight;
-    uint16_t seglen = len > TCP_MSS ? TCP_MSS : len;
-    if (seglen > room) seglen = (uint16_t)room;
-    if (seglen == 0) { spin_unlock_irq(&tcp_lock, tl); return -11; }
+    uint32_t seglen = len > s->snd_mss ? s->snd_mss : len;
+    if (seglen > room) seglen = room;
+    if (seglen < len && seglen < s->snd_mss && in_flight) {   /* no tiny tails: an ACK is due */
+        s->poll_out_blocked = 1;
+        spin_unlock_irq(&tcp_lock, tl);
+        return -11;
+    }
 
-    int rc = tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, seglen);
-    if (rc < 0) { spin_unlock_irq(&tcp_lock, tl); return rc; }
-    seg_enqueue(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, seglen);
+    if (seg_enqueue(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, (uint16_t)seglen) != 0) {
+        spin_unlock_irq(&tcp_lock, tl);
+        return -12;
+    }
+    /* queued now: a frame the device refused is a loss like any other */
+    tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, (uint16_t)seglen);
     s->snd_nxt += seglen;
     spin_unlock_irq(&tcp_lock, tl);
     return (int)seglen;
 }
 
+static void tcp_send_fin(socket_t *s, int next_state)
+{
+    if (seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0) != 0) {
+        tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        tcp_closed(s, 12);
+        return;
+    }
+    tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+    s->snd_nxt++;
+    s->tcp_state = next_state;
+}
+
 int tcp_close(socket_t *s)
 {
     uint64_t tl = spin_lock_irq(&tcp_lock);
-    if (s->tcp_state == TCP_ESTABLISHED) {
-        tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
-        s->snd_nxt++;
-        s->tcp_state = TCP_FIN_WAIT1;
-    } else if (s->tcp_state == TCP_CLOSE_WAIT) {
-        tcp_tx_seg(s, TCP_FIN | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        seg_enqueue(s, TCP_FIN | TCP_ACK, s->snd_nxt, NULL, 0);
-        s->snd_nxt++;
-        s->tcp_state = TCP_LAST_ACK;
-    }
+    if (s->tcp_state == TCP_ESTABLISHED)       tcp_send_fin(s, TCP_FIN_WAIT1);
+    else if (s->tcp_state == TCP_CLOSE_WAIT)   tcp_send_fin(s, TCP_LAST_ACK);
+    else if (s->tcp_state == TCP_SYN_SENT)     tcp_closed(s, 0);
     spin_unlock_irq(&tcp_lock, tl);
+    return 0;
+}
+
+/* The last file reference is gone, tcp_close has run. Returns 1 if the connection
+ * is over and the caller frees the socket; otherwise tcp_tick owns it from here,
+ * so unacked data and the FIN keep being retransmitted. */
+int tcp_orphan(socket_t *s)
+{
+    uint64_t tl = spin_lock_irq(&tcp_lock);
+    if (s->tcp_state == TCP_CLOSED) { spin_unlock_irq(&tcp_lock, tl); return 1; }
+    s->orphan = 1;
+    if (s->tcp_state == TCP_FIN_WAIT2 && !s->linger_deadline)
+        s->linger_deadline = kernel_ticks + TCP_FIN_LINGER;
+    spin_unlock_irq(&tcp_lock, tl);
+
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    skb_t *skb = s->recv_head;
+    s->recv_head = s->recv_tail = NULL;
+    s->rcv_buffered = 0;
+    spin_unlock_irq(&s->recv_lock, f);
+    while (skb) { skb_t *n = skb->next; skb_free(skb); skb = n; }
     return 0;
 }
 
@@ -1111,35 +1353,74 @@ int tcp_listen(socket_t *s, int backlog)
 
 /* ── retransmit tick (called from sched_tick) ────────────── */
 
+/* A zero window with nothing outstanding: nudge the peer with an old sequence
+ * number, which it must answer with its current window. */
+static void tcp_persist(socket_t *s)
+{
+    if (s->snd_wnd || s->unacked_head) { s->persist_deadline = 0; return; }
+    if (++s->probes > TCP_RETX_GIVEUP) {
+        tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        tcp_closed(s, 110);   /* ETIMEDOUT */
+        return;
+    }
+    tcp_tx_seg(s, TCP_ACK, s->snd_nxt - 1, s->rcv_nxt, NULL, 0);
+    uint32_t t = (s->rto ? s->rto : TCP_RTO_INIT) << s->persist_n;
+    if (t >= TCP_RTO_MAX) t = TCP_RTO_MAX;
+    else s->persist_n++;
+    s->persist_deadline = kernel_ticks + t;
+}
+
+static int tcp_timer_due(const socket_t *s, uint64_t now)
+{
+    return (s->orphan && s->tcp_state == TCP_CLOSED) ||
+           (s->retx_deadline && now >= s->retx_deadline) ||
+           (s->persist_deadline && now >= s->persist_deadline) ||
+           (s->linger_deadline && now >= s->linger_deadline);
+}
+
 void tcp_tick(void)
 {
+    /* walks every socket: 100 times a second is plenty */
+    if (kernel_ticks % (TIMER_HZ / 100))
+        return;
     for (int i = 0; i < gsock_cap; i++) {
         /* Read + pin the slot under gsock_lock: a concurrent close runs
          * sock_free under it, and gsock_ensure may realloc the array, so the
          * bare gsock[i] read + deref raced both. */
         uint64_t gf = spin_lock_irq(&gsock_lock);
         socket_t *s = (i < gsock_cap) ? gsock[i] : NULL;
-        if (s && (s->type != SOCK_STREAM ||
-                  s->retx_deadline == 0 || kernel_ticks < s->retx_deadline))
+        if (s && (s->type != SOCK_STREAM || !tcp_timer_due(s, kernel_ticks)))
             s = NULL;
         if (s) sock_hold(s);
         spin_unlock_irq(&gsock_lock, gf);
         if (!s) continue;
 
         uint64_t tl = spin_lock_irq(&tcp_lock);   /* serialise vs RX + syscalls */
+        if (s->orphan && s->tcp_state == TCP_CLOSED) {
+            s->orphan = 0;
+            spin_unlock_irq(&tcp_lock, tl);
+            sock_free(s);
+            sock_put(s);
+            continue;
+        }
+        if (s->linger_deadline && kernel_ticks >= s->linger_deadline)
+            tcp_closed(s, 0);
+        if (s->persist_deadline && kernel_ticks >= s->persist_deadline)
+            tcp_persist(s);
+        if (!s->retx_deadline || kernel_ticks < s->retx_deadline) {
+            spin_unlock_irq(&tcp_lock, tl);
+            sock_put(s);
+            continue;
+        }
         tcp_seg_t *g = s->unacked_head;
         if (!g) { s->retx_deadline = 0; spin_unlock_irq(&tcp_lock, tl); sock_put(s); continue; }
 
         s->retx_count++;
         if (s->retx_count > TCP_RETX_GIVEUP) {
-            /* give up — force close and wake anyone waiting */
-            s->tcp_state = TCP_CLOSED;
-            seg_clear(s);
-            tcp_wake_close(s);
-            uint64_t lf = spin_lock_irq(&s->recv_lock);
-            process_t *w = s->recv_waiter; s->recv_waiter = NULL;
-            spin_unlock_irq(&s->recv_lock, lf);
-            if (w) task_wake(w);
+            /* the peer may still be there, waiting: say that this is the end */
+            if (s->tcp_state != TCP_SYN_SENT)
+                tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+            tcp_closed(s, 110);   /* ETIMEDOUT */
             spin_unlock_irq(&tcp_lock, tl);
             sock_put(s);
             continue;
@@ -1148,11 +1429,13 @@ void tcp_tick(void)
         /* timeout: drop ssthresh per the active algorithm, collapse cwnd to slow
          * start, abandon any fast recovery, retransmit the oldest non-SACKed
          * segment, and back off the timer (RFC 6298 §5.5). */
-        tcp_cc_on_loss(s);
+        if (s->retx_count == 1) tcp_cc_on_loss(s);
         s->cwnd        = TCP_MSS;
         s->dup_acks    = 0;
-        s->in_recovery = 0;
+        s->in_recovery = 2;
+        s->recover     = s->snd_nxt;
         s->cubic_epoch = 0;
+        s->rtx_next    = g->seq;
         tcp_retransmit_one(s);
         s->rto = (s->rto ? s->rto : TCP_RTO_INIT) * 2;
         if (s->rto > TCP_RTO_MAX) s->rto = TCP_RTO_MAX;

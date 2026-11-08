@@ -1,3 +1,4 @@
+#include <kernel/board.h>
 #include <kernel/net/net.h>
 #include <kernel/net/eth.h>
 #include <kernel/net/ipv6.h>
@@ -8,6 +9,7 @@
 #include <kernel/proc.h>
 #include <kernel/sync.h>
 #include <kernel/nsproxy.h>
+#include <kernel/cgroup.h>
 
 /* ── SKB allocator (heap-based, no fixed pool) ───────────── */
 
@@ -21,6 +23,9 @@ skb_t *skb_alloc(void)
     s->scm_nfiles = 0;
     s->ext = NULL;
     s->ext_len = 0;
+    s->cg = NULL;
+    s->cred_pid = 0;
+    s->cred_uid = s->cred_gid = 0;
     return s;
 }
 
@@ -40,6 +45,7 @@ skb_t *skb_alloc_big(uint32_t cap)
 void skb_free(skb_t *skb)
 {
     if (!skb) return;
+    cgroup_file_release(skb->cg, SKB_TRUESIZE(skb));
     if (skb->ext) kfree(skb->ext);
     kfree(skb);
 }
@@ -50,6 +56,7 @@ void skb_free(skb_t *skb)
 static netdev_t **devs;
 static int        ndevs;
 static int        devs_cap;
+static spinlock_t devs_lock = SPINLOCK_INIT;   /* writers of devs[]; readers walk it bare */
 
 static int lo_tx(netdev_t *dev, skb_t *skb);   /* defined below */
 
@@ -77,13 +84,22 @@ net_namespace_t *net_ns_get(net_namespace_t *ns)
 
 static void netdev_unregister(netdev_t *dev)
 {
+    uint64_t f = spin_lock_irq(&devs_lock);
     for (int i = 0; i < ndevs; i++)
         if (devs[i] == dev) {
             for (int j = i; j < ndevs - 1; j++) devs[j] = devs[j + 1];
             ndevs--;
-            return;
+            break;
         }
+    spin_unlock_irq(&devs_lock, f);
 }
+
+/* A dead namespace waits here for net_poll: its loopback is embedded in it, and
+ * the poller may be inside that device, or on a dropped socket's way through this
+ * very put. */
+static net_namespace_t *ns_dying;
+
+void net_rx_wake(void);
 
 void net_ns_put(net_namespace_t *ns)
 {
@@ -93,7 +109,27 @@ void net_ns_put(net_namespace_t *ns)
     spin_unlock_irq(&netns_lock, f);
     if (last) {
         netdev_unregister(&ns->lo);   /* its private loopback */
+        f = spin_lock_irq(&netns_lock);
+        ns->dying_next = ns_dying;
+        ns_dying = ns;
+        spin_unlock_irq(&netns_lock, f);
+        net_rx_wake();
+    }
+}
+
+/* net_poll only: the one walker that holds device pointers across calls */
+static void net_ns_reap(void)
+{
+    uint64_t f = spin_lock_irq(&netns_lock);
+    net_namespace_t *ns = ns_dying;
+    ns_dying = NULL;
+    spin_unlock_irq(&netns_lock, f);
+    while (ns) {
+        net_namespace_t *next = ns->dying_next;
+        skb_t *skb;
+        while ((skb = netdev_rx_dequeue(&ns->lo)) != NULL) skb_free(skb);
         kfree(ns);
+        ns = next;
     }
 }
 
@@ -122,16 +158,19 @@ void net_register(netdev_t *dev)
     if (!in6_is_ll(&dev->ip6_ll))
         ipv6_linklocal_from_mac(dev->mac, &dev->ip6_ll);
 
+    uint64_t df = spin_lock_irq(&devs_lock);
     if (ndevs >= devs_cap) {
         int nc = devs_cap ? devs_cap * 2 : NETDEV_INIT_CAP;
         netdev_t **nb = kmalloc((size_t)nc * sizeof(netdev_t *));
-        if (!nb) return;
-        if (devs) { memcpy(nb, devs, (size_t)ndevs * sizeof(netdev_t *)); kfree(devs); }
+        if (!nb) { spin_unlock_irq(&devs_lock, df); return; }
+        /* the old array is not freed: a reader may be walking it */
+        if (devs) memcpy(nb, devs, (size_t)ndevs * sizeof(netdev_t *));
         devs = nb; devs_cap = nc;
     }
     if (!dev->net_ns) dev->net_ns = current_net_ns();
     devs[ndevs++] = dev;
-    kprintf("net: registered %s  ip=%u.%u.%u.%u  mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+    spin_unlock_irq(&devs_lock, df);
+    kprintf(KERN_INFO "net: registered %s ip=%u.%u.%u.%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
         dev->name,
         (dev->ip >> 24) & 0xff, (dev->ip >> 16) & 0xff,
         (dev->ip >>  8) & 0xff,  dev->ip & 0xff,
@@ -139,14 +178,15 @@ void net_register(netdev_t *dev)
         dev->mac[3], dev->mac[4], dev->mac[5]);
 }
 
-netdev_t *net_dev(int idx)
+netdev_t *net_dev_in(net_namespace_t *ns, int idx)
 {
-    net_namespace_t *ns = current_net_ns();
     int k = 0;
     for (int i = 0; i < ndevs; i++)
         if (devs[i]->net_ns == ns && k++ == idx) return devs[i];
     return NULL;
 }
+
+netdev_t *net_dev(int idx) { return net_dev_in(current_net_ns(), idx); }
 
 netdev_t *net_dev_by_ip(uint32_t ip)
 {
@@ -158,8 +198,30 @@ netdev_t *net_dev_by_ip(uint32_t ip)
 
 /* ── RX queue ────────────────────────────────────────────── */
 
+void netdev_rx_drop(netdev_t *dev)
+{
+    atomic_fetch_add64(&dev->rx_dropped, 1);
+}
+
+void netdev_count_tx(netdev_t *dev, uint32_t len)
+{
+    atomic_fetch_add64(&dev->tx_packets, 1);
+    atomic_fetch_add64(&dev->tx_bytes, len);
+}
+
+int netdev_tx(netdev_t *dev, skb_t *skb)
+{
+    uint32_t len = skb->len;              /* dev->tx frees the skb */
+    int rc = dev->tx(dev, skb);
+    if (rc < 0) atomic_fetch_add64(&dev->tx_dropped, 1);
+    else        netdev_count_tx(dev, len);
+    return rc;
+}
+
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
 {
+    atomic_fetch_add64(&dev->rx_packets, 1);
+    atomic_fetch_add64(&dev->rx_bytes, skb->len);
     skb->next = NULL;
     uint64_t f = spin_lock_irq(&dev->rx_lock);
     if (dev->rx_tail) dev->rx_tail->next = skb;
@@ -203,10 +265,12 @@ void net_poll(void)
         netdev_t *dev = devs[i];
         if (dev->poll) dev->poll(dev);
 
+        if (dev->rx_claimed) continue;
         skb_t *skb;
         while ((skb = netdev_rx_dequeue(dev)) != NULL)
             eth_rx(dev, skb);
     }
+    net_ns_reap();
 
     f = spin_lock_irq(&net_poll_lock);
     net_poll_busy = 0;
@@ -248,7 +312,7 @@ static void net_rx_thread(void)
          * shell prompt would never drain the RX ring and it fills with the
          * network's background broadcast traffic, stalling RX. A timed wake keeps
          * the ring drained; net_rx_wake still wakes us early when wired. */
-        task_sleep_until(kernel_ticks + 1);
+        task_sleep_until(kernel_ticks + TIMER_HZ / 100);
         continue;
     }
 }
@@ -287,12 +351,15 @@ uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len)
  * which otherwise never loses or reorders. Zero (default) = off. */
 int net_drop_n = 0;
 
+int net_drop_hit(void)
+{
+    static uint32_t c;
+    return net_drop_n && ++c % (uint32_t)net_drop_n == 0;
+}
+
 static int lo_tx(netdev_t *dev, skb_t *skb)
 {
-    if (net_drop_n) {
-        static uint32_t c;
-        if (++c % (uint32_t)net_drop_n == 0) { skb_free(skb); return 0; }  /* "lost" */
-    }
+    if (net_drop_hit()) { skb_free(skb); return 0; }  /* "lost" */
     netdev_rx_enqueue(dev, skb);
     return 0;
 }
@@ -302,6 +369,12 @@ static int lo_tx(netdev_t *dev, skb_t *skb)
 netdev_t *net_default_dev(void)
 {
     net_namespace_t *ns = current_net_ns();
+    /* With the cable out, a Wi-Fi link with an address carries the traffic */
+    for (int i = 0; i < ndevs; i++) {
+        netdev_t *d = devs[i];
+        if (d->net_ns == ns && (d->ip >> 24) != 127 && d->ip && (d->link_up || !d->link_check))
+            return d;
+    }
     for (int i = 0; i < ndevs; i++)
         if (devs[i]->net_ns == ns && (devs[i]->ip >> 24) != 127) return devs[i];
     return &ns->lo;   /* a namespace always has its own loopback */
@@ -373,26 +446,34 @@ static void write_resolv_conf(uint32_t dns)
 
 /* Configure one NIC: DHCPv4 (falling back to its driver static IP) + IPv6
  * stateless autoconfig (RS → SLAAC). Reused by boot and the link watcher. */
-static void net_dhcp_one(netdev_t *d)
+static void net_dhcp_one(netdev_t *d, int can_sleep)
 {
-    extern int dhcp_configure(netdev_t *dev, uint32_t *out_dns);
+    extern int dhcp_configure(netdev_t *dev, uint32_t *out_dns, int can_sleep);
     extern volatile uint64_t kernel_ticks;
     if (!d || !d->poll || (d->ip >> 24) == 127) return;   /* skip loopback */
 
     uint32_t dns = 0;
-    if (dhcp_configure(d, &dns) == 0) {
+    if (dhcp_configure(d, &dns, can_sleep) == 0) {
+        extern uint32_t dhcp_last_lease;
+        /* Renew halfway: a router that reassigns an expired address cuts the
+         * machine off while its own view of the network still looks fine. */
+        uint32_t half = dhcp_last_lease ? dhcp_last_lease / 2 : 1800;
+        d->renew_tick = kernel_ticks + (uint64_t)(half ? half : 60) * TIMER_HZ;
         if (dns) write_resolv_conf(dns);
     } else {
-        kprintf("dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
+        kprintf(KERN_WARN "dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
                 (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
                 (d->ip >> 8) & 0xff, d->ip & 0xff);
     }
 
     ndp_send_rs(d);
-    uint64_t deadline = kernel_ticks + 300;   /* ~3s — a real router's RA can lag */
-    while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) net_poll();
+    uint64_t deadline = kernel_ticks + 3 * TIMER_HZ;   /* ~3s — a real router's RA can lag */
+    while (kernel_ticks < deadline && in6_is_unspec(&d->ip6)) {
+        if (can_sleep) task_sleep_until(kernel_ticks + 1);   /* net_rx is polling */
+        else           net_poll();
+    }
     if (!in6_is_unspec(&d->ip6))
-        kprintf("slaac: %s configured a global IPv6 address\n", d->name);
+        kprintf(KERN_INFO "net: %s slaac configured a global ipv6 address\n", d->name);
 }
 
 /* Configure every real NIC. Run after the drivers register and the VFS is up. */
@@ -406,7 +487,7 @@ void net_dhcp_all(void)
          * thread, not here — doing both would run two net_dhcp_one at once and
          * race the driver's poll. NICs without link_check (e.g. virtio) have no
          * watcher, so configure them synchronously at boot. */
-        if (!d->link_check) net_dhcp_one(d);
+        if (!d->link_check) net_dhcp_one(d, 0);   /* boot path: must not sleep */
     }
 }
 
@@ -419,23 +500,27 @@ static void net_link_thread(void)
 {
     extern volatile uint64_t kernel_ticks;
     for (;;) {
-        task_sleep_until(kernel_ticks + 100);   /* ~1s */
+        task_sleep_until(kernel_ticks + TIMER_HZ);   /* ~1s */
         for (int i = 0; i < ndevs; i++) {
             netdev_t *d = devs[i];
             if (!d->poll || !d->link_check || (d->ip >> 24) == 127) continue;
             int up = d->link_check(d);
             if (up && !d->link_up) {
-                kprintf("%s: link up — renewing address configuration\n", d->name);
+                kprintf(KERN_INFO "%s: link up, renewing address configuration\n", d->name);
                 d->link_up = 1;
-                net_dhcp_one(d);
+                net_dhcp_one(d, 1);
             } else if (!up && d->link_up) {
-                kprintf("%s: link down (carrier lost)\n", d->name);
+                kprintf(KERN_WARN "%s: link down (carrier lost)\n", d->name);
                 d->link_up = 0;
-            } else if (up && d->link_up && d->ip == 0 && in6_is_unspec(&d->ip6)) {
+            } else if (up && d->link_up && d->renew_tick && kernel_ticks >= d->renew_tick) {
+                d->renew_tick = kernel_ticks + 60 * TIMER_HZ;   /* tries again in a minute */
+                net_dhcp_one(d, 1);
+            } else if (up && d->link_up && d->ip == 0 && kernel_ticks >= d->renew_tick) {
+                d->renew_tick = kernel_ticks + 20 * TIMER_HZ;   /* an IPv6 address is no lease */
                 /* link up but still unconfigured — boot config raced a slow first
                  * reply, or the DHCP server/router came up later. Keep retrying
                  * like a client daemon until we get an address. */
-                net_dhcp_one(d);
+                net_dhcp_one(d, 1);
             }
         }
     }

@@ -45,7 +45,13 @@ typedef struct skb {
 #define SKB_SCM_MAX CONFIG_SKB_SCM_MAX
     void       *scm_files[SKB_SCM_MAX];
     uint8_t     scm_nfiles;
+    void       *cg;         /* cgroup paying while it waits in a receive queue */
+    /* AF_UNIX sender, for SCM_CREDENTIALS when the receiver set SO_PASSCRED */
+    int32_t     cred_pid;
+    uint32_t    cred_uid, cred_gid;
 } skb_t;
+
+#define SKB_TRUESIZE(skb) ((long)sizeof(skb_t) + (long)(skb)->ext_len)
 
 skb_t  *skb_alloc(void);
 /* skb whose data buffer holds up to cap bytes — backed by buf[] when cap fits,
@@ -78,10 +84,16 @@ typedef struct netdev {
     void      (*poll)(struct netdev *);   /* hardware poll, set by driver */
     int       (*link_check)(struct netdev *); /* 1=carrier up, 0=down; NULL=always up */
     int         link_up;                  /* current carrier state (link watcher) */
+    uint64_t    renew_tick;               /* when to renew the DHCP lease, 0 = none */
     void       *priv;
+
+    /* /proc/net/dev. Atomic: TX runs from syscalls, RX from any polling CPU. */
+    volatile uint64_t rx_packets, rx_bytes, rx_dropped;
+    volatile uint64_t tx_packets, tx_bytes, tx_dropped;
 
     /* RX queue — filled by poll, drained by net_poll */
     spinlock_t  rx_lock;
+    volatile int rx_claimed;   /* DHCP owns the RX queue; net_poll must not drain it */
     skb_t      *rx_head;
     skb_t      *rx_tail;
 
@@ -92,10 +104,16 @@ typedef struct netdev {
  * Each holds its own set of devices (a fresh ns has only its private
  * loopback); sockets and device lookups are scoped to a namespace so two
  * namespaces are isolated network stacks. */
+/* One table per namespace, so names cannot cross and neither can a full table. */
+#define UNIX_REG_MAX 64
+typedef struct { char path[108]; int pathlen; struct socket *sock; } unix_bind_t;
+
 typedef struct net_namespace {
     int           refcount;
     unsigned long inum;
     netdev_t      lo;                 /* this namespace's private loopback */
+    unix_bind_t   unix_reg[UNIX_REG_MAX];
+    struct net_namespace *dying_next; /* net_ns_put to net_poll */
 } net_namespace_t;
 
 extern net_namespace_t init_net_ns;
@@ -109,6 +127,7 @@ net_namespace_t *nsfile_to_net(struct vfs_file *f);
 
 void net_register(netdev_t *dev);
 netdev_t *net_dev(int idx);          /* idx-th device in the current namespace */
+netdev_t *net_dev_in(net_namespace_t *ns, int idx);
 netdev_t *net_dev_by_ip(uint32_t ip);
 netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
 netdev_t *net_route_dev(uint32_t dst_ip);  /* egress device for a destination */
@@ -122,6 +141,10 @@ void net_rx_wake(void);
 
 /* Push received skb onto dev's RX queue */
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb);
+void netdev_rx_drop(netdev_t *dev);              /* driver discarded a frame */
+void netdev_count_tx(netdev_t *dev, uint32_t len);
+/* Every frame leaves through here, not dev->tx: this is what counts it. */
+int  netdev_tx(netdev_t *dev, skb_t *skb);
 skb_t *netdev_rx_dequeue(netdev_t *dev);
 
 /* Internet checksum over len bytes */

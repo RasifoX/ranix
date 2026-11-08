@@ -210,14 +210,16 @@ static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
         spin_unlock_irq(&t->lock, flags);
 
         if (got) {
-            if (copy_to_user(b + copied, chunk, got))
+            if (copy_fop_to_user(b + copied, chunk, got))
                 return copied ? (ssize_t)copied : -14;
             copied += got;
             continue;
         }
         if (copied > 0) break;
         if (f->flags & O_NONBLOCK) return -11;
+        if (task_has_actionable_signal()) return -4;   /* EINTR, and SIGKILL's only way out */
         fb_tty_flush();
+        poll_arm();
         poll_block((uint64_t)-1);
     }
     return copied;
@@ -257,7 +259,7 @@ static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
         if (want > sizeof(kb) - carry_n) want = sizeof(kb) - carry_n;
         char *p = kb;
         for (size_t i = 0; i < carry_n; i++) p[i] = carry[i];
-        if (copy_from_user(kb + carry_n, (const char *)buf + off, want)) return -14;
+        if (copy_fop_from_user(kb + carry_n, (const char *)buf + off, want)) return -14;
         size_t total = carry_n + want;
 
         for (size_t i = 0; i + 3 < total; i++) {
@@ -309,6 +311,12 @@ static int tty_poll(vfs_file_t *f)
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
 #define TIOCNOTTY  0x5422
+#define KDSETMODE  0x4B3A
+#define KDGETMODE  0x4B3B
+#define KD_TEXT     0
+#define KD_GRAPHICS 1
+
+static pid_t kd_owner;     /* who asked for KD_GRAPHICS, 0 when nobody did */
 
 static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
@@ -357,27 +365,39 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         if (pg > 0) task_signal_pgrp(pg, 28);   /* SIGWINCH */
         return 0;
     }
-    if (cmd == TIOCGPGRP)
-        return copy_to_user((void *)(uintptr_t)arg, &t->fg_pgrp, sizeof(t->fg_pgrp)) ? -14 : 0;
+    if (cmd == TIOCGPGRP) {
+        pid_t pgrp = pid_to_user(t->fg_pgrp);
+        return copy_to_user((void *)(uintptr_t)arg, &pgrp, sizeof(pgrp)) ? -14 : 0;
+    }
     if (cmd == TIOCSPGRP) {
         pid_t pgrp;
         if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
-        t->fg_pgrp = pgrp;
-        return 0;
+        pid_t fg;
+        long r = tty_check_fg(t, 0, pgrp, &fg);
+        if (r == 0) t->fg_pgrp = fg;
+        return (int)r;
     }
     if (cmd == TIOCSCTTY) {
         process_t *cur = task_current();
-        if (cur) {
-            if (cur->pgrp > 0) t->fg_pgrp = cur->pgrp;
-            cur->ctty = t;
-            cur->ctty_fops = &tty_fops;
-        }
+        int r = tty_acquire(t, &tty_fops, arg == 1);
+        if (r < 0) return r;
+        if (r == 0 && cur->pgrp > 0) t->fg_pgrp = cur->pgrp;
         return 0;
     }
     if (cmd == TIOCNOTTY) {
         process_t *cur = task_current();
         if (cur && cur->ctty == t) { cur->ctty = NULL; cur->ctty_fops = NULL; }
         return 0;
+    }
+    if (cmd == KDSETMODE) {
+        if (arg != KD_TEXT && arg != KD_GRAPHICS) return -22;
+        fb_tty_set_graphics(arg == KD_GRAPHICS);
+        kd_owner = arg == KD_GRAPHICS ? task_current()->pid : 0;
+        return 0;
+    }
+    if (cmd == KDGETMODE) {
+        int mode = fb_tty_get_graphics() ? KD_GRAPHICS : KD_TEXT;
+        return copy_to_user((void *)(uintptr_t)arg, &mode, sizeof(mode)) ? -14 : 0;
     }
     return -25;
 }
@@ -429,12 +449,36 @@ static int ctty_poll(vfs_file_t *f)
     return fo->poll(&tmp);
 }
 
+/* A session leader with no terminal has none to open: ENXIO, as on Linux.
+ * "bash -i" (VS Code reads the login environment so) opens /dev/tty when
+ * stderr is not one; handed the console it waited for the console's
+ * foreground forever. Others keep the console: init starts its shell there
+ * without a controlling terminal. */
+static int ctty_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+    (void)in; (void)f; (void)flags;
+    process_t *cur = task_current();
+    if (cur && !cur->ctty && cur->pid > 1 && cur->sid == (pid_t)cur->pid)
+        return -6; /* ENXIO */
+    return 0;
+}
+
 static vfs_fops_t ctty_dev_fops = {
+    .open  = ctty_open,
     .read  = ctty_read,
     .write = ctty_write,
     .poll  = ctty_poll,
     .ioctl = ctty_ioctl,
 };
+
+/* A program killed in graphics mode must not leave an invisible console. */
+void tty_task_gone(pid_t pid)
+{
+    if (kd_owner && kd_owner == pid) {
+        kd_owner = 0;
+        fb_tty_set_graphics(0);
+    }
+}
 
 void tty_core_init(void)
 {

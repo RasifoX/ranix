@@ -1,3 +1,5 @@
+#include <kernel/board.h>
+#include <kernel/capabilities.h>
 /* ── uname ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -15,7 +17,10 @@ static long sys_uname(linux_utsname_t *uts)
 	uts_namespace_t *ns = current_uts();
 	linux_utsname_t k;
 	memset(&k, 0, sizeof(k));
-	memcpy(k.sysname,    "Ranix",   6);
+	/* Ranix by name; a process tree that runs software written for Linux
+	 * (prctl PR_RANIX_UNAME_LINUX, set by the Linux userland launcher) sees "Linux" */
+	if (task_current()->uname_linux) memcpy(k.sysname, "Linux", 6);
+	else                              memcpy(k.sysname, "Ranix", 6);
 	memcpy(k.nodename,   ns->nodename,   sizeof(k.nodename));
 	memcpy(k.release,    "6.6.0-ranix", 12);
 	memcpy(k.version,    "#1 SMP",  7);
@@ -25,7 +30,7 @@ static long sys_uname(linux_utsname_t *uts)
 	memcpy(k.machine,    "aarch64", 8);
 #endif
 	memcpy(k.domainname, ns->domainname, sizeof(k.domainname));
-	return copy_to_user(uts, &k, sizeof(k));
+	return copy_to_user(uts, &k, sizeof(k)) ? -14 : 0;
 }
 
 /*
@@ -36,6 +41,7 @@ static long sys_uname(linux_utsname_t *uts)
 static long sys_unshare(unsigned long flags)
 {
 	process_t *p = task_current();
+	if (!may_create_ns(p, flags)) return -1; /* EPERM */
 	if (flags & CLONE_NEWUTS) {
 		uts_namespace_t *ns = uts_ns_clone(p->uts_ns);
 		if (!ns) return -12; /* ENOMEM */
@@ -102,15 +108,12 @@ static long sys_unshare(unsigned long flags)
  * setns(2) — join the namespace referred to by an open ns fd. Only the UTS
  * namespace is supported; nstype, if given, must match.
  */
-static long sys_setns(int fd, int nstype)
+static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 {
-	process_t *p = task_current();
-	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f) return -9; /* EBADF */
-
 	uts_namespace_t *uts = nsfile_to_uts(f);
 	if (uts) {
 		if (nstype != 0 && nstype != CLONE_NEWUTS) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		uts_ns_get(uts);
 		uts_ns_put(p->uts_ns);
 		p->uts_ns = uts;
@@ -120,6 +123,7 @@ static long sys_setns(int fd, int nstype)
 	ipc_namespace_t *ipc = nsfile_to_ipc(f);
 	if (ipc) {
 		if (nstype != 0 && nstype != CLONE_NEWIPC) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		ipc_ns_get(ipc);
 		ipc_ns_put(p->ipc_ns);
 		p->ipc_ns = ipc;
@@ -129,6 +133,7 @@ static long sys_setns(int fd, int nstype)
 	time_namespace_t *tns = nsfile_to_time(f);
 	if (tns) {
 		if (nstype != 0 && nstype != CLONE_NEWTIME) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		time_ns_get(tns);
 		time_ns_put(p->time_ns);
 		p->time_ns = tns;
@@ -138,6 +143,7 @@ static long sys_setns(int fd, int nstype)
 	mnt_namespace_t *mns = nsfile_to_mnt(f);
 	if (mns) {
 		if (nstype != 0 && nstype != CLONE_NEWNS) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		mnt_ns_get(mns);
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = mns;
@@ -147,6 +153,7 @@ static long sys_setns(int fd, int nstype)
 	pid_namespace_t *pns = nsfile_to_pid(f);
 	if (pns) {
 		if (nstype != 0 && nstype != CLONE_NEWPID) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		/* like unshare(CLONE_NEWPID): the caller's own pid ns is unchanged;
 		 * the joined ns becomes the ns for its future children */
 		pid_ns_get(pns);
@@ -158,6 +165,7 @@ static long sys_setns(int fd, int nstype)
 	user_namespace_t *uns = nsfile_to_user(f);
 	if (uns) {
 		if (nstype != 0 && nstype != CLONE_NEWUSER) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		user_ns_get(uns);
 		user_ns_put(p->user_ns);
 		p->user_ns = uns;
@@ -167,6 +175,7 @@ static long sys_setns(int fd, int nstype)
 	net_namespace_t *nns = nsfile_to_net(f);
 	if (nns) {
 		if (nstype != 0 && nstype != CLONE_NEWNET) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		net_ns_get(nns);
 		net_ns_put(p->net_ns);
 		p->net_ns = nns;
@@ -176,6 +185,7 @@ static long sys_setns(int fd, int nstype)
 	struct cgroup_namespace *cns = nsfile_to_cgroup(f);
 	if (cns) {
 		if (nstype != 0 && nstype != CLONE_NEWCGROUP) return -22;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
 		cgroup_ns_get(cns);
 		cgroup_ns_put(p->cgroup_ns);
 		p->cgroup_ns = cns;
@@ -183,6 +193,16 @@ static long sys_setns(int fd, int nstype)
 	}
 
 	return -22; /* EINVAL: not a namespace fd */
+}
+
+static long sys_setns(int fd, int nstype)
+{
+	process_t *p = task_current();
+	vfs_file_t *f = fget(p->fds, fd);
+	if (!f) return -9; /* EBADF */
+	long r = setns_file(p, f, nstype);
+	fput(f);
+	return r;
 }
 
 /* ── time syscalls ───────────────────────────────────────── */
@@ -266,6 +286,7 @@ static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
 }
 
 static void mono_time(int64_t *sec, int64_t *nsec);
+static void real_time(int64_t *sec, int64_t *nsec);
 
 /* Tick value for the deadline sweep to wake a timed futex waiter at the ns
  * deadline. Recomputed each time the waiter sleeps so a fast kernel_ticks under
@@ -282,6 +303,10 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
 	int cmd = op & FUTEX_CMD_MASK;
+	/* Priority inheritance is not here. EOPNOTSUPP is what libraries probe for and
+	 * fall back on; ENOSYS from a futex makes PulseAudio's client abort. */
+	if (cmd >= 6 && cmd <= 8)
+		return -95;
 	process_t *self = task_current();
 	void *mm = self->vm;
 
@@ -290,7 +315,10 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
 		if (timeout) {
 			linux_timespec_t kts;
-			if (copy_from_user(&kts, timeout, sizeof(kts)) == 0) {
+			if (copy_from_user(&kts, timeout, sizeof(kts)) != 0) return -14;
+			if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L) return -22;
+			if (kts.tv_sec > 0x7fffffffffffffffLL / 1000000000LL - 2) timeout = NULL;
+			else {
 				/* FUTEX_WAIT's timeout is a relative span, FUTEX_WAIT_BITSET's an
 				 * absolute deadline on the same boot-relative clock mono_time
 				 * reports. Track the deadline in ns and decide the timeout against
@@ -300,12 +328,24 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				int64_t now_ns = ns * 1000000000LL + nn;
 				int64_t want   = kts.tv_sec * 1000000000LL + kts.tv_nsec;
 				end_ns = (cmd == 9) ? want : now_ns + want;
+				/* FUTEX_CLOCK_REALTIME: that instant is wall-clock time (glibc's
+				 * pthread_cond_timedwait), decades past the boot clock: move it onto
+				 * mono_time, or the wait never times out. */
+				if (cmd == 9 && (op & FUTEX_CLOCK_REALTIME)) {
+					int64_t rs, rn; real_time(&rs, &rn);
+					end_ns = want - ((rs * 1000000000LL + rn) - now_ns);
+				}
 				timed  = 1;
 			}
 		}
+		if (task_has_actionable_signal()) return -4;   /* the first sleep would not see it */
 		futex_q_t q = { self, uaddr, mm, 0, NULL };
-		uint64_t f = spin_lock_irq(&futex_lock);
+		/* Fault the word in before taking the lock: the fault path can sleep and
+		 * allocate, which it must not do under an IRQ-off spinlock. */
 		uint32_t cur;
+		if ((uintptr_t)uaddr & 3) return -22;
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -14;
+		uint64_t f = spin_lock_irq(&futex_lock);
 		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -14; }
 		if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -11; }
 		unsigned h = futex_hash(mm, uaddr);
@@ -361,7 +401,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		if (!uaddr2) return -22;
 		uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
 		uint32_t oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
-		if (op3 & 8) { oparg = 1u << oparg; op3 &= ~8u; }
+		if (op3 & 8) { oparg = 1u << (oparg & 31); op3 &= ~8u; }
 		uint32_t oldval = 0;
 		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -14;
 		uint32_t newval = oldval;
@@ -388,14 +428,15 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 
 	if (cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */) {
 		if (cmd == 4) {
-			uint64_t fq = spin_lock_irq(&futex_lock);
 			uint32_t cur;
-			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, fq); return -14; }
-			if (cur != val3)                                   { spin_unlock_irq(&futex_lock, fq); return -11; }
-			spin_unlock_irq(&futex_lock, fq);
+			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -14;
+			if (cur != val3) return -11;
 		}
 		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = futex_do_wake(mm, uaddr, (int)val, uaddr2, (int)(uintptr_t)timeout);
+		/* onto itself the requeue keeps re-finding the same waiter, up to 2^31
+		 * times with IRQs off */
+		int woken = futex_do_wake(mm, uaddr, (int)val, uaddr == uaddr2 ? NULL : uaddr2,
+		                          (int)(uintptr_t)timeout);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
 	}
@@ -459,7 +500,7 @@ void futex_exit_robust(process_t *p)
 {
 	if (!p->robust_list) return;
 	void *mm = p->vm;
-	uint32_t tid = (uint32_t)p->pid & FUTEX_TID_MASK;
+	uint32_t tid = (uint32_t)task_vpid(p) & FUTEX_TID_MASK;
 
 	struct robust_list_head head;
 	if (copy_from_user(&head, p->robust_list, sizeof(head)) != 0) return;
@@ -488,8 +529,10 @@ static long sys_set_robust_list(void *head, size_t len)
 
 static long sys_get_robust_list(pid_t tid, void **head_ptr, size_t *len_ptr)
 {
-	process_t *t = tid ? proc_get(tid) : task_current();
+	process_t *t = tid ? proc_get_user(tid) : task_current();
 	if (!t) return -3;
+	/* the head is a user address of the target: an ASLR leak without this */
+	if (tid && !ptrace_may_access(t)) { proc_put(t); return -1; }
 	void  *head = t->robust_list;
 	size_t len  = sizeof(struct robust_list_head);
 	if (tid) proc_put(t);
@@ -513,8 +556,9 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 		return;
 	}
 #elif defined(__x86_64__)
-	extern uint64_t hpet_now_ns(void);
-	uint64_t hns = hpet_now_ns();
+	extern uint64_t hpet_now_ns(void), tsc_now_ns(void);
+	uint64_t hns = tsc_now_ns();
+	if (!hns) hns = hpet_now_ns();
 	if (hns) {
 		*sec  = (int64_t)(hns / 1000000000ULL);
 		*nsec = (int64_t)(hns % 1000000000ULL);
@@ -620,7 +664,7 @@ static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 	default:
 		return -22; /* EINVAL: unknown clock */
 	}
-	return copy_to_user(tp, &k, sizeof(k));
+	return copy_to_user(tp, &k, sizeof(k)) ? -14 : 0;
 }
 
 static long sys_clock_getres(int clkid, linux_timespec_t *res)
@@ -641,7 +685,7 @@ static long sys_clock_getres(int clkid, linux_timespec_t *res)
 		} else {
 			r.tv_sec = 0; r.tv_nsec = 1;
 		}
-		return copy_to_user(res, &r, sizeof(r));
+		return copy_to_user(res, &r, sizeof(r)) ? -14 : 0;
 	}
 	return 0;
 }
@@ -656,15 +700,16 @@ static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 	real_time(&s, &ns);
 	k.tv_sec  = s;
 	k.tv_usec = ns / 1000;
-	return copy_to_user(tv, &k, sizeof(k));
+	return copy_to_user(tv, &k, sizeof(k)) ? -14 : 0;
 }
 
 static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 {
-	if (!cap_has(task_current()->cap_effective, CAP_SYS_TIME)) return -1; /* EPERM */
+	if (!capable_task(task_current(), CAP_SYS_TIME)) return -1; /* EPERM */
 	if (clkid != CLOCK_REALTIME || !tp) return -22;
 	linux_timespec_t k;
 	if (copy_from_user(&k, tp, sizeof(k)) != 0) return -14;
+	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec  - ms;
 	g_rt_off_nsec = (int64_t)k.tv_nsec - mn;
@@ -683,10 +728,11 @@ static void rtc_sync_to_hw(void)
 static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 {
 	(void)tz;
-	if (!cap_has(task_current()->cap_effective, CAP_SYS_TIME)) return -1; /* EPERM */
+	if (!capable_task(task_current(), CAP_SYS_TIME)) return -1; /* EPERM */
 	if (!tv) return -14;
 	linux_timeval_t k;
 	if (copy_from_user(&k, tv, sizeof(k)) != 0) return -14;
+	if (k.tv_sec < 0 || k.tv_usec < 0 || k.tv_usec >= 1000000L) return -22;
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec - ms;
 	g_rt_off_nsec = (int64_t)k.tv_usec * 1000 - mn;
@@ -717,7 +763,7 @@ static long sys_adjtimex(k_timex_t *utx)
 	if (!utx) return -14;
 	k_timex_t tx;
 	if (copy_from_user(&tx, utx, sizeof(tx)) != 0) return -14;
-	if (tx.modes != 0 && !cap_has(task_current()->cap_effective, CAP_SYS_TIME))
+	if (tx.modes != 0 && !capable_task(task_current(), CAP_SYS_TIME))
 		return -1; /* EPERM — read-only adjtimex (modes==0) stays unprivileged */
 
 	if (tx.modes & 0x0100) {           /* ADJ_SETOFFSET: step the clock by .time */
@@ -725,9 +771,9 @@ static long sys_adjtimex(k_timex_t *utx)
 		int64_t add_n = (tx.modes & 0x2000) ? tx.time_usec   /* ADJ_NANO */
 		                                     : tx.time_usec * 1000;
 		int64_t ms, mn, cs, cn; mono_time(&ms, &mn); real_time(&cs, &cn);
-		int64_t ns = cs + add_s, nn = cn + add_n;
-		while (nn >= 1000000000LL) { nn -= 1000000000LL; ns++; }
-		while (nn < 0)             { nn += 1000000000LL; ns--; }
+		int64_t ns = cs + add_s + add_n / 1000000000LL, nn = cn + add_n % 1000000000LL;
+		if (nn >= 1000000000LL) { nn -= 1000000000LL; ns++; }
+		if (nn < 0)             { nn += 1000000000LL; ns--; }
 		g_rt_off_sec = ns - ms; g_rt_off_nsec = nn - mn;
 		vdso_time_changed();
 		rtc_sync_to_hw();
@@ -737,24 +783,39 @@ static long sys_adjtimex(k_timex_t *utx)
 	/* report current discipline state */
 	tx.offset = 0; tx.freq = g_tx_freq; tx.maxerror = 0; tx.esterror = 0;
 	tx.status = 0; tx.tick = 10000; tx.tai = 0;
-	copy_to_user(utx, &tx, sizeof(tx));
-	return 0;   /* TIME_OK */
+	return copy_to_user(utx, &tx, sizeof(tx)) ? -14 : 0;   /* TIME_OK */
+}
+
+static long sleep_for(const linux_timespec_t *kts, linux_timespec_t *urem)
+{
+	linux_timespec_t k = *kts;
+	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
+	/* a huge span must saturate: a wrapped end returns at once */
+	uint64_t ticks = (uint64_t)k.tv_sec >= (uint64_t)-1 / 2 / TIMER_HZ ? (uint64_t)-1 / 2
+	               : (uint64_t)k.tv_sec * TIMER_HZ + (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
+	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
+	while (kernel_ticks < end) {
+		if (task_has_actionable_signal()) {   /* EINTR (delivered signal only) */
+			if (urem) {                       /* a retry loop resumes from here */
+				uint64_t left = end - kernel_ticks;
+				linux_timespec_t r;
+				r.tv_sec  = (long)(left / TIMER_HZ);
+				r.tv_nsec = (long)(left % TIMER_HZ) * (1000000000 / TIMER_HZ);
+				if (copy_to_user(urem, &r, sizeof(r)) != 0) return -14;
+			}
+			return -4;
+		}
+		task_sleep_until(end);
+	}
+	return 0;
 }
 
 static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 {
-	(void)rem;
 	if (!req) return -14;
 	linux_timespec_t k;
 	if (copy_from_user(&k, req, sizeof(k)) != 0) return -14;
-	uint64_t ticks = (uint64_t)k.tv_sec * TIMER_HZ +
-	                 (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
-	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
-	while (kernel_ticks < end) {
-		if (task_has_actionable_signal()) return -4; /* EINTR (delivered signal only) */
-		task_sleep_until(end);
-	}
-	return 0;
+	return sleep_for(&k, rem);
 }
 
 typedef struct { int64_t tv_sec; int64_t tv_usec; } itimerval_tv_t;
@@ -777,11 +838,14 @@ static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_
         oval.it_value.tv_usec   = (int64_t)((*value % hz) * (1000000 / hz));
         oval.it_interval.tv_sec = (int64_t)(*interval / hz);
         oval.it_interval.tv_usec= (int64_t)((*interval % hz) * (1000000 / hz));
-        copy_to_user(old_v, &oval, sizeof(oval));
+        if (copy_to_user(old_v, &oval, sizeof(oval)) != 0) return -14;
     }
     if (new_v) {
         itimerval_t nval;
         if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -14;
+        if (nval.it_value.tv_sec < 0 || nval.it_interval.tv_sec < 0 ||
+            (uint64_t)nval.it_value.tv_usec >= 1000000 ||
+            (uint64_t)nval.it_interval.tv_usec >= 1000000) return -22;
         uint64_t nv = (uint64_t)nval.it_value.tv_sec * hz +
                       (uint64_t)nval.it_value.tv_usec * hz / 1000000;
         uint64_t ni = (uint64_t)nval.it_interval.tv_sec * hz +
@@ -808,18 +872,18 @@ static long sys_times(void *buf)
 	if (buf) {
 		process_t *p = task_current();
 		int64_t tms[4];   /* tms_utime, tms_stime, tms_cutime, tms_cstime — in ticks (CLK_TCK==TIMER_HZ) */
-		tms[0] = (int64_t)(p ? p->utime_ticks  : 0);
-		tms[1] = (int64_t)(p ? p->stime_ticks  : 0);
-		tms[2] = (int64_t)(p ? p->cutime_ticks : 0);
-		tms[3] = (int64_t)(p ? p->cstime_ticks : 0);
+		tms[0] = (int64_t)TICKS_USER(p ? p->utime_ticks  : 0);
+		tms[1] = (int64_t)TICKS_USER(p ? p->stime_ticks  : 0);
+		tms[2] = (int64_t)TICKS_USER(p ? p->cutime_ticks : 0);
+		tms[3] = (int64_t)TICKS_USER(p ? p->cstime_ticks : 0);
 		if (copy_to_user(buf, tms, sizeof(tms)) != 0) return -14;
 	}
-	return (long)kernel_ticks;
+	return (long)TICKS_USER(kernel_ticks);
 }
 
 static long sys_sysinfo(void *info)
 {
-	if (!info) return 0;
+	if (!info) return -14;
 	/* struct sysinfo layout (kernel ABI) */
 	struct {
 		int64_t  uptime;
@@ -839,8 +903,7 @@ static long sys_sysinfo(void *info)
 	si.freeram   = buddy_free_pages()  * PAGE_SIZE;
 	si.procs     = (uint16_t)task_count();
 	si.mem_unit  = 1;
-	copy_to_user(info, &si, sizeof(si));
-	return 0;
+	return copy_to_user(info, &si, sizeof(si)) ? -14 : 0;
 }
 
 /* ── execve ──────────────────────────────────────────────────────────────────
@@ -852,6 +915,7 @@ static long sys_sysinfo(void *info)
  * USER_STACK_/USER_MMAP_ macros, all in scope via the textual include.
  * ───────────────────────────────────────────────────────────────────────── */
 static long sys_execve(const char *path, char * const argv[], char * const envp[]);
+static long do_execve(char *kpath, char * const argv[], char * const envp[]);
 
 /* ── pidfd (glibc 2.36+) ─────────────────────────────────────────────────────
  * A file descriptor referring to a process: the pid lives in the inode and
@@ -864,13 +928,16 @@ static vfs_fops_t pidfd_fops = { .close = pidfd_close_vfs };
 
 static long sys_pidfd_open(pid_t pid, unsigned int flags)
 {
-	(void)flags;
-	if (pid <= 0 || !proc_find(pid)) return -3;   /* ESRCH */
+	if (flags & ~0x800u) return -22;   /* PIDFD_NONBLOCK */
+	process_t *t = pid > 0 ? proc_get_user(pid) : NULL;
+	if (!t) return -3;   /* ESRCH */
+	pid_t global = (pid_t)t->pid;   /* the fd can reach another pid namespace */
+	proc_put(t);
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return -12;
 	memset(in, 0, sizeof(*in));
 	in->fops     = &pidfd_fops;
-	in->priv     = (void *)(uint64_t)pid;
+	in->priv     = (void *)(uint64_t)global;
 	in->refcount = 1;
 	vfs_file_t *f = kmalloc(sizeof(*f));
 	if (!f) { kfree(in); return -12; }
@@ -878,16 +945,22 @@ static long sys_pidfd_open(pid_t pid, unsigned int flags)
 	f->inode    = in;
 	f->refcount = 0;   /* fd_alloc takes the +1 */
 	int fd = fd_alloc(task_current()->fds, f);
-	if (fd < 0) { kfree(f); kfree(in); return -12; }
+	if (fd < 0) { kfree(f); kfree(in); return fd == -1 ? -12 : fd; }
 	return fd;
 }
 
 static long sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned int flags)
 {
-	(void)info; (void)flags;
-	vfs_file_t *f = fd_get(task_current()->fds, pidfd);
-	if (!f || !f->inode || f->inode->fops != &pidfd_fops) return -9; /* EBADF */
-	return sys_kill((pid_t)(uint64_t)f->inode->priv, sig);
+	(void)info;
+	if (flags) return -22;
+	vfs_file_t *f = fget(task_current()->fds, pidfd);
+	if (!f) return -9; /* EBADF */
+	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -9; }
+	process_t *t = proc_get((pid_t)(uint64_t)f->inode->priv);
+	fput(f);
+	long r = (t && task_pid_nr_ns(t, current_pid_ns())) ? kill_task(t, sig) : -3;
+	proc_put(t);
+	return r;
 }
 
 /* ── real-time scheduling policy (SCHED_FIFO/RR) ─────────────────────────────
@@ -898,8 +971,11 @@ struct ranix_sched_param { int sched_priority; };
 static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
 {
 	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
-	process_t *p = pid ? proc_get(pid) : task_current();
+	/* a real-time spinner starves every normal task on its CPU */
+	if (policy != SCHED_NORMAL && !capable_task(task_current(), CAP_SYS_NICE)) return -1;
+	process_t *p = pid ? proc_get_user(pid) : task_current();
 	if (!p) return -3;
+	if (pid && !task_may_control(p, CAP_SYS_NICE)) { proc_put(p); return -1; } /* EPERM */
 	long ret = 0;
 	int prio = 0;
 	if (uparam) {
@@ -918,14 +994,16 @@ static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
 
 static long sys_sched_setparam(pid_t pid, const void *uparam)
 {
-	process_t *p = pid ? proc_get(pid) : task_current();
+	process_t *p = pid ? proc_get_user(pid) : task_current();
 	if (!p) return -3;
+	if (pid && !task_may_control(p, CAP_SYS_NICE)) { proc_put(p); return -1; } /* EPERM */
 	long ret = 0;
 	struct ranix_sched_param sp;
 	if (!uparam) ret = -14;
 	else if (copy_from_user(&sp, uparam, sizeof(sp)) != 0) ret = -14;
 	else if (p->sched_policy == SCHED_NORMAL) { if (sp.sched_priority != 0) ret = -22; }
 	else if (sp.sched_priority < 1 || sp.sched_priority > 99) ret = -22;
+	else if (sp.sched_priority > p->rt_priority && !capable_task(task_current(), CAP_SYS_NICE)) ret = -1;
 	if (ret == 0) p->rt_priority = sp.sched_priority;
 	if (pid) proc_put(p);
 	return ret;
@@ -933,15 +1011,125 @@ static long sys_sched_setparam(pid_t pid, const void *uparam)
 
 static long sys_sched_getscheduler(pid_t pid)
 {
-	process_t *p = pid ? proc_get(pid) : task_current();
+	process_t *p = pid ? proc_get_user(pid) : task_current();
 	long r = p ? (long)p->sched_policy : -3;
 	if (pid) proc_put(p);
 	return r;
 }
 
+/* sched_attr, as far as Ranix keeps it: policy, nice, rt priority. Batch and idle
+ * are accepted as normal; deadline scheduling is not offered. */
+struct ranix_sched_attr {
+	uint32_t size, policy;
+	uint64_t flags;
+	int32_t  nice;
+	uint32_t priority;
+	uint64_t runtime, deadline, period;
+	uint32_t util_min, util_max;
+};
+
+static long sys_sched_getattr(pid_t pid, void *uattr, unsigned int usize, unsigned int flags)
+{
+	if (flags || !uattr || usize < 48 || usize > 4096) return -22;
+	process_t *p = pid ? proc_get_user(pid) : task_current();
+	if (!p) return -3;
+	struct ranix_sched_attr a;
+	memset(&a, 0, sizeof(a));
+	a.size     = usize < sizeof(a) ? usize : (uint32_t)sizeof(a);
+	a.policy   = (uint32_t)p->sched_policy;
+	a.nice     = p->nice;
+	a.priority = (uint32_t)p->rt_priority;
+	if (pid) proc_put(p);
+	return copy_to_user(uattr, &a, a.size) ? -14 : 0;
+}
+
+static long sys_sched_setattr(pid_t pid, const void *uattr, unsigned int flags)
+{
+	if (flags || !uattr) return -22;
+	struct ranix_sched_attr a;
+	memset(&a, 0, sizeof(a));
+	uint32_t sz;
+	if (copy_from_user(&sz, uattr, 4)) return -14;
+	if (!sz) sz = 48;
+	if (sz < 48 || sz > 4096) return -7;   /* E2BIG, as Linux */
+	if (copy_from_user(&a, uattr, sz < sizeof(a) ? sz : sizeof(a))) return -14;
+	int policy = (int)a.policy;
+	if (policy == 3 || policy == 5) policy = SCHED_NORMAL;      /* BATCH, IDLE */
+	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
+	if (policy == SCHED_NORMAL) {
+		if (a.priority) return -22;
+		long r = sys_sched_setscheduler(pid, SCHED_NORMAL, NULL);
+		if (r) return r;
+		process_t *p = pid ? proc_get_user(pid) : task_current();
+		if (!p) return -3;
+		int nice = a.nice < -20 ? -20 : a.nice > 19 ? 19 : a.nice;
+		if (nice < p->nice && !capable_task(task_current(), CAP_SYS_NICE)) r = -1;
+		else p->nice = nice;
+		if (pid) proc_put(p);
+		return r;
+	}
+	struct ranix_sched_param sp = { (int)a.priority };
+	/* sys_sched_setscheduler copies from user memory: hand it the value through a
+	 * kernel-side path instead */
+	process_t *p = pid ? proc_get_user(pid) : task_current();
+	if (!p) return -3;
+	long r = 0;
+	if (!capable_task(task_current(), CAP_SYS_NICE)) r = -1;
+	else if (pid && !task_may_control(p, CAP_SYS_NICE)) r = -1;
+	else if (sp.sched_priority < 1 || sp.sched_priority > 99) r = -22;
+	else { p->sched_policy = policy; p->rt_priority = sp.sched_priority; }
+	if (pid) proc_put(p);
+	return r;
+}
+
+/* Are two processes' resources the same object? 0 yes, 1/2 an order, 3 not
+ * comparable. File, memory, file table and signal handlers are known here. */
+static long sys_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsigned long idx2)
+{
+	process_t *a = proc_get_user(pid1), *b = proc_get_user(pid2);
+	long r = 0;
+	if (!a || !b) { r = -3; goto out; }
+	if (!task_may_control(a, CAP_SYS_PTRACE) || !task_may_control(b, CAP_SYS_PTRACE)) { r = -1; goto out; }
+	const void *x, *y;
+	switch (type) {
+	case 0: {                                   /* KCMP_FILE */
+		vfs_file_t *fa = fget(a->fds, (int)idx1), *fb = fget(b->fds, (int)idx2);
+		x = fa; y = fb;
+		if (fa) fput(fa);
+		if (fb) fput(fb);
+		if (!x || !y) { r = -9; goto out; }
+		break;
+	}
+	case 1: x = a->vm; y = b->vm; break;        /* KCMP_VM */
+	case 2: x = a->fds; y = b->fds; break;      /* KCMP_FILES */
+	case 4: x = a->sighand; y = b->sighand; break;   /* KCMP_SIGHAND */
+	default: r = -22; goto out;
+	}
+	r = x == y ? 0 : (uintptr_t)x < (uintptr_t)y ? 1 : 2;
+out:
+	proc_put(a);
+	proc_put(b);
+	return r;
+}
+
+/* The memory of a process being killed goes back as it exits; nothing to hurry. */
+static long sys_process_mrelease(int pidfd, unsigned int flags)
+{
+	if (flags) return -22;
+	vfs_file_t *f = fget(task_current()->fds, pidfd);
+	if (!f) return -9;
+	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -9; }
+	process_t *t = proc_get((pid_t)(uint64_t)f->inode->priv);
+	fput(f);
+	if (!t) return -3;
+	long r = (t->sig_pending & (1UL << (9 - 1))) || t->state == PROC_ZOMBIE || t->state == PROC_DEAD ? 0 : -22;
+	proc_put(t);
+	return r;
+}
+
 static long sys_sched_getparam(pid_t pid, void *uparam)
 {
-	process_t *p = pid ? proc_get(pid) : task_current();
+	process_t *p = pid ? proc_get_user(pid) : task_current();
 	if (!p) return -3;
 	struct ranix_sched_param sp = { p->rt_priority };
 	if (pid) proc_put(p);
@@ -968,20 +1156,22 @@ static long sys_sched_get_priority_min(int policy)
 static long sys_execveat(int dirfd, const char *path, char * const argv[],
                          char * const envp[], int flags)
 {
-	if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
-		vfs_file_t *f = fget(task_current()->fds, dirfd);  /* pin: f->path is read across execve */
-		if (!f || !f->path[0]) { if (f) fput(f); return -9; }
-		long ret = sys_execve(f->path, argv, envp);
-		fput(f);
-		return ret;
-	}
-	if (!path) return -14;
+	char first = 0;
+	if (path && get_user(first, path) != 0) return -14;
 	char *kp = kmalloc(PATH_MAX);
 	if (!kp) return -12;
+	if ((flags & AT_EMPTY_PATH) && !first) {
+		vfs_file_t *f = fget(task_current()->fds, dirfd);
+		if (!f) { kfree(kp); return -9; }
+		if (!f->path[0]) { fput(f); kfree(kp); return -9; }
+		memcpy(kp, f->path, strlen(f->path) + 1);
+		fput(f);
+		return do_execve(kp, argv, envp);
+	}
+	if (!path) { kfree(kp); return -14; }
 	int r = resolve_path(kp, dirfd, path);
-	long ret = r ? r : sys_execve(kp, argv, envp);
-	kfree(kp);
-	return ret;
+	if (r) { kfree(kp); return r; }
+	return do_execve(kp, argv, envp);
 }
 
 /* x-permission against the caller's effective ids (execve EACCES check). */
@@ -1000,24 +1190,54 @@ static int exec_permitted(const vfs_stat_t *st, process_t *p)
 
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
-	if (!path) return -14;
+	char *kp = kmalloc(PATH_MAX);
+	if (!kp) return -12;
+	int r = copy_path_from_user(kp, path);
+	if (r) { kfree(kp); return r; }
+	return do_execve(kp, argv, envp);
+}
 
-	process_t *p = task_current();
+/* One user string into the staging area at *koff. -EFAULT on a bad pointer,
+ * -E2BIG if it overruns the budget. */
+static long exec_stage_ustr(char *kstrs, int *koff, int budget, const char *u)
+{
+	int room = budget - *koff;
+	if (room <= 0) return -7;
+	long n = strncpy_from_user(kstrs + *koff, u, (size_t)room);
+	if (n < 0) return -14;
+	if (n >= room) return -7;
+	*koff += (int)n + 1;
+	return 0;
+}
 
-	/* copy path to kernel buffer */
-	char *kpath = kmalloc(PATH_MAX);
-	if (!kpath) return -12;
-	int i = 0;
-	/* path is user via SYS_ARCH_EXECVE, kernel via execveat (resolve_path). */
-	uaccess_begin();
-	while (i < PATH_MAX - 1 && path[i]) {
-		kpath[i] = path[i];
-		i++;
+/* Count a user pointer array up to its NULL. An array running past max is left
+ * for the budget checks to refuse. */
+static long exec_count_uvec(char * const *uv, int max)
+{
+	int n = 0;
+	while (uv && n < max) {
+		char *s;
+		if (get_user(s, &uv[n]) != 0) return -14;
+		if (!s) break;
+		n++;
 	}
-	int too_long = path[i] != 0;
-	uaccess_end();
-	if (too_long) { kfree(kpath); return -36; }   /* ENAMETOOLONG */
-	kpath[i] = '\0';
+	return n;
+}
+
+/* kpath: a kmalloc'd PATH_MAX kernel buffer, consumed. argv and envp are user. */
+static long do_execve(char *kpath, char * const argv[], char * const envp[])
+{
+	process_t *p = task_current();
+	int i = strlen(kpath);
+
+	/* the VFS walks absolute paths only */
+	if (i && kpath[0] != '/') {
+		int bl = strlen(p->cwd);
+		if (bl + 1 + i >= PATH_MAX) { kfree(kpath); return -36; }
+		memmove(kpath + bl + 1, kpath, i + 1);
+		memcpy(kpath, p->cwd, bl);
+		kpath[bl] = '/';
+	}
 
 	/* Resolve #! interpreters and enforce execute permission before staging the
 	 * argument vector. Each script level prepends [interp, optarg?, scriptpath]
@@ -1096,13 +1316,15 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	int max_ptrs = (int)(ARG_WIN_BYTES / sizeof(uint64_t));
 	/* a shebang prefix replaces argv[0]; skip the caller's argv[0] in that case */
 	int user_skip = shebang_n ? 1 : 0;
-	int user_argc = 0;
-	uaccess_begin();
-	if (argv) while (user_argc < max_ptrs && argv[user_argc]) user_argc++;
+	long user_argc = exec_count_uvec(argv, max_ptrs);
+	long ucount_env = exec_count_uvec(envp, max_ptrs);
+	if (user_argc < 0 || ucount_env < 0) {
+		for (int k=0;k<shebang_n;k++) kfree(shebang_pre[k]);
+		kfree(kpath); kfree(kstrs); return -14;
+	}
 	int user_start = (user_skip && user_argc > 0) ? 1 : 0;
-	argc = shebang_n + (user_argc - user_start);
-	if (envp) while (envc < max_ptrs && envp[envc]) envc++;
-	uaccess_end();
+	argc = shebang_n + ((int)user_argc - user_start);
+	envc = (int)ucount_env;
 
 	char **kargv = kmalloc((size_t)(argc + 1) * sizeof(char *));
 	char **kenvp = kmalloc((size_t)(envc + 1) * sizeof(char *));
@@ -1111,23 +1333,26 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #define EXEC_STAGE_FREE_PRE() do { for (int _k=0;_k<shebang_n;_k++) kfree(shebang_pre[_k]); } while (0)
 	int koff = 0;
 	for (int a = 0; a < argc; a++) {
-		/* shebang_pre[] is kernel; argv[] and the strings it points at are user.
-		 * Bracket only the user touches so kfree/return stays outside the window. */
-		uaccess_begin();
-		const char *s = (a < shebang_n) ? shebang_pre[a]
-		                                : argv[user_start + (a - shebang_n)];
-		int n = 0;
-		while (s[n]) n++;
-		uaccess_end();
-		if (koff + n + 1 > ARG_STR_MAX) {
-			EXEC_STAGE_FREE_PRE(); kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
+		/* shebang_pre[] is kernel; argv[] and the strings it points at are user,
+		 * and a sibling thread may change them under this second read. */
+		int at = koff;
+		long sr = -7;
+		if (a < shebang_n) {
+			int n = strlen(shebang_pre[a]);
+			if (koff + n + 1 <= ARG_STR_MAX) {
+				memcpy(kstrs + koff, shebang_pre[a], (size_t)n + 1);
+				koff += n + 1;
+				sr = 0;
+			}
+		} else {
+			char *s = NULL;
+			sr = get_user(s, &argv[user_start + (a - shebang_n)]) != 0 || !s ? -14
+			   : exec_stage_ustr(kstrs, &koff, ARG_STR_MAX, s);
 		}
-		uaccess_begin();
-		memcpy(kstrs + koff, s, n);
-		uaccess_end();
-		kstrs[koff + n] = '\0';
-		kargv[a] = kstrs + koff;
-		koff += n + 1;
+		if (sr) {
+			EXEC_STAGE_FREE_PRE(); kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return sr;
+		}
+		kargv[a] = kstrs + at;
 	}
 	EXEC_STAGE_FREE_PRE();
 	shebang_n = 0;
@@ -1136,20 +1361,14 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * strings get appended below. */
 	int argv_bytes = koff;
 	for (int e = 0; e < envc; e++) {
-		uaccess_begin();
-		const char *s = envp[e];
-		int n = 0;
-		while (s[n]) n++;
-		uaccess_end();
-		if (koff + n + 1 > ARG_STR_MAX) {
-			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return -7; /* E2BIG */
+		int at = koff;
+		char *s = NULL;
+		long sr = get_user(s, &envp[e]) != 0 || !s ? -14
+		        : exec_stage_ustr(kstrs, &koff, ARG_STR_MAX, s);
+		if (sr) {
+			kfree(kpath); kfree(kstrs); kfree(kargv); kfree(kenvp); return sr;
 		}
-		uaccess_begin();
-		memcpy(kstrs + koff, s, n);
-		uaccess_end();
-		kstrs[koff + n] = '\0';
-		kenvp[e] = kstrs + koff;
-		koff += n + 1;
+		kenvp[e] = kstrs + at;
 	}
 
 	/* free the heap staging that is no longer needed once a pre-switch step fails
@@ -1160,7 +1379,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* read file from VFS */
 	vfs_stat_t st = {0};
 	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -2; }
-	if (st.size == 0)              { EXEC_STAGE_FREE(); return -2; }
+	if (st.size == 0)              { EXEC_STAGE_FREE(); return -8; } /* ENOEXEC */
 
 	unsigned long mnt_flags = vfs_path_mnt_flags(kpath);
 	if (mnt_flags & MS_NOEXEC) { EXEC_STAGE_FREE(); return -13; } /* EACCES */
@@ -1198,26 +1417,34 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 		kenvp[envc] = 0;
 	}
 
-	uint8_t *buf = kmalloc(st.size);
-	if (!buf) { EXEC_STAGE_FREE(); return -12; }
-
 	int fd = vfs_open(kpath, O_RDONLY, 0);
-	if (fd < 0) { kfree(buf); EXEC_STAGE_FREE(); return -2; }
-	vfs_read(fd, buf, st.size);
-	vfs_close(fd);
+	if (fd < 0) { EXEC_STAGE_FREE(); return -2; }
+
+	/* /proc/<pid>/exe names the file itself, symlinks followed (Linux d_path):
+	 * a program run as /proc/self/exe, as Chromium starts its helpers, must
+	 * still find its $ORIGIN libraries next to the real binary. */
+	char exe_real[PROC_NAME_MAX];
+	exe_real[0] = '\0';
+	{
+		vfs_file_t *ef = fd_get(p->fds, fd);
+		const char *rp = ef ? (ef->lpath ? ef->lpath : ef->path) : NULL;
+		size_t rl = rp ? strlen(rp) : 0;
+		if (rp && rp[0] == '/' && rl < sizeof exe_real)
+			memcpy(exe_real, rp, rl + 1);
+	}
 
 	/* build new address space */
 	vm_space_t *new_vm = vm_create();
-	if (!new_vm) { kfree(buf); EXEC_STAGE_FREE(); return -12; }
+	if (!new_vm) { vfs_close(fd); EXEC_STAGE_FREE(); return -12; }
 
 	elf_info_t ei = {0};
-	if (elf_load(new_vm, buf, (size_t)st.size, 0, &ei) != 0) {
-		kfree(buf);
+	int load_rc = elf_load_fd(new_vm, fd, (size_t)st.size, 0, &ei);
+	vfs_close(fd);
+	if (load_rc != 0) {
 		vm_destroy(new_vm);
 		EXEC_STAGE_FREE();
-		return -8;
+		return load_rc == -12 ? -12 : -8;
 	}
-	kfree(buf);
 
 	/* entry point and aux values; overridden below for dynamic executables */
 	uint64_t jump_entry = ei.entry;   /* where the kernel transfers control */
@@ -1227,30 +1454,47 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * personality ADDR_NO_RANDOMIZE (0x0040000) pins it (setarch -R, debuggers).
 	 * 24 page-bits of entropy → base in [1 GB, ~65 GB), leaving the rest of the
 	 * 256 GB span for the mmap window below the 1 GB-hugepage ceiling. */
-	int no_aslr = (task_current()->personality & 0x0040000) != 0;
+	/* a personality set by the caller must not weaken a setuid image */
+	int no_aslr = (task_current()->personality & 0x0040000) != 0 && !secure_exec;
 	uint64_t mmap_base  = USER_MMAP_BASE_ +
 		(no_aslr ? 0 : ((rng_next() & 0xffffffULL) << 12));
+	/* the bump allocator never skips: an image with no interpreter sits at
+	 * 4 GB, so the window starts past it */
+	if (!ei.interp[0] && ei.load_bias) mmap_base += ei.load_bias;
 
 	/* Dynamically linked: load the interpreter (ld.so) too and enter it
 	 * instead of the executable. It performs relocations in userspace, then
 	 * jumps to the executable's entry (passed via AT_ENTRY). */
 	if (ei.interp[0]) {
-		vfs_stat_t ist = {0};
-		if (vfs_stat(ei.interp, &ist) != 0 || ist.size == 0) {
-			vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8;
+		/* A relative PT_INTERP is relative to the working directory, as on
+		 * Linux: VS Code's C/C++ server ships its own musl as "./libc.so" and
+		 * is started from its directory. The VFS walks absolute paths only. */
+		const char *ipath = ei.interp;
+		char *iabs = NULL;
+		if (ei.interp[0] != '/') {
+			size_t rl = strlen(ei.interp), cl = strlen(p->cwd);
+			int slash = cl && p->cwd[cl - 1] != '/';
+			if (cl + (size_t)slash + rl + 1 > PATH_MAX) {
+				vm_destroy(new_vm); EXEC_STAGE_FREE(); return -36; /* ENAMETOOLONG */
+			}
+			iabs = kmalloc(PATH_MAX);
+			if (!iabs) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12; }
+			memcpy(iabs, p->cwd, cl);
+			if (slash) iabs[cl] = '/';
+			memcpy(iabs + cl + slash, ei.interp, rl + 1);
+			ipath = iabs;
 		}
-		uint8_t *ibuf = kmalloc(ist.size);
-		if (!ibuf) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12; }
-		int ifd = vfs_open(ei.interp, O_RDONLY, 0);
-		if (ifd < 0) { kfree(ibuf); vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8; }
-		vfs_read(ifd, ibuf, ist.size);
-		vfs_close(ifd);
+		vfs_stat_t ist = {0};
+		int ifd = (vfs_stat(ipath, &ist) != 0 || ist.size == 0) ? -1 : vfs_open(ipath, O_RDONLY, 0);
+		if (iabs) kfree(iabs);
+		if (ifd < 0) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8; }
 
 		elf_info_t ii = {0};
-		if (elf_load(new_vm, ibuf, (size_t)ist.size, mmap_base, &ii) != 0) {
-			kfree(ibuf); vm_destroy(new_vm); EXEC_STAGE_FREE(); return -8;
+		int irc = elf_load_fd(new_vm, ifd, (size_t)ist.size, mmap_base, &ii);
+		vfs_close(ifd);
+		if (irc != 0) {
+			vm_destroy(new_vm); EXEC_STAGE_FREE(); return irc == -12 ? -12 : -8;
 		}
-		kfree(ibuf);
 
 		jump_entry = ii.entry;
 		at_base    = mmap_base;
@@ -1264,6 +1508,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * argv/envp/auxv block can be written through their kernel direct-map address
 	 * instead of raw user VAs (see the staging note below). */
 	uint64_t argpg[ARG_WIN_PAGES];
+	if (cgroup_charge_mem(new_vm, p->cgroup, (USER_STACK_PAGES_ + 1) * PAGE_SIZE) != 0) {
+		vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12;
+	}
 	for (int j = 0; j < USER_STACK_PAGES_; j++) {
 		void *pg = buddy_alloc(0);
 		if (!pg) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -12; }
@@ -1297,8 +1544,9 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	p->name[nlen] = '\0';
 
 	/* remember the full path for /proc/<pid>/exe */
+	const char *exe_src = exe_real[0] ? exe_real : kpath;
 	int el = 0;
-	while (kpath[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = kpath[el]; el++; }
+	while (exe_src[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = exe_src[el]; el++; }
 	p->exe_path[el] = '\0';
 
 	/* publish the real argv for /proc/<pid>/cmdline (ps full command, pgrep -f) */
@@ -1317,6 +1565,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	/* reset signal state: SIG_IGN stays, user handlers reset to SIG_DFL. If the
 	 * disposition table is still shared with sibling threads, detach to a private
 	 * copy first so the reset doesn't reach them. */
+	p->altstack = (stack_t){0};   /* the old image's stack is gone */
 	if (p->sighand->refcount > 1) {
 		sighand_t *priv = sighand_alloc(p->sighand);
 		if (priv) { sighand_put(p->sighand); p->sighand = priv; }
@@ -1328,6 +1577,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	p->sig_mask    = 0;
 	p->sig_pending = 0;
 	sigqueue_drop(p);
+	{ extern void ptimer_drop(pid_t tgid); ptimer_drop(p->tgid); }
 
 	/* apply credentials: suid/sgid set to new euid/egid after exec */
 	p->euid = new_euid; p->suid = new_euid;
@@ -1376,9 +1626,11 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	 * when its last reference drops, and new_vm starts with an empty VMA list */
 	vm_space_t *old_vm = p->vm;
 	p->vm        = new_vm;
-	p->brk       = ei.load_end;
+	p->vm->brk   = ei.load_end;
 	p->vm->mmap_next = mmap_base;
-	p->dumpable  = 1;
+	p->dumpable  = secure_exec ? 0 : 1;
+	{ extern void ptrace_exec_done(process_t *); ptrace_exec_done(p); }
+	{ extern void vfork_release(process_t *); vfork_release(p); }
 	arch_vm_switch((uint64_t)new_vm->root, new_vm->asid);
 	if (old_vm) vm_destroy(old_vm);
 
@@ -1447,6 +1699,7 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	((uint64_t *)KB(sp))[1] = (uint64_t)(v); \
 } while (0)
 
+	uint64_t aux_hi = sp;
 	PUSH_AUX(0,  0);
 	/* AT_SYSINFO_EHDR advertisement gated off until the signal-delivery latency
 	 * to syscall-free loops (exposed by c-itimer) is root-caused. The vDSO is
@@ -1473,6 +1726,12 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 	PUSH_AUX(4,  ei.phentsize);
 	PUSH_AUX(3,  ei.phdr_va);
 #undef PUSH_AUX
+	{
+		uint64_t an = aux_hi - sp;
+		if (an > sizeof(p->saved_auxv)) an = sizeof(p->saved_auxv);
+		memcpy(p->saved_auxv, KB(sp), (size_t)an);
+		p->saved_auxv_len = (uint32_t)an;
+	}
 
 	/* envp[] */
 	sp -= 8; *(uint64_t *)KB(sp) = 0;
@@ -1502,18 +1761,22 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 #undef EXEC_STAGE_FREE
 
 	/* reinitialise context frame */
+	/* p->ctx is whatever frame the last sleep or preemption saved; loading a
+	 * file can do either, and the entry point must land in the syscall's frame */
+	p->ctx = p->uctx;
 	arch_context_init_user(p->ctx, jump_entry, sp);
 
 	/* reset TLS */
 	p->tls_base = 0;
+#if defined(__x86_64__)
+	p->user_gs_base = 0;
+	__asm__ volatile("wrmsr" :: "c"(0xC0000102U), "a"(0U), "d"(0U));
+#endif
 #if defined(__aarch64__)
 	__asm__ volatile("msr tpidr_el0, xzr");
 #elif defined(__x86_64__)
 	__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"(0U), "d"(0U));
 #endif
-
-	/* wake vfork parent — child now has its own address space */
-	proc_vfork_exec_notify();
 
 	return 0;
 }
@@ -1531,6 +1794,12 @@ static long sys_exit(int code)
 	p->exit_code  = code;
 	task_exit();
 	return 0;
+}
+
+static long sys_exit_group(int code)
+{
+	task_group_exit(task_current(), code, 0);
+	return sys_exit(code);
 }
 
 static long sys_getpid(void)
@@ -1556,10 +1825,12 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
                            const iovec_t *uriov, unsigned long rcnt,
                            unsigned long flags, int write)
 {
-	(void)flags;
+	if (flags) return -22;
 	if (lcnt > 16 || rcnt > 16) return -22;        /* EINVAL (we cap at 16 iovecs) */
 	uid_t teuid = 0;
-	vm_space_t *tvm = proc_get_vm_cred(pid, &teuid);   /* pinned; vm_destroy to release */
+	process_t *target = proc_get_user(pid);
+	vm_space_t *tvm = target ? proc_get_vm_cred((pid_t)target->pid, &teuid) : NULL;   /* pinned; vm_destroy to release */
+	proc_put(target);
 	if (!tvm) return -3;                               /* ESRCH */
 	process_t *cur = task_current();
 	long ret;
@@ -1585,24 +1856,18 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
 				if (n > sizeof(tmp)) n = sizeof(tmp);
 				uint64_t lva = (uint64_t)liov[li].iov_base + lo;
 				uint64_t rva = (uint64_t)riov[ri].iov_base + ro;
-				/* rva is memcpy'd raw at EL1 in the target's space; the kernel half
-				 * is mapped in every space, so an rva >= VIRT_OFFSET would copy
-				 * kernel memory (your own pid passes the euid gate). Bound it. */
-				if (!access_ok((void *)rva, n)) break;
+				size_t got;
 				if (write) {
 					if (copy_from_user(tmp, (void *)lva, n) != 0) break;
-					arch_vm_switch((uint64_t)tvm->root, tvm->asid);
-					memcpy((void *)rva, tmp, n);
-					arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
+					got = vm_access_remote(tvm, rva, tmp, n, 1);
 				} else {
-					arch_vm_switch((uint64_t)tvm->root, tvm->asid);
-					memcpy(tmp, (void *)rva, n);
-					arch_vm_switch((uint64_t)cur->vm->root, cur->vm->asid);
-					if (copy_to_user((void *)lva, tmp, n) != 0) break;
+					got = vm_access_remote(tvm, rva, tmp, n, 0);
+					if (got && copy_to_user((void *)lva, tmp, got) != 0) break;
 				}
-				lo += n; ro += n; total += (long)n;
+				lo += got; ro += got; total += (long)got;
+				if (got < n) break;
 			}
-			ret = total;
+			ret = total ? total : ((lcnt && rcnt) ? -14 : 0);
 		}
 	}
 	vm_destroy(tvm);
@@ -1616,13 +1881,30 @@ static long sys_vfork(uint64_t newsp)
 	 * parent and child can run concurrently and corrupt the shared
 	 * user stack. fork semantics are always a valid vfork. The child still
 	 * runs on its own stack when the caller passes one (posix_spawn). */
-	return (long)proc_fork(0, newsp);
+	/* The parent still waits, as vfork promises: until the child execs or exits.
+	 * Programs count on it, and a chain of vforks that did not wait multiplies. */
+	process_t *p = task_current();
+	p->vfork_pending = 1;
+	long pid = (long)proc_fork(0, newsp);
+	if (pid < 0) { p->vfork_pending = 0; return pid; }
+	extern spinlock_t sched_lock;
+	while (!task_has_actionable_signal()) {
+		/* checked under the lock task_wake takes, so the release cannot slip
+		 * between the test and the sleep; no deadline, no tick sweep */
+		uint64_t f = spin_lock_irq(&sched_lock);
+		if (!p->vfork_pending) { spin_unlock_irq(&sched_lock, f); break; }
+		task_sleep_locked(f);
+	}
+	p->vfork_pending = 0;
+	return pid;
 }
 
 static long sys_pipe2(int *pipefd, int flags)
 {
+	if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -22;
 	int kfds[2];
-	if (vfs_pipe(kfds) != 0) return -1;
+	int pr = vfs_pipe(kfds);
+	if (pr != 0) return pr == -24 ? -24 : -12;
 	process_t *p = task_current();
 	if (flags & O_NONBLOCK) {
 		for (int i = 0; i < 2; i++) {
@@ -1634,7 +1916,11 @@ static long sys_pipe2(int *pipefd, int flags)
 		fd_set_cloexec(p->fds, kfds[0], 1);
 		fd_set_cloexec(p->fds, kfds[1], 1);
 	}
-	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) return -14;
+	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) {
+		vfs_close(kfds[0]);
+		vfs_close(kfds[1]);
+		return -14;
+	}
 	return 0;
 }
 
@@ -1649,7 +1935,7 @@ extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sl
  * frees the struct. */
 static void fill_wait_rusage(void *urusage, process_t *child)
 {
-	if (!urusage || (uint64_t)urusage <= 0x1000) return;
+	if (!urusage) return;
 	int64_t r[18];
 	memset(r, 0, sizeof(r));
 	uint64_t hz = TIMER_HZ;
@@ -1660,7 +1946,8 @@ static void fill_wait_rusage(void *urusage, process_t *child)
 	copy_to_user(urusage, r, sizeof(r));
 }
 
-static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
+/* status is a kernel int; the syscall entries below copy it out. */
+static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
 {
 	process_t *p = task_current();
 	int wnohang  = (flags & WNOHANG) != 0;
@@ -1669,7 +1956,7 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0, event = 0;
-			proc_find_zombie_or_sleep(p->pid, p, !wnohang, flags, &child, &any_alive, &event);
+			proc_find_zombie_or_sleep(p->tgid, p, !wnohang, flags, &child, &any_alive, &event);
 			if (child && event == 1) {
 				int st = child->killed_by_sig
 				       ? (child->exit_code & 0x7F)
@@ -1677,62 +1964,85 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 				int v = task_pid_nr_ns(child, current_pid_ns());
 				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
 				fill_wait_rusage(rusage, child);
-				proc_reap(child);
-				if (status && (uint64_t)status > 0x1000)
+				if (child->pid == child->tgid && child->ppid != p->tgid) {
+					/* a tracee that is someone else's child: they reap it */
+					child->tracer = 0;
+					child->reaped = 0;
+					proc_wake_waiters(child->ppid);
 					*status = st;
+					return (long)result;
+				}
+				proc_reap(child);
+				*status = st;
 				return (long)result;
+			}
+			if (child && event == 5) {                   /* a tracee's ptrace stop */
+				int v = task_pid_nr_ns(child, current_pid_ns());
+				int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5;
+				*status = (ss << 8) | 0x7f;
+				return (long)(v ? v : (int)child->pid);
 			}
 			if (child && (event == 3 || event == 4)) {   /* stopped / continued */
 				int v = task_pid_nr_ns(child, current_pid_ns());
 				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
-				if (status && (uint64_t)status > 0x1000)
-					*status = (event == 3) ? ((child->job_stop_sig << 8) | 0x7f) : 0xffff;
+				*status = (event == 3) ? ((child->job_stop_sig << 8) | 0x7f) : 0xffff;
 				return (long)result;
 			}
 			if (!any_alive) return -10; /* ECHILD */
 			if (wnohang)    return 0;
 			arch_yield();
+			p->in_wait = 0;
 			if (task_has_actionable_signal()) return -4; /* EINTR */
 		}
 	}
 
-	process_t *child = pidns_find(current_pid_ns(), (int)pid);
-	if (!child || child->ppid != p->pid) return -10;
+	process_t *child = pid > 0 ? proc_find_child(p->tgid, current_pid_ns(), (int)pid) : NULL;
+	if (!child) return -10;
 
 	while (1) {
 		int r = proc_check_or_sleep(child, p, !wnohang, flags);
 		if (r == 1) break;  /* zombie */
 		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
-			if (status && (uint64_t)status > 0x1000) {
-				int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5; /* SIGTRAP */
-				*status = (ss << 8) | 0x7f; /* WIFSTOPPED */
-			}
+			int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5; /* SIGTRAP */
+			*status = (ss << 8) | 0x7f; /* WIFSTOPPED */
 			return (long)pid;
 		}
 		if (r == 3) {       /* job-control stop (WUNTRACED) */
-			if (status && (uint64_t)status > 0x1000)
-				*status = (child->job_stop_sig << 8) | 0x7f;
+			*status = (child->job_stop_sig << 8) | 0x7f;
 			return (long)pid;
 		}
 		if (r == 4) {       /* continued (WCONTINUED) */
-			if (status && (uint64_t)status > 0x1000)
-				*status = 0xffff;
+			*status = 0xffff;
 			return (long)pid;
 		}
 		if (wnohang) return 0;
 		arch_yield();
+		p->in_wait = 0;
 		if (task_has_actionable_signal()) return -4; /* EINTR */
 	}
 
-	child->reaped = 1;
 	int st = child->killed_by_sig
 	       ? (child->exit_code & 0x7F)
 	       : (child->exit_code & 0xFF) << 8;
 	fill_wait_rusage(rusage, child);
-	proc_reap(child);
-	if (status && (uint64_t)status > 0x1000)
+	if (child->pid == child->tgid && child->ppid != p->tgid) {
+		child->tracer = 0;
+		proc_wake_waiters(child->ppid);
 		*status = st;
+		return (long)pid;
+	}
+	child->reaped = 1;
+	proc_reap(child);
+	*status = st;
 	return (long)pid;
+}
+
+static long sys_waitpid(pid_t pid, int *ustatus, int flags, void *rusage)
+{
+	int st = 0;
+	long r = do_waitpid(pid, &st, flags, rusage);
+	if (r > 0 && ustatus && put_user(st, ustatus) != 0) return -14;
+	return r;
 }
 
 #if defined(__x86_64__)
@@ -1741,6 +2051,8 @@ static long sys_waitpid(pid_t pid, int *status, int flags, void *rusage)
 
 static long sys_arch_prctl(int code, uint64_t addr)
 {
+	/* wrmsr #GPs in ring 0 on a non-canonical base */
+	if ((code == ARCH_SET_FS || code == ARCH_SET_GS) && !access_ok((void *)addr, 0)) return -1;
 	if (code == ARCH_SET_FS) {
 		__asm__ volatile("wrmsr" :: "c"(0xC0000100U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
 		task_current()->tls_base = addr;
@@ -1749,6 +2061,7 @@ static long sys_arch_prctl(int code, uint64_t addr)
 	if (code == ARCH_SET_GS) {
 		/* When kernel is running, USER GS is stored in KERNEL_GS_BASE MSR. */
 		__asm__ volatile("wrmsr" :: "c"(0xC0000102U), "a"((uint32_t)addr), "d"((uint32_t)(addr >> 32)));
+		task_current()->user_gs_base = addr;
 		return 0;
 	}
 	return -22;
