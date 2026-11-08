@@ -3,6 +3,7 @@
 
 #include <uapi/types.h>
 #include <kernel/sync.h>
+#include <asm/mmu.h>   /* the user layout (HUGE1G window, VA end) is per arch */
 
 #define VM_READ   (1 << 0)
 #define VM_WRITE  (1 << 1)
@@ -10,7 +11,8 @@
 #define VM_USER   (1 << 3)
 #define VM_NOCACHE (1 << 4)
 #define VM_DEVICE  (1 << 5)
-#define VM_NOFREE  (1 << 6)   /* kernel-shared page (vDSO/vvar): unmap, never free on teardown */
+#define VM_WC      (1 << 12)   /* write-combining: x86 only, else as VM_NOCACHE */
+#define VM_NOFREE  (1 << 6)   /* kernel-shared page (vDSO/vvar, rings): unmap, never free */
 
 #define HUGE_PAGE_SIZE  (2UL * 1024 * 1024)
 #define HUGE_PAGE_MASK  (~(HUGE_PAGE_SIZE - 1))
@@ -18,7 +20,11 @@
 /* 1 GB hugepage mmaps live in their own high VA window, above the mmap ceiling
  * and below the stack, so a 1 GB-aligned block never collides with the normal
  * mmap region or the stack. Stays inside page-table slot 0 (< 512 GB). */
+#ifdef ARCH_HUGE1G_VA_BASE
+#define HUGE1G_VA_BASE  ARCH_HUGE1G_VA_BASE
+#else
 #define HUGE1G_VA_BASE  0x3F00000000UL   /* 252 GB */
+#endif
 
 #define VM_SPACE_MAGIC 0x564D5350u   /* "VMSP" — set at create, checked at lifecycle ops */
 
@@ -30,6 +36,11 @@ typedef struct {
 	struct vma *vmas;      /* mapped-region list; shared by all threads of this space */
 	uint64_t   mmap_next;  /* bump cursor for anon/file mmap placement (shared by all threads) */
 	uint64_t   huge1g_next;/* bump cursor for the 1 GB-hugepage VA window (shared by all threads) */
+	uint64_t   brk;        /* program break: one per address space, not per task */
+	mutex_t    brk_lock;   /* serializes brk; it allocates, so it cannot hold fault_lock */
+	void      *mem_cg;     /* cgroup holding mem_charged, set by the first charge */
+	long       mem_charged;/* bytes this space asked for; the OOM killer's score */
+	long       pt_charged; /* of which page tables, freed with the space */
 	uint32_t   magic;      /* VM_SPACE_MAGIC; corruption/use-after-free tripwire */
 } vm_space_t;
 
@@ -43,12 +54,14 @@ int         vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flag
 int         vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 int         vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 void        vm_unmap(vm_space_t *vs, uint64_t vaddr);
+uint64_t    vm_skip_empty(vm_space_t *vs, uint64_t vaddr);   /* next VA whose page table exists */
 void        vm_activate(void);
 void        vm_set_kernel_pt(uint64_t phys);
 
 void        vm_init_kernel(uint64_t root_phys);
 void       *ioremap(uint64_t phys_addr, size_t size, uint32_t flags);
 int         vm_handle_fault(uint64_t vaddr, int is_write);
+size_t      vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write);
 
 /* arch-specific: load page table into hardware. asid is the address space's
  * TLB tag on aarch64 (0 forces a flush); ignored on x86_64. */
