@@ -104,7 +104,7 @@ void smp_init(void)
 			if (!ap_kstacks[i] || !ap_irq_stacks[i] || !ap_idle_procs[i]) ok = 0;
 		}
 		if (!ok) {
-			kprintf("SMP: per-CPU alloc failed, staying uniprocessor\n");
+			kprintf(KERN_WARN "smp: per-cpu alloc failed, staying uniprocessor\n");
 			ncpus = 1;
 		}
 	}
@@ -144,7 +144,7 @@ void smp_init(void)
 			__asm__ volatile("" ::: "memory");
 
 		if (!ap_boot_sync[i].ready) {
-			kprintf("SMP: CPU%d timed out\n", i);
+			kprintf(KERN_WARN "smp: cpu%d timed out\n", i);
 			continue;
 		}
 
@@ -154,7 +154,7 @@ void smp_init(void)
 		smp_ncpus++;
 	}
 
-	kprintf("SMP: %d/%d CPUs online\n", smp_ncpus, ncpus);
+	kprintf(KERN_INFO "smp: %d/%d cpus online\n", smp_ncpus, ncpus);
 }
 
 void smp_ipi_resched(int cpu_id)
@@ -169,7 +169,7 @@ void smp_ipi_resched(int cpu_id)
  * broadcaster raises membarrier_req, sends an IPI to every other online CPU,
  * and waits for each handler to run a full barrier and bump membarrier_acks.
  * One in-flight broadcast at a time (membarrier_lock). */
-static spinlock_t membarrier_lock;
+
 static volatile uint32_t membarrier_req;
 static volatile uint32_t membarrier_acks;
 
@@ -177,7 +177,11 @@ void smp_membarrier(void)
 {
 	if (smp_ncpus <= 1) { smp_mb(); return; }
 
-	uint64_t f = spin_lock_irq(&membarrier_lock);
+	/* Taken with interrupts on: a CPU waiting here must still answer the IPI of the
+	 * one holding it, or the holder waits out its whole timeout every time. */
+	static volatile int mb_busy;
+	while (__atomic_exchange_n(&mb_busy, 1, __ATOMIC_ACQUIRE))
+		cpu_relax();
 	int self = (int)arch_get_cpu_ctx()->cpu_id;
 	uint32_t expect = 0;
 	membarrier_acks = 0;
@@ -195,7 +199,7 @@ void smp_membarrier(void)
 		__asm__ volatile("" ::: "memory");
 	membarrier_req = 0;
 	smp_mb();
-	spin_unlock_irq(&membarrier_lock, f);
+	__atomic_store_n(&mb_busy, 0, __ATOMIC_RELEASE);
 	smp_mb();
 }
 
@@ -217,14 +221,27 @@ void smp_ipi_handler(void)
 	arch_smp_ipi_ack();
 }
 
+static void ap_idle_once(cpu_context_t *c)
+{
+	if (c->need_resched) {
+		c->need_resched = 0;
+		if (c->tick_slow) {
+			c->tick_slow = 0;
+			c->idle_run = 0;
+			arch_tick_slow(0);
+		}
+		arch_yield();
+	} else {
+		arch_idle_deep(&c->need_resched, c->tick_slow);
+	}
+}
+
 static void ap_idle_loop(void)
 {
 	/* See idle_loop() in sched.c: reschedule on need_resched instead of
 	 * sleeping until the next tick. */
 	for (;;) {
-		cpu_context_t *c = arch_get_cpu_ctx();
-		if (c->need_resched) { c->need_resched = 0; arch_yield(); }
-		else arch_halt();
+		ap_idle_once(arch_get_cpu_ctx());
 	}
 }
 
@@ -243,7 +260,6 @@ void secondary_cpu_main(int cpu_id)
 	p->state        = PROC_RUNNING;
 	p->on_cpu       = 1;
 	p->kstack       = ap_kstacks[cpu_id];
-	p->vfork_parent = -1;
 	memcpy(p->name, "idle", 5);
 
 	uint8_t *sp_top = ap_kstacks[cpu_id] + KSTACK_SIZE;
@@ -275,8 +291,6 @@ void secondary_cpu_main(int cpu_id)
 
 	/* idle loop — reschedule on need_resched, else sleep until an interrupt */
 	while (1) {
-		cpu_context_t *c = arch_get_cpu_ctx();
-		if (c->need_resched) { c->need_resched = 0; arch_yield(); }
-		else arch_halt();
+		ap_idle_once(arch_get_cpu_ctx());
 	}
 }

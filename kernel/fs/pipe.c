@@ -6,6 +6,8 @@
 #include <kernel/proc.h>
 #include <kernel/lib/string.h>
 #include <kernel/config.h>
+#include <kernel/hal.h>
+#include <kernel/cgroup.h>
 
 extern int task_has_actionable_signal(void);
 
@@ -16,92 +18,152 @@ typedef struct {
     uint32_t      readers;
     uint32_t      writers;
     spinlock_t    lock;
+    void         *cg;          /* cgroup paying for the buffer */
     wait_queue_t  rd_wait;
     wait_queue_t  wr_wait;
     wait_queue_t  open_wait;   /* FIFO open rendezvous (wait for the other end) */
 } pipe_t;
 
+static void *pipe_buffer_alloc(pipe_t *pipe)
+{
+    if (cgroup_charge_file(&pipe->cg, 0, PIPE_BUF_SIZE) != 0) return NULL;
+    void *p = buddy_alloc(0);
+    if (!p) cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+    return p;
+}
+
+static void pipe_buffer_undo(pipe_t *pipe)
+{
+    buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
+    cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+}
+
+/* The ring is copied through a kernel buffer: user memory can fault, and a fault
+ * may need the disk or a sleeping lock, neither of which is allowed under
+ * pipe->lock. A read that faults after dequeuing loses those bytes. */
 static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
 {
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint8_t *p = (uint8_t *)buf;
     size_t read = 0;
+    ssize_t ret;
+
+    if (len == 0) return 0;
+    uint8_t *kbuf = kmalloc(len < PIPE_BUF_SIZE ? len : PIPE_BUF_SIZE);
+    if (!kbuf) return -12;
 
     while (read < len) {
         uint64_t f = spin_lock_irq(&pipe->lock);
 
         uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
         if (avail == 0) {
-            if (pipe->writers == 0) {
+            if (read > 0 || pipe->writers == 0) {
                 spin_unlock_irq(&pipe->lock, f);
-                break; /* EOF */
+                break; /* short read or EOF */
             }
             if (file->flags & O_NONBLOCK) {
                 spin_unlock_irq(&pipe->lock, f);
-                return read ? (ssize_t)read : -11; /* EAGAIN */
+                ret = -11; /* EAGAIN */
+                goto out;
             }
             if (task_has_actionable_signal()) {
                 spin_unlock_irq(&pipe->lock, f);
-                return read ? (ssize_t)read : -4; /* EINTR */
+                ret = -4; /* EINTR */
+                goto out;
             }
             sleep_on_locked(&pipe->rd_wait, &pipe->lock, f);
             continue;
         }
 
+        int was_full = avail == PIPE_BUF_SIZE - 1;
         uint32_t n = avail < (len - read) ? avail : (len - read);
         for (uint32_t i = 0; i < n; i++) {
-            p[read++] = pipe->buffer[pipe->tail];
+            kbuf[i] = pipe->buffer[pipe->tail];
             pipe->tail = (pipe->tail + 1) % PIPE_BUF_SIZE;
         }
 
         wake_up(&pipe->wr_wait);
         spin_unlock_irq(&pipe->lock, f);
-    }
+        if (was_full) poll_notify_key(pipe);   /* an epoll/poll writer waits on poll_wq, not wr_wait */
 
-    return (ssize_t)read;
+        if (copy_fop_to_user(p + read, kbuf, n) != 0) {
+            ret = read ? (ssize_t)read : -14; /* EFAULT */
+            goto out;
+        }
+        read += n;
+    }
+    ret = (ssize_t)read;
+out:
+    kfree(kbuf);
+    return ret;
 }
 
 static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
 {
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     const uint8_t *p = (const uint8_t *)buf;
+    size_t cap = len < PIPE_BUF_SIZE ? len : PIPE_BUF_SIZE;
     size_t written = 0;
+    ssize_t ret;
+
+    if (len == 0) return 0;
+    uint8_t *kbuf = kmalloc(cap);
+    if (!kbuf) return -12;
 
     while (written < len) {
-        uint64_t f = spin_lock_irq(&pipe->lock);
+        size_t chunk = (len - written) < cap ? (len - written) : cap;
+        if (copy_fop_from_user(kbuf, p + written, chunk) != 0) {
+            ret = written ? (ssize_t)written : -14; /* EFAULT */
+            goto out;
+        }
 
-        if (pipe->readers == 0) {
+        size_t off = 0;
+        while (off < chunk) {
+            uint64_t f = spin_lock_irq(&pipe->lock);
+
+            if (pipe->readers == 0) {
+                spin_unlock_irq(&pipe->lock, f);
+                task_signal(task_current(), 13); /* SIGPIPE */
+                ret = written ? (ssize_t)written : -32; /* EPIPE */
+                goto out;
+            }
+
+            uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
+            /* POSIX: a write that fits the pipe goes in whole or waits, so writers
+             * sharing a pipe never interleave inside one record */
+            uint32_t need = len <= PIPE_BUF_SIZE - 1 ? (uint32_t)(chunk - off) : 1;
+            if (free < need) {
+                if (file->flags & O_NONBLOCK) {
+                    spin_unlock_irq(&pipe->lock, f);
+                    ret = written ? (ssize_t)written : -11; /* EAGAIN */
+                    goto out;
+                }
+                if (task_has_actionable_signal()) {
+                    spin_unlock_irq(&pipe->lock, f);
+                    ret = written ? (ssize_t)written : -4; /* EINTR */
+                    goto out;
+                }
+                sleep_on_locked(&pipe->wr_wait, &pipe->lock, f);
+                continue;
+            }
+
+            uint32_t n = free < (chunk - off) ? free : (uint32_t)(chunk - off);
+            for (uint32_t i = 0; i < n; i++) {
+                pipe->buffer[pipe->head] = kbuf[off + i];
+                pipe->head = (pipe->head + 1) % PIPE_BUF_SIZE;
+            }
+
+            wake_up(&pipe->rd_wait);
             spin_unlock_irq(&pipe->lock, f);
-            task_signal(task_current(), 13); /* SIGPIPE */
-            return -32; /* EPIPE */
+            poll_notify_key(pipe);
+            off += n;
+            written += n;
         }
-
-        uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
-        if (free == 0) {
-            if (file->flags & O_NONBLOCK) {
-                spin_unlock_irq(&pipe->lock, f);
-                return written ? (ssize_t)written : -11; /* EAGAIN */
-            }
-            if (task_has_actionable_signal()) {
-                spin_unlock_irq(&pipe->lock, f);
-                return written ? (ssize_t)written : -4; /* EINTR */
-            }
-            sleep_on_locked(&pipe->wr_wait, &pipe->lock, f);
-            continue;
-        }
-
-        uint32_t n = free < (len - written) ? free : (len - written);
-        for (uint32_t i = 0; i < n; i++) {
-            pipe->buffer[pipe->head] = p[written++];
-            pipe->head = (pipe->head + 1) % PIPE_BUF_SIZE;
-        }
-
-        wake_up(&pipe->rd_wait);
-        spin_unlock_irq(&pipe->lock, f);
-        poll_notify();
     }
-
-    return (ssize_t)written;
+    ret = (ssize_t)written;
+out:
+    kfree(kbuf);
+    return ret;
 }
 
 static int pipe_close(vfs_file_t *file)
@@ -119,6 +181,7 @@ static int pipe_close(vfs_file_t *file)
     if (pipe->readers == 0 && pipe->writers == 0) {
         spin_unlock_irq(&pipe->lock, f);
         buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
+        cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
         vfs_inode_t *inode = file->inode;
         kfree(pipe);
         kfree(inode);
@@ -136,19 +199,38 @@ static int pipe_poll(vfs_file_t *file)
     uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
     uint32_t free  = PIPE_BUF_SIZE - 1 - avail;
     spin_unlock_irq(&pipe->lock, f);
+    int acc = file->flags & 3;
     int r = 0;
-    if (avail > 0) r |= 0x0001; /* POLLIN  */
-    if (free  > 0) r |= 0x0004; /* POLLOUT */
-    if (pipe->writers == 0) r |= 0x0011; /* POLLHUP | POLLIN: drained EOF is readable */
-    if (pipe->readers == 0) r |= 0x0008; /* POLLERR: write end with no reader */
+    if (acc != O_WRONLY) {
+        if (avail > 0) r |= 0x0001; /* POLLIN  */
+        if (pipe->writers == 0) r |= 0x0011; /* POLLHUP | POLLIN: drained EOF is readable */
+    }
+    if (acc != O_RDONLY) {
+        if (free > 0) r |= 0x0004; /* POLLOUT */
+        if (pipe->readers == 0) r |= 0x0008; /* POLLERR: write end with no reader */
+    }
     return r;
 }
 
+#define FIONREAD 0x541B
+
+static int pipe_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
+{
+    if (cmd != FIONREAD) return -25; /* ENOTTY */
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    int avail = (int)((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
+    spin_unlock_irq(&pipe->lock, f);
+    return copy_to_user((void *)(uintptr_t)arg, &avail, sizeof(avail)) ? -14 : 0;
+}
+
 static vfs_fops_t pipe_fops = {
+    .poll_keyed = 1,
     .read  = pipe_read,
     .write = pipe_write,
     .close = pipe_close,
     .poll  = pipe_poll,
+    .ioctl = pipe_ioctl,
 };
 
 /* ── named pipes (FIFO) — mknod S_IFIFO + open rendezvous ──────────
@@ -165,7 +247,7 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
         pipe = kmalloc(sizeof(*pipe));
         if (!pipe) { spin_unlock_irq(&fifo_glock, g); return -12; }
         memset(pipe, 0, sizeof(*pipe));
-        uint64_t bp = (uint64_t)buddy_alloc(0);
+        uint64_t bp = (uint64_t)pipe_buffer_alloc(pipe);
         if (!bp) { kfree(pipe); spin_unlock_irq(&fifo_glock, g); return -12; }
         pipe->buffer = (uint8_t *)PHYS_TO_VIRT(bp);
         pipe->lock = (spinlock_t)SPINLOCK_INIT;
@@ -219,11 +301,13 @@ static int fifo_close(vfs_file_t *file)
 }
 
 static vfs_fops_t fifo_fops = {
+    .poll_keyed = 1,
     .open  = fifo_open,
     .read  = pipe_read,
     .write = pipe_write,
     .close = fifo_close,
     .poll  = pipe_poll,
+    .ioctl = pipe_ioctl,
 };
 
 void fifo_init_inode(vfs_inode_t *in)
@@ -232,12 +316,22 @@ void fifo_init_inode(vfs_inode_t *in)
     in->priv = NULL;   /* pipe created on first open */
 }
 
+void fifo_free_inode(vfs_inode_t *in)
+{
+    pipe_t *pipe = in->priv;
+    in->priv = NULL;
+    if (!pipe) return;
+    buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
+    cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+    kfree(pipe);
+}
+
 int vfs_pipe(int pipefd[2])
 {
     pipe_t *pipe = kmalloc(sizeof(*pipe));
     if (!pipe) return -1;
     memset(pipe, 0, sizeof(*pipe));
-    uint64_t buf_phys = (uint64_t)buddy_alloc(0);
+    uint64_t buf_phys = (uint64_t)pipe_buffer_alloc(pipe);
     if (!buf_phys) { kfree(pipe); return -1; }
     pipe->buffer = (uint8_t *)PHYS_TO_VIRT(buf_phys);
     pipe->readers = 1;
@@ -248,7 +342,7 @@ int vfs_pipe(int pipefd[2])
 
     vfs_inode_t *inode = kmalloc(sizeof(*inode));
     if (!inode) {
-        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
+        pipe_buffer_undo(pipe);
         kfree(pipe);
         return -1;
     }
@@ -264,7 +358,7 @@ int vfs_pipe(int pipefd[2])
     if (!rf || !wf) {
         kfree(rf);
         kfree(wf);
-        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
+        pipe_buffer_undo(pipe);
         kfree(pipe);
         kfree(inode);
         return -1;

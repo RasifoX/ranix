@@ -30,6 +30,9 @@ void arch_halt(void);
  * window where a resched IPI lands between the idle loop's flag test and the
  * halt — without it the woken task sits runnable while the CPU sleeps. */
 void arch_idle_halt(volatile int *flag);
+void arch_idle_deep(volatile int *flag, int deep);  /* the same, deeper if deep and if it can */
+void arch_tick_slow(int slow);                      /* this CPU's timer: TICK_SLOW times slower */
+#define TICK_SLOW 10
 void arch_yield(void);
 void arch_cpu_init(void);
 
@@ -64,6 +67,11 @@ typedef struct cpu_context {
 	/* watchdog (C-only) — wd_ticks frozen ⇒ this CPU is wedged with IRQs off */
 	volatile uint64_t   wd_ticks;       /* bumped every local timer tick */
 	volatile const char *wd_where;      /* breadcrumb: last kernel region entered */
+	volatile uint64_t   busy_ticks, idle_ticks;  /* for /proc/stat */
+	volatile int        tick_slow;      /* idle a while: the local timer runs slower */
+	uint32_t            idle_run;       /* idle ticks in a row */
+	int                 rq_n;           /* tasks on rq: counted, not walked, under sched_lock */
+	uint32_t vm_tag;                    /* address space whose TLB entries this CPU may hold */
 } cpu_context_t;
 
 /* Get the current CPU's context structure. Implemented in arch/ */
