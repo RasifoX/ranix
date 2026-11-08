@@ -232,6 +232,8 @@ typedef struct vfs_mount {
     void              *priv;
     void             (*kill_sb)(void *priv);   /* umount destructor (tmpfs/overlay); may be NULL */
     void             (*get_sb)(void *priv);    /* bump sb refcount when a namespace clones the mount */
+    int              (*busy)(void *priv);      /* umount asks: nonzero while still in use. Under
+                                                * vfs_lock, so it must not sleep; may be NULL */
     vfs_inode_t       *orig_inode;
     unsigned long      flags;         /* per-mount MS_RDONLY/NOSUID/NODEV/NOEXEC */
     int                pin_root;      /* root belongs to another mount's tree (session views) */
@@ -306,6 +308,14 @@ int              vfs_bind(mnt_namespace_t *ns, vfs_dentry_t *mp, vfs_dentry_t *d
 vfs_dentry_t    *vfs_follow_in(mnt_namespace_t *ns, vfs_dentry_t *d);
 int        vfs_umount(const char *path);
 void       vfs_inode_free(vfs_inode_t *in);    /* a lookup result no dentry took; no-op if cached */
+/* Something a path walk may still be reading. fn(d) runs once every syscall that
+ * had walked a path when vfs_defer was called has finished, the caller's own
+ * included. d is the caller's. */
+typedef struct vfs_deferred {
+    struct vfs_deferred *next;
+    void               (*fn)(struct vfs_deferred *d);
+} vfs_deferred_t;
+void       vfs_defer(vfs_deferred_t *d);
 void       vfs_inode_orphan(vfs_inode_t *in);  /* last name gone: iops->evict follows, in time */
 struct process;
 void       vfs_walk_done(struct process *p);

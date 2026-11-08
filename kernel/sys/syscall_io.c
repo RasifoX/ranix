@@ -738,8 +738,12 @@ static long proc_fd_reopen(const char *kp, int flags)
 	f->inode = of->inode;
 	f->flags = flags & ~0100000;         /* the rest of O_CLOEXEC is handled below */
 	atomic_fetch_add32((volatile uint32_t *)&f->inode->open_refs, 1);
-	int fd = fd_alloc(cur->fds, f);
+	/* a new open of the file: its filesystem counts it as one, close uncounts it */
+	vfs_fops_t *ops = f->inode->fops;
+	int orc = ops && ops->open ? ops->open(f->inode, f, f->flags) : 0;
+	int fd = orc ? orc : fd_alloc(cur->fds, f);
 	if (fd < 0) {
+		if (!orc && ops && ops->close) ops->close(f);
 		atomic_sub_fetch32((volatile uint32_t *)&f->inode->open_refs, 1);
 		kfree(f);
 		return fd == -1 ? -12 : fd;
