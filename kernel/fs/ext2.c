@@ -2950,47 +2950,12 @@ static void orphans_reap(ext2_fs_t *fs)
 	if (n) kprintf(KERN_INFO "ext2: %u orphan inodes released\n", n);
 }
 
-int ext2_mount(vfs_mount_t *mnt, void *data)
+/* A filesystem in core for the superblock sb of bdev, block size bs: its
+ * geometry, locks and block cache, nothing read yet. NULL without memory. */
+static ext2_fs_t *ext2_fs_new(block_device_t *bdev, const ext2_super_t *sb, uint32_t bs)
 {
-	static int flushd_up;
-	block_device_t *bdev = data;
-	if (!bdev) return -1;
-
-	/* superblock at byte 1024, i.e. LBA 2 for 512-byte sectors */
-	uint8_t *sb_buf = ext2_alloc_page();
-	if (!sb_buf) return -1;
-
-	/* read 2 sectors to cover byte 1024..2047 */
-	if (block_read(bdev, 2, sb_buf, 2) != 0) {
-		ext2_free_page(sb_buf);
-		return -1;
-	}
-
-	ext2_super_t *sb = (ext2_super_t *)sb_buf;
-	if (sb->s_magic != EXT2_MAGIC) {
-		ext2_free_page(sb_buf);
-		return -1;
-	}
-
-	if (sb->s_log_block_size > 2) {
-		kprintf(KERN_ERR "ext2: block size not supported\n");
-		ext2_free_page(sb_buf);
-		return -1;
-	}
-	uint32_t bs = 1024u << sb->s_log_block_size;
-	uint16_t isz = sb->s_rev_level > 0 ? sb->s_inode_size : 128;
-	if (!sb->s_blocks_per_group || sb->s_blocks_per_group > bs * 8 ||
-	    !sb->s_inodes_per_group || sb->s_inodes_per_group > bs * 8 ||
-	    isz < 128 || isz > bs || (isz & (isz - 1)) || sb->s_desc_size > bs ||
-	    !sb->s_inodes_count || !sb->s_blocks_count_lo ||
-	    sb->s_first_data_block >= sb->s_blocks_count_lo) {
-		kprintf(KERN_ERR "ext2: superblock makes no sense\n");
-		ext2_free_page(sb_buf);
-		return -1;
-	}
-
 	ext2_fs_t *fs = kmalloc(sizeof(*fs));
-	if (!fs) { ext2_free_page(sb_buf); return -1; }
+	if (!fs) return NULL;
 	memset(fs, 0, sizeof(*fs));
 	fs->bdev              = bdev;
 	fs->block_size        = bs;
@@ -3017,7 +2982,7 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	fs->flush_lock  = (mutex_t)MUTEX_INIT;
 	fs->io_lock     = (mutex_t)MUTEX_INIT;
 	fs->hash = kmalloc(sizeof(*fs->hash) << EXT2_HASH_BITS);
-	if (!fs->hash) { kfree(fs); ext2_free_page(sb_buf); return -1; }
+	if (!fs->hash) { kfree(fs); return NULL; }
 	memset(fs->hash, 0, sizeof(*fs->hash) << EXT2_HASH_BITS);
 	fs->bc_max = buddy_free_pages() / 2;
 
@@ -3029,24 +2994,15 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 	void *rp = buddy_alloc(ra_order);
 	fs->ra_buf   = rp ? (uint8_t *)PHYS_TO_VIRT((uint64_t)rp) : NULL;
 	fs->ra_order = ra_order;
+	return fs;
+}
 
-	kprintf(KERN_DEBUG "ext2: bs=%u ino_sz=%u groups=%u desc=%u %s%s\n",
-	        bs, fs->inode_size, fs->num_groups, fs->desc_size,
-	        (sb->s_feature_incompat & 0x80) ? "64bit" : "32bit",
-	        (sb->s_feature_compat & 0x4) ? " journal" : "");
-
-	/* Checksums we would not update: writing would corrupt the filesystem. It is
-	 * also what keeps a host OS's ext4 safe from a stray rw mount. */
-	uint32_t ro_compat = sb->s_feature_ro_compat, incompat = sb->s_feature_incompat;
-	uint32_t compat = sb->s_feature_compat, jinum = sb->s_journal_inum;
-	if (bdev->ro || (ro_compat & (0x400 | 0x10)) || (incompat & ~(0x2u | 0x4u | 0x40u | 0x80u | 0x200u)) ||
-	    fs->total_blocks * fs->sectors_per_block > bdev->size_blocks)
-		mnt->flags |= MS_RDONLY;
-	fs->rdonly = !!(mnt->flags & MS_RDONLY);
-	fs->pend = kmalloc(EXT2_PEND_MAX * sizeof(*fs->pend));
-	if (!fs->pend) { ext2_free_page(sb_buf); kfree(fs->hash); kfree(fs); return -1; }
-	ext2_free_page(sb_buf);
-
+/* Open the jbd2 log if there is one we can use, replay it if the last mount
+ * crashed, and get a writable filesystem going: marked in use, log armed,
+ * orphans released. Whatever cannot be trusted mounts read-only. */
+static void ext2_log_start(ext2_fs_t *fs, vfs_mount_t *mnt, uint32_t compat, uint32_t jinum,
+                           uint32_t incompat)
+{
 	int have_log = 0;
 	if ((compat & EXT2_FEAT_HAS_JOURNAL) && jinum)
 		have_log = jload(fs, jinum) == 0;
@@ -3093,6 +3049,68 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 		if (fs->jmap) kprintf(KERN_INFO "ext2: log active, %u blocks\n", fs->jlen);
 		orphans_reap(fs);
 	}
+}
+
+int ext2_mount(vfs_mount_t *mnt, void *data)
+{
+	static int flushd_up;
+	block_device_t *bdev = data;
+	if (!bdev) return -1;
+
+	/* superblock at byte 1024, i.e. LBA 2 for 512-byte sectors */
+	uint8_t *sb_buf = ext2_alloc_page();
+	if (!sb_buf) return -1;
+
+	/* read 2 sectors to cover byte 1024..2047 */
+	if (block_read(bdev, 2, sb_buf, 2) != 0) {
+		ext2_free_page(sb_buf);
+		return -1;
+	}
+
+	ext2_super_t *sb = (ext2_super_t *)sb_buf;
+	if (sb->s_magic != EXT2_MAGIC) {
+		ext2_free_page(sb_buf);
+		return -1;
+	}
+
+	if (sb->s_log_block_size > 2) {
+		kprintf(KERN_ERR "ext2: block size not supported\n");
+		ext2_free_page(sb_buf);
+		return -1;
+	}
+	uint32_t bs = 1024u << sb->s_log_block_size;
+	uint16_t isz = sb->s_rev_level > 0 ? sb->s_inode_size : 128;
+	if (!sb->s_blocks_per_group || sb->s_blocks_per_group > bs * 8 ||
+	    !sb->s_inodes_per_group || sb->s_inodes_per_group > bs * 8 ||
+	    isz < 128 || isz > bs || (isz & (isz - 1)) || sb->s_desc_size > bs ||
+	    !sb->s_inodes_count || !sb->s_blocks_count_lo ||
+	    sb->s_first_data_block >= sb->s_blocks_count_lo) {
+		kprintf(KERN_ERR "ext2: superblock makes no sense\n");
+		ext2_free_page(sb_buf);
+		return -1;
+	}
+
+	ext2_fs_t *fs = ext2_fs_new(bdev, sb, bs);
+	if (!fs) { ext2_free_page(sb_buf); return -1; }
+
+	kprintf(KERN_DEBUG "ext2: bs=%u ino_sz=%u groups=%u desc=%u %s%s\n",
+	        bs, fs->inode_size, fs->num_groups, fs->desc_size,
+	        (sb->s_feature_incompat & 0x80) ? "64bit" : "32bit",
+	        (sb->s_feature_compat & 0x4) ? " journal" : "");
+
+	/* Checksums we would not update: writing would corrupt the filesystem. It is
+	 * also what keeps a host OS's ext4 safe from a stray rw mount. */
+	uint32_t ro_compat = sb->s_feature_ro_compat, incompat = sb->s_feature_incompat;
+	uint32_t compat = sb->s_feature_compat, jinum = sb->s_journal_inum;
+	if (bdev->ro || (ro_compat & (0x400 | 0x10)) || (incompat & ~(0x2u | 0x4u | 0x40u | 0x80u | 0x200u)) ||
+	    fs->total_blocks * fs->sectors_per_block > bdev->size_blocks)
+		mnt->flags |= MS_RDONLY;
+	fs->rdonly = !!(mnt->flags & MS_RDONLY);
+	fs->pend = kmalloc(EXT2_PEND_MAX * sizeof(*fs->pend));
+	if (!fs->pend) { ext2_free_page(sb_buf); kfree(fs->hash); kfree(fs); return -1; }
+	ext2_free_page(sb_buf);
+
+	ext2_log_start(fs, mnt, compat, jinum, incompat);
 
 	/* read root inode */
 	mutex_lock(&fs->lock);
