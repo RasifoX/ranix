@@ -49,6 +49,8 @@ uint32_t make_kgid(user_namespace_t *ns, uint32_t gid);
 /* parse+install a uid_map/gid_map line ("inside outside count"); is_gid selects */
 int user_ns_set_map(user_namespace_t *ns, const char *buf, int is_gid);
 int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid);
+/* may this task write that map? (root anything; others one line, their own id) */
+int user_ns_map_permitted(struct process *writer, user_namespace_t *ns, const char *buf, int is_gid);
 
 struct vfs_file;
 user_namespace_t *nsfile_to_user(struct vfs_file *f);

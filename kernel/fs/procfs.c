@@ -1686,7 +1686,8 @@ static ssize_t procfs_uidmap_write(vfs_file_t *f, const void *buf, size_t len)
 	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
 	if (copy_from_user(kb, buf, n) != 0) { if (pr->pid) proc_put(p); return -14; }
 	kb[n] = '\0';
-	int rc = user_ns_set_map(p->user_ns, kb, pr->is_gid);
+	int rc = user_ns_map_permitted(task_current(), p->user_ns, kb, pr->is_gid)
+	         ? user_ns_set_map(p->user_ns, kb, pr->is_gid) : -1;
 	if (pr->pid) proc_put(p);
 	return rc != 0 ? -1 : (ssize_t)len;
 }
@@ -1703,6 +1704,9 @@ static vfs_inode_t *procfs_uidmap_inode(int pid, int is_gid)
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->fops     = &procfs_uidmap_fops;
+	/* the task's own, as on Linux: its user may open it to map itself */
+	process_t *t = pid ? proc_get((pid_t)pid) : task_current();
+	if (t) { in->uid = t->euid; in->gid = t->egid; if (pid) proc_put(t); }
 	procfs_uidmap_priv_t *pr = kmalloc(sizeof(*pr));
 	if (!pr) { kfree(in); return NULL; }
 	pr->pid = pid; pr->is_gid = is_gid;
