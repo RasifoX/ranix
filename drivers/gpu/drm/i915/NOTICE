@@ -1,0 +1,81 @@
+Code in this directory derived from Linux i915 (MIT)
+====================================================
+
+Origin: Linux 6.1.176, drivers/gpu/drm/i915, from Debian's linux-source-6.1
+(6.1.176-1) package, extracted 2026-11-08. Only files whose SPDX identifier is
+MIT are used. Nothing GPL-licensed is copied; dma-fence/dma-resv/sync_file are
+implemented fresh in Ranix with the same API.
+
+Copied unchanged (SPDX MIT, Copyright Intel Corporation):
+  i915_reg_defs.h
+  gt/intel_gt_regs.h
+  gt/intel_engine_regs.h
+  gt/intel_gpu_commands.h
+  gt/intel_lrc_reg.h
+
+Derived (changed) code:
+  ranix_gt.c
+    - set_offsets(), gen9_rcs_offsets[] and the body of __lrc_init_regs() /
+      init_common_regs() / __reset_stop_ring() from gt/intel_lrc.c, specialised
+      to Gen9 RCS and a GGTT-only (32-bit legacy, no PPGTT) context;
+      BUILD_BUG_ON_ZERO checks dropped from the table macros.
+    - the forcewake get sequence (ack clear, request, ack set, fallback toggle
+      WaRsForcewakeAddDelayForAck) from intel_uncore.c, rewritten over plain MMIO.
+    - enable_execlists() and the ELSP write order from
+      gt/intel_execlists_submission.c, the descriptor layout from lrc_descriptor().
+    - the request emitters from gt/gen8_engine_cs.c: gen8_emit_flush_rcs()
+      (EMIT_INVALIDATE with the Gen9 null PIPE_CONTROL), gen8_emit_bb_start(),
+      gen8_emit_fini_breadcrumb_rcs() + gen8_emit_fini_breadcrumb_tail() +
+      gen8_emit_wa_tail(), written into a local command array.
+    - bdw_setup_private_ppat() from gt/intel_gtt.c (the PPAT values).
+    - reset_csb_pointers() and a reduced process_csb() from
+      gt/intel_execlists_submission.c (CSB in the HWSP, read-pointer update).
+    - GT frequency (RPS) from gt/intel_rps.c: gen6_rps_get_freq_caps() (Gen9 BC
+      RP_STATE_CAP fields, x GEN9_FREQ_SCALER), gen9_rps_enable() (RC_VIDEO_FREQ,
+      RP_IDLE_HYSTERSIS), rps_set_power() at HIGH_POWER (EI/thresholds, RP_CONTROL
+      bits), gen6_rps_set() (GEN9_FREQUENCY request), and the rps_timer()/rps_work()
+      policy (95 %/85 % busy, doubling step, waitboost) reduced to one engine sampled
+      on the timer tick; the RP1 boost target and 100 ms idle drop are Ranix's.
+    Everything else in ranix_gt.c (objects, GGTT binding, the request queue and
+    its one-at-a-time ELSP policy, kernel-context parking, hang detection and the
+    wedge path, the sysfs control) is Ranix's own; ranix_power.c and
+    intel_display.c (display back end, GGTT window, written from the PRM) are Ranix's own.
+
+  ranix_gem.c
+    - ioc_getparam() follows i915_getparam.c: the same parameter set, the
+      "always 1" group and the rejected UMS params; values are Kaby Lake GT2's
+      and what Ranix implements. The rest of the file (GEM uAPI, contexts,
+      execbuffer, query, per-file address space) is Ranix's own.
+
+  ranix_vm.c
+    - PPGTT entry encoding (present|rw, PPAT_CACHED for objects, index 0 for
+      directories) as in gt/gen8_ppgtt.c and gt/intel_gtt.h; the page-table
+      walker is Ranix's own.
+
+  ranix_i915_uapi.h
+    - transcription of the i915 uAPI (include/uapi/drm/i915_drm.h) structs and
+      numbers Ranix implements; layouts checked against that header.
+
+The LinuxKPI headers these files compile against are in ../../linuxkpi
+(BSD-2-Clause, written for Ranix).
+
+MIT license text of the Intel files (as in their headers):
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice (including the next
+  paragraph) shall be included in all copies or substantial portions of the
+  Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+  THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+  IN THE SOFTWARE.
