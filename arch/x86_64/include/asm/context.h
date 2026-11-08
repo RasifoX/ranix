@@ -9,14 +9,16 @@
  * We push the rest plus a vector number and error code slot.
  *
  *   offset 0   : fxsave area (512 bytes, 16-byte aligned)
- *   offset 512 : r15-r8, rbp, rdi, rsi, rdx, rcx, rbx, rax  (15 * 8)
- *   offset 632 : vector
- *   offset 640 : error_code
- *   offset 648 : rip, cs, rflags, rsp, ss  (CPU-pushed, 5 * 8)
- *   total      : 688 bytes
+ *   offset 512 : upper halves of ymm0-15 (256 bytes), when AVX is on
+ *   offset 768 : r15-r8, rbp, rdi, rsi, rdx, rcx, rbx, rax  (15 * 8)
+ *   offset 888 : vector
+ *   offset 896 : error_code
+ *   offset 904 : rip, cs, rflags, rsp, ss  (CPU-pushed, 5 * 8)
+ *   total      : 944 bytes
  */
 typedef struct {
 	uint8_t  fxsave[512] __attribute__((aligned(16)));
+	uint8_t  ymmh[256];
 	uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
 	uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
 	uint64_t vector;
@@ -93,6 +95,8 @@ typedef struct {
 #define SYS_ARCH_RECVFROM          45
 #define SYS_ARCH_SENDMSG           46
 #define SYS_ARCH_RECVMSG           47
+#define SYS_ARCH_SENDMMSG          307
+#define SYS_ARCH_RECVMMSG          299
 #define SYS_ARCH_SHUTDOWN          48
 #define SYS_ARCH_BIND              49
 #define SYS_ARCH_LISTEN            50
@@ -213,6 +217,10 @@ typedef struct {
 #define SYS_ARCH_SCHED_SETPARAM        142
 #define SYS_ARCH_SCHED_SETSCHEDULER    144
 #define SYS_ARCH_SCHED_GETSCHEDULER    145
+#define SYS_ARCH_KCMP                  312
+#define SYS_ARCH_SCHED_SETATTR         314
+#define SYS_ARCH_SCHED_GETATTR         315
+#define SYS_ARCH_PROCESS_MRELEASE      448
 #define SYS_ARCH_SCHED_GETPARAM        143
 #define SYS_ARCH_SCHED_GET_PRIORITY_MAX 146
 #define SYS_ARCH_SCHED_GET_PRIORITY_MIN 147
@@ -235,6 +243,7 @@ typedef struct {
 #define SYS_ARCH_MQ_UNLINK         241
 #define SYS_ARCH_MQ_TIMEDSEND      242
 #define SYS_ARCH_MQ_TIMEDRECEIVE   243
+#define SYS_ARCH_ASESS             2048   /* Ranix agent sessions, same number on every arch */
 #define SYS_ARCH_MQ_GETSETATTR     245
 #define SYS_ARCH_WAITID            247
 #define SYS_ARCH_INOTIFY_INIT      253
@@ -261,6 +270,37 @@ typedef struct {
 #define SYS_ARCH_FUTIMENS          280 /* same number, used via fd path */
 #define SYS_ARCH_UTIMENSAT         280
 #define SYS_ARCH_EPOLL_PWAIT       281
+#define SYS_ARCH_RT_SIGTIMEDWAIT   128
+#define SYS_ARCH_PREADV 295
+#define SYS_ARCH_PWRITEV 296
+#define SYS_ARCH_PREADV2 327
+#define SYS_ARCH_PWRITEV2 328
+#define SYS_ARCH_MINCORE 27
+#define SYS_ARCH_READAHEAD 187
+#define SYS_ARCH_SYNCFS 306
+#define SYS_ARCH_FSETXATTR 190
+#define SYS_ARCH_FLISTXATTR 196
+#define SYS_ARCH_LREMOVEXATTR 198
+#define SYS_ARCH_FREMOVEXATTR 199
+#define SYS_ARCH_SCHED_RR_GET_INTERVAL 148
+#define SYS_ARCH_SETDOMAINNAME 171
+#define SYS_ARCH_IOPRIO_SET 251
+#define SYS_ARCH_IOPRIO_GET 252
+#define SYS_ARCH_PKEY_ALLOC 330
+#define SYS_ARCH_PKEY_FREE 331
+#define SYS_ARCH_PKEY_MPROTECT 329
+#define SYS_ARCH_OPENAT2 437
+#define SYS_ARCH_FCHMODAT2 452
+#define SYS_ARCH_RESTART_SYSCALL 219
+#define SYS_ARCH_UTIME 132
+#define SYS_ARCH_UTIMES 235
+#define SYS_ARCH_FUTIMESAT 261
+#define SYS_ARCH_SIGNALFD 282
+#define SYS_ARCH_TIMER_CREATE      222
+#define SYS_ARCH_TIMER_SETTIME     223
+#define SYS_ARCH_TIMER_GETTIME     224
+#define SYS_ARCH_TIMER_GETOVERRUN  225
+#define SYS_ARCH_TIMER_DELETE      226
 #define SYS_ARCH_TIMERFD_CREATE    283
 #define SYS_ARCH_EVENTFD           284
 #define SYS_ARCH_FALLOCATE         285
@@ -279,11 +319,15 @@ typedef struct {
 #define SYS_ARCH_GETRANDOM         318
 #define SYS_ARCH_MEMFD_CREATE      319
 #define SYS_ARCH_MEMBARRIER        324
+#define SYS_ARCH_MBIND              237
+#define SYS_ARCH_SET_MEMPOLICY      238
+#define SYS_ARCH_GET_MEMPOLICY      239
 #define SYS_ARCH_MLOCK2            325
 #define SYS_ARCH_COPY_FILE_RANGE   326
 #define SYS_ARCH_STATX             332
 #define SYS_ARCH_RSEQ              334
 #define SYS_ARCH_FACCESSAT2        439
+#define SYS_ARCH_EPOLL_PWAIT2      441
 #define SYS_ARCH_EXECVEAT          322
 #define SYS_ARCH_SECCOMP           317
 #define SYS_ARCH_PIDFD_SEND_SIGNAL 424
