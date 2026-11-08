@@ -4,7 +4,12 @@
 #include <uapi/types.h>
 #include <kernel/fb.h>
 
-#define TIMER_HZ 100
+/* The one tick rate. Include this header wherever TIMER_HZ is used; a local
+ * fallback ("#ifndef TIMER_HZ / #define TIMER_HZ 100") silently made several
+ * files count seconds 10x short (fixed 2026-11-08). */
+#define TIMER_HZ 1000
+#define USER_HZ  100                  /* what user space is told a clock tick is */
+#define TICKS_USER(t) ((t) / (TIMER_HZ / USER_HZ))
 
 typedef struct {
 	const char *name;

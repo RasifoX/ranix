@@ -40,6 +40,18 @@ else
     GLIBC_LDSO_DST = lib64/ld-linux-x86-64.so.2
     GLIBC_LIBC_DST = lib/x86_64-linux-gnu/libc.so.6
     GLIBC_LIBM_DST = lib/x86_64-linux-gnu/libm.so.6
+    # A musl host has no glibc to copy: take Debian's (scripts/glibc-sysroot.sh)
+    ifeq ($(wildcard $(GLIBC_LDSO)),)
+        GLIBC_SYSROOT = $(CURDIR)/.cache/glibc-sysroot-amd64
+        GLIBC_LDSO    = $(GLIBC_SYSROOT)/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+        GLIBC_LIBC    = $(GLIBC_SYSROOT)/lib/x86_64-linux-gnu/libc.so.6
+        GLIBC_LIBM    = $(GLIBC_SYSROOT)/lib/x86_64-linux-gnu/libm.so.6
+        GLIBC_CFLAGS  = --sysroot=$(GLIBC_SYSROOT) -B$(GLIBC_SYSROOT)/usr/lib/x86_64-linux-gnu \
+                        -isystem $(GLIBC_SYSROOT)/usr/include/x86_64-linux-gnu \
+                        -fno-stack-protector -U_FORTIFY_SOURCE \
+                        -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
+        GLIBC_SYSROOT_DEP = $(GLIBC_SYSROOT)/.stamp
+    endif
 endif
 GLIBC_TEST_SRC = userspace/c_glibc.c
 GLIBC_TEST_BIN = $(BUILD_DIR)/c-glibc
@@ -49,7 +61,7 @@ GLIBC_SPAWN_BIN = $(BUILD_DIR)/c-glibcspawn
 # Stock GNU coreutils proof: ship an unmodified host coreutils binary (echo),
 # which dynamically links the same glibc shipped above. Exercises the full
 # __libc_start_main path (locale, argv/environ) beyond the trivial c-glibc.
-GNU_COREUTILS_BIN = /bin/echo
+GNU_COREUTILS_BIN = $(if $(GLIBC_SYSROOT),$(GLIBC_SYSROOT)/bin/echo,/bin/echo)
 
 CC  = clang --target=$(ARCH)-none-elf
 AS  = clang --target=$(ARCH)-none-elf
@@ -135,6 +147,7 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/exceptions.c \
         arch/x86_64/smp.c \
         arch/x86_64/mach-pc/board.c \
+        arch/x86_64/mach-pc/pstore.c \
         arch/x86_64/acpi.c \
         arch/x86_64/multiboot2.c
     SRCS_ARCH_ASM = \
@@ -145,12 +158,18 @@ else ifeq ($(ARCH),x86_64)
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \
         drivers/irqchip/pit/pit.c \
+        drivers/watchdog/itco.c \
+        drivers/watchdog/wdog_core.c \
         drivers/input/ps2/ps2.c \
+        drivers/input/ps2/synaptics.c \
         drivers/block/virtio_blk.c \
         drivers/block/ahci.c \
         drivers/block/nvme.c \
         drivers/usb/xhci.c \
-        drivers/net/virtio_net.c
+        drivers/net/virtio_net.c \
+        drivers/net/rtl8168.c \
+        drivers/net/rtw8723.c \
+        drivers/sound/hda.c
 endif
 
 # Auto-discovered: every .c in kernel/net is compiled (no textual-includes here).
@@ -187,9 +206,14 @@ SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c))
     $(wildcard kernel/lib/*.c) \
     $(wildcard kernel/tty/*.c) \
     drivers/video/fbdev.c \
+    drivers/video/backlight.c \
+    $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/thermal/*.c) \
     drivers/input/input_core.c
 
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
+
+# i915 GT code ported from Linux (MIT) builds against the LinuxKPI shim headers
+$(BUILD_DIR)/drivers/gpu/drm/i915/%.o: CFLAGS += -Idrivers/gpu/linuxkpi/include -Idrivers/gpu/drm/i915
 SRCS_ASM = $(SRCS_ARCH_ASM)
 
 CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall -fno-omit-frame-pointer $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
@@ -216,7 +240,7 @@ APK_KEYS_APK      = $(APK_BASE)/alpine-keys-2.5-r0.apk
 # Mozilla CA bundle (extracted from Alpine's ca-certificates-bundle apk) shipped
 # to /etc/ssl/certs so a live `apk add` over HTTPS verifies the mirror's TLS cert
 # (apk-tools' OpenSSL looks under OPENSSLDIR=/etc/ssl).
-APK_CACERTS_APK   = $(APK_BASE)/ca-certificates-bundle-20260413-r0.apk
+APK_CACERTS_APK   = $(APK_BASE)/ca-certificates-bundle-20261020-r0.apk
 
 # Debian (glibc) package path: dpkg + a tiny target package (hello) and the
 # runtime-library closure, fetched as .deb files on the HOST at build time and
@@ -289,7 +313,7 @@ $(BUILD_DIR)/kernel/vdso.o: $(BUILD_DIR)/vdso_image.h
 all: initramfs $(TARGET)
 
 # Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
-USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test
+USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test userspace/ranix-sess userspace/ranix-ajan
 # Auto-discovered: the bench harness plus every userspace/test_*.c. Adding a
 # test_*.c is enough — no hand-editing this list (and no more merge conflicts
 # from everyone appending to it).
@@ -489,15 +513,20 @@ $(LDSO_SRC): $(APK_STATIC_BIN)
 	@tar xzf "$(APK_DIR)/musl.apk" -C "$(APK_DIR)" lib/$(LDSO_NAME) 2>/dev/null
 	@chmod +x "$@"
 
-$(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC)
+ifdef GLIBC_SYSROOT
+$(GLIBC_SYSROOT_DEP):
+	@sh scripts/glibc-sysroot.sh "$(CACHE_DIR)" "$(DEB_SUITE)" "$(GLIBC_SYSROOT)"
+endif
+
+$(GLIBC_TEST_BIN): $(GLIBC_TEST_SRC) $(GLIBC_SYSROOT_DEP)
 	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
-		$(GLIBC_HOST_CC) -O2 -o $@ $< && \
+		$(GLIBC_HOST_CC) $(GLIBC_CFLAGS) -O2 -o $@ $< && \
 		echo "[OK] c-glibc (stock glibc) built for $(ARCH)"; \
 	else echo "[skip] c-glibc: stock glibc toolchain/loader unavailable"; fi
 
-$(GLIBC_SPAWN_BIN): $(GLIBC_SPAWN_SRC)
+$(GLIBC_SPAWN_BIN): $(GLIBC_SPAWN_SRC) $(GLIBC_SYSROOT_DEP)
 	@if command -v $(GLIBC_HOST_CC) >/dev/null && [ -e $(GLIBC_LDSO) ] && [ -e $(GLIBC_LIBC) ]; then \
-		$(GLIBC_HOST_CC) -O2 -pthread -o $@ $< && \
+		$(GLIBC_HOST_CC) $(GLIBC_CFLAGS) -O2 -pthread -o $@ $< && \
 		echo "[OK] c-glibcspawn (stock glibc) built for $(ARCH)"; \
 	else echo "[skip] c-glibcspawn: stock glibc toolchain/loader unavailable"; fi
 GLIBC_TEST_DEP = $(GLIBC_TEST_BIN) $(GLIBC_SPAWN_BIN)
@@ -534,7 +563,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	            awk sort uniq cut tr rev xargs dd stat du diff \
 	            env tee seq sleep date id whoami hostname \
 	            true false dirname basename pwd uptime nproc \
-	            timeout test expr yes which readlink ping nc wget \
+	            timeout test expr yes which readlink ping nc wget ip \
 	            su login passwd; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
@@ -598,18 +627,6 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@chmod +x $(BUILD_DIR)/initramfs/bin/dropbearmulti
 	@for c in dropbear dbclient dropbearkey scp ssh; do ln -sf dropbearmulti $(BUILD_DIR)/initramfs/bin/$$c; done
 	@mkdir -p $(BUILD_DIR)/initramfs/etc/dropbear $(BUILD_DIR)/initramfs/root/.ssh
-	@if [ -z "$(DEMO)" ] && [ -f doomgeneric/doomgeneric ]; then \
-		DOOM_ARCH=$$(readelf -h doomgeneric/doomgeneric 2>/dev/null | awk '/Machine:/{print $$NF}'); \
-		NEED_ARCH="$(ARCH)"; \
-		if [ "$$NEED_ARCH" = "x86_64" ] && [ "$$DOOM_ARCH" = "X86-64" ]; then \
-			cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
-		elif [ "$$NEED_ARCH" = "aarch64" ] && [ "$$DOOM_ARCH" = "AArch64" ]; then \
-			cp doomgeneric/doomgeneric $(BUILD_DIR)/initramfs/bin/doom; \
-		fi \
-	fi
-	@if [ -z "$(DEMO)" ] && [ -f doom1.wad ]; then \
-		cp doom1.wad $(BUILD_DIR)/initramfs/bin/doom1.wad; \
-	fi
 	@if [ -z "$(DEMO)" ] && [ -f tests/ranix_test.sh ]; then cp tests/ranix_test.sh $(BUILD_DIR)/initramfs/test.sh; fi
 	@printf 'root:x:0:0:root:/root:/bin/bash\ntest:x:1000:1000:Test User:/home/test:/bin/sh\n' \
 	    > $(BUILD_DIR)/initramfs/etc/passwd
@@ -643,6 +660,8 @@ userspace/%: userspace/%.c
 # dynamically linked (PT_INTERP → /lib/ld-musl-*.so.1); exercises the in-kernel
 # dynamic-linker loading path. Explicit rule overrides the static one above.
 userspace/test_dynamic: userspace/test_dynamic.c
+	$(MUSL_CC) -O2 -o $@ $<
+userspace/test_asess_dynprobe: userspace/test_asess_dynprobe.c
 	$(MUSL_CC) -O2 -o $@ $<
 
 # extra shared library + a load-time and a runtime (dlopen) consumer
@@ -800,27 +819,21 @@ clean:
 qemu: $(TARGET) initramfs
 	$(QEMU_CMD) $(QEMU_NET) -m 512M -nographic -kernel $(QEMU_KERNEL) -initrd $(BUILD_DIR)/initramfs.cpio
 
+# Disks are read-only until named in ranix.disk.rw. The test VMs write to throwaway
+# images, so those boots allow all; a shipped image leaves it empty.
+ISO_CMDLINE ?=
+test qemu-disk: ISO_CMDLINE = ranix.disk.rw=all ranix.hugepages1g=1
+
 iso: initramfs $(TARGET)
 	@mkdir -p iso/boot/grub
 	@cp $(TARGET) iso/boot/ranix.elf
 	@cp $(BUILD_DIR)/initramfs.cpio iso/boot/initramfs.cpio
-	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n  module2 /boot/initramfs.cpio\n}\n' > iso/boot/grub/grub.cfg
+	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf $(ISO_CMDLINE)\n  module2 /boot/initramfs.cpio\n}\n' > iso/boot/grub/grub.cfg
 	grub-mkrescue -o ranix.iso iso/ 2>/dev/null
 	@echo "[OK] ranix.iso hazır"
 
 qemu-iso: iso
 	$(QEMU_CMD) -m 512M -nographic -cdrom ranix.iso
-
-doom: doomgeneric/doomgeneric
-
-doomgeneric/doomgeneric: doomgeneric/doomgeneric_linuxvt.c
-	$(MAKE) -C doomgeneric -f Makefile.ranix ARCH=$(ARCH) \
-	    CC=$(MUSL_CC)
-
-qemu-doom: doom
-	rm -f $(BUILD_DIR)/initramfs.cpio
-	$(MAKE) ARCH=$(ARCH) iso
-	$(QEMU_CMD) -vga std -m 256M -cdrom ranix.iso -serial file:serial.log
 
 # Create a 32 MB ext2 test disk image with some files
 disk-image: ranix-disk.img
@@ -859,14 +872,20 @@ $(BUILD_DIR)/usb-test.img:
 # while the suite mounts this one at /mnt2 (mount -t ext2 /dev/nvme0n1 /mnt2) and
 # read/writes both independently. The ext2 fs occupies the first 4 MB; raw block
 # markers for the NVM READ/WRITE round-trip test live past the fs at high sectors.
-$(BUILD_DIR)/nvme-test.img:
+$(BUILD_DIR)/nvme-test.img: Makefile
 	@rm -rf $(BUILD_DIR)/nvmeseed
 	@mkdir -p $(BUILD_DIR)/nvmeseed
 	@printf 'ranix-nvme-ext2-ok' > $(BUILD_DIR)/nvmeseed/marker.txt
 	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs.img bs=1M count=4 2>/dev/null
-	mkfs.ext2 -F -q -b 1024 -d $(BUILD_DIR)/nvmeseed $(BUILD_DIR)/nvme-fs.img >/dev/null 2>&1
-	dd if=/dev/zero of=$@ bs=1M count=8 2>/dev/null
+	@# -N 6144: c-ext2hard-4k's big_dir makes 5000 files; mke2fs' default for 4 MiB
+	@# at 4k blocks is 1024 inodes, so it ran out of inodes (ENOSPC), not blocks.
+	mkfs.ext2 -F -q -b 4096 -N 6144 -d $(BUILD_DIR)/nvmeseed $(BUILD_DIR)/nvme-fs.img >/dev/null 2>&1
+	dd if=/dev/zero of=$@ bs=1M count=12 2>/dev/null
 	dd if=$(BUILD_DIR)/nvme-fs.img of=$@ bs=512 conv=notrunc 2>/dev/null
+	@printf 'ranix-offset-ok' > $(BUILD_DIR)/nvmeseed/marker.txt
+	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs2.img bs=1M count=2 2>/dev/null
+	mkfs.ext2 -F -q -b 4096 -d $(BUILD_DIR)/nvmeseed $(BUILD_DIR)/nvme-fs2.img >/dev/null 2>&1
+	dd if=$(BUILD_DIR)/nvme-fs2.img of=$@ bs=1M seek=8 conv=notrunc 2>/dev/null
 	printf 'RANIX-NVME-DISK-OK' | dd of=$@ bs=512 seek=12000 conv=notrunc 2>/dev/null
 	@echo "[OK] nvme-test.img"
 
@@ -925,7 +944,8 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-
 	    -device qemu-xhci,id=xhci,streams=off \
 	    -device usb-storage,bus=xhci.0,drive=u0 \
 	    -drive file=$(BUILD_DIR)/nvme-test.img,if=none,id=nvm0,format=raw \
-	    -device nvme,drive=nvm0,serial=ranix0 || true
+	    -device nvme,drive=nvm0,serial=ranix0 \
+	    -audiodev none,id=a0 -device intel-hda -device hda-output,audiodev=a0 || true
 else
 test: initramfs $(TARGET)
 	@rm -f $(TEST_LOG)

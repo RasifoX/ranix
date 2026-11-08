@@ -69,11 +69,17 @@ typedef struct {
 	spinlock_t    guard;
 	volatile int  locked;
 	void         *owner;   /* task_t* of current holder, NULL if free */
+	void         *owner_at; /* where it was taken: to name a stuck holder */
 } mutex_t;
 
 #define MUTEX_INIT  { SPINLOCK_INIT, 0, 0 }
 
 void mutex_lock(mutex_t *m);
+/* Ranix kill-always-wins: like mutex_lock, but gives up with -EINTR (-4) once the
+ * caller has a fatal signal (SIGKILL, group exit). Use on every syscall path that
+ * may wait behind another task's long hold, so a stuck holder never makes its
+ * waiters unkillable too. */
+int  mutex_lock_killable(mutex_t *m);
 void mutex_unlock(mutex_t *m);
 
 /*
@@ -96,6 +102,10 @@ void wake_up(wait_queue_t *q);
 /* poll/select/epoll: poll_block() sleeps until poll_notify() or the deadline;
  * producers call poll_notify() when an fd's readiness changes. */
 void poll_notify(void);
+void poll_arm(void);                 /* call before scanning the fds */
+void poll_arm_scan(void);
+void poll_notify_key(const void *key);
+void poll_note_key(const void *key);
 void poll_block(uint64_t deadline);
 
 #endif

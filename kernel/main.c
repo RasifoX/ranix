@@ -1,5 +1,7 @@
+#include <kernel/lib/sha256.h>
 #include <kernel/board.h>
 #include <kernel/cmdline.h>
+#include <kernel/input.h>
 #include <kernel/driver.h>
 #include <kernel/fdt.h>
 #include <kernel/hal.h>
@@ -12,6 +14,8 @@
 #include <kernel/mm/vm.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/proc.h>
+#include <kernel/pstore.h>
+#include <kernel/watchdog.h>
 #include <kernel/block.h>
 #include <kernel/fs/mbr.h>
 #include <kernel/fs/gpt.h>
@@ -19,6 +23,14 @@
 extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
 #include <kernel/vfs.h>
+
+/* Boot-path pets. Long steps with bounded timeouts (DHCP, disk probing) must not
+ * add up to a false reset, and a step that truly hangs stops the pets. */
+#if defined(__x86_64__)
+#define WD_BOOT_PROGRESS() watchdog_touch()
+#else
+#define WD_BOOT_PROGRESS() do { } while (0)
+#endif
 
 extern char     __kernel_phys_end;
 extern uint64_t _dtb_ptr;
@@ -145,13 +157,22 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	/* Carve 1 GB-aligned blocks off the top of the largest contiguous region
 	 * for the 1 GB hugepage pool, leaving a margin for the buddy allocator.
 	 * The window is excluded from the buddy add so those blocks are never
-	 * handed out. Small systems reserve nothing → 1G mmap returns ENOMEM. */
+	 * handed out, so nothing is carved unless ranix.hugepages1g=N asks: a pool
+	 * nobody uses took 4 GB of an 8 GB laptop. Without it 1G mmap returns ENOMEM. */
+	int hp_want = 0;
+	{
+		char b[4];
+		if (cmdline_get("ranix.hugepages1g", b, sizeof(b)))
+			for (char *c = b; *c >= '0' && *c <= '9' && hp_want < 8; c++)
+				hp_want = hp_want * 10 + (*c - '0');
+		if (hp_want > 8) hp_want = 8;
+	}
 	struct _big_ctx bc = { 0, 0 };
 	board_foreach_mem_region(_pmm_biggest, &bc);
 	uint64_t pool_lo = bc.end & HUGE_1G_MASK;   /* exclusive top, walked down */
 	uint64_t reg_lo  = bc.base > free_start ? bc.base : free_start;
 	int hp_blocks = 0;
-	while (hp_blocks < 8 && pool_lo >= HUGE_1G_SIZE &&
+	while (hp_blocks < hp_want && pool_lo >= HUGE_1G_SIZE &&
 	       pool_lo - HUGE_1G_SIZE >= reg_lo + (512UL << 20)) {
 		pool_lo -= HUGE_1G_SIZE;
 		hp_blocks++;
@@ -164,6 +185,26 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 			n_exc++;
 		}
 	}
+
+#if defined(__x86_64__)
+	/* Persistent log: keep its fixed RAM region away from the allocator. It must
+	 * survive this boot's use of memory or the next boot reads garbage. */
+	{
+		uint64_t ps_base, ps_size;
+		if (pstore_region(free_start, &ps_base, &ps_size) == 0) {
+			uint64_t pool_end = pool_lo + (uint64_t)hp_blocks * HUGE_1G_SIZE;
+			if (n_exc >= 8 || (hp_blocks > 0 && ps_base < pool_end &&
+			                   ps_base + ps_size > pool_lo)) {
+				kprintf(KERN_WARN "pstore: region lost to a reservation, no persistent log\n");
+				pstore_cancel();
+			} else {
+				exc[n_exc][0] = ps_base;
+				exc[n_exc][1] = ps_base + ps_size;
+				n_exc++;
+			}
+		}
+	}
+#endif
 
 	/* sort exclusions by start address (bubble sort) */
 	for (int i = 0; i < n_exc - 1; i++)
@@ -186,10 +227,10 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 		uint64_t top = (max_limit - PAGE_SIZE) & PAGE_MASK;
 		uint64_t va  = PHYS_TO_VIRT(top);
 		if (VIRT_TO_PHYS(va) != top)
-			kprintf("BUG: PHYS_TO_VIRT round-trip failed for phys %p\n", (void *)top);
+			kprintf(KERN_ERR "mm: phys_to_virt round-trip failed for phys %p\n", (void *)top);
 		uint64_t resolved = arch_vm_get_paddr(kernel_vm_space->root, va);
 		if (resolved != top)
-			kprintf("BUG: top RAM phys %p not mapped (got %p)\n",
+			kprintf(KERN_ERR "mm: top of ram phys %p not mapped (got %p)\n",
 			        (void *)top, (void *)resolved);
 	}
 
@@ -201,7 +242,7 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 
 	board_foreach_mem_region(_pmm_add, &ac);
 
-	kprintf("Memory: %d MB total across %d region(s)\n",
+	kprintf(KERN_INFO "mm: %d MB in %d regions\n",
 	        (int)(ac.total_free >> 20), mc.n);
 }
 
@@ -238,12 +279,22 @@ void kernel_main(void)
 		const void *cl_val = fdt_get_prop("chosen", "bootargs", &cl_len);
 		if (cl_val && cl_len > 0)
 			cmdline_init((const char *)cl_val);
-		kprintf("Ranix — %s (%d cores)\n", fi->model, (int)fi->num_cpus);
+		klog_setup();
+		kprintf(KERN_INFO "boot: ranix on %s, %d cores\n", fi->model, (int)fi->num_cpus);
 	} else {
-		kprintf("Ranix — %s\n", cfg->name);
+		klog_setup();
+		kprintf(KERN_INFO "boot: ranix on %s\n", cfg->name);
 	}
 
 	setup_physical_memory(global_fb_phys, fb_sz, cfg);
+	{
+		char kb[4];
+		if (cmdline_get("ranix.kbd", kb, sizeof(kb)) && kb[0] == 't' && kb[1] == 'r')
+			input_keymap = KEYMAP_TR;
+	}
+#if defined(__x86_64__)
+	pstore_attach();
+#endif
 	heap_init();
 
 	/* framebuffer TTY needs kmalloc — init after heap */
@@ -255,6 +306,9 @@ void kernel_main(void)
 
 	irq_init();
 	board_irq_init();
+#if defined(__x86_64__)
+	watchdog_init();   /* armed before anything below can stall the boot */
+#endif
 
 	/* "panic_test" on the kernel command line forces a fault so the branded
 	 * panic screen can be witnessed on real hardware (and in CI). An undefined
@@ -269,6 +323,7 @@ void kernel_main(void)
 
 	{ extern void csprng_init(void); csprng_init(); }
 	vfs_init();
+	kprintf(KERN_INFO "hash: self-test %s\n", hash_selftest() == 0 ? "ok" : "FAILED");
 	vfs_mount("/", "ramfs", NULL);
 	vfs_mkdir("/dev",  0755);
 	vfs_mkdir("/proc", 0555);
@@ -288,6 +343,7 @@ void kernel_main(void)
 	vfs_mkdir("/cgroup", 0755);
 	vfs_mount("/cgroup", "cgroup2", NULL);
 	initrd_init();
+	WD_BOOT_PROGRESS();
 
 	sched_init();
 	
@@ -303,13 +359,30 @@ void kernel_main(void)
 	rtc_init();
 	extern void smp_init(void);
 	smp_init();
+#if defined(__x86_64__)
+	{ extern void arch_idle_init(void); arch_idle_init(); }
+#endif
 	extern int smp_ncpus;
 	buddy_init_percpu(smp_ncpus);   /* enable per-CPU order-0 page caches */
+#if defined(__x86_64__)
+	watchdog_start();
+#endif
+	WD_BOOT_PROGRESS();
 	board_drivers_register();
+	WD_BOOT_PROGRESS();
 	extern void net_dhcp_all(void);
 	net_dhcp_all();
+	WD_BOOT_PROGRESS();
 	extern void fbdev_init(void);
 	fbdev_init();
+	extern void drm_init(void);
+	drm_init();                     /* /dev/dri: KMS on the firmware's mode */
+	extern void thermal_guard_init(void);
+	thermal_guard_init();           /* package temperature limit until ACPI drives the fan */
+	extern void rescue_init(void);
+	rescue_init();                  /* udp rescue channel + /dev/rescue (kernel/rescue.c) */
+	extern void claim_init(void);
+	claim_init();                   /* /dev/claim: visible resource claims (kernel/claim.c) */
 	extern void input_core_init(void);
 	input_core_init();
 	extern void tty_core_init(void);
@@ -334,11 +407,15 @@ void kernel_main(void)
 		 * devices so a partitioned boot disk wins /mnt over a bare
 		 * secondary disk that also carries a filesystem. */
 		int total = block_device_count();
+		/* Booting beside another OS: leave its filesystems alone. */
+		if (cmdline_has("ranix.noautomount")) total = 0;
 		int mounted = 0;
 		for (int pass = 0; pass < 2 && !mounted; pass++)
 		for (int bi = 0; bi < total; bi++) {
 			block_device_t *bd = block_device_get(bi);
-			if (!bd) continue;
+			/* A protected disk is not mounted at boot in any mode: mounting one is
+			 * a decision for its owner, not a default. */
+			if (!bd || bd->kernel_only || bd->ro) continue;
 			int is_part = 0;
 			for (const char *p = bd->name; *p; p++) if (*p == 'p') { is_part = 1; break; }
 			if ((pass == 0) != (is_part != 0)) continue;
@@ -349,7 +426,7 @@ void kernel_main(void)
 				uint16_t magic = *(uint16_t *)(sb_buf + 56); /* s_magic offset */
 				if (magic == 0xEF53) {
 					if (vfs_mount("/mnt", "ext2", bd) == 0) {
-						kprintf("ext2: mounted /mnt (%s)\n", bd->name);
+						kprintf(KERN_INFO "ext2: mounted /mnt (%s)\n", bd->name);
 						mounted = 1; break;
 					}
 				}
@@ -360,7 +437,7 @@ void kernel_main(void)
 				if (bd->read(bd, 0, bpb, 1) == 0 && bpb[510] == 0x55 && bpb[511] == 0xAA &&
 				    (uint16_t)(bpb[11] | (bpb[12] << 8)) == 512) {
 					if (vfs_mount("/mnt", "vfat", bd) == 0) {
-						kprintf("fat: mounted /mnt (%s)\n", bd->name);
+						kprintf(KERN_INFO "fat: mounted /mnt (%s)\n", bd->name);
 						mounted = 1; break;
 					}
 				}
@@ -371,13 +448,28 @@ void kernel_main(void)
 				if (bd->read(bd, 64, pvd, 1) == 0 && pvd[0] == 1 &&
 				    pvd[1]=='C' && pvd[2]=='D' && pvd[3]=='0' && pvd[4]=='0' && pvd[5]=='1') {
 					if (vfs_mount("/mnt", "iso9660", bd) == 0) {
-						kprintf("iso9660: mounted /mnt (%s)\n", bd->name);
+						kprintf(KERN_INFO "iso9660: mounted /mnt (%s)\n", bd->name);
 						mounted = 1; break;
 					}
 				}
 			}
 		}
 	}
+
+	/* Test images only: a direct call through the device's write pointer must meet
+	 * the gate as block_write does. The buffer is zeros, so a gate that failed here
+	 * would show on the image. */
+	if (cmdline_has("ranix.disk.selftest")) {
+		static uint8_t zero[BLOCK_SIZE];
+		for (int bi = 0; bi < block_device_count(); bi++) {
+			block_device_t *bd = block_device_get(bi);
+			if (!bd || !bd->ro || !bd->write) continue;
+			kprintf(KERN_INFO "blockguard: %s direct=%d api=%d\n", bd->name,
+			        bd->write(bd, 0, zero, 1), block_write(bd, 0, zero, 1));
+		}
+	}
+
+	WD_BOOT_PROGRESS();
 
 	/* Start init (PID 1) as the primary task */
 	static const char *init_candidates[] = {
@@ -410,10 +502,10 @@ void kernel_main(void)
 				vfs_read(fd, buf, st.size);
 				vfs_close(fd);
 				if (!cmdline_has("quiet"))
-					kprintf("Starting %s...\n", init_path);
+					kprintf(KERN_INFO "init: starting %s\n", init_path);
 				proc_exec(init_path, buf, st.size);
 			} else {
-				kprintf("init: vfs_open %s failed\n", init_path);
+				kprintf(KERN_ERR "init: vfs_open %s failed\n", init_path);
 			}
 			kfree(buf);
 		}
@@ -421,13 +513,23 @@ void kernel_main(void)
 		kpanic("init: no init binary found");
 	}
 
+#if defined(__x86_64__)
+	watchdog_boot_done();
+#endif
+
 	extern void net_poll(void);
 	while (1) {
 		net_poll();
 		/* Non-preemptible kernel: cpu0's idle yields voluntarily when a task
 		 * became runnable here (irq_handler preempts only user space). */
 		cpu_context_t *c = arch_get_cpu_ctx();
-		if (c->need_resched) { c->need_resched = 0; yield(); }
-		else                  arch_halt();
+		if (c->need_resched) {
+			extern void sched_bsp_wake(void);
+			sched_bsp_wake();
+			c->need_resched = 0;
+			yield();
+		} else {
+			arch_idle_deep(&c->need_resched, c->tick_slow);   /* checks and sleeps as one */
+		}
 	}
 }
