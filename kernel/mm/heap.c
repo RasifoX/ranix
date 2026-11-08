@@ -1,4 +1,5 @@
 #include <kernel/kprintf.h>
+#include <kernel/lib/string.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
@@ -42,8 +43,10 @@ void heap_init(void) {
         free_lists[i] = NULL;
 }
 
-void *kmalloc(size_t size) {
-    if (size == 0) return NULL;
+static void *kmalloc_raw(size_t size) {
+    /* user-derived sizes reach here: the header add and the order loop below
+     * must not wrap */
+    if (size == 0 || size > ((size_t)PAGE_SIZE << BUDDY_MAX_ORDER)) return NULL;
 
     size_t total = size + sizeof(heap_header_t);
 
@@ -115,11 +118,30 @@ void *kmalloc(size_t size) {
     return (void *)(hdr + 1);
 }
 
+/* Zeroed, always. Structures here reach user space field by field, and freed
+ * blocks hold the last owner's data: a field a path forgets is a leak or a wild
+ * pointer. One memset closes that whole class. */
+void *kmalloc(size_t size) {
+    void *p = kmalloc_raw(size);
+    if (p) memset(p, 0, size);
+    return p;
+}
+
+/* The last frees and who made them: a block freed twice names its first freer. */
+#define FREE_RING 512
+static struct { void *ptr, *by; } free_ring[FREE_RING];
+static uint32_t free_at;
+
 void kfree(void *ptr) {
     if (!ptr) return;
 
     heap_header_t *hdr = (heap_header_t *)ptr - 1;
     uint64_t f = spin_lock_irq(&heap_lock);
+    if (hdr->magic == HEAP_LARGE || hdr->magic == HEAP_MAGIC) {
+        free_ring[free_at % FREE_RING].ptr = ptr;
+        free_ring[free_at % FREE_RING].by = __builtin_return_address(0);
+        free_at++;
+    }
 
     if (hdr->magic == HEAP_LARGE) {
         buddy_free(VIRT_TO_PHYS(hdr), hdr->class_idx);
@@ -157,8 +179,15 @@ void kfree(void *ptr) {
             }
         }
     } else {
-        kprintf("kfree: bad ptr=%p hdr=%p magic=0x%x\n", ptr, hdr, hdr->magic);
-        kpanic("kfree: invalid pointer or corrupted header");
+        /* Most often a second free of a block that is still free: leaving it alone
+         * costs nothing, and the machine goes on. Say who did both. */
+        void *first = NULL;
+        for (uint32_t k = 1; k <= FREE_RING && k <= free_at; k++)
+            if (free_ring[(free_at - k) % FREE_RING].ptr == ptr) { first = free_ring[(free_at - k) % FREE_RING].by; break; }
+        spin_unlock_irq(&heap_lock, f);
+        kprintf(KERN_ERR "mm: kfree bad ptr=%p magic=0x%x by %p, %p; freed before by %p\n", ptr,
+                hdr->magic, __builtin_return_address(0), __builtin_return_address(1), first);
+        return;
     }
 
     spin_unlock_irq(&heap_lock, f);

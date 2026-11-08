@@ -33,8 +33,8 @@ static int kmsg_readable(void)
 {
 	int fd = open("/dev/kmsg", O_RDONLY);
 	if (fd < 0) return 0;
-	char c;
-	int n = read(fd, &c, 1);
+	char c[1024];                 /* one record a read: a too small buffer is EINVAL */
+	int n = read(fd, c, sizeof c);
 	close(fd);
 	return n >= 0;
 }

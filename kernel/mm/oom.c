@@ -8,19 +8,45 @@
 #include <kernel/mm/oom.h>
 #include <kernel/proc.h>
 #include <kernel/kprintf.h>
+#include <kernel/vfs.h>
+#include <kernel/config.h>
+#include <kernel/board.h>
+#include <kernel/hal.h>
 
-int oom_kill_alloc(void)
+int oom_kill_alloc_ex(int can_sleep)
 {
+#if IS_ENABLED(CONFIG_FS_EXT2)
+	if (ext2_shrink(1024)) return OOM_KILLED_OTHER;   /* clean cached blocks go first */
+#endif
 	process_t *cur = task_current();
-	process_t *v = oom_select_victim();
+	long charged = 0;
+	{
+		extern int oom_victim_pending(void);
+		extern volatile uint64_t kernel_ticks;
+		int pend = oom_victim_pending();
+		if (pend == 2) return OOM_KILLED_SELF;   /* this one dies on its way out */
+		if (pend == 1) {                         /* wait for the last kill to land */
+			if (can_sleep) {
+				task_sleep_until(kernel_ticks + TIMER_HZ / 50);
+			} else {                             /* under a spinlock: spin, briefly */
+				/* bounded by count too: with interrupts off on the tick CPU
+				 * kernel_ticks would not move */
+				uint64_t t = kernel_ticks;
+				for (int k = 0; k < 2000000 && kernel_ticks - t < TIMER_HZ / 200; k++)
+					cpu_relax();
+			}
+			return OOM_KILLED_OTHER;
+		}
+	}
+	process_t *v = oom_select_victim(&charged);
 	if (!v) {
-		kprintf("oom: no killable victim — allocation will fail\n");
+		kprintf(KERN_ERR "oom: no killable victim, allocation will fail\n");
 		return OOM_NONE;
 	}
 
 	int self = (v == cur);
-	kprintf("oom: kill pid=%u (%s) charged=%ldKB%s\n",
-	        (unsigned)v->pid, v->name, v->mem_charged >> 10,
+	kprintf(KERN_WARN "oom: kill pid=%u (%s) charged=%ldKB%s\n",
+	        (unsigned)v->pid, v->name, charged >> 10,
 	        self ? " [self]" : "");
 	oom_kill_victim(v);
 	proc_put(v);
