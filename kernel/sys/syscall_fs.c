@@ -22,39 +22,50 @@ static void path_trim_trailing_slash(char *p)
 	while (n > 1 && p[n - 1] == '/') p[--n] = '\0';
 }
 
+/* The path of the directory dirfd names, into base (PATH_MAX), for a walk:
+ * from where it stands now (vfs_file_dirpath), or by its opening path where the
+ * cache keeps no position. *top: as vfs_file_dirpath. */
+static int dirfd_base(process_t *p, int dirfd, char *base, vfs_dentry_t **top)
+{
+	vfs_file_t *f = (p && p->fds) ? fget(p->fds, dirfd) : NULL;
+	int r = 0;
+	*top = NULL;
+	if (!f) return -9;                                         /* EBADF */
+	if (!f->inode)                     r = -9;
+	else if (!S_ISDIR(f->inode->mode)) r = -20;                /* ENOTDIR */
+	else if ((r = vfs_file_dirpath(f, base, top)) == 1) {
+		r = f->path[0] == '/' ? 0 : -9;
+		if (!r) memcpy(base, f->path, strlen(f->path) + 1);
+	}
+	fput(f);
+	return r;
+}
+
 /* resolve a (possibly dirfd-relative) user path to an absolute kernel path.
- * `out` must hold PATH_MAX bytes. A relative path is joined onto cwd in a heap
- * scratch buffer so this stays a single PATH_MAX stack frame. */
+ * `out` must hold PATH_MAX bytes. A relative path is joined onto its base in a
+ * heap scratch buffer so this stays a single PATH_MAX stack frame. */
 static int resolve_path(char *out, int dirfd, const char *upath)
 {
 	int r = copy_path_from_user(out, upath);
 	if (r) return r;
 	/* "" names nothing; joined onto the base it would silently mean the cwd */
 	if (!out[0]) return -2;
-	if (out[0] == '/') { path_trim_trailing_slash(out); return 0; }
 	process_t *p = task_current();
-	const char *base;
-	vfs_file_t *f = NULL;   /* pinned: base points into it, a sibling may close dirfd */
-	fs_path_t *cwd = NULL;  /* held: a CLONE_FS sibling may chdir meanwhile */
-	if (dirfd == AT_FDCWD) {
-		cwd = fs_cwd_get(p->fs);
-		base = cwd->s;
-	} else {
-		f = (p && p->fds) ? fget(p->fds, dirfd) : NULL;
-		if (!f) return -9;                                      /* EBADF */
-		if (!f->inode)                { fput(f); return -9; }
-		if (!S_ISDIR(f->inode->mode)) { fput(f); return -20; }  /* ENOTDIR */
-		if (f->path[0] != '/')        { fput(f); return -9; }
-		base = f->path;
-		vfs_walk_anchor(p, base);
-	}
-	int blen = strlen(base), plen = strlen(out);
-	if (blen + 1 + plen >= PATH_MAX) { fput(f); fs_path_put(cwd); return -36; }
+	if (out[0] == '/') { path_trim_trailing_slash(out); return vfs_walk_from(p, NULL); }
 	char *tmp = kmalloc(PATH_MAX);
-	if (!tmp) { fput(f); fs_path_put(cwd); return -12; }
-	memcpy(tmp, base, blen);
-	fput(f);
-	fs_path_put(cwd);
+	if (!tmp) return -12;
+	vfs_dentry_t *top = NULL;
+	if (dirfd == AT_FDCWD) {
+		fs_path_t *cwd = fs_cwd_get(p->fs);   /* held: a CLONE_FS sibling may chdir meanwhile */
+		memcpy(tmp, cwd->s, strlen(cwd->s) + 1);
+		fs_path_put(cwd);
+	} else if (!(r = dirfd_base(p, dirfd, tmp, &top))) {
+		vfs_walk_anchor(p, tmp);
+	}
+	if (!r) r = vfs_walk_from(p, top);
+	int blen = r ? 0 : (int)strlen(tmp), plen = (int)strlen(out);
+	if (!r && blen + 1 + plen >= PATH_MAX) r = -36;
+	if (r) { kfree(tmp); return r; }
 	if (blen == 0 || tmp[blen - 1] != '/') tmp[blen++] = '/';
 	memcpy(tmp + blen, out, plen);
 	tmp[blen + plen] = '\0';

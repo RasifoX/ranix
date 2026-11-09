@@ -303,6 +303,8 @@ typedef struct process {
 	int             walk_denied;   /* this syscall's path walk stopped at a directory it may not search */
 	int             walking;       /* this syscall has walked a path; see the deferred frees in vfs.c */
 	char           *walk_anchor[2]; /* this syscall's dirfd paths; see walk_anchored in vfs.c */
+	struct vfs_dentry *walk_top;   /* this syscall's held directory above the root; see vfs_walk_from */
+	uint8_t         walk_kinds;    /* this syscall's path starts: 1 the root, 2 walk_top */
 	uint32_t        walk_gen;
 
 	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */

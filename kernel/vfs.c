@@ -164,6 +164,21 @@ void vfs_inode_free(vfs_inode_t *in)
 typedef struct { vfs_inode_t *in; vfs_dentry_t *de; vfs_deferred_t *call; vfs_inode_t *fr; } grave_t;
 
 static spinlock_t grave_lock = SPINLOCK_INIT;
+
+/* Where an open directory stands: its dentry (held, see dentry_hold) and the
+ * mounts the walk that opened it came in through, innermost last, so that ".."
+ * and its path leave a bind the way they entered (walk_t.mnt). A directory the
+ * cache does not keep (procfs /proc/PID) has no dentry: it keeps instead the
+ * dentry its f->path starts from (held too), the root it was opened under. */
+#define WALK_MNT_MAX 16
+typedef struct { vfs_dentry_t *root, *mp; } walk_mnt_t;
+typedef struct { int n; vfs_dentry_t *start; walk_mnt_t mnt[WALK_MNT_MAX]; } walk_mnts_t;
+struct vfs_dirpos {
+	vfs_dentry_t *d;         /* NULL: not cached, see start */
+	vfs_dentry_t *start;     /* where f->path starts, when d is NULL */
+	int           nmnt;
+	walk_mnt_t    mnt[];
+};
 static uint32_t   walk_gen, walkers[2];
 static grave_t    grave_new, grave_old;
 
@@ -264,13 +279,15 @@ static int on_anchor(const char *anchor, const char *start, size_t n)
 	return anchor[n] == '/' || anchor[n] == '\0';
 }
 
-static int walk_anchored(const char *start, const char *end)
+static int walk_anchored(const char *start, const char *end, int outside)
 {
 	process_t *p = task_current();
 	size_t n = (size_t)(end - start);
 	if (!p) return 0;
+	if (outside == 2) return 0;   /* back at the root by a symlink: the anchors lie above */
 	if (on_anchor(p->walk_anchor[0], start, n) || on_anchor(p->walk_anchor[1], start, n))
 		return 1;
+	if (outside) return 0;   /* the cwd is a path from the root, not from above it */
 	fs_path_t *cwd = fs_cwd_get(p->fs);   /* held: a CLONE_FS sibling may chdir */
 	int r = on_anchor(cwd->s, start, n);
 	fs_path_put(cwd);
@@ -288,6 +305,34 @@ void vfs_walk_anchor(process_t *p, const char *path)
 	p->walk_anchor[i] = c;
 }
 
+/* Where this syscall's next path starts: at the task's root (top NULL), or, for
+ * a directory held from before a chroot, at the top of the tree above it
+ * (vfs_file_dirpath). A path walks from the top only when it lies on that
+ * directory's anchor. One syscall's paths start at one of the two: mixing them
+ * (renameat from such a directory to a path of the root) is -18 (EXDEV). */
+int vfs_walk_from(process_t *p, vfs_dentry_t *top)
+{
+	int kind = top ? 2 : 1;
+	if (top && p->walk_top && p->walk_top != top) return -18;
+	if ((p->walk_kinds | kind) == 3) return -18;
+	p->walk_kinds |= kind;
+	if (top) p->walk_top = top;
+	return 0;
+}
+
+/* The held directory's top, if path is on one of this syscall's anchors */
+static vfs_dentry_t *walk_top_for(process_t *p, const char *path)
+{
+	if (!p || !p->walk_top) return NULL;
+	for (int i = 0; i < 2; i++) {
+		const char *a = p->walk_anchor[i];
+		size_t n = a ? strlen(a) : 0;
+		if (a && strncmp(path, a, n) == 0 && (n == 1 || path[n] == '/' || path[n] == '\0'))
+			return p->walk_top;
+	}
+	return NULL;
+}
+
 /* At syscall exit and task exit, and before anything that may block for long. */
 void vfs_walk_done(process_t *p)
 {
@@ -295,6 +340,8 @@ void vfs_walk_done(process_t *p)
 		kfree(p->walk_anchor[i]);
 		p->walk_anchor[i] = NULL;
 	}
+	p->walk_top = NULL;
+	p->walk_kinds = 0;
 	if (!p->walking) return;
 	uint64_t f = spin_lock_irq(&grave_lock);
 	p->walking = 0;
@@ -341,8 +388,34 @@ static void dentry_retire(vfs_dentry_t *d)
 		return;
 	}
 	d->retired = 1;
+	if (d->holds) {                 /* the last close of a directory here frees it */
+		spin_unlock_irq(&grave_lock, f);
+		return;
+	}
 	d->grave_next = grave_new.de;
 	grave_new.de = d;
+	spin_unlock_irq(&grave_lock, f);
+}
+
+/* An open directory holds its dentry: the cache keeps it, and if its name goes
+ * (rmdir, a rename over it, umount) it stays readable, marked retired, until
+ * the hold is dropped. 0: d is retired already, and nothing is held. */
+static int dentry_hold(vfs_dentry_t *d)
+{
+	uint64_t f = spin_lock_irq(&grave_lock);
+	int ok = !d->retired;
+	if (ok) d->holds++;
+	spin_unlock_irq(&grave_lock, f);
+	return ok;
+}
+
+static void dentry_unhold(vfs_dentry_t *d)
+{
+	uint64_t f = spin_lock_irq(&grave_lock);
+	if (--d->holds == 0 && d->retired) {
+		d->grave_next = grave_new.de;
+		grave_new.de = d;
+	}
 	spin_unlock_irq(&grave_lock, f);
 }
 
@@ -500,7 +573,7 @@ static void dentry_unlink(vfs_dentry_t *d)
 static int dentry_evictable(vfs_dentry_t *d)
 {
 	vfs_inode_t *in = d->inode;
-	return d->pprev && !d->child && !d->pins && !d->keep && !d->retired &&
+	return d->pprev && !d->child && !d->pins && !d->keep && !d->retired && !d->holds &&
 	       in && in->lookup_copy && !in->open_refs && !in->in_grave && d != root_dentry;
 }
 
@@ -565,6 +638,7 @@ static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_
 	d->pprev  = NULL;
 	d->lru_prev = d->lru_next = NULL;
 	d->keep   = 0;
+	d->holds  = 0;
 
 	if (parent) {
 		/* full: make room among the oldest first, never under the new name */
@@ -798,6 +872,7 @@ uint32_t vfs_path_sdev(const char *path)
 
 static void file_free(vfs_file_t *f)
 {
+	if (f->at) { dentry_unhold(f->at->d ? f->at->d : f->at->start); kfree(f->at); }
 	if (f->bdev) block_put(f->bdev);
 	kfree(f->lpath);
 	kfree(f);
@@ -852,7 +927,6 @@ static void rp_pop(char *rp, int *rl)
  * dentry cache stands in volatile_dentry, and the walk owns its inode
  * (prev_volatile) until the next step. f holds the irq flags of vfs_lock while
  * the walk has it. */
-#define WALK_MNT_MAX 16
 
 typedef struct {
 	vfs_dentry_t *d;
@@ -869,8 +943,10 @@ typedef struct {
 	 * parent, so a walk that reached the same directory by its own path leaves
 	 * by that parent instead. Dentries, not mounts: an umount meanwhile cannot
 	 * free them under the walk. */
-	struct { vfs_dentry_t *root, *mp; } mnt[WALK_MNT_MAX];
+	walk_mnt_t    mnt[WALK_MNT_MAX];
 	int           nmnt;
+	int           outside;     /* started above proc_root, at the held directory's top */
+	vfs_dentry_t *start;       /* where rp starts: that top, or proc_root */
 } walk_t;
 
 /* Step from d into whatever is mounted on it, as follow_mounts does, and note
@@ -1003,6 +1079,75 @@ static vfs_dentry_t *walk_lookup(walk_t *w, const char *name)
 	return &w->volatile_dentry;
 }
 
+/* What an fd link of procfs names, as a copy of the open file's attributes for
+ * stat. Strictly read-only: open (vfs_open_fds_rp) and link (vfs_link) refuse
+ * it, and every attribute change through it is EPERM. */
+static int snapshot_setattr(vfs_inode_t *in, const vfs_iattr_t *a)
+{
+	(void)in; (void)a;
+	return -1;
+}
+static vfs_iops_t snapshot_iops = { .setattr = snapshot_setattr };
+
+static vfs_inode_t *inode_snapshot(vfs_inode_t *src)
+{
+	vfs_stat_t st = {0};
+	if (src->iops && src->iops->stat) {
+		if (src->iops->stat(src, &st)) return NULL;
+	} else {
+		st.ino = src->ino; st.mode = src->mode; st.nlink = src->nlink;
+		st.uid = src->uid; st.gid = src->gid; st.size = src->size; st.rdev = src->rdev;
+	}
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino = st.ino; in->mode = st.mode; in->nlink = st.nlink;
+	in->uid = st.uid; in->gid = st.gid; in->size = st.size; in->rdev = st.rdev;
+	in->atime = src->atime; in->mtime = src->mtime; in->ctime = src->ctime;
+	in->refcount = 1;
+	in->iops = &snapshot_iops;
+	return in;
+}
+
+/* child is an fd link of procfs (iops->link_file), met at the name ending at
+ * end. Its text is walked as any symlink's (0) when it is the absolute path the
+ * file was opened by under this same root. Otherwise, as the last name, the
+ * walk ends on a copy of the file's attributes (1): Linux follows the link to
+ * the open file itself, which a path from another root (opened before a
+ * chroot), or a socket or pipe with no path, cannot name. Caller holds
+ * vfs_lock; this drops and retakes it. -1: the walk fails, the lock dropped. */
+static int walk_fdlink(walk_t *w, vfs_dentry_t *child, const char *end)
+{
+	const char *rest = end;
+	while (*rest == '/') rest++;
+	vfs_inode_t *lin = child->inode, *in = NULL;
+	spin_unlock_irq(&vfs_lock, w->f);
+	vfs_file_t *f = lin->iops->link_file(lin);
+	int r = 0;
+	if (f && !*rest && !(f->path[0] == '/' && f->opened_root == w->proc_root)) {
+		in = f->inode ? inode_snapshot(f->inode) : NULL;
+		r = in ? 1 : -1;
+	}
+	if (f) fput(f);
+	if (r == -1) {
+		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
+		return -1;
+	}
+	w->f = spin_lock_irq(&vfs_lock);
+	if (r == 1) {
+		/* in takes the link's place: in the volatile slot, under the link's directory */
+		if (child != &w->volatile_dentry) w->volatile_dentry.parent = w->d;
+		if (w->prev_volatile) vfs_inode_free(w->prev_volatile);
+		w->volatile_dentry.inode = in;
+		w->volatile_dentry.child = NULL;
+		w->volatile_dentry.next  = NULL;
+		w->prev_volatile = in;
+		w->d_is_volatile = 1;
+		w->d = &w->volatile_dentry;
+	}
+	return r;
+}
+
 /* child is a symlink met at the name ending at end, in work. Put its target in
  * place of the names walked so far and point *pp at where the walk goes on.
  * Caller holds vfs_lock. -1: the walk fails, and the lock is dropped. */
@@ -1049,6 +1194,8 @@ static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *
 		if (w->rp) { w->rl = 0; w->rp[0] = '\0'; }   /* an absolute target starts over at the root */
 		w->d = w->proc_root;
 		w->nmnt = 0;
+		if (w->outside) w->outside = 2;
+		w->start = w->proc_root;
 		*pp = work + 1;
 		w->d_is_volatile = 0;
 		/* Absolute symlink restart — free any volatile context */
@@ -1065,42 +1212,91 @@ static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *
 	return 0;
 }
 
-static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, char *rp)
+/* Set w up to walk path from the task's root. *workp gets the walk's own copy of
+ * path, which symlinks rewrite. 0: vfs_lock is held (w->f). -1: no walk, and the
+ * lock is not held. */
+static int walk_init(walk_t *w, const char *path, char *rp, char **workp)
 {
-	walk_t w;
-	w.rp = rp;
-	w.rl = 0;
+	w->rp = rp;
+	w->rl = 0;
 	if (rp) rp[0] = '\0';
 	walk_begin();
-	w.f = spin_lock_irq(&vfs_lock);
+	w->f = spin_lock_irq(&vfs_lock);
 	if (!path || path[0] != '/' || !root_dentry) {
-		spin_unlock_irq(&vfs_lock, w.f);
-		return NULL;
+		spin_unlock_irq(&vfs_lock, w->f);
+		return -1;
 	}
 
 	/* mutable work buffer so symlink splicing can rewrite the path. Heap-backed
 	 * (PATH_MAX): a stack array this large would blow the kernel stack once
 	 * overlayfs lookup re-enters this resolver. */
 	char *work = kmalloc(PATH_MAX);
-	if (!work) { spin_unlock_irq(&vfs_lock, w.f); return NULL; }
+	if (!work) { spin_unlock_irq(&vfs_lock, w->f); return -1; }
 	int wi = 0;
 	while (wi < PATH_MAX - 1 && path[wi]) { work[wi] = path[wi]; wi++; }
-	if (path[wi]) { kfree(work); spin_unlock_irq(&vfs_lock, w.f); return NULL; }
+	if (path[wi]) { kfree(work); spin_unlock_irq(&vfs_lock, w->f); return -1; }
 	work[wi] = '\0';
 
 	/* chroot: an absolute path is relative to the process's own root, not the
 	 * global one. NULL ->root means it sees "/" as the global root. */
 	process_t *_cur = task_current();
 	vfs_dentry_t *_root = fs_root_of((struct process *)_cur);
-	w.proc_root = _root ? _root : root_dentry;
+	w->proc_root = _root ? _root : root_dentry;
 
 	/* a mount's root has ->parent set to outside the mount, so a process root that
 	 * is a mountpoint is left through this dentry, not through proc_root */
-	w.root_top = follow_mounts(w.proc_root);
-	w.d = w.root_top;
-	w.d_is_volatile = 0;
-	w.prev_volatile = NULL;
-	w.nmnt = 0;
+	w->root_top = follow_mounts(w->proc_root);
+	vfs_dentry_t *top = walk_top_for(_cur, path);
+	w->outside = top != NULL;
+	w->d = top ? follow_mounts(top) : w->root_top;
+	w->start = top ? top : w->proc_root;
+	w->d_is_volatile = 0;
+	w->prev_volatile = NULL;
+	w->nmnt = 0;
+	*workp = work;
+	return 0;
+}
+
+/* The end of a walk: the mount flags and the path it took, for those who asked,
+ * and the volatile dentry moved out of w, which dies with the caller's frame. */
+static vfs_dentry_t *walk_finish(walk_t *w, vfs_dentry_t *reached, unsigned long *mflags, char *rp)
+{
+	if (mflags) {
+		uint64_t f = spin_lock_irq(&vfs_lock);
+		*mflags |= dentry_mnt_flags(w->d ? w->d : reached);
+		spin_unlock_irq(&vfs_lock, f);
+	}
+	if (rp) {
+		if (!w->d || w->rl < 0) rp[0] = '\0';
+		else if (w->rl == 0) { rp[0] = '/'; rp[1] = '\0'; }
+	}
+	/* volatile_dentry dies with this frame; callers keep reading d->inode */
+	if (w->d == &w->volatile_dentry) {
+		vfs_dentry_t *slot = volatile_slot();
+		slot->inode  = w->volatile_dentry.inode;
+		slot->parent = w->volatile_dentry.parent;
+		slot->child  = NULL;
+		slot->next   = NULL;
+		w->d = slot;
+	}
+	return w->d;
+}
+
+static vfs_dentry_t *resolve_walk_ms(const char *path, unsigned long *mflags, char *rp,
+                                     walk_mnts_t *ms);
+static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, char *rp)
+{
+	return resolve_walk_ms(path, mflags, rp, NULL);
+}
+
+/* With ms set, also the mounts the walk ended inside (for vfs_dirpos). */
+static vfs_dentry_t *resolve_walk_ms(const char *path, unsigned long *mflags, char *rp,
+                                     walk_mnts_t *ms)
+{
+	walk_t w;
+	char *work;
+	if (ms) { ms->n = 0; ms->start = NULL; }
+	if (walk_init(&w, path, rp, &work)) return NULL;
 	const char   *p = work + 1;   /* skip leading '/' */
 	int symlink_depth = 0;
 	vfs_dentry_t *reached = w.d;
@@ -1134,7 +1330,7 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 		 * (ramfs reads it as a dir entry list), so calling it on a regular file
 		 * walks file bytes as a pointer chain and faults. Reject here. */
 		if ((w.d->inode && !S_ISDIR(w.d->inode->mode)) ||
-		    (!walk_anchored(work, end) && !vfs_may_search(w.d->inode))) {
+		    (!walk_anchored(work, end, w.outside) && !vfs_may_search(w.d->inode))) {
 			spin_unlock_irq(&vfs_lock, w.f);
 			if (w.prev_volatile) { vfs_inode_free(w.prev_volatile); w.prev_volatile = NULL; }
 			w.d = NULL; goto out;
@@ -1148,6 +1344,10 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 		 * so resolve to the link itself and let open() act on the object
 		 * rather than following its text. */
 		if (S_ISLNK(child->inode->mode) && !child->inode->fops) {
+			int fr = child->inode->iops && child->inode->iops->link_file ?
+			         walk_fdlink(&w, child, end) : 0;
+			if (fr < 0) { w.d = NULL; goto out; }
+			if (fr > 0) { p = end; continue; }
 			if (walk_symlink(&w, child, work, end, &p, mflags, &symlink_depth) != 0) {
 				w.d = NULL; goto out;
 			}
@@ -1162,26 +1362,13 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 	/* prev_volatile (if set) is the FINAL component's inode — freed by vfs_close */
 	spin_unlock_irq(&vfs_lock, w.f);
 out:
-	if (mflags) {
-		uint64_t f = spin_lock_irq(&vfs_lock);
-		*mflags |= dentry_mnt_flags(w.d ? w.d : reached);
-		spin_unlock_irq(&vfs_lock, f);
-	}
 	kfree(work);
-	if (rp) {
-		if (!w.d || w.rl < 0) rp[0] = '\0';
-		else if (w.rl == 0) { rp[0] = '/'; rp[1] = '\0'; }
+	if (ms) {
+		ms->n = w.d ? w.nmnt : 0;
+		ms->start = w.start;
+		memcpy(ms->mnt, w.mnt, sizeof(w.mnt[0]) * (size_t)ms->n);
 	}
-	/* volatile_dentry dies with this frame; callers keep reading d->inode */
-	if (w.d == &w.volatile_dentry) {
-		vfs_dentry_t *slot = volatile_slot();
-		slot->inode  = w.volatile_dentry.inode;
-		slot->parent = w.volatile_dentry.parent;
-		slot->child  = NULL;
-		slot->next   = NULL;
-		w.d = slot;
-	}
-	return w.d;
+	return walk_finish(&w, reached, mflags, rp);
 }
 
 /* The cached dentry of name in dir, following neither symlinks nor mounts. NULL
@@ -1572,6 +1759,96 @@ static vfs_dentry_t *my_root(void)
 	process_t *c = task_current();
 	vfs_dentry_t *r = fs_root_of((struct process *)c);
 	return r ? r : root_dentry;
+}
+
+/* The position of a directory f just opened, which the walk ended on at d */
+static struct vfs_dirpos *dirpos_new(vfs_dentry_t *d, const walk_mnts_t *ms)
+{
+	if (!d) return NULL;
+	if (vfs_dentry_is_volatile(d)) d = NULL;
+	if (!d && !ms->start) return NULL;
+	struct vfs_dirpos *pos = kmalloc(sizeof(*pos) + sizeof(walk_mnt_t) * (size_t)ms->n);
+	if (!pos) return NULL;
+	if (!dentry_hold(d ? d : ms->start)) { kfree(pos); return NULL; }
+	pos->d = d;
+	pos->start = ms->start;
+	pos->nmnt = ms->n;
+	memcpy(pos->mnt, ms->mnt, sizeof(walk_mnt_t) * (size_t)ms->n);
+	return pos;
+}
+
+/* c is the root of a mount pos came in through, or of one in ns: its mountpoint
+ * stands for it (name and parent). Only a mount still there counts; a stale
+ * entry is compared, never followed. Caller holds vfs_lock. */
+static vfs_dentry_t *dirpos_mountpoint(struct vfs_dirpos *pos, int *n,
+                                       mnt_namespace_t *ns, vfs_dentry_t *c)
+{
+	while (*n && c == pos->mnt[*n - 1].root) {
+		vfs_dentry_t *mp = pos->mnt[--*n].mp;
+		for (vfs_mount_t *m = ns->mounts; m; m = m->next)
+			if (m->mountpoint == mp && m->root == c) return mp;
+	}
+	if (c->pprev) return NULL;   /* in a child list: no mount's own root */
+	for (vfs_mount_t *m = ns->mounts; m; m = m->next)
+		if (m->root == c && m->mountpoint) return m->mountpoint;
+	return NULL;
+}
+
+/* name in front of the path being built backwards at out + *at */
+static int path_prepend(char *out, int *at, const char *name)
+{
+	int len = (int)strlen(name);
+	if (*at - len - 1 < 0) return -36;
+	*at -= len;
+	memcpy(out + *at, name, (size_t)len);
+	out[--*at] = '/';
+	return 0;
+}
+
+/* A directory not cached: its f->path, from the root it was opened under. That
+ * is the caller's root as a rule (1: go by f->path); after a chroot it is the
+ * start of the walk, above the new root. */
+static int dirpos_by_path(vfs_file_t *f, vfs_dentry_t *root, char *out, vfs_dentry_t **top)
+{
+	vfs_dentry_t *s = f->at->start;
+	if (s == root || f->path[0] != '/') return 1;
+	if (s->retired) return -2;
+	memcpy(out, f->path, strlen(f->path) + 1);
+	*top = s;
+	return 0;
+}
+
+/* Where the open directory f stands now (Linux: a dirfd lookup starts at the
+ * directory, not at its name), written to out (PATH_MAX) as a path for this
+ * task's walk: from its root when f lies below it; else (f was opened before a
+ * chroot) from the top of the tree above f, which *top then names. 1: f has no
+ * position (not a directory, or one the cache does not keep), go by f->path.
+ * -2: removed. -36: too long. */
+int vfs_file_dirpath(vfs_file_t *f, char *out, vfs_dentry_t **top)
+{
+	struct vfs_dirpos *pos = f->at;
+	if (!pos) return 1;
+	vfs_dentry_t *root = my_root();
+	if (!pos->d) return dirpos_by_path(f, root, out, top);
+	mnt_namespace_t *ns = current_mnt_ns();
+	walk_begin();   /* the parents read below stay until this syscall ends */
+	uint64_t fl = spin_lock_irq(&vfs_lock);
+	vfs_dentry_t *root_top = follow_mounts(root), *c = pos->d, *mp;
+	int n = pos->nmnt, at = PATH_MAX - 1, r = 0;
+	out[at] = '\0';
+	*top = NULL;
+	for (int guard = 0; !r; guard++) {
+		if (c->retired || guard > PATH_MAX / 2) r = -2;
+		else if (c == root || c == root_top) break;
+		else if ((mp = dirpos_mountpoint(pos, &n, ns, c))) c = mp;
+		else if (!c->parent || c->parent == c) { *top = c; break; }
+		else if (!(r = path_prepend(out, &at, c->name))) c = c->parent;
+	}
+	spin_unlock_irq(&vfs_lock, fl);
+	if (r) return r;
+	if (at == PATH_MAX - 1) out[--at] = '/';
+	memmove(out, out + at, (size_t)(PATH_MAX - at));
+	return 0;
 }
 
 size_t vfs_proc_mounts(char *buf, size_t sz)
@@ -2027,52 +2304,86 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	return ret;
 }
 
+/* O_CREAT of a name the walk did not find: make it in its parent directory.
+ * 0 with *dp and *inp set; 1 when someone made it meanwhile (the caller walks
+ * again, once); else -errno. */
+static int open_create(const char *path, uid_t uid, gid_t gid, mode_t umask, mode_t mode,
+                       char *rp, int raced, vfs_dentry_t **dp, vfs_inode_t **inp)
+{
+	/* find parent directory */
+	const char *fname;
+	char *dir_path = vfs_parent_alloc(path, &fname);
+	if (!dir_path) return -12;
+
+	vfs_dentry_t *parent = resolve_walk_rp(dir_path, NULL, rp);
+	/* the new name sits in the parent's real directory */
+	if (rp && rp[0]) {
+		size_t pl = strlen(rp), fl = strlen(fname);
+		if (pl == 1) pl = 0;   /* parent is the root */
+		if (pl + 1 + fl < PATH_MAX) { rp[pl] = '/'; memcpy(rp + pl + 1, fname, fl + 1); }
+		else rp[0] = '\0';
+	}
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
+	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE | MAY_EXEC, uid, gid);
+	if (pr) { kfree(dir_path); return pr; }
+
+	mode_t cmode = mode & ~umask;
+	/* /proc, /sys and friends have no create */
+	if (!parent->inode->iops->create) { kfree(dir_path); return -13; }
+	int cr = parent->inode->iops->create(parent->inode, fname, cmode);
+	if (cr != 0) {
+		kfree(dir_path);
+		/* someone created it since the walk: this is then a plain open */
+		if (cr == -17 && !raced) return 1;
+		return cr < -1 ? cr : -5;   /* -1 is a filesystem's bare failure, not EPERM */
+	}
+
+	vfs_inode_t *inode = parent->inode->iops->lookup(parent->inode, fname);
+	if (!inode) { kfree(dir_path); return -5; }
+	*inp = inode;
+	*dp = vfs_dentry_create(parent, fname, inode);
+	if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
+	kfree(dir_path);
+	return 0;
+}
+
+/* f->path: where the walk went (rp), else path made canonical. */
+static void file_set_path(vfs_file_t *f, const char *path, const char *rp)
+{
+	/* a truncated path would name some other file to openat and fchdir: too long
+	 * stays empty, which they refuse */
+	if (strlen(path) < sizeof(f->path)) {
+		/* A path that does not fit is no path: cut short it would name another file
+		 * for every openat against this descriptor, which now fails instead. */
+		if (path[0] == '/' && rp && rp[0] && strlen(rp) < sizeof(f->path)) memcpy(f->path, rp, strlen(rp) + 1);
+		else if (path[0] == '/' && strlen(path) < sizeof(f->path)) vfs_canon_path(path, f->path, sizeof(f->path));
+		else if (path[0] != '/' && strlen(path) < sizeof(f->path)) memcpy(f->path, path, strlen(path) + 1);
+	}
+	/* too long for path[]: keep the walked absolute path aside for fchdir */
+	if (!f->path[0] && path[0] == '/' && rp && rp[0] == '/') {
+		size_t rl = strlen(rp);
+		f->lpath = kmalloc(rl + 1);
+		if (f->lpath) memcpy(f->lpath, rp, rl + 1);
+	}
+}
+
 static int vfs_open_fds_rp(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
                            const char *path, int flags, mode_t mode, unsigned long mflags, char *rp)
 {
 	vfs_inode_t  *inode = NULL;
+	walk_mnts_t ms;
 	int raced = 0;
 again:;
-	vfs_dentry_t *d = resolve_walk_rp(path, NULL, rp);
+	vfs_dentry_t *d = resolve_walk_ms(path, NULL, rp, &ms);
 
 	if (!d) {
 		if (!(flags & O_CREAT)) return -2; /* ENOENT */
 
-		/* find parent directory */
-		const char *fname;
-		char *dir_path = vfs_parent_alloc(path, &fname);
-		if (!dir_path) return -12;
-
-		vfs_dentry_t *parent = resolve_walk_rp(dir_path, NULL, rp);
-		/* the new name sits in the parent's real directory */
-		if (rp && rp[0]) {
-			size_t pl = strlen(rp), fl = strlen(fname);
-			if (pl == 1) pl = 0;   /* parent is the root */
-			if (pl + 1 + fl < PATH_MAX) { rp[pl] = '/'; memcpy(rp + pl + 1, fname, fl + 1); }
-			else rp[0] = '\0';
-		}
-		if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
-		if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
-
-		int pr = vfs_check_perm(parent->inode, MAY_WRITE | MAY_EXEC, uid, gid);
-		if (pr) { kfree(dir_path); return pr; }
-
-		mode_t cmode = mode & ~umask;
-		/* /proc, /sys and friends have no create */
-		if (!parent->inode->iops->create) { kfree(dir_path); return -13; }
-		int cr = parent->inode->iops->create(parent->inode, fname, cmode);
-		if (cr != 0) {
-			kfree(dir_path);
-			/* someone created it since the walk: this is then a plain open */
-			if (cr == -17 && !raced) { raced = 1; goto again; }
-			return cr < -1 ? cr : -5;   /* -1 is a filesystem's bare failure, not EPERM */
-		}
-
-		inode = parent->inode->iops->lookup(parent->inode, fname);
-		if (!inode) { kfree(dir_path); return -5; }
-		d = vfs_dentry_create(parent, fname, inode);
-		if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
-		kfree(dir_path);
+		int cr = open_create(path, uid, gid, umask, mode, rp, raced, &d, &inode);
+		if (cr == 1) { raced = 1; goto again; }
+		if (cr) return cr;
 	} else {
 		if ((flags & O_CREAT) && (flags & O_EXCL)) return -17; /* EEXIST */
 		inode = d->inode;
@@ -2095,6 +2406,7 @@ again:;
 	}
 
 	if (!inode) return -5;
+	if (inode->iops == &snapshot_iops) return -6;   /* ENXIO: names no file to open */
 	if ((mflags & MS_NODEV) && (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)))
 		return -13; /* EACCES */
 	if ((flags & O_DIRECTORY) && !S_ISDIR(inode->mode)) return -20; /* ENOTDIR */
@@ -2109,21 +2421,9 @@ again:;
 	f->refcount = 0; /* incremented by fd_alloc */
 	f->bdev     = dentry_bdev_get(d);
 	f->sdev     = dentry_sdev(d);
-	/* a truncated path would name some other file to openat and fchdir: too long
-	 * stays empty, which they refuse */
-	if (strlen(path) < sizeof(f->path)) {
-		/* A path that does not fit is no path: cut short it would name another file
-		 * for every openat against this descriptor, which now fails instead. */
-		if (path[0] == '/' && rp && rp[0] && strlen(rp) < sizeof(f->path)) memcpy(f->path, rp, strlen(rp) + 1);
-		else if (path[0] == '/' && strlen(path) < sizeof(f->path)) vfs_canon_path(path, f->path, sizeof(f->path));
-		else if (path[0] != '/' && strlen(path) < sizeof(f->path)) memcpy(f->path, path, strlen(path) + 1);
-	}
-	/* too long for path[]: keep the walked absolute path aside for fchdir */
-	if (!f->path[0] && path[0] == '/' && rp && rp[0] == '/') {
-		size_t rl = strlen(rp);
-		f->lpath = kmalloc(rl + 1);
-		if (f->lpath) memcpy(f->lpath, rp, rl + 1);
-	}
+	file_set_path(f, path, rp);
+	if (S_ISDIR(inode->mode)) f->at = dirpos_new(d, &ms);
+	f->opened_root = ms.start;
 
 	/* held from here; only an open that may block for good (FIFO, device) leaves the walk */
 	atomic_fetch_add32((volatile uint32_t *)&inode->open_refs, 1);
@@ -2911,6 +3211,7 @@ int vfs_link(const char *oldpath, const char *newpath)
 	if (!od || !od->inode) return -2;
 	if (S_ISDIR(od->inode->mode)) return -21;
 	vfs_inode_t *old_in = od->inode;   /* the next resolve may reuse a volatile dentry */
+	if (old_in->iops == &snapshot_iops) return -18;   /* EXDEV: a copy, not the file */
 	vfs_dentry_t *old_mnt = dentry_mnt_root(od);
 
 	const char *new_name;

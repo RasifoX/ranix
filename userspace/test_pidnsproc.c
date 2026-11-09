@@ -38,7 +38,7 @@ int main(void)
 
 		char buf[64];
 		long r = readlink("/proc/self", buf, sizeof(buf) - 1);
-		int self_is_1 = (r > 0 && (buf[r] = 0, strcmp(buf, "/proc/1") == 0));
+		int self_is_1 = (r > 0 && (buf[r] = 0, strcmp(buf, "1") == 0));
 
 		_exit((saw_one && !saw_other && n_numeric == 1 && self_is_1) ? 0 : 5);
 	}
