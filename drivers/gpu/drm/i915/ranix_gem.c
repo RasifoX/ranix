@@ -35,7 +35,11 @@
 
 typedef struct uctx {
 	uint32_t id;
-	gt_ctx_t *gt;
+	/* One hardware context per engine-map slot, as i915 gives each slot its own
+	 * intel_context: Mesa puts its render and compute batches on two slots of one
+	 * context, each relying on the state it left behind. gt[0] also serves the
+	 * legacy ring selection; the others are made on first use. */
+	gt_ctx_t *gt[8];
 	int      nengines;                     /* 0: legacy ring selection */
 	struct i915_engine_class_instance eng[8];
 	int32_t  priority;
@@ -351,13 +355,31 @@ static uctx_t *ctx_new(ifile_t *f, uint32_t id)
 	uctx_t *c = kmalloc(sizeof(*c));
 	if (!c) return NULL;
 	memset(c, 0, sizeof(*c));
-	c->gt = gt_ctx_create(f->vm.pml4);
-	if (!c->gt) { kfree(c); return NULL; }
+	c->gt[0] = gt_ctx_create(f->vm.pml4);
+	if (!c->gt[0]) { kfree(c); return NULL; }
 	c->id = id;
 	c->bannable = c->recoverable = c->persistence = 1;
 	c->next = f->ctxs;
 	f->ctxs = c;
 	return c;
+}
+
+/* every hardware context of c (waits for their requests), then c itself */
+static void ctx_free(uctx_t *c)
+{
+	for (int i = 0; i < 8; i++) gt_ctx_destroy(c->gt[i]);
+	kfree(c);
+}
+
+/* the hardware context for an execbuf's ring field, or NULL with *e set */
+static gt_ctx_t *ctx_engine(ifile_t *f, uctx_t *c, uint32_t ring, int *e)
+{
+	*e = -EINVAL_;
+	if (!c->nengines) return ring > 1 ? NULL : c->gt[0];   /* DEFAULT and RENDER: one rcs0 */
+	if (ring >= (uint32_t)c->nengines || c->eng[ring].engine_class != I915_ENGINE_CLASS_RENDER) return NULL;
+	if (!c->gt[ring]) c->gt[ring] = gt_ctx_create(f->vm.pml4);
+	if (!c->gt[ring]) *e = gt_usable() ? -ENOMEM_ : -EIO_;
+	return c->gt[ring];
 }
 
 static int ctx_setparam(ifile_t *f, uctx_t *c, struct drm_i915_gem_context_param *p)
@@ -379,6 +401,7 @@ static int ctx_setparam(ifile_t *f, uctx_t *c, struct drm_i915_gem_context_param
 				return -EINVAL_;
 		memcpy(c->eng, e, n * 4);
 		c->nengines = (int)n;
+		for (int i = 1; i < 8; i++) { gt_ctx_destroy(c->gt[i]); c->gt[i] = NULL; }   /* a new map: new slots */
 		return 0;
 	}
 	case I915_CONTEXT_PARAM_PRIORITY:
@@ -426,8 +449,7 @@ static int ioc_ctx_create(drm_filep_t *fp, void *d)
 		}
 	if (e) {
 		f->ctxs = c->next;
-		gt_ctx_destroy(c->gt);
-		kfree(c);
+		ctx_free(c);
 		return e;
 	}
 	a->ctx_id = f->next_ctx++;
@@ -443,8 +465,7 @@ static int ioc_ctx_destroy(drm_filep_t *fp, void *d)
 		if ((*pp)->id == a->ctx_id) {
 			uctx_t *c = *pp;
 			*pp = c->next;
-			gt_ctx_destroy(c->gt);
-			kfree(c);
+			ctx_free(c);
 			return 0;
 		}
 	return -ENOENT_;
@@ -702,12 +723,8 @@ static int ioc_execbuffer2(drm_filep_t *fp, void *d)
 	ifile_t *f = ifile(fp);
 	if (!f) { mutex_unlock(&drm_lock); return -ENOMEM_; }
 	if ((e = ctx_get(fp, ctx_id, &c))) { mutex_unlock(&drm_lock); return e; }
-	uint32_t ring = (uint32_t)(eb->flags & I915_EXEC_RING_MASK);
-	if (c->nengines) {
-		if (ring >= (uint32_t)c->nengines || c->eng[ring].engine_class != I915_ENGINE_CLASS_RENDER) {
-			mutex_unlock(&drm_lock); return -EINVAL_;
-		}
-	} else if (ring > 1) { mutex_unlock(&drm_lock); return -EINVAL_; }   /* DEFAULT and RENDER */
+	gt_ctx_t *gc = ctx_engine(f, c, (uint32_t)(eb->flags & I915_EXEC_RING_MASK), &e);
+	if (!gc) { mutex_unlock(&drm_lock); return e; }
 
 	uint32_t n = eb->buffer_count;
 	struct drm_i915_gem_exec_object2 *x = kmalloc(n * sizeof(*x));
@@ -753,7 +770,7 @@ static int ioc_execbuffer2(drm_filep_t *fp, void *d)
 	if (!e) {
 		uint64_t batch = (*va_slot(f, x[bi].handle) & ~BOUND) + eb->batch_start_offset;
 		if (eb->batch_start_offset >= objs[bi]->size) e = -EINVAL_;
-		else e = gt_submit(c->gt, batch, &seq);
+		else e = gt_submit(gc, batch, &seq);
 	}
 	if (!e) {
 		for (uint32_t i = 0; i < n; i++) objs[i]->gpu_seqno = seq;
@@ -799,8 +816,7 @@ static void i915_close(drm_filep_t *fp)
 	while (f->ctxs) {
 		uctx_t *c = f->ctxs;
 		f->ctxs = c->next;
-		gt_ctx_destroy(c->gt);                 /* waits for its requests */
-		kfree(c);
+		ctx_free(c);                           /* waits for its requests */
 	}
 	ppgtt_fini(&f->vm);
 	kfree(f->va);

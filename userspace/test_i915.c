@@ -58,6 +58,9 @@ struct syncobj_wait { uint64_t handles; int64_t timeout; uint32_t n, flags, firs
 
 #define MI_STORE_DWORD  ((0x20u << 23) | 2)
 #define MI_BB_END       (0x0Au << 23)
+#define MI_LRI_1        ((0x22u << 23) | 1)          /* MI_LOAD_REGISTER_IMM, one register */
+#define MI_SRM          ((0x24u << 23) | 2)          /* MI_STORE_REGISTER_MEM, 64-bit address */
+#define CS_GPR0         0x2600                       /* render CS GPR 0: saved with the context */
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fprintf(stderr, "FAIL %d: ", __LINE__); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); fails++; } } while (0)
@@ -143,6 +146,44 @@ static void irq_checks(int fd, struct execbuf2 *eb, uint32_t *bm, uint32_t *tm, 
 }
 
 /* ranix_gt changes engine settings: nobody but root may write it */
+/* Two slots of one engine map are two hardware contexts, as in i915: a register
+ * set on slot 1 does not show on slot 0. Mesa's render and compute batches use
+ * two slots and each relies on the state it left there. */
+static void engine_slots_separate(int fd, uint32_t T, uint32_t *tm)
+{
+	struct engines2 { uint64_t extensions; uint16_t c0, i0, c1, i1; } en = { 0, 0, 0, 0, 0 };
+	struct ctx_setparam_ext sp = { .param = { .size = sizeof(en), .param = 0xa, .value = (uintptr_t)&en } };
+	struct ctx_create_ext cc = { .flags = 1, .extensions = (uintptr_t)&sp };
+	CHECK(xioctl(fd, IOC_CTX_CREATE, &cc) == 0, "CONTEXT_CREATE_EXT [rcs0, rcs0]");
+	uint32_t B = create(fd, 4096), *bm = map(fd, B, 4096);
+	CHECK(B && bm != MAP_FAILED, "slot batch object");
+	if (!B || bm == MAP_FAILED || fails) return;
+	uint32_t prog[3][5] = {
+		{ MI_LRI_1, CS_GPR0, 0x11111111, MI_BB_END, 0 },                   /* slot 0 */
+		{ MI_LRI_1, CS_GPR0, 0x22222222, MI_BB_END, 0 },                   /* slot 1 */
+		{ MI_SRM, CS_GPR0, 0x200000 + 0x200, 0, MI_BB_END },               /* slot 0 again */
+	};
+	tm[0x80] = 0;
+	struct exec_obj o[2] = {
+		{ .handle = T, .offset = 0x200000, .flags = (1 << 4) | (1 << 3) | (1 << 2) },
+		{ .handle = B, .offset = 0x400000, .flags = (1 << 4) | (1 << 3) },
+	};
+	for (int i = 0; i < 3; i++) {
+		memcpy(bm + i * 16, prog[i], sizeof prog[i]);
+		struct execbuf2 eb = { .buffers_ptr = (uintptr_t)o, .count = 2, .start = i * 64,
+		                       .flags = i == 1 ? 1 : 0, .rsvd1 = cc.ctx_id };
+		int e = xioctl(fd, IOC_EXECBUF, &eb);
+		CHECK(e == 0, "execbuf on slot %d: %d", i == 1, e);
+		wait_obj(fd, T);
+	}
+	CHECK(tm[0x80] == 0x11111111, "slot 0 sees 0x%x in GPR0, want its own 0x11111111", tm[0x80]);
+	struct ctx_destroy cd = { .ctx_id = cc.ctx_id };
+	CHECK(xioctl(fd, IOC_CTX_DESTROY, &cd) == 0, "destroy [rcs0, rcs0]");
+	struct gem_close gc = { .handle = B };
+	munmap(bm, 4096);
+	CHECK(xioctl(fd, IOC_GEM_CLOSE, &gc) == 0, "close slot batch");
+}
+
 static void gt_node_closed_to_users(void)
 {
 	if (geteuid() != 0 || access("/sys/class/drm/ranix_gt", F_OK)) return;
@@ -218,6 +259,8 @@ int main(void)
 	if (!e) { wait_obj(fd, T); CHECK(tm[0x40] == 0xC0FFEE, "GPU wrote 0x%x", tm[0x40]); }
 	struct gem_busy bz = { .handle = T };
 	CHECK(xioctl(fd, IOC_BUSY, &bz) == 0 && bz.busy == 0, "BUSY after wait");
+
+	engine_slots_separate(fd, T, tm);
 
 	/* relocation into a kernel-placed object, default context */
 	uint32_t T2 = create(fd, 4096), B2 = create(fd, 4096);
