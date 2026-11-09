@@ -1,0 +1,5 @@
+# Check names tests/ranix_test.sh may run twice (human decision only, 2026-11-09 coordinator):
+# the same test registered in two places long before the dup gate.
+c-compat
+c-ptrace2
+c-sarestart
