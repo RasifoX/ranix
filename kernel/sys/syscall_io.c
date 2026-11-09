@@ -311,8 +311,38 @@ static epoll_t *epfd_get(int epfd, vfs_file_t **held)
 	return (epoll_t *)f->inode->priv;
 }
 
+/* Why epfd_get failed: no such fd, or one that is not an epoll */
+static long epfd_errno(int epfd)
+{
+	process_t *p = task_current();
+	return p->fds && fd_get(p->fds, epfd) ? -EINVAL : -EBADF;
+}
+
+/* Watching epoll t from ep: a way back to ep is a cycle (ELOOP), and a chain of
+ * more than 5 epolls is EINVAL, as on Linux. A watch is an fd of this process,
+ * so the walk follows the fds. */
+#define EPOLL_MAX_NESTS 4
+static long epoll_check_nest(epoll_t *ep, epoll_t *t, int depth)
+{
+	if (t == ep) return -ELOOP;
+	if (depth > EPOLL_MAX_NESTS) return -EINVAL;
+	for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+		uint64_t f = spin_lock_irq(&t->lock);
+		int wfd = t->fds[i];
+		spin_unlock_irq(&t->lock, f);
+		vfs_file_t *held;
+		epoll_t *sub = wfd >= 0 ? epfd_get(wfd, &held) : NULL;
+		if (!sub) continue;
+		long r = epoll_check_nest(ep, sub, depth + 1);
+		fput(held);
+		if (r) return r;
+	}
+	return 0;
+}
+
 static long sys_epoll_create1(int flags)
 {
+	if (flags & ~O_CLOEXEC) return -EINVAL;
 	epoll_t *ep = kmalloc(sizeof(*ep));
 	if (!ep) return -ENOMEM;
 	memset(ep, 0, sizeof(*ep));
@@ -385,13 +415,22 @@ static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 	linux_epoll_event_t ev = {0};
 	if (op != EPOLL_CTL_DEL && copy_from_user(&ev, uevent, sizeof(ev)) != 0)
 		return -EFAULT;
-	vfs_file_t *held;
+	vfs_file_t *held, *target, *theld;
 	epoll_t *ep = epfd_get(epfd, &held);
-	if (!ep) return -EBADF;
-	long r;
+	if (!ep) return epfd_errno(epfd);
+	long r = 0;
 	if (fd == epfd) r = -22;
-	else if (!fd_get(task_current()->fds, fd)) r = -9;
-	else r = epoll_ctl_do(ep, op, fd, ev);
+	else if (!(target = fd_get(task_current()->fds, fd))) r = -9;
+	else if (op == EPOLL_CTL_ADD) {
+		/* a file or directory opened by its path is always ready: Linux will
+		 * not watch it. Anonymous inodes (io_uring's) may say S_IFREG too. */
+		mode_t m = target->inode ? target->inode->mode : 0;
+		int pollable = target->inode && target->inode->fops && target->inode->fops->poll;
+		epoll_t *t = epfd_get(fd, &theld);
+		if ((S_ISREG(m) || S_ISDIR(m)) && !pollable && target->path[0] == '/') r = -EPERM;
+		else if (t) { r = epoll_check_nest(ep, t, 1); fput(theld); }
+	}
+	if (!r) r = epoll_ctl_do(ep, op, fd, ev);
 	fput(held);
 	return r;
 }
@@ -405,7 +444,7 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 	if (maxevents > EPOLL_MAX_WATCH) maxevents = EPOLL_MAX_WATCH;
 	vfs_file_t *held;
 	epoll_t *ep = epfd_get(epfd, &held);
-	if (!ep) return -EBADF;
+	if (!ep) return epfd_errno(epfd);
 
 	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
 	                  : (timeout_ms == 0) ? 0
