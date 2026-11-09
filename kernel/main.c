@@ -559,9 +559,7 @@ void kernel_main(void)
 	WD_BOOT_PROGRESS();
 
 	sched_init();
-#if defined(__x86_64__)
 	mmu_null_guard_selftest();   /* the fault path needs the per-CPU task */
-#endif
 	
 	/* idle process needs an fd table to use VFS during boot */
 	process_t *idle = task_current();
