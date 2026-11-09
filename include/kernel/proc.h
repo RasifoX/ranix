@@ -444,6 +444,9 @@ enum { PROC_NS_UTS = 0, PROC_NS_IPC, PROC_NS_TIME, PROC_NS_MNT, PROC_NS_PID,
  * target is gone or the ns is. Release with the matching xxx_ns_put. */
 void      *proc_get_ns(pid_t pid, int kind);
 int        proc_thread_count(pid_t tgid);
+/* fn on each other live thread of p's group, sched_lock held by the caller;
+ * stops at and returns the first thread fn answers nonzero for, else NULL */
+process_t *proc_other_threads_locked(process_t *p, int (*fn)(process_t *t, void *arg), void *arg);
 void       proc_wait(pid_t pid);
 int        proc_root_under(const void *top);
 void       proc_reap(process_t *child);
