@@ -33,14 +33,26 @@ typedef struct {
     vfs_file_t   *async_rd;    /* the read end that asked for O_ASYNC, told when data comes */
 } pipe_t;
 
+/* /proc/sys/fs/pipe-max-size: what F_SETPIPE_SZ grants without CAP_SYS_RESOURCE */
+unsigned long pipe_max_size = 1048576;
+
+/* A new pipe holds 64 KB, as on Linux; without CAP_SYS_RESOURCE no more than
+ * pipe-max-size allows. If 64 KB of contiguous memory is not there, one page. */
+#define PIPE_DEF_ORDER 4
 static void *pipe_buffer_alloc(pipe_t *pipe)
 {
-    if (cgroup_charge_file(&pipe->cg, 0, PIPE_BUF_SIZE) != 0) return NULL;
-    void *p = buddy_alloc(0);
-    if (!p) { cgroup_file_release(pipe->cg, PIPE_BUF_SIZE); return NULL; }
-    pipe->size  = PIPE_BUF_SIZE;
-    pipe->order = 0;
-    return p;
+    int order = PIPE_DEF_ORDER;
+    if (!capable_task(task_current(), CAP_SYS_RESOURCE))
+        while (order > 0 && ((unsigned long)PAGE_SIZE << order) > pipe_max_size) order--;
+    for (;; order = 0) {
+        uint32_t size = (uint32_t)PAGE_SIZE << order;
+        if (cgroup_charge_file(&pipe->cg, 0, size) == 0) {
+            void *p = buddy_alloc(order);
+            if (p) { pipe->size = size; pipe->order = order; return p; }
+            cgroup_file_release(pipe->cg, size);
+        }
+        if (order == 0) return NULL;
+    }
 }
 
 static void pipe_buffer_undo(pipe_t *pipe)
@@ -396,9 +408,6 @@ int vfs_pipe(int pipefd[2])
 
     return 0;
 }
-
-/* /proc/sys/fs/pipe-max-size: what F_SETPIPE_SZ grants without CAP_SYS_RESOURCE */
-unsigned long pipe_max_size = 1048576;
 
 /* F_GETPIPE_SZ and F_SETPIPE_SZ. A size becomes a power-of-two number of pages;
  * the data in the pipe moves over, and must fit (EBUSY). -EBADF: not a pipe. */
