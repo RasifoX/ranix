@@ -201,6 +201,7 @@ check "hungtask-detects"  "ok"     "$(dmesg 2>/dev/null | grep -q 'hung: task pi
 # snapshot hung_report prints from: every queue counted as rq_n says, pins held
 i=0; while [ $i -lt 30 ] && ! dmesg 2>/dev/null | grep -q 'hung: snapshot selftest'; do sleep 1; i=$((i+1)); done
 check "hungtask-snapshot" "ok"     "$(dmesg 2>/dev/null | grep -q 'hung: snapshot selftest ok' && echo ok)"
+check "null-page-guard"  "ok"     "$(dmesg 2>/dev/null | grep -q "mm: null page guard ok" && echo ok)"
 check "status-sigblk"    "1"       "$(grep -c '^SigBlk:' /proc/self/status)"
 check "status-vmsize"    "1"       "$(grep -c '^VmSize:' /proc/self/status)"
 check "c-proccmdline" "OK" "$(timeout 10 /bin/test_proccmdline 2>/dev/null)"
