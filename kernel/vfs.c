@@ -2970,6 +2970,9 @@ int vfs_rename(const char *old_path, const char *new_path)
 	vfs_inode_t *old_in = old_parent->inode;   /* the next resolve may reuse a volatile dentry */
 	int ro = vfs_dentry_readonly(old_parent);
 	vfs_dentry_t *old_mnt = dentry_mnt_root(old_parent);
+	/* two uncached directories both come back in the task's one volatile slot:
+	 * equal pointers then say nothing about the directories being the same */
+	int old_vol = vfs_dentry_is_volatile(old_parent);
 	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
 	if (!new_parent || !new_parent->inode) { kfree(old_dir); kfree(new_dir); return -ENOENT; }
 	if (ro || vfs_dentry_readonly(new_parent)) { kfree(old_dir); kfree(new_dir); return -EROFS; } /* EROFS */
@@ -2977,7 +2980,8 @@ int vfs_rename(const char *old_path, const char *new_path)
 	int pr = may_change(old_in);
 	if (!pr) pr = may_change(new_parent->inode);
 	if (pr) { kfree(old_dir); kfree(new_dir); return pr; }
-	if (old_parent == new_parent && strcmp(old_name, new_name) == 0) {
+	int same_dir = !old_vol && old_parent == new_parent;
+	if (same_dir && strcmp(old_name, new_name) == 0) {
 		kfree(old_dir); kfree(new_dir); return 0;
 	}
 	/* a directory moved under itself would detach a cycle from the tree */
@@ -3010,16 +3014,17 @@ int vfs_rename(const char *old_path, const char *new_path)
 			}
 			tp = &(*tp)->next;
 		}
-		/* detach the moved dentry from its old parent's child list */
-		vfs_dentry_t **pp = &old_parent->child;
-		while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
-		vfs_dentry_t *d = *pp;
+		/* detach the moved dentry from its old parent's child list (a volatile
+		 * parent keeps none, and the slot may hold the new parent by now) */
+		vfs_dentry_t **pp = old_vol ? NULL : &old_parent->child;
+		while (pp && *pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
+		vfs_dentry_t *d = pp ? *pp : NULL;
 		if (d) {
 			int nlen = 0;
 			while (new_name[nlen] && nlen < 254) nlen++;
 			memcpy(d->name, new_name, nlen);
 			d->name[nlen] = '\0';
-			if (old_parent != new_parent) {
+			if (!same_dir) {
 				dentry_unlink(d);
 				dentry_link(new_parent, d);
 			}
