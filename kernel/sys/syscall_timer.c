@@ -3,6 +3,9 @@
  * thread, not the tick: posting a real-time signal allocates. Times are kept on
  * the monotonic clock, so an absolute CLOCK_REALTIME time is converted when set;
  * a later settimeofday does not move an armed timer. Resolution is one tick.
+ * With nothing armed the thread sleeps a second, so arming must wake it: the
+ * kick flag and the wait queue, both under ptimer_lock, make that wakeup one a
+ * thread between its scan and its sleep cannot miss.
  */
 #include <kernel/sync.h>
 
@@ -28,7 +31,8 @@ typedef struct { kts_t interval, value; } kits_t;
 
 static ptimer_t   ptimers[PTIMER_MAX];
 static spinlock_t ptimer_lock = SPINLOCK_INIT;
-static pid_t      ptimer_pid;
+static wait_queue_t ptimer_wq = WAIT_QUEUE_INIT;
+static int        ptimer_kick;    /* a timer was armed since the last scan began */
 static int        ptimer_started;
 static int        ptimer_next_id = 1;
 
@@ -42,6 +46,9 @@ static uint64_t ptimer_now(void)
 static void ptimer_thread(void)
 {
 	for (;;) {
+		uint64_t f = spin_lock_irq(&ptimer_lock);
+		ptimer_kick = 0;
+		spin_unlock_irq(&ptimer_lock, f);
 		uint64_t now = ptimer_now();
 		int armed = 0;
 		for (int i = 0; i < PTIMER_MAX; i++) {
@@ -71,7 +78,16 @@ static void ptimer_thread(void)
 				                 c.value, c.tid != 0);
 			proc_put(p);
 		}
-		task_sleep_until(kernel_ticks + (armed ? 1 : TIMER_HZ));
+		/* A slot armed after it was scanned left ptimer_kick set: scan again.
+		 * Otherwise sleep, released atomically with the lock, so a later arm's
+		 * wake_up finds this thread on the queue. */
+		f = spin_lock_irq(&ptimer_lock);
+		if (ptimer_kick) {
+			spin_unlock_irq(&ptimer_lock, f);
+			continue;
+		}
+		sleep_on_locked_until(&ptimer_wq, &ptimer_lock, f,
+		                      kernel_ticks + (armed ? 1 : TIMER_HZ));
 	}
 }
 
@@ -118,7 +134,7 @@ static long sys_timer_create(int clk, const void *usev, int *uid)
 		int start = !ptimer_started;
 		ptimer_started = 1;
 		spin_unlock_irq(&ptimer_lock, f);
-		if (start) ptimer_pid = proc_create("ptimer", ptimer_thread);
+		if (start) proc_create("ptimer", ptimer_thread);
 	}
 	uint64_t f = spin_lock_irq(&ptimer_lock);
 	ptimer_t *t = NULL;
@@ -174,9 +190,10 @@ static long sys_timer_settime(int id, int flags, const kits_t *unew, kits_t *uol
 	t->next_ns = val ? now + val : 0;
 	t->interval_ns = val ? (uint64_t)n.interval.sec * NS + (uint64_t)n.interval.nsec : 0;
 	t->overrun = 0;
+	int kick = t->next_ns != 0;
+	if (kick) ptimer_kick = 1;
 	spin_unlock_irq(&ptimer_lock, f);
-	process_t *w = proc_get(ptimer_pid);   /* idle, it sleeps for a second */
-	if (w) { task_wake(w); proc_put(w); }
+	if (kick) wake_up(&ptimer_wq);        /* idle, it sleeps for a second */
 	if (uold && copy_to_user(uold, &o, sizeof(o)) != 0) return -EFAULT;
 	return 0;
 }
