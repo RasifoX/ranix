@@ -241,7 +241,8 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 
 /* ── futex: event-driven, per-address hash buckets (futex_q model) ──────
  * Waiters are stack-allocated nodes linked into a bucket keyed by
- * (address space, uaddr). FUTEX_WAIT does an atomic value-check + enqueue under
+ * (address space, uaddr), or by the page for a MAP_SHARED one (futex_key).
+ * FUTEX_WAIT does an atomic value-check + enqueue under
  * futex_lock, then sleeps; FUTEX_WAKE dequeues and wakes — no fixed slot table,
  * no slot-reuse races. The wait loop re-reads the user word each iteration, so a
  * release whose wake was never delivered is still noticed. (A non-timed waiter
@@ -277,7 +278,7 @@ static int futex_unlink(futex_q_t *q)
 /* caller holds futex_lock; wake up to max waiters on (mm,uaddr), requeue up to
  * max_req of the remainder onto uaddr2. returns number woken. */
 static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
-                         uint32_t *uaddr2, int max_req)
+                         void *mm2, uint32_t *uaddr2, int max_req)
 {
 	int woken = 0, requeued = 0;
 	futex_q_t **pp = &futex_bucket[futex_hash(mm, uaddr)];
@@ -291,8 +292,9 @@ static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
 			woken++;
 		} else if (uaddr2 && requeued < max_req) {
 			*pp = q->next;
+			q->mm = mm2;
 			q->uaddr = uaddr2;
-			unsigned h2 = futex_hash(mm, uaddr2);
+			unsigned h2 = futex_hash(mm2, uaddr2);
 			q->next = futex_bucket[h2]; futex_bucket[h2] = q;
 			requeued++;
 		} else {
@@ -304,6 +306,27 @@ static int futex_do_wake(void *mm, uint32_t *uaddr, int max,
 
 static void mono_time(int64_t *sec, int64_t *nsec);
 static void real_time(int64_t *sec, int64_t *nsec);
+
+/* Which word a futex is. In a MAP_SHARED mapping it is the same word for every
+ * process that maps the page, so it is keyed by the page (mm NULL, physical
+ * address), as Linux keys it by inode and offset. Anything else, and every
+ * FUTEX_PRIVATE_FLAG futex, belongs to this address space alone. */
+static void futex_key(process_t *self, int op, uint32_t *uaddr, void **mm, uint32_t **key)
+{
+	*mm = self->vm;
+	*key = uaddr;
+	if ((op & FUTEX_PRIVATE_FLAG) || !uaddr || !self->vm) return;
+	uint64_t va = (uint64_t)uaddr;
+	vma_t *v = self->vm->vmas;
+	while (v && !(va >= v->vaddr && va < v->vaddr + v->size)) v = v->next;
+	if (!v || !(v->flags & VMA_SHARED)) return;
+	uint32_t cur;
+	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return;   /* faults the page in */
+	uint64_t pa = arch_vm_get_paddr(self->vm->root, va);   /* a huge page's comes with the offset */
+	if (!pa) return;
+	*mm = NULL;
+	*key = (uint32_t *)((pa & ~(uint64_t)(PAGE_SIZE - 1)) | (va & (PAGE_SIZE - 1)));
+}
 
 /* Tick value for the deadline sweep to wake a timed futex waiter at the ns
  * deadline. Recomputed each time the waiter sleeps so a fast kernel_ticks under
@@ -353,15 +376,15 @@ static long futex_deadline(int op, int cmd, linux_timespec_t *timeout, int64_t *
 
 /* FUTEX_WAIT and FUTEX_WAIT_BITSET: sleep while *uaddr == val, until woken, a
  * delivered signal, a changed word or the deadline. */
-static long futex_wait(process_t *self, void *mm, uint32_t *uaddr, int op, int cmd, uint32_t val,
-                       linux_timespec_t *timeout)
+static long futex_wait(process_t *self, void *mm, uint32_t *key, uint32_t *uaddr, int op, int cmd,
+                       uint32_t val, linux_timespec_t *timeout)
 {
 	int timed = 0;
 	int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
 	long err = futex_deadline(op, cmd, timeout, &end_ns, &timed);
 	if (err) return err;
 	if (task_has_actionable_signal()) return -EINTR;   /* the first sleep would not see it */
-	futex_q_t q = { self, uaddr, mm, 0, NULL };
+	futex_q_t q = { self, key, mm, 0, NULL };
 	/* Fault the word in before taking the lock: the fault path can sleep and
 	 * allocate, which it must not do under an IRQ-off spinlock. */
 	uint32_t cur;
@@ -370,7 +393,7 @@ static long futex_wait(process_t *self, void *mm, uint32_t *uaddr, int op, int c
 	uint64_t f = spin_lock_irq(&futex_lock);
 	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -EFAULT; }
 	if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -EAGAIN; }
-	unsigned h = futex_hash(mm, uaddr);
+	unsigned h = futex_hash(mm, key);
 	q.next = futex_bucket[h]; futex_bucket[h] = &q;
 	uint64_t fs = spin_lock_irq(&sched_lock);
 	self->state = PROC_SLEEPING;
@@ -414,8 +437,8 @@ static long futex_wait(process_t *self, void *mm, uint32_t *uaddr, int op, int c
 
 /* FUTEX_WAKE_OP: change *uaddr2 by the op in val3, wake val waiters on uaddr and,
  * when the old value passes val3's comparison, up to val2 (in timeout) on uaddr2. */
-static long futex_wake_op(void *mm, uint32_t *uaddr, uint32_t val, uint32_t *uaddr2,
-                          linux_timespec_t *timeout, uint32_t val3)
+static long futex_wake_op(void *mm, uint32_t *key, uint32_t val, void *mm2, uint32_t *key2,
+                          uint32_t *uaddr2, linux_timespec_t *timeout, uint32_t val3)
 {
 	if (!uaddr2) return -EINVAL;
 	uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
@@ -431,7 +454,7 @@ static long futex_wake_op(void *mm, uint32_t *uaddr, uint32_t val, uint32_t *uad
 	}
 	if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -EFAULT;
 	uint64_t f = spin_lock_irq(&futex_lock);
-	int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
+	int woken = futex_do_wake(mm, key, (int)val, NULL, NULL, 0);
 	int do2 = 0;
 	switch (cmp3) {
 	case 0: do2 = (oldval == cmparg); break; case 1: do2 = (oldval != cmparg); break;
@@ -440,7 +463,7 @@ static long futex_wake_op(void *mm, uint32_t *uaddr, uint32_t val, uint32_t *uad
 	case 4: do2 = ((int32_t)oldval >  (int32_t)cmparg); break;
 	case 5: do2 = ((int32_t)oldval >= (int32_t)cmparg); break;
 	}
-	if (do2) woken += futex_do_wake(mm, uaddr2, (int)(uintptr_t)timeout, NULL, 0);
+	if (do2) woken += futex_do_wake(mm2, key2, (int)(uintptr_t)timeout, NULL, NULL, 0);
 	spin_unlock_irq(&futex_lock, f);
 	return woken;
 }
@@ -454,20 +477,24 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 	if (cmd >= 6 && cmd <= 8)
 		return -EOPNOTSUPP;
 	process_t *self = task_current();
-	void *mm = self->vm;
+	void *mm, *mm2 = NULL;
+	uint32_t *key, *key2 = NULL;
+	futex_key(self, op, uaddr, &mm, &key);
+	if (cmd == FUTEX_WAKE_OP || cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */)
+		futex_key(self, op, uaddr2, &mm2, &key2);
 
 	if (cmd == FUTEX_WAIT || cmd == 9 /* FUTEX_WAIT_BITSET */)
-		return futex_wait(self, mm, uaddr, op, cmd, val, timeout);
+		return futex_wait(self, mm, key, uaddr, op, cmd, val, timeout);
 
 	if (cmd == FUTEX_WAKE) {
 		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
+		int woken = futex_do_wake(mm, key, (int)val, NULL, NULL, 0);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
 	}
 
 	if (cmd == FUTEX_WAKE_OP)
-		return futex_wake_op(mm, uaddr, val, uaddr2, timeout, val3);
+		return futex_wake_op(mm, key, val, mm2, key2, uaddr2, timeout, val3);
 
 	if (cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */) {
 		if (cmd == 4) {
@@ -478,7 +505,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		uint64_t f = spin_lock_irq(&futex_lock);
 		/* onto itself the requeue keeps re-finding the same waiter, up to 2^31
 		 * times with IRQs off */
-		int woken = futex_do_wake(mm, uaddr, (int)val, uaddr == uaddr2 ? NULL : uaddr2,
+		int same = mm == mm2 && key == key2;
+		int woken = futex_do_wake(mm, key, (int)val, mm2, same ? NULL : key2,
 		                          (int)(uintptr_t)timeout);
 		spin_unlock_irq(&futex_lock, f);
 		return woken;
@@ -492,8 +520,11 @@ void futex_wake_addr(uint32_t *uaddr)
 {
 	if (!uaddr) return;
 	process_t *self = task_current();
+	void *mm = self ? self->vm : NULL;
+	uint32_t *key = uaddr;
+	if (self) futex_key(self, 0, uaddr, &mm, &key);
 	uint64_t f = spin_lock_irq(&futex_lock);
-	futex_do_wake(self ? self->vm : NULL, uaddr, 0x7fffffff, NULL, 0);
+	futex_do_wake(mm, key, 0x7fffffff, NULL, NULL, 0);
 	spin_unlock_irq(&futex_lock, f);
 }
 
@@ -532,8 +563,10 @@ static void robust_handle_futex(process_t *self, void *mm, uint32_t *uaddr, uint
 		if (copy_from_user(&check, uaddr, sizeof(check)) != 0) return;
 		if (check == new) break;
 	}
+	uint32_t *key = uaddr;
+	futex_key(self, 0, uaddr, &mm, &key);
 	uint64_t f = spin_lock_irq(&futex_lock);
-	futex_do_wake(mm, uaddr, 1, NULL, 0);
+	futex_do_wake(mm, key, 1, NULL, NULL, 0);
 	spin_unlock_irq(&futex_lock, f);
 }
 
