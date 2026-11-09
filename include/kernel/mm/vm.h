@@ -78,6 +78,10 @@ void arch_vm_switch(uint64_t root_phys, uint32_t asid);
 void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end);
 
 uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+
+/* vm.mmap_min_addr: nothing is mapped below it for a task without
+ * CAP_SYS_RAWIO, so a kernel NULL dereference never lands on user memory */
+#define MMAP_MIN_ADDR 65536UL
 void vma_free_space(vm_space_t *vs);
 
 #endif
