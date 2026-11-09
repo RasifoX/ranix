@@ -189,6 +189,15 @@ static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_t
  * sender supplies is read from user memory; we only trust its si_code and
  * si_value and stamp the real sender pid/uid (Linux keeps the caller's, which
  * glibc and musl fill with the same getpid/getuid). */
+/* Linux do_rt_sigqueueinfo: nobody, root included, may make a signal look like
+ * the kernel's (si_code >= 0, e.g. a fake CLD_EXITED) or like a tgkill
+ * (SI_TKILL) when sending to another task; to itself it may. tid is the
+ * caller's argument, as the caller numbers tasks. */
+static int siginfo_forged(int32_t si_code, pid_t tid)
+{
+	return (si_code >= 0 || si_code == SI_TKILL) && tid != task_vpid(task_current());
+}
+
 static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 {
 	if (sig <= 0 || sig > NSIG) return -EINVAL;
@@ -196,6 +205,7 @@ static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 	uint64_t si_value = 0;
 	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -EFAULT;
 	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
+	if (siginfo_forged(si_code, pid)) return -EPERM;
 	process_t *p = proc_get_user(pid);
 	if (!p) return -ESRCH;
 	long r = -EPERM;
@@ -216,6 +226,7 @@ static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *ui
 	uint64_t si_value = 0;
 	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -EFAULT;
 	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
+	if (siginfo_forged(si_code, tid)) return -EPERM;
 	process_t *t = proc_get_user(tid);
 	process_t *leader = proc_get_user(tgid);
 	long r = -EPERM;
