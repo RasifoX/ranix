@@ -55,26 +55,26 @@ static long nl_sendv(socket_t *s, const k_iovec *iov, uint64_t niov,
     size_t total = 0;
     for (uint64_t i = 0; i < niov; i++) {
         if (iov[i].len > NETLINK_SEND_MAX || total + iov[i].len > NETLINK_SEND_MAX)
-            return -90; /* EMSGSIZE */
+            return -EMSGSIZE;
         total += (size_t)iov[i].len;
     }
     if (uaddr && addrlen) {
         sockaddr_nl_t a;
-        if (addrlen < sizeof(a)) return -22;
-        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -14;
-        if (a.nl_family != AF_NETLINK) return -22;
-        if (a.nl_pid) return -111;    /* ECONNREFUSED: only the kernel listens here */
-        if (a.nl_groups) return -95;  /* EOPNOTSUPP: no multicast */
+        if (addrlen < sizeof(a)) return -EINVAL;
+        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -EFAULT;
+        if (a.nl_family != AF_NETLINK) return -EINVAL;
+        if (a.nl_pid) return -ECONNREFUSED;   /* only the kernel listens here */
+        if (a.nl_groups) return -EOPNOTSUPP;   /* no multicast */
     }
     if (total == 0) return 0;
 
     uint8_t *kb = kmalloc(total);
-    if (!kb) return -12;
+    if (!kb) return -ENOMEM;
     size_t off = 0;
     for (uint64_t i = 0; i < niov; i++) {
         if (iov[i].len && copy_fop_from_user(kb + off, iov[i].base, (size_t)iov[i].len) != 0) {
             kfree(kb);
-            return -14;
+            return -EFAULT;
         }
         off += (size_t)iov[i].len;
     }
@@ -88,9 +88,9 @@ static long nl_name_to_user(const socket_t *s, void *uaddr, uint32_t *uaddrlen, 
     sockaddr_nl_t a = { .nl_family = AF_NETLINK };
     if (!peer) { a.nl_pid = s->nl_pid; a.nl_groups = s->nl_groups; }
     uint32_t have;
-    if (copy_from_user(&have, uaddrlen, sizeof(have)) != 0) return -14;
+    if (copy_from_user(&have, uaddrlen, sizeof(have)) != 0) return -EFAULT;
     if (have > sizeof(a)) have = sizeof(a);
-    if (copy_to_user(uaddr, &a, have) != 0) return -14;
+    if (copy_to_user(uaddr, &a, have) != 0) return -EFAULT;
     uint32_t full = sizeof(a);
     return copy_to_user(uaddrlen, &full, sizeof(full)) ? -14 : 0;
 }
@@ -182,7 +182,7 @@ static long tcp_stream_tx(socket_t *s, const void *buf, size_t len, int nonblock
 {
     if (!len) return 0;
     uint8_t *kbuf = kmalloc(len < TCP_COPY_MAX ? len : TCP_COPY_MAX);
-    if (!kbuf) return -12;
+    if (!kbuf) return -ENOMEM;
     size_t done = 0;
     long err = 0;
     while (done < len && !err) {
@@ -212,7 +212,7 @@ static long tcp_stream_tx(socket_t *s, const void *buf, size_t len, int nonblock
 static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
     socket_t *s = (socket_t *)file->inode->priv;
-    if (!s) return -9;
+    if (!s) return -EBADF;
     if (s->domain == AF_NETLINK) {
         k_iovec v = { buf, len };
         int mflags;
@@ -274,12 +274,12 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
         }
         if (file->flags & O_NONBLOCK) {
             spin_unlock_irq(&s->recv_lock, f);
-            return -11;
+            return -EAGAIN;
         }
         s->recv_waiter = task_current();
         task_sleep_unlock(&s->recv_lock, f);
         process_t *p = task_current();
-        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -EINTR; }
     }
 }
 
@@ -294,7 +294,7 @@ static long unix_send_wait(socket_t *s, const uint8_t *kb, size_t len, int nonbl
     size_t done = 0;
     /* a datagram goes whole or not at all: Chromium's zygote sends 2 KB requests
      * over SOCK_SEQPACKET, and a cut one was a launch that silently failed */
-    if (s->type != SOCK_STREAM && len > UNIX_DGRAM_MAX) return -90; /* EMSGSIZE */
+    if (s->type != SOCK_STREAM && len > UNIX_DGRAM_MAX) return -EMSGSIZE;
     while (done < len) {
         size_t n = s->type != SOCK_STREAM ? len - done
                  : (len - done < SKB_DATA_MAX ? len - done : SKB_DATA_MAX);
@@ -319,7 +319,7 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
 static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
 {
     socket_t *s = (socket_t *)file->inode->priv;
-    if (!s) return -9;
+    if (!s) return -EBADF;
     if (s->domain == AF_NETLINK) {
         k_iovec v = { (void *)buf, len };
         return nl_sendv(s, &v, 1, NULL, 0);
@@ -329,7 +329,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
             size_t done = 0;
             size_t cap = len < UNIX_COPY_MAX ? len : UNIX_COPY_MAX;
             uint8_t *kb = kmalloc(cap);
-            if (!kb) return -12;
+            if (!kb) return -ENOMEM;
             while (done < len) {
                 size_t n = len - done < cap ? len - done : cap;
                 if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) {
@@ -348,7 +348,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
     }
     if (s->type == SOCK_DGRAM && s->remote_port)   /* a connected UDP socket */
         return sock_sendto(s, file->flags & O_NONBLOCK, buf, len, NULL, 0);
-    return -38;
+    return -ENOSYS;
 }
 
 #define FIONREAD 0x541B
@@ -423,9 +423,9 @@ static short ifr_flags(const netdev_t *d)
 static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
 {
     struct ifreq r;
-    if (copy_from_user(&r, (void *)(uintptr_t)arg, sizeof(r))) return -14;
+    if (copy_from_user(&r, (void *)(uintptr_t)arg, sizeof(r))) return -EFAULT;
     netdev_t *d = ifr_dev(&r);
-    if (!d) return -19;   /* ENODEV */
+    if (!d) return -ENODEV;
     switch (cmd) {
     case SIOCGIFADDR: {
         memset(&r.u, 0, sizeof(r.u));
@@ -451,7 +451,7 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
         memset(&r.u, 0, sizeof(r.u));
         for (int i = 0; ; i++) {
             netdev_t *e = net_dev(i);
-            if (!e) return -19;
+            if (!e) return -ENODEV;
             if (e == d) { r.u.ifru_ifindex = i + 1; break; }
         }
         break;
@@ -466,9 +466,9 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
         memcpy(r.u.ifru_hwaddr.sa_data, d->mac, 6);
         break;
     default:
-        return -25;
+        return -ENOTTY;
     }
-    if (copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r))) return -14;
+    if (copy_to_user((void *)(uintptr_t)arg, &r, sizeof(r))) return -EFAULT;
     return 0;
 }
 
@@ -477,7 +477,7 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
 static int sock_ioctl_ifconf(uint64_t arg)
 {
     struct ifconf c;
-    if (copy_from_user(&c, (void *)(uintptr_t)arg, sizeof(c))) return -14;
+    if (copy_from_user(&c, (void *)(uintptr_t)arg, sizeof(c))) return -EFAULT;
     struct ifreq *ureq = c.u.ifcu_req;
     int cap   = (int)(c.ifc_len / (int)sizeof(struct ifreq));
     int used  = 0;
@@ -493,19 +493,19 @@ static int sock_ioctl_ifconf(uint64_t arg)
             memcpy(r.ifr_name, d->name, (size_t)n);
             r.u.ifru_addr.sin_family = AF_INET;
             r.u.ifru_addr.sin_addr   = htonl(d->ip);
-            if (copy_to_user(&ureq[used], &r, sizeof(r))) return -14;
+            if (copy_to_user(&ureq[used], &r, sizeof(r))) return -EFAULT;
         }
         used++;
     }
     c.ifc_len = used * (int)sizeof(struct ifreq);
-    if (copy_to_user((void *)(uintptr_t)arg, &c, sizeof(c))) return -14;
+    if (copy_to_user((void *)(uintptr_t)arg, &c, sizeof(c))) return -EFAULT;
     return 0;
 }
 
 static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
     socket_t *s = (socket_t *)file->inode->priv;
-    if (!s) return -9;
+    if (!s) return -EBADF;
     switch (cmd) {
     case SIOCGIFADDR: case SIOCGIFNETMASK: case SIOCGIFFLAGS:
     case SIOCGIFMTU:  case SIOCGIFINDEX:   case SIOCGIFHWADDR:
@@ -524,7 +524,7 @@ static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
         return copy_to_user((void *)(uintptr_t)arg, &navail, sizeof(navail)) ? -14 : 0;
     }
     default:
-        return -25; /* ENOTTY */
+        return -ENOTTY;
     }
 }
 
@@ -561,10 +561,10 @@ static long sock_name_put(void *uaddr, const void *sa, uint32_t sz, uint32_t *kl
 static long sock_name_put_u(void *uaddr, const void *sa, uint32_t sz, uint32_t *ulen)
 {
     uint32_t l;
-    if (!ulen) return -14;
-    if (copy_from_user(&l, ulen, sizeof(l)) != 0) return -14;
-    if ((int)l < 0) return -22;
-    if (sock_name_put(uaddr, sa, sz, &l) != 0) return -14;
+    if (!ulen) return -EFAULT;
+    if (copy_from_user(&l, ulen, sizeof(l)) != 0) return -EFAULT;
+    if ((int)l < 0) return -EINVAL;
+    if (sock_name_put(uaddr, sa, sz, &l) != 0) return -EFAULT;
     return copy_to_user(ulen, &l, sizeof(l)) ? -14 : 0;
 }
 
@@ -579,7 +579,7 @@ static socket_t *fd_to_sock(int fd)
 static int sock_to_fd(socket_t *s, int sflags)
 {
     vfs_inode_t *in = kmalloc(sizeof(*in));
-    if (!in) return -12;
+    if (!in) return -ENOMEM;
     memset(in, 0, sizeof(*in));
     in->fops     = &sock_fops;
     in->priv     = s;
@@ -591,7 +591,7 @@ static int sock_to_fd(socket_t *s, int sflags)
     in->ino      = 0x50000000ULL + atomic_fetch_add32(&sock_ino, 1);
 
     vfs_file_t *f = kmalloc(sizeof(*f));
-    if (!f) { kfree(in); return -12; }
+    if (!f) { kfree(in); return -ENOMEM; }
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->refcount = 0;   /* fd_alloc takes the +1, like vfs_open; a single close() then frees */
@@ -737,19 +737,19 @@ static long sys_socket(int domain, int type, int proto)
     int sflags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     type &= SOCK_TYPE_MASK;
     if (domain != AF_INET && domain != AF_INET6 && domain != AF_UNIX && domain != AF_NETLINK)
-        return -97;
-    if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -22;
+        return -EAFNOSUPPORT;
+    if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -EINVAL;
     if (domain == AF_NETLINK) {
-        if (type == SOCK_STREAM) return -94;      /* ESOCKTNOSUPPORT */
-        if (proto != NETLINK_ROUTE) return -93;   /* EPROTONOSUPPORT */
+        if (type == SOCK_STREAM) return -ESOCKTNOSUPPORT;
+        if (proto != NETLINK_ROUTE) return -EPROTONOSUPPORT;
     }
-    if (domain == AF_UNIX && type == SOCK_RAW) return -94;
+    if (domain == AF_UNIX && type == SOCK_RAW) return -ESOCKTNOSUPPORT;
     /* a raw socket sees and forges traffic that is not the caller's */
     if ((domain == AF_INET || domain == AF_INET6) && type == SOCK_RAW &&
         !capable_task(task_current(), CAP_NET_RAW)) return -1;
     socket_t *s = sock_alloc(domain, type, proto);
-    if (!s) return -12;
-    if (sock_own(s) != 0) { sock_free(s); return -12; }
+    if (!s) return -ENOMEM;
+    if (sock_own(s) != 0) { sock_free(s); return -ENOMEM; }
     s->dev = net_default_dev();
     if (type == SOCK_RAW || domain == AF_NETLINK) sock_register(s);
     int fd = sock_to_fd(s, sflags);
@@ -790,39 +790,39 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
 
     if (s->domain == AF_NETLINK) {
         sockaddr_nl_t a;
-        if (addrlen < sizeof(a)) return -22;
-        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -14;
-        if (a.nl_family != AF_NETLINK) return -22;
+        if (addrlen < sizeof(a)) return -EINVAL;
+        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -EFAULT;
+        if (a.nl_family != AF_NETLINK) return -EINVAL;
         return netlink_bind(s, a.nl_pid, a.nl_groups);
     }
 
     uint16_t family = 0;
-    if (addrlen < sizeof(family)) return -22;
-    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -14;
+    if (addrlen < sizeof(family)) return -EINVAL;
+    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -EFAULT;
     /* the two branches below store into different halves of socket_t */
-    if ((family == AF_UNIX) != (s->domain == AF_UNIX)) return -97;   /* EAFNOSUPPORT */
-    if (family == AF_INET6 && s->domain != AF_INET6) return -97;
+    if ((family == AF_UNIX) != (s->domain == AF_UNIX)) return -EAFNOSUPPORT;
+    if (family == AF_INET6 && s->domain != AF_INET6) return -EAFNOSUPPORT;
 
     if (family == AF_UNIX) {
         sockaddr_un_t su;
         memset(&su, 0, sizeof(su));   /* a short addrlen leaves the rest as stack bytes */
         uint32_t copylen = addrlen < sizeof(su) ? addrlen : sizeof(su);
-        if (copy_from_user(&su, uaddr, copylen) != 0) return -14;
+        if (copy_from_user(&su, uaddr, copylen) != 0) return -EFAULT;
         /* a second bind would leave the first registry slot behind at close,
          * pointing at the freed socket */
-        if (s->unix_path_len > 0) return -22;
+        if (s->unix_path_len > 0) return -EINVAL;
         int pathlen;
         if (su.sun_path[0] == '\0') {
             /* abstract namespace: name is sun_path[0..addrlen-3], includes \0 */
             pathlen = (int)addrlen - 2;
-            if (pathlen <= 0 || pathlen > 107) return -22;
+            if (pathlen <= 0 || pathlen > 107) return -EINVAL;
         } else {
             /* filesystem path: use strlen+1 (null terminator included) */
             pathlen = unix_path_key(&su);
         }
         int pr = unix_path_reachable(&su, 0);
         if (pr) return pr;
-        if (unix_reg_find(s->net_ns, su.sun_path, pathlen)) return -98; /* EADDRINUSE */
+        if (unix_reg_find(s->net_ns, su.sun_path, pathlen)) return -EADDRINUSE;
         memcpy(s->unix_path, su.sun_path, (size_t)pathlen);
         s->unix_path_len = pathlen;
         /* The name is visible in the file system, as programs check with
@@ -832,18 +832,18 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
         return unix_reg_add(s->unix_path, pathlen, s);
     }
 
-    if (s->local_port) return -22;   /* already bound */
+    if (s->local_port) return -EINVAL;   /* already bound */
     if (family == AF_INET6) {
         sockaddr_in6_t sa6;
-        if (addrlen < sizeof(sa6)) return -22;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+        if (addrlen < sizeof(sa6)) return -EINVAL;
+        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
         uint16_t port = ntohs(sa6.sin6_port);
         uint32_t v4;
         if (in6_v4mapped(&sa6.sin6_addr, &v4)) {        /* an IPv4 address after all */
-            if (s->v6only) return -99;                  /* EADDRNOTAVAIL */
-            if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -13;
+            if (s->v6only) return -EADDRNOTAVAIL;
+            if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -EACCES;
             if (!port) port = alloc_port();
-            if (ip_port_taken(s, AF_INET, s->type, port)) return -98;
+            if (ip_port_taken(s, AF_INET, s->type, port)) return -EADDRINUSE;
             s->domain     = AF_INET;
             s->v4mapped   = 1;
             s->local_ip   = v4;
@@ -851,9 +851,9 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
             sock_register(s);
             return 0;
         }
-        if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -13;
+        if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -EACCES;
         if (!port) port = alloc_port();   /* then listen() and getsockname() have one */
-        if (ip_port_taken(s, AF_INET6, s->type, port)) return -98; /* EADDRINUSE */
+        if (ip_port_taken(s, AF_INET6, s->type, port)) return -EADDRINUSE;
         s->local_ip6  = sa6.sin6_addr;
         s->local_port = port;
         sock_register(s);
@@ -861,12 +861,12 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
     }
 
     sockaddr_in_t sa;
-    if (addrlen < sizeof(sa)) return -22;
-    if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+    if (addrlen < sizeof(sa)) return -EINVAL;
+    if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -EFAULT;
     uint16_t port = ntohs(sa.sin_port);
-    if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -13;
+    if (port && port < 1024 && !capable_task(task_current(), CAP_NET_BIND_SERVICE)) return -EACCES;
     if (!port) port = alloc_port();
-    if (ip_port_taken(s, AF_INET, s->type, port)) return -98; /* EADDRINUSE */
+    if (ip_port_taken(s, AF_INET, s->type, port)) return -EADDRINUSE;
     s->local_ip   = ntohl(sa.sin_addr);
     s->local_port = port;
     sock_register(s);
@@ -878,40 +878,40 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     (void)addrlen;
     process_t  *cp = task_current();
     vfs_file_t *cfile = fd_get(cp->fds, fd);
-    if (!cfile) return -9;
-    if (!cfile->inode || cfile->inode->fops != &sock_fops) return -88;   /* ENOTSOCK */
+    if (!cfile) return -EBADF;
+    if (!cfile->inode || cfile->inode->fops != &sock_fops) return -ENOTSOCK;
     socket_t *s = (socket_t *)cfile->inode->priv;
     int nonblock = (cfile->flags & O_NONBLOCK) ? 1 : 0;
 
     uint16_t family = 0;
-    if (addrlen < sizeof(family)) return -22;
-    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -14;
+    if (addrlen < sizeof(family)) return -EINVAL;
+    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -EFAULT;
 
     if (s->domain == AF_NETLINK) {
         sockaddr_nl_t a;
-        if (addrlen < sizeof(a)) return -22;
-        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -14;
-        if (a.nl_family != AF_NETLINK) return -22;
-        if (a.nl_pid) return -111;
-        if (a.nl_groups) return -95;
+        if (addrlen < sizeof(a)) return -EINVAL;
+        if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -EFAULT;
+        if (a.nl_family != AF_NETLINK) return -EINVAL;
+        if (a.nl_pid) return -ECONNREFUSED;
+        if (a.nl_groups) return -EOPNOTSUPP;
         return netlink_bind(s, 0, s->nl_groups);
     }
     /* the two branches below store into different halves of socket_t */
-    if ((family == AF_UNIX) != (s->domain == AF_UNIX)) return -97;   /* EAFNOSUPPORT */
-    if (family == AF_INET6 && s->domain != AF_INET6) return -97;
+    if ((family == AF_UNIX) != (s->domain == AF_UNIX)) return -EAFNOSUPPORT;
+    if (family == AF_INET6 && s->domain != AF_INET6) return -EAFNOSUPPORT;
 
     if (family == AF_UNIX) {
         sockaddr_un_t su;
         memset(&su, 0, sizeof(su));   /* a short addrlen leaves the rest as stack bytes */
         uint32_t copylen = addrlen < sizeof(su) ? addrlen : sizeof(su);
-        if (copy_from_user(&su, uaddr, copylen) != 0) return -14;
+        if (copy_from_user(&su, uaddr, copylen) != 0) return -EFAULT;
         /* a replaced peer would keep pointing here after this socket is freed */
-        if (s->unix_peer) return -106;              /* EISCONN */
-        if (s->tcp_state == TCP_LISTEN) return -22;
+        if (s->unix_peer) return -EISCONN;
+        if (s->tcp_state == TCP_LISTEN) return -EINVAL;
         int pathlen;
         if (su.sun_path[0] == '\0') {
             pathlen = (int)addrlen - 2;
-            if (pathlen <= 0 || pathlen > 107) return -22;
+            if (pathlen <= 0 || pathlen > 107) return -EINVAL;
         } else {
             pathlen = unix_path_key(&su);
         }
@@ -920,8 +920,8 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
 
         /* allocate server-side peer socket */
         socket_t *peer = sock_alloc(AF_UNIX, s->type, 0);
-        if (!peer) return -12;
-        if (sock_own(peer) != 0) { sock_free(peer); return -12; }
+        if (!peer) return -ENOMEM;
+        if (sock_own(peer) != 0) { sock_free(peer); return -ENOMEM; }
 
         /* The listener stays valid only while the registry lock is held: its
          * close unregisters under this lock before freeing it. */
@@ -930,7 +930,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
         if (!ls || ls->tcp_state != TCP_LISTEN) {
             spin_unlock_irq(&unix_reg_lock, rf);
             sock_free(peer);
-            return -111; /* ECONNREFUSED */
+            return -ECONNREFUSED;
         }
         peer->unix_peer = s;
         s->unix_peer    = peer;
@@ -960,9 +960,9 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     int is_mapped = 0;
     if (family == AF_INET6 && (s->type == SOCK_STREAM || s->type == SOCK_DGRAM) && s->proto != IPPROTO_ICMPV6) {
         sockaddr_in6_t m6;
-        if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -14;
+        if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -EFAULT;
         is_mapped = in6_v4mapped(&m6.sin6_addr, &mapped4);
-        if (is_mapped && s->v6only) return -101;
+        if (is_mapped && s->v6only) return -ENETUNREACH;
         if (is_mapped) {                                /* go on as IPv4 */
             uint32_t bound4 = 0;
             if (s->domain == AF_INET6 && s->local_port && !in6_v4mapped(&s->local_ip6, &bound4))
@@ -978,19 +978,19 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
         /* addresses set above */
     } else if (family == AF_INET6) {
         sockaddr_in6_t sa6;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
         s->remote_ip6  = sa6.sin6_addr;
         s->remote_port = ntohs(sa6.sin6_port);
         if (s->type == SOCK_DGRAM) {
             /* getaddrinfo probes a source address this way: no route means no such
              * source, not a socket that claims to be somewhere */
             netdev_t *d6 = net_route_dev6(&s->remote_ip6);
-            if (!ipv6_reachable(d6, &s->remote_ip6)) return -101;   /* ENETUNREACH */
+            if (!ipv6_reachable(d6, &s->remote_ip6)) return -ENETUNREACH;
             s->local_ip6 = ipv6_src_for(d6, &s->remote_ip6);
         }
     } else {
         sockaddr_in_t sa;
-        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -EFAULT;
         s->remote_ip   = ntohl(sa.sin_addr);
         s->remote_port = ntohs(sa.sin_port);
         if (s->domain == AF_INET6 && s->type == SOCK_DGRAM) {
@@ -1005,13 +1005,13 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
         }
     }
     if (s->type == SOCK_DGRAM) return 0;
-    if (s->type != SOCK_STREAM) return -38;
-    if (!s->dev) return -101; /* ENETUNREACH — no network device to reach the peer */
+    if (s->type != SOCK_STREAM) return -ENOSYS;
+    if (!s->dev) return -ENETUNREACH;   /* no network device to reach the peer */
     /* a namespace with only loopback has no way to this peer; the SYN would loop
      * back to nobody and connect would sleep forever */
     if (s->domain == AF_INET && (s->remote_ip >> 24) != 127 &&
         net_route_dev(s->remote_ip) == &current_net_ns()->lo)
-        return -101;
+        return -ENETUNREACH;
     /* fail fast on an unreachable IPv6 peer (no on-link prefix, no router) so an
      * AF_UNSPEC client falls back to IPv4 instead of blocking on a dropped SYN */
     if (s->domain == AF_INET6) {
@@ -1020,8 +1020,8 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
             /* nonblocking: report the failure through SO_ERROR/poll like Linux,
              * so a client iterating addrinfo (libfetch) moves on to the next
              * address instead of mistaking a stale POLLOUT for success. */
-            if (nonblock) { s->so_error = 113; s->connect_inprog = 1; return -115; }
-            return -113; /* EHOSTUNREACH */
+            if (nonblock) { s->so_error = 113; s->connect_inprog = 1; return -EINPROGRESS; }
+            return -EHOSTUNREACH;
         }
     }
 
@@ -1031,7 +1031,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     /* nonblocking connect: the SYN is out — return EINPROGRESS at once. The
      * result surfaces later via poll(POLLOUT) + getsockopt(SO_ERROR), exactly
      * as on Linux; tcp_input records it in so_error when the handshake settles. */
-    if (nonblock) { s->connect_inprog = 1; s->so_error = 0; return -115; }
+    if (nonblock) { s->connect_inprog = 1; s->so_error = 0; return -EINPROGRESS; }
 
     /* block until ESTABLISHED or RST — event-driven: tcp_input updates tcp_state
      * then wakes connect_waiter under recv_lock, so registering + re-checking
@@ -1044,7 +1044,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
             cf = spin_lock_irq(&s->recv_lock);
             s->connect_waiter = NULL;
             spin_unlock_irq(&s->recv_lock, cf);
-            return -4;
+            return -EINTR;
         }
         cf = spin_lock_irq(&s->recv_lock);
     }
@@ -1069,24 +1069,24 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
     if (s->domain == AF_UNIX) {
         if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;
         uint8_t *kb = kmalloc(len);
-        if (!kb) return -12;
-        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
+        if (!kb) return -ENOMEM;
+        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -EFAULT; }
         long rc = unix_send_wait(s, kb, len, nonblock);
         kfree(kb);
         return rc;
     }
     if (s->type == SOCK_STREAM)   /* the connected remote; a dst in uaddr means nothing */
         return tcp_stream_tx(s, buf, len, nonblock, 0);
-    if (!s->dev) return -9;
+    if (!s->dev) return -EBADF;
 
     /* a datagram to ::ffff:a.b.c.d from an IPv6 socket on "::" is IPv4 */
     if (s->domain == AF_INET6 && s->type == SOCK_DGRAM && s->proto != IPPROTO_ICMPV6 && uaddr) {
         sockaddr_in6_t m6;
         uint32_t v4;
         static const in6_addr_t any6;
-        if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -14;
+        if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -EFAULT;
         if (m6.sin6_family == AF_INET6 && in6_v4mapped(&m6.sin6_addr, &v4)) {
-            if (s->v6only || memcmp(&s->local_ip6, &any6, sizeof(any6)) != 0) return -101;
+            if (s->v6only || memcmp(&s->local_ip6, &any6, sizeof(any6)) != 0) return -ENETUNREACH;
             s->domain = AF_INET;
             s->v4mapped = 1;
             s->local_ip = 0;
@@ -1098,7 +1098,7 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         uint16_t   dst_port6;
         if (uaddr) {
             sockaddr_in6_t sa6;
-            if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
+            if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
             dst6      = sa6.sin6_addr;
             dst_port6 = ntohs(sa6.sin6_port);
         } else {
@@ -1109,11 +1109,11 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
          * the ICMPv6 path below copies into one skb and clamps separately. */
         if (len > 65487) len = 65487;
         uint8_t *kb = kmalloc(len);
-        if (!kb) return -12;
-        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -14; }
+        if (!kb) return -ENOMEM;
+        if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -EFAULT; }
         /* fail fast if the destination has no route, rather than spinning the
          * resolve loop and returning a misleading ENOSYS */
-        if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -113; }
+        if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -EHOSTUNREACH; }
 
         long rr = -38;
         /* ICMPv6 over SOCK_RAW *or* SOCK_DGRAM (Linux "ping socket": unprivileged
@@ -1163,15 +1163,15 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
 
     uint32_t dst_ip; uint16_t dst_port;
     uint16_t dfam = 0;
-    if (uaddr && s->v4mapped && copy_from_user(&dfam, uaddr, sizeof(dfam)) != 0) return -14;
+    if (uaddr && s->v4mapped && copy_from_user(&dfam, uaddr, sizeof(dfam)) != 0) return -EFAULT;
     if (uaddr && dfam == AF_INET6) {                    /* ::ffff:a.b.c.d from a mapped socket */
         sockaddr_in6_t sa6;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -14;
-        if (!in6_v4mapped(&sa6.sin6_addr, &dst_ip)) return -101;
+        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
+        if (!in6_v4mapped(&sa6.sin6_addr, &dst_ip)) return -ENETUNREACH;
         dst_port = ntohs(sa6.sin6_port);
     } else if (uaddr) {
         sockaddr_in_t sa;
-        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -14;
+        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -EFAULT;
         dst_ip   = ntohl(sa.sin_addr);
         dst_port = ntohs(sa.sin_port);
     } else {
@@ -1182,8 +1182,8 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
      * paths (raw ICMP) still copy into one skb and clamp below. */
     if (len > 65507) len = 65507;
     uint8_t *kbuf = kmalloc(len);
-    if (!kbuf) return -12;
-    if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -14; }
+    if (!kbuf) return -ENOMEM;
+    if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -EFAULT; }
 
     long r = -38;
     if (s->type == SOCK_DGRAM && s->proto != 1 /* not an ICMP ping socket */) {
@@ -1238,7 +1238,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
     /* the netlink path copies through the kernel-or-user fop helpers */
-    if (!access_ok(buf, len)) return -14;
+    if (!access_ok(buf, len)) return -EFAULT;
     return sock_sendto(s, sock_nonblocking(fd, flags), buf, len, uaddr, addrlen);
 }
 
@@ -1248,7 +1248,7 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
     int nonblock = sock_nonblocking(fd, flags);
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
-    if (!access_ok(buf, len)) return -14;
+    if (!access_ok(buf, len)) return -EFAULT;
 
     if (s->domain == AF_NETLINK) {
         k_iovec v = { buf, len };
@@ -1256,7 +1256,7 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
         long r = netlink_recv(s, &v, 1, flags, nonblock, &mflags);
         if (r >= 0 && uaddr && klen) {
             sockaddr_nl_t kernel = { .nl_family = AF_NETLINK };
-            if (sock_name_put(uaddr, &kernel, sizeof(kernel), klen) != 0) return -14;
+            if (sock_name_put(uaddr, &kernel, sizeof(kernel), klen) != 0) return -EFAULT;
         }
         return r;
     }
@@ -1321,15 +1321,15 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
             uint64_t f = spin_lock_irq(&s->recv_lock);
             if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f); continue; }
             if (sock_at_eof(s)) { spin_unlock_irq(&s->recv_lock, f); return sock_eof_rc(s); }
-            if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
+            if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -EAGAIN; }
             if (rcv_deadline && kernel_ticks >= rcv_deadline) {
-                spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN: SO_RCVTIMEO */
+                spin_unlock_irq(&s->recv_lock, f); return -EAGAIN;   /* SO_RCVTIMEO */
             }
             s->recv_waiter = task_current();
             if (rcv_deadline) { task_current()->wake_deadline = rcv_deadline; sched_note_wake_deadline(rcv_deadline); }
             task_sleep_unlock(&s->recv_lock, f);
             task_current()->wake_deadline = 0;
-            if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+            if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -EINTR; }
         }
     }
 
@@ -1343,7 +1343,7 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
             size_t n = skb->len < len ? skb->len : len;
             if (n && copy_to_user(buf, skb->data, n) != 0) {
                 skb_free(skb);
-                return -14;
+                return -EFAULT;
             }
             if (!klen) {
                 /* no name wanted */
@@ -1399,15 +1399,15 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
         if (s->domain == AF_UNIX && s->unix_seqpacket && sock_at_eof(s)) {
             spin_unlock_irq(&s->recv_lock, f); return 0;
         }
-        if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN */ }
+        if (nonblock) { spin_unlock_irq(&s->recv_lock, f); return -EAGAIN; }
         if (rcv_deadline && kernel_ticks >= rcv_deadline) {
-            spin_unlock_irq(&s->recv_lock, f); return -11; /* EAGAIN: SO_RCVTIMEO */
+            spin_unlock_irq(&s->recv_lock, f); return -EAGAIN;   /* SO_RCVTIMEO */
         }
         s->recv_waiter = task_current();
         if (rcv_deadline) { task_current()->wake_deadline = rcv_deadline; sched_note_wake_deadline(rcv_deadline); }
         task_sleep_unlock(&s->recv_lock, f);
         task_current()->wake_deadline = 0;
-        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+        if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -EINTR; }
     }
 }
 
@@ -1416,10 +1416,10 @@ static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
 {
     if (!uaddr || !addrlen) return do_recvfrom(fd, buf, len, flags, NULL, NULL);
     uint32_t l;
-    if (copy_from_user(&l, addrlen, sizeof(l)) != 0) return -14;
-    if ((int)l < 0) return -22;
+    if (copy_from_user(&l, addrlen, sizeof(l)) != 0) return -EFAULT;
+    if ((int)l < 0) return -EINVAL;
     long r = do_recvfrom(fd, buf, len, flags, uaddr, &l);
-    if (r >= 0 && copy_to_user(addrlen, &l, sizeof(l)) != 0) return -14;
+    if (r >= 0 && copy_to_user(addrlen, &l, sizeof(l)) != 0) return -EFAULT;
     return r;
 }
 
@@ -1444,21 +1444,21 @@ typedef struct { uint64_t cmsg_len; int cmsg_level; int cmsg_type; } k_cmsghdr;
 static long sys_sendmsg(int fd, const void *umsg, int flags)
 {
     k_msghdr m;
-    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -14;
+    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -EFAULT;
     if (m.msg_iovlen == 0) return 0;
     if (m.msg_iovlen > 64) {
         /* A stream may take part of it: the caller sends the rest. Firefox's IPC
          * gathers long messages from hundreds of pieces. */
         socket_t *t = fd_to_sock(fd);
-        if (m.msg_iovlen > 1024 || !t || t->type != SOCK_STREAM) return -22;
+        if (m.msg_iovlen > 1024 || !t || t->type != SOCK_STREAM) return -EINVAL;
         m.msg_iovlen = 64;
     }
     k_iovec iov[64];
-    if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
+    if (copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -EFAULT;
     /* before any path below: the netlink one copies through the kernel-or-user
      * fop helpers, which would read a kernel address as kernel memory */
     for (uint64_t i = 0; i < m.msg_iovlen; i++)
-        if (!access_ok(iov[i].base, (size_t)iov[i].len)) return -14;
+        if (!access_ok(iov[i].base, (size_t)iov[i].len)) return -EFAULT;
 
     socket_t *ns = fd_to_sock(fd);
     if (ns && ns->domain == AF_NETLINK)
@@ -1471,11 +1471,11 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
         if (s && s->domain == AF_UNIX) {
             uint8_t cb[sizeof(k_cmsghdr) + SKB_SCM_MAX * sizeof(int)];
             size_t clen = m.msg_controllen < sizeof(cb) ? m.msg_controllen : sizeof(cb);
-            if (copy_from_user(cb, m.msg_control, clen) != 0) return -14;
+            if (copy_from_user(cb, m.msg_control, clen) != 0) return -EFAULT;
             k_cmsghdr *ch = (k_cmsghdr *)cb;
             if (m.msg_controllen > sizeof(cb)) {
                 kprintf(KERN_WARN "sendmsg: control %lu bytes too long\n", (unsigned long)m.msg_controllen);
-                return -22;
+                return -EINVAL;
             }
             /* the rights may follow other messages (SCM_CREDENTIALS): find them */
             for (size_t co = 0; co + sizeof(k_cmsghdr) <= clen; ) {
@@ -1489,14 +1489,14 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
                 int nfd = (int)((ch->cmsg_len - sizeof(k_cmsghdr)) / sizeof(int));
                 if (nfd > SKB_SCM_MAX) {                 /* never lose them quietly */
                     kprintf(KERN_WARN "sendmsg: %d descriptors, limit %d\n", nfd, SKB_SCM_MAX);
-                    return -22;
+                    return -EINVAL;
                 }
                 int *cfds = (int *)((uint8_t *)ch + sizeof(k_cmsghdr));
                 process_t *p = task_current();
                 void *files[SKB_SCM_MAX]; int nf = 0;
                 for (int i = 0; i < nfd; i++) {
                     vfs_file_t *vf = fget(p->fds, cfds[i]);   /* atomic in-flight ref under the table lock */
-                    if (!vf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -9; }
+                    if (!vf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -EBADF; }
                     files[nf++] = vf;
                 }
                 /* a stream takes the first skb's worth now, the caller sends the
@@ -1505,16 +1505,16 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
                 for (uint64_t i = 0; i < m.msg_iovlen; i++) want += (size_t)iov[i].len;
                 size_t dcap = s->type == SOCK_STREAM ? SKB_DATA_MAX : UNIX_DGRAM_MAX;
                 if (s->type != SOCK_STREAM && want > dcap) {
-                    for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -90; /* EMSGSIZE */
+                    for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -EMSGSIZE;
                 }
                 if (want > dcap) want = dcap;
                 uint8_t *dbuf = kmalloc(want ? want : 1); size_t dl = 0;
-                if (!dbuf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -12; }
+                if (!dbuf) { for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -ENOMEM; }
                 for (uint64_t i = 0; i < m.msg_iovlen && dl < want; i++) {
                     size_t c = iov[i].len; if (c > want - dl) c = want - dl;
                     if (c && copy_from_user(dbuf + dl, iov[i].base, c) != 0) {
                         kfree(dbuf);
-                        for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -14;
+                        for (int j = 0; j < nf; j++) vfs_file_put(files[j]); return -EFAULT;
                     }
                     dl += c;
                 }
@@ -1531,12 +1531,12 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
     if (ns && ns->domain == AF_UNIX && ns->type != SOCK_STREAM && m.msg_iovlen > 1 && !m.msg_name) {
         size_t want = 0;
         for (uint64_t i = 0; i < m.msg_iovlen; i++) want += (size_t)iov[i].len;
-        if (want > UNIX_DGRAM_MAX) return -90;
+        if (want > UNIX_DGRAM_MAX) return -EMSGSIZE;
         uint8_t *kb = kmalloc(want ? want : 1);
-        if (!kb) return -12;
+        if (!kb) return -ENOMEM;
         size_t dl = 0;
         for (uint64_t i = 0; i < m.msg_iovlen; i++) {
-            if (iov[i].len && copy_from_user(kb + dl, iov[i].base, (size_t)iov[i].len) != 0) { kfree(kb); return -14; }
+            if (iov[i].len && copy_from_user(kb + dl, iov[i].base, (size_t)iov[i].len) != 0) { kfree(kb); return -EFAULT; }
             dl += (size_t)iov[i].len;
         }
         vfs_file_t *sf = fd_get(task_current()->fds, fd);
@@ -1561,22 +1561,22 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
 static long sys_recvmsg(int fd, void *umsg, int flags)
 {
     k_msghdr m;
-    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -14;
+    if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -EFAULT;
     uint64_t zero64 = 0; int zero32 = 0;
-    if (copy_to_user((char *)umsg + 40, &zero64, sizeof(zero64)) != 0) return -14; /* msg_controllen */
-    if (copy_to_user((char *)umsg + 48, &zero32, sizeof(zero32)) != 0) return -14; /* msg_flags */
+    if (copy_to_user((char *)umsg + 40, &zero64, sizeof(zero64)) != 0) return -EFAULT; /* msg_controllen */
+    if (copy_to_user((char *)umsg + 48, &zero32, sizeof(zero32)) != 0) return -EFAULT; /* msg_flags */
     if (m.msg_iovlen > 64) {
         socket_t *t = fd_to_sock(fd);
-        if (m.msg_iovlen > 1024 || !t || t->type != SOCK_STREAM) return -22;
+        if (m.msg_iovlen > 1024 || !t || t->type != SOCK_STREAM) return -EINVAL;
         m.msg_iovlen = 64;
     }
     k_iovec iov[64];
     if (m.msg_iovlen &&
-        copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -14;
+        copy_from_user(iov, m.msg_iov, (size_t)m.msg_iovlen * sizeof(k_iovec)) != 0) return -EFAULT;
     /* netlink_recv writes through the kernel-or-user fop helper: a kernel address
      * here would be a write into the kernel */
     for (uint64_t i = 0; i < m.msg_iovlen; i++)
-        if (!access_ok(iov[i].base, (size_t)iov[i].len)) return -14;
+        if (!access_ok(iov[i].base, (size_t)iov[i].len)) return -EFAULT;
 
     socket_t *s = fd_to_sock(fd);
 
@@ -1615,13 +1615,13 @@ static long sys_recvmsg(int fd, void *umsg, int flags)
                 spin_unlock_irq(&s->recv_lock, f);
                 if (total > 0) break;                       /* return what we have */
                 if (sock_at_eof(s)) return 0;               /* EOF */
-                if (nonblock) return -11;
+                if (nonblock) return -EAGAIN;
                 uint64_t f2 = spin_lock_irq(&s->recv_lock);
                 if (s->recv_head) { spin_unlock_irq(&s->recv_lock, f2); continue; }
                 if (sock_at_eof(s)) { spin_unlock_irq(&s->recv_lock, f2); return 0; }
                 s->recv_waiter = task_current();
                 task_sleep_unlock(&s->recv_lock, f2);
-                if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -4; }
+                if (task_has_actionable_signal()) { s->recv_waiter = NULL; return -EINTR; }
                 continue;
             }
             /* Passed files stay with their own bytes: one read never spans them,
@@ -1778,12 +1778,12 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
     if (!s) return sock_fd_err(fd);
     if (s->domain == AF_NETLINK) return nl_name_to_user(s, uaddr, addrlen, 1);
     if (s->domain == AF_UNIX) {
-        if (!s->unix_peer) return -107;   /* ENOTCONN */
+        if (!s->unix_peer) return -ENOTCONN;
         return sock_name_unix(s->unix_peer, uaddr, addrlen);
     }
     if (s->domain == AF_INET6) return sock_name6(&s->remote_ip6, s->remote_port, uaddr, addrlen);
     if (s->v4mapped) {
-        if (!s->remote_port) return -107;   /* ENOTCONN */
+        if (!s->remote_port) return -ENOTCONN;
         in6_addr_t a;
         in6_set_v4mapped(&a, s->remote_ip);
         return sock_name6(&a, s->remote_port, uaddr, addrlen);
@@ -1839,16 +1839,16 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 	if (!s) return sock_fd_err(fd); /* EBADF */
 
 	if (lv == SOL_RANIX_FILTER && opt == NF_RULE) {
-		if (!capable_task(task_current(), CAP_NET_ADMIN)) return -1; /* EPERM */
+		if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
 		char line[160];
-		if (!val || len == 0 || len >= sizeof(line)) return -22;
-		if (copy_from_user(line, val, len) != 0) return -14;
+		if (!val || len == 0 || len >= sizeof(line)) return -EINVAL;
+		if (copy_from_user(line, val, len) != 0) return -EFAULT;
 		return nf_ctl_set(line, len);
 	}
 
 	int iv = 0;
 	if (val && len >= sizeof(int)) {
-		if (copy_from_user(&iv, val, sizeof(int)) != 0) return -14;
+		if (copy_from_user(&iv, val, sizeof(int)) != 0) return -EFAULT;
 	}
 
 	if (lv == SO_SOL_SOCKET) {
@@ -1862,30 +1862,30 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		case SO_SNDTIMEO: {
 			struct k_timeval tv = {0, 0};
 			if (val && len >= sizeof(tv) && copy_from_user(&tv, val, sizeof(tv)) != 0)
-				return -14;
+				return -EFAULT;
 			uint32_t t = tv_to_ticks(&tv);
 			if (opt == SO_RCVTIMEO) s->rcv_timeo = t; else s->snd_timeo = t;
 			return 0;
 		}
 		case SO_ERROR: case SO_TYPE: case SO_ACCEPTCONN:
-			return -92;   /* ENOPROTOOPT: read-only */
+			return -ENOPROTOOPT;   /* read-only */
 		case SO_PASSCRED:   s->so_passcred = iv ? 1 : 0; return 0;
 		case SO_DONTROUTE: case SO_BROADCAST: case SO_LINGER:
 		case SO_PRIORITY:  case SO_BSDCOMPAT:
 		case SO_OOBINLINE:
 			return 0;     /* known but no behavioral effect here */
 		default:
-			return -92;   /* ENOPROTOOPT */
+			return -ENOPROTOOPT;
 		}
 	} else if (lv == SO_IPPROTO_TCP) {
 		if (opt == SO_TCP_NODELAY) { s->tcp_nodelay = iv ? 1 : 0; return 0; }
 		/* TCP_KEEPIDLE/KEEPINTVL/KEEPCNT: keepalive timing, accepted (Chromium
 		 * sets them on every connection and logs ENOPROTOOPT) */
 		if (opt >= 4 && opt <= 6) return iv > 0 ? 0 : -22;
-		return -92;
+		return -ENOPROTOOPT;
 	}
 	if (lv == 41 /* IPPROTO_IPV6 */ && opt == 26 /* IPV6_V6ONLY */) {
-		if (s->domain != AF_INET6) return -22;
+		if (s->domain != AF_INET6) return -EINVAL;
 		s->v6only = iv ? 1 : 0;
 		return 0;
 	}
@@ -1898,33 +1898,33 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 {
 	socket_t *s = fd_to_sock(fd);
 	if (!s) return sock_fd_err(fd);            /* EBADF */
-	if (!val || !len) return -14; /* EFAULT */
+	if (!val || !len) return -EFAULT;
 
 	uint32_t ulen;
-	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -14;
+	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -EFAULT;
 
 	if (lv == SO_IPPROTO_TCP && opt == SO_TCP_INFO) {
-		if (s->type != SOCK_STREAM) return -92;
+		if (s->type != SOCK_STREAM) return -ENOPROTOOPT;
 		uint8_t info[96];
 		uint32_t n = tcp_get_info(s, info, ulen < sizeof(info) ? ulen : sizeof(info));
-		if (n && copy_to_user(val, info, n) != 0) return -14;
-		if (copy_to_user(len, &n, sizeof(n)) != 0) return -14;
+		if (n && copy_to_user(val, info, n) != 0) return -EFAULT;
+		if (copy_to_user(len, &n, sizeof(n)) != 0) return -EFAULT;
 		return 0;
 	}
 
 	if (lv == SOL_RANIX_FILTER && opt == NF_RULE) {
-		if (!capable_task(task_current(), CAP_NET_ADMIN)) return -1; /* EPERM */
+		if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
 		char tmp[512];
 		int n = nf_ctl_dump(tmp, sizeof(tmp));
 		uint32_t cp = ulen < (uint32_t)n ? ulen : (uint32_t)n;
-		if (cp && copy_to_user(val, tmp, cp) != 0) return -14;
+		if (cp && copy_to_user(val, tmp, cp) != 0) return -EFAULT;
 		uint32_t rn = (uint32_t)n;
-		if (copy_to_user(len, &rn, sizeof(rn)) != 0) return -14;
+		if (copy_to_user(len, &rn, sizeof(rn)) != 0) return -EFAULT;
 		return 0;
 	}
 
 	if (lv == SO_SOL_SOCKET && opt == 17 /* SO_PEERCRED */) {
-		if (s->domain != AF_UNIX) return -92;          /* ENOPROTOOPT */
+		if (s->domain != AF_UNIX) return -ENOPROTOOPT;
 		/* unconnected: Linux answers pid 0, uid and gid -1, not an error */
 		struct { int32_t pid; uint32_t uid, gid; } uc = { 0, 0xffffffffu, 0xffffffffu };
 		if (s->pc_set) {
@@ -1932,9 +1932,9 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 			uc.uid = s->pc_uid; uc.gid = s->pc_gid;
 		}
 		uint32_t cp = ulen < sizeof(uc) ? ulen : sizeof(uc);
-		if (cp && copy_to_user(val, &uc, cp) != 0) return -14;
+		if (cp && copy_to_user(val, &uc, cp) != 0) return -EFAULT;
 		uint32_t rl = sizeof(uc);
-		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -14;
+		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -EFAULT;
 		return 0;
 	}
 
@@ -1944,9 +1944,9 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		tv.tv_sec  = t / TIMER_HZ;
 		tv.tv_usec = (int64_t)(t % TIMER_HZ) * 1000000 / TIMER_HZ;
 		uint32_t cp = ulen < sizeof(tv) ? ulen : sizeof(tv);
-		if (cp && copy_to_user(val, &tv, cp) != 0) return -14;
+		if (cp && copy_to_user(val, &tv, cp) != 0) return -EFAULT;
 		uint32_t rl = sizeof(tv);
-		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -14;
+		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -EFAULT;
 		return 0;
 	}
 
@@ -1963,21 +1963,21 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		case SO_REUSEPORT:  out = s->so_reuseport; break;
 		case SO_KEEPALIVE:  out = s->so_keepalive; break;
 		case SO_PASSCRED:   out = s->so_passcred; break;
-		default:            return -92;  /* ENOPROTOOPT */
+		default:            return -ENOPROTOOPT;
 		}
 	} else if (lv == SO_IPPROTO_TCP) {
 		if (opt == SO_TCP_NODELAY) out = s->tcp_nodelay;
-		else return -92;
+		else return -ENOPROTOOPT;
 	} else if (lv == 41 && opt == 26 && (s->domain == AF_INET6 || s->v4mapped)) {
 		out = s->v6only;
 	} else {
-		return -92;
+		return -ENOPROTOOPT;
 	}
 
 	uint32_t cp = ulen < sizeof(int) ? ulen : sizeof(int);
-	if (cp && copy_to_user(val, &out, cp) != 0) return -14;
+	if (cp && copy_to_user(val, &out, cp) != 0) return -EFAULT;
 	uint32_t rl = sizeof(int);
-	if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -14;
+	if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -EFAULT;
 	return 0;
 }
 
@@ -1985,8 +1985,8 @@ static long sys_listen(int fd, int bl)
 {
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
-    if (s->type != SOCK_STREAM) return -95; /* EOPNOTSUPP */
-    if (s->domain == AF_UNIX && s->unix_peer) return -22;   /* a connected socket cannot also accept */
+    if (s->type != SOCK_STREAM) return -EOPNOTSUPP;
+    if (s->domain == AF_UNIX && s->unix_peer) return -EINVAL;   /* a connected socket cannot also accept */
     /* a listener is a door: remember whose (SO_PEERCRED, /proc/net/tcp uid) */
     process_t *me = task_current();
     s->own_pid = (int32_t)me->tgid; s->own_uid = me->euid; s->own_gid = me->egid;
@@ -2002,25 +2002,25 @@ static long sys_accept4(int fd, void *ua, uint32_t *al, int fl)
 {
     process_t *lp = task_current();
     vfs_file_t *lf = fd_get(lp->fds, fd);
-    if (fl & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) return -22;
-    if (!lf) return -9;
-    if (!lf->inode || lf->inode->fops != &sock_fops) return -88;   /* ENOTSOCK */
+    if (fl & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) return -EINVAL;
+    if (!lf) return -EBADF;
+    if (!lf->inode || lf->inode->fops != &sock_fops) return -ENOTSOCK;
     socket_t *ls = (socket_t *)lf->inode->priv;
-    if (ls->tcp_state != TCP_LISTEN) return -22;
+    if (ls->tcp_state != TCP_LISTEN) return -EINVAL;
     int nonblock = (lf->flags & O_NONBLOCK) ? 1 : 0;
 
     /* wait for a completed connection — tcp_input enqueues it then wakes
      * accept_waiter under recv_lock, so this register + re-check is atomic. */
     uint64_t af = spin_lock_irq(&ls->recv_lock);
     while (!ls->accept_head) {
-        if (nonblock) { spin_unlock_irq(&ls->recv_lock, af); return -11; }
+        if (nonblock) { spin_unlock_irq(&ls->recv_lock, af); return -EAGAIN; }
         ls->accept_waiter = task_current();
         task_sleep_unlock(&ls->recv_lock, af);
         if (task_has_actionable_signal()) {
             af = spin_lock_irq(&ls->recv_lock);
             ls->accept_waiter = NULL;
             spin_unlock_irq(&ls->recv_lock, af);
-            return -4;
+            return -EINTR;
         }
         af = spin_lock_irq(&ls->recv_lock);
     }
@@ -2104,7 +2104,7 @@ static long sys_shutdown(int fd, int how)
 {
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
-    if (how < 0 || how > 2) return -22;
+    if (how < 0 || how > 2) return -EINVAL;
     if (s && s->domain == AF_UNIX) {
         socket_t *peer = s->unix_peer;
         if (how != 1 /* SHUT_WR */) {
@@ -2126,12 +2126,12 @@ static long sys_shutdown(int fd, int how)
 
 static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t bufsiz)
 {
-    if (!bufsiz) return -22;
+    if (!bufsiz) return -EINVAL;
     char *kp = kmalloc(PATH_MAX);
-    if (!kp) return -12;
+    if (!kp) return -ENOMEM;
     char *parent_path = kmalloc(PATH_MAX);
     char *kbuf = kmalloc(PATH_MAX);
-    if (!parent_path || !kbuf) { kfree(kp); kfree(parent_path); kfree(kbuf); return -12; }
+    if (!parent_path || !kbuf) { kfree(kp); kfree(parent_path); kfree(kbuf); return -ENOMEM; }
 
     long ret = resolve_path(kp, dirfd, upath);
     if (ret) goto out;

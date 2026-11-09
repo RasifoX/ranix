@@ -32,6 +32,7 @@
 #include <kernel/time.h>
 #include <kernel/init.h>
 #include <kernel/claim.h>
+#include <kernel/errno.h>
 
 
 
@@ -204,7 +205,7 @@ int claim_reboot_check(process_t *caller)
 		if (descends(caller, c[i].pid, c[i].stop)) continue;
 		kprintf(KERN_WARN "claim: reboot by pid %d (%s) refused: claim %lu holds it (see /dev/claim)\n",
 		        (int)caller->pid, caller->name, (unsigned long)c[i].id);
-		return -16;
+		return -EBUSY;
 	}
 	return 0;
 }
@@ -215,7 +216,7 @@ int claim_reboot_check(process_t *caller)
 static int stop_target(process_t *me, pid_t nr, pid_t *pid, uint64_t *start)
 {
 	process_t *t = nr > 0 ? proc_get_user(nr) : proc_get((pid_t)me->tgid);
-	if (!t) return -3;                                                     /* ESRCH */
+	if (!t) return -ESRCH;
 	int ok = signal_may_send(me, t, 15);
 	*pid = (pid_t)t->tgid;
 	*start = t->start_tick;
@@ -227,10 +228,10 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 {
 	process_t *me = task_current();
 	q->res[CLAIM_RES_MAX - 1] = 0; q->holder[CLAIM_HOLDER_MAX - 1] = 0; q->purpose[CLAIM_PURPOSE_MAX - 1] = 0;
-	if (!res_ok(q->res)) return -22;
+	if (!res_ok(q->res)) return -EINVAL;
 	if (!q->holder[0]) cpy(q->holder, me->name, sizeof q->holder);
-	if ((q->flags & CLAIM_F_DETACH) && !q->secs) return -22;   /* a detached claim must end by itself */
-	if (q->secs > 7 * 24 * 3600) return -22;
+	if ((q->flags & CLAIM_F_DETACH) && !q->secs) return -EINVAL;   /* a detached claim must end by itself */
+	if (q->secs > 7 * 24 * 3600) return -EINVAL;
 	uid_t uid = me->euid;
 	pid_t stop_pid;
 	uint64_t stop_start;
@@ -252,8 +253,8 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 		}
 		if (!busy) {
 			struct claim *c = same ? same : free_slot;
-			if (!c) { spin_unlock_irq(&cl_lock, f); return -28; }        /* ENOSPC */
-			if (!same && mine >= PER_UID_MAX && uid != 0) { spin_unlock_irq(&cl_lock, f); return -28; }
+			if (!c) { spin_unlock_irq(&cl_lock, f); return -ENOSPC; }        /* ENOSPC */
+			if (!same && mine >= PER_UID_MAX && uid != 0) { spin_unlock_irq(&cl_lock, f); return -ENOSPC; }
 			if (!same) {
 				memset(c, 0, sizeof *c);
 				c->used = 1; c->id = cl_next_id++;
@@ -283,8 +284,8 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 		fill_busy(q, busy);
 		spin_unlock_irq(&cl_lock, f);
 		if (swept) changed();
-		if (!(q->flags & CLAIM_F_WAIT)) return -16;                       /* EBUSY */
-		if (task_has_actionable_signal()) return -4;                       /* EINTR */
+		if (!(q->flags & CLAIM_F_WAIT)) return -EBUSY;
+		if (task_has_actionable_signal()) return -EINTR;
 		task_sleep_until(kernel_ticks + TIMER_HZ / 4);
 	}
 }
@@ -330,14 +331,14 @@ static int do_by_id(struct claim_req *q, uint32_t cmd)
 	sweep_locked();
 	struct claim *c = 0;
 	for (int i = 0; i < NCLAIM; i++) if (tab[i].used && tab[i].id == q->id) c = &tab[i];
-	if (!c) { spin_unlock_irq(&cl_lock, f); return -2; }                  /* ENOENT */
+	if (!c) { spin_unlock_irq(&cl_lock, f); return -ENOENT; }                  /* ENOENT */
 	if (!may_manage(c)) { spin_unlock_irq(&cl_lock, f); return -1; }      /* EPERM */
 	pid_t victim = 0;
 	uint64_t victim_start = 0;
 	char res[CLAIM_RES_MAX], holder[CLAIM_HOLDER_MAX];
 	cpy(res, c->res, sizeof res); cpy(holder, c->holder, sizeof holder);
 	if (cmd == CLAIM_IOC_EXTEND) {
-		if (!q->secs || q->secs > 7 * 24 * 3600) { spin_unlock_irq(&cl_lock, f); return -22; }
+		if (!q->secs || q->secs > 7 * 24 * 3600) { spin_unlock_irq(&cl_lock, f); return -EINVAL; }
 		c->expire_tick = kernel_ticks + (uint64_t)q->secs * TIMER_HZ;
 	} else {
 		if (cmd == CLAIM_IOC_STOP) { victim = c->stop_pid; victim_start = c->stop_start; }
@@ -363,7 +364,7 @@ static int do_check(struct claim_req *q)
 		if (tab[i].used && strcmp(tab[i].res, q->res) == 0 && strcmp(tab[i].holder, q->holder) != 0) {
 			fill_busy(q, &tab[i]);
 			spin_unlock_irq(&cl_lock, f);
-			return -16;
+			return -EBUSY;
 		}
 	spin_unlock_irq(&cl_lock, f);
 	return 0;
@@ -371,16 +372,16 @@ static int do_check(struct claim_req *q)
 
 static int cdev_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
-	if (cmd < CLAIM_IOC_TAKE || cmd > CLAIM_IOC_CHECK) return -25;
+	if (cmd < CLAIM_IOC_TAKE || cmd > CLAIM_IOC_CHECK) return -ENOTTY;
 	struct claim_req q;
-	if (copy_fop_from_user(&q, (void *)arg, sizeof q)) return -14;
+	if (copy_fop_from_user(&q, (void *)arg, sizeof q)) return -EFAULT;
 	int r;
 	switch (cmd) {
 	case CLAIM_IOC_TAKE:  r = do_take(file, &q); break;
 	case CLAIM_IOC_CHECK: r = do_check(&q); break;
 	default:              r = do_by_id(&q, cmd); break;
 	}
-	if ((r == 0 || r == -16) && copy_fop_to_user((void *)arg, &q, sizeof q)) return -14;
+	if ((r == 0 || r == -16) && copy_fop_to_user((void *)arg, &q, sizeof q)) return -EFAULT;
 	return r;
 }
 
@@ -389,7 +390,7 @@ static int cdev_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 {
 	(void)in; (void)flags;
 	struct cfile *cf = kmalloc(sizeof *cf);
-	if (!cf) return -12;
+	if (!cf) return -ENOMEM;
 	memset(cf, 0, sizeof *cf);
 	f->priv = cf;
 	return 0;
@@ -417,9 +418,9 @@ static int cdev_close(vfs_file_t *f)
 static ssize_t cdev_read(vfs_file_t *f, void *buf, size_t len)
 {
 	struct cfile *cf = f->priv;
-	if (!cf) return -9;
+	if (!cf) return -EBADF;
 	if (!cf->snap || ((size_t)f->pos >= cf->snap_len && cf->snap_gen != cl_gen)) {
-		if (!cf->snap) { cf->snap = kmalloc(SNAP_MAX); if (!cf->snap) return -12; }
+		if (!cf->snap) { cf->snap = kmalloc(SNAP_MAX); if (!cf->snap) return -ENOMEM; }
 		kout_t o; kout_init(&o, cf->snap, SNAP_MAX);
 		cf->snap_gen = cl_gen;
 		claim_report(&o, 1);
@@ -429,7 +430,7 @@ static ssize_t cdev_read(vfs_file_t *f, void *buf, size_t len)
 	if ((size_t)f->pos >= cf->snap_len) return 0;
 	size_t n = cf->snap_len - (size_t)f->pos;
 	if (n > len) n = len;
-	if (copy_fop_to_user(buf, cf->snap + f->pos, n)) return -14;
+	if (copy_fop_to_user(buf, cf->snap + f->pos, n)) return -EFAULT;
 	f->pos += (off_t)n;
 	return (ssize_t)n;
 }

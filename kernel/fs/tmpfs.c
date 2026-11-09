@@ -13,6 +13,7 @@
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
 #include <kernel/fs/devfs.h>
+#include <kernel/errno.h>
 
 /*
  * tmpfs — in-memory filesystem with size accounting and mount options.
@@ -164,17 +165,17 @@ static int tmpfs_create_locked(vfs_inode_t *dir, const char *name, mode_t mode)
 	tmpfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	for (tmpfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = tmpfs_inode_alloc(dir->i_sb, mode | S_IFREG);
-	if (!in) return -28; /* ENOSPC: out of inodes */
+	if (!in) return -ENOSPC;   /* out of inodes */
 	pagefile_t *pf = pagefile_new(&sb_limit, dir->i_sb);
-	if (!pf) { sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!pf) { sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	in->priv = pf;
 	in->fops = &tmpfs_fops;
 	in->iops = &tmpfs_iops;
 
-	if (!dir_new_entry(rd, name, in)) { pagefile_evict(pf); sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!dir_new_entry(rd, name, in)) { pagefile_evict(pf); sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	return 0;
 }
 
@@ -186,9 +187,9 @@ static int tmpfs_mknod_locked(vfs_inode_t *dir, const char *name, mode_t mode, d
 	/* S_IFSOCK: the name an AF_UNIX bind leaves, so stat and its mode work */
 	if (type != S_IFIFO && type != S_IFCHR && type != S_IFBLK && type != 0140000) return -1;
 	for (tmpfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 	vfs_inode_t *in = tmpfs_inode_alloc(dir->i_sb, mode);
-	if (!in) return -28;
+	if (!in) return -ENOSPC;
 	in->iops = &tmpfs_iops;
 	if (type == S_IFIFO) {
 		fifo_init_inode(in);
@@ -198,7 +199,7 @@ static int tmpfs_mknod_locked(vfs_inode_t *dir, const char *name, mode_t mode, d
 		in->fops = devfs_fops_for_rdev(dev, &dpriv);
 		in->priv = dpriv;
 	}
-	if (!dir_new_entry(rd, name, in)) { sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!dir_new_entry(rd, name, in)) { sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	return 0;
 }
 
@@ -207,18 +208,18 @@ static int tmpfs_mkdir_locked(vfs_inode_t *dir, const char *name, mode_t mode)
 	tmpfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	for (tmpfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = tmpfs_inode_alloc(dir->i_sb, mode | S_IFDIR);
-	if (!in) return -28;
+	if (!in) return -ENOSPC;
 	tmpfs_dir_t *nrd = kmalloc(sizeof(*nrd));
-	if (!nrd) { sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!nrd) { sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	memset(nrd, 0, sizeof(*nrd));
 	in->priv = nrd;
 	in->iops = &tmpfs_iops;
 	in->fops = &tmpfs_dir_fops;
 
-	if (!dir_new_entry(rd, name, in)) { kfree(nrd); sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!dir_new_entry(rd, name, in)) { kfree(nrd); sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	dir->nlink++;
 	return 0;
 }
@@ -262,7 +263,7 @@ static int tmpfs_unlink_locked(vfs_inode_t *dir, const char *name)
 		if (strcmp((*pp)->name, name) == 0) {
 			tmpfs_entry_t *e = *pp;
 			vfs_inode_t *in = e->inode;
-			if (S_ISDIR(in->mode) && ((tmpfs_dir_t *)in->priv)->count) return -39; /* ENOTEMPTY */
+			if (S_ISDIR(in->mode) && ((tmpfs_dir_t *)in->priv)->count) return -ENOTEMPTY;
 			*pp = e->next;
 			rd->count--;
 			if (S_ISDIR(in->mode)) dir->nlink--;
@@ -303,9 +304,9 @@ static int tmpfs_rename_locked(vfs_inode_t *old_dir, const char *old_name,
                         vfs_inode_t *new_dir, const char *new_name)
 {
 	tmpfs_dir_t *rd = old_dir->priv, *nrd = new_dir->priv;
-	if (!rd || !nrd) return -2;
-	if (!tmpfs_lookup_locked(rd, old_name)) return -2;
-	if (tmpfs_unlink_locked(new_dir, new_name) == -39) return -39;
+	if (!rd || !nrd) return -ENOENT;
+	if (!tmpfs_lookup_locked(rd, old_name)) return -ENOENT;
+	if (tmpfs_unlink_locked(new_dir, new_name) == -39) return -ENOTEMPTY;
 
 	/* found again: the unlink may have changed this very list */
 	tmpfs_entry_t **pp = &rd->entries;
@@ -341,7 +342,7 @@ static int tmpfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 
 static int tmpfs_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
 {
-	if (!S_ISLNK(inode->mode)) return -22;
+	if (!S_ISLNK(inode->mode)) return -EINVAL;
 	const char *target = (const char *)inode->priv;
 	if (!target) return -1;
 	int len = 0;
@@ -355,45 +356,45 @@ static int tmpfs_symlink_locked(vfs_inode_t *dir, const char *name, const char *
 	tmpfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	for (tmpfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = tmpfs_inode_alloc(dir->i_sb, S_IFLNK | 0777);
-	if (!in) return -28;
+	if (!in) return -ENOSPC;
 	int tlen = 0; while (target[tlen]) tlen++;
 	char *t = kmalloc(tlen + 1);
-	if (!t) { sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!t) { sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	for (int i = 0; i <= tlen; i++) t[i] = target[i];
 	in->priv = t;
 	in->size = tlen;
 	in->iops = &tmpfs_iops;
 
-	if (!dir_new_entry(rd, name, in)) { kfree(t); sb_uncharge_inode(dir->i_sb); kfree(in); return -12; }
+	if (!dir_new_entry(rd, name, in)) { kfree(t); sb_uncharge_inode(dir->i_sb); kfree(in); return -ENOMEM; }
 	return 0;
 }
 
 static int tmpfs_link_locked(vfs_inode_t *dir, const char *name, vfs_inode_t *target)
 {
-	if (S_ISDIR(target->mode)) return -21;
-	if (!target->nlink || target->deferred_unlink) return -2;   /* no name left to add to */
+	if (S_ISDIR(target->mode)) return -EISDIR;
+	if (!target->nlink || target->deferred_unlink) return -ENOENT;   /* no name left to add to */
 	tmpfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	for (tmpfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
-	if (!dir_new_entry(rd, name, target)) return -12;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
+	if (!dir_new_entry(rd, name, target)) return -ENOMEM;
 	target->nlink++;
 	return 0;
 }
 
 static int tmpfs_truncate(vfs_inode_t *inode, off_t len)
 {
-	if (!S_ISREG(inode->mode)) return -22;
+	if (!S_ISREG(inode->mode)) return -EINVAL;
 	return pagefile_truncate(inode, len);
 }
 
 static int tmpfs_statfs(vfs_inode_t *inode, vfs_statfs_t *out)
 {
 	tmpfs_sb_t *sb = inode->i_sb;
-	if (!sb) return -38;
+	if (!sb) return -ENOSYS;
 	uint64_t f = spin_lock_irq(&sb->lock);
 	uint64_t used = sb->used_bytes, maxb = sb->max_bytes;
 	uint64_t uino = sb->used_inodes, maxino = sb->max_inodes;

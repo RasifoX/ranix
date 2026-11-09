@@ -11,8 +11,8 @@
 
 static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldact, size_t sigsetsize)
 {
-	if (sig <= 0 || sig > NSIG || sigsetsize < 8) return -22;
-	if (sig == SIGKILL || sig == SIGSTOP) return -22;   /* uncatchable */
+	if (sig <= 0 || sig > NSIG || sigsetsize < 8) return -EINVAL;
+	if (sig == SIGKILL || sig == SIGSTOP) return -EINVAL;   /* uncatchable */
 
 	/* struct sigaction (kernel ABI): handler, flags, restorer, mask[N]
 	 * Our sigaction_t mirrors this layout. User struct may have larger
@@ -25,32 +25,32 @@ static long sys_rt_sigaction(int sig, const sigaction_t *act, sigaction_t *oldac
 	process_t *p = task_current();
 	if (oldact) {
 		if (copy_to_user(oldact, &p->sighand->actions[sig - 1], copy_sz) != 0)
-			return -14;
+			return -EFAULT;
 	}
 	if (act) {
 		if (copy_from_user(&p->sighand->actions[sig - 1], act, copy_sz) != 0)
-			return -14;
+			return -EFAULT;
 	}
 	return 0;
 }
 
 static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize)
 {
-	if (sigsetsize < 8) return -22;
+	if (sigsetsize < 8) return -EINVAL;
 	process_t *p = task_current();
 	if (oldset) {
 		if (copy_to_user(oldset, &p->sig_mask, sizeof(uint64_t)) != 0)
-			return -14;
+			return -EFAULT;
 	}
 	if (set) {
 		uint64_t new_set;
 		if (copy_from_user(&new_set, set, sizeof(uint64_t)) != 0)
-			return -14;
+			return -EFAULT;
 
 		if (how == 0) p->sig_mask |= new_set;        /* SIG_BLOCK */
 		else if (how == 1) p->sig_mask &= ~new_set;  /* SIG_UNBLOCK */
 		else if (how == 2) p->sig_mask = new_set;    /* SIG_SETMASK */
-		else return -22;
+		else return -EINVAL;
 
 		p->sig_mask &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));  /* unblockable */
 	}
@@ -60,20 +60,20 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 /* Process-directed signal to a pinned task. */
 static long kill_task(process_t *t, int sig)
 {
-	if (sig < 0 || sig > NSIG) return -22; /* EINVAL */
-	if (!signal_may_send(task_current(), t, sig)) return -1; /* EPERM */
+	if (sig < 0 || sig > NSIG) return -EINVAL;
+	if (!signal_may_send(task_current(), t, sig)) return -EPERM;
 	if (sig) task_signal_group(t, sig);   /* any eligible thread */
 	return 0;
 }
 
 static long sys_kill(pid_t pid, int sig)
 {
-	if (sig < 0 || sig > NSIG) return -22; /* EINVAL */
+	if (sig < 0 || sig > NSIG) return -EINVAL;
 	process_t *cur = task_current();
 
 	if (pid > 0) {
 		process_t *p = proc_get_user(pid);
-		if (!p) return -3; /* ESRCH */
+		if (!p) return -ESRCH;
 		long r = kill_task(p, sig);
 		proc_put(p);
 		return r;
@@ -84,7 +84,7 @@ static long sys_kill(pid_t pid, int sig)
 	/* pid==0 → caller's group; pid<-1 → group -pid. The stored pgrp is a global
 	 * pid, so map the supplied ns-local number to it. */
 	pid_t pgrp = pid ? pid_from_user(-pid) : cur->pgrp;
-	if (!pgrp) return -3;
+	if (!pgrp) return -ESRCH;
 	return task_kill_many(cur, pgrp, sig);
 }
 
@@ -94,7 +94,7 @@ static long sys_kill(pid_t pid, int sig)
  * has exited and been reused by an unrelated process. */
 static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 {
-	if (tgid <= 0 || tid <= 0 || sig < 0 || sig > NSIG) return -22; /* EINVAL */
+	if (tgid <= 0 || tid <= 0 || sig < 0 || sig > NSIG) return -EINVAL;
 	process_t *t = proc_get_user(tid);
 	process_t *leader = proc_get_user(tgid);
 	long r = 0;
@@ -111,9 +111,9 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
  * leaves the sender asleep. */
 static long sys_tkill(pid_t tid, int sig)
 {
-	if (tid <= 0 || sig < 0 || sig > NSIG) return -22; /* EINVAL */
+	if (tid <= 0 || sig < 0 || sig > NSIG) return -EINVAL;
 	process_t *t = proc_get_user(tid);
-	if (!t) return -3; /* ESRCH */
+	if (!t) return -ESRCH;
 	long r = 0;
 	if (!signal_may_send(task_current(), t, sig)) r = -1; /* EPERM */
 	else if (sig) task_signal(t, sig);
@@ -126,15 +126,15 @@ static long sys_tkill(pid_t tid, int sig)
  * the loop dequeues before user mode is reached, so no handler runs. */
 static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_timespec_t *uto, size_t sz)
 {
-	if (sz != 8) return -22;
+	if (sz != 8) return -EINVAL;
 	uint64_t set;
-	if (copy_from_user(&set, uset, sizeof(set)) != 0) return -14;
+	if (copy_from_user(&set, uset, sizeof(set)) != 0) return -EFAULT;
 	set &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
 	uint64_t end = 0;
 	if (uto) {
 		linux_timespec_t k;
-		if (copy_from_user(&k, uto, sizeof(k)) != 0) return -14;
-		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
+		if (copy_from_user(&k, uto, sizeof(k)) != 0) return -EFAULT;
+		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
 		uint64_t t = (uint64_t)k.tv_sec * TIMER_HZ + (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
 		end = kernel_ticks + (t || !k.tv_nsec ? t : 1);
 	}
@@ -175,13 +175,13 @@ static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_t
  * si_value and stamp the real sender pid/uid. */
 static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 {
-	if (sig <= 0 || sig > NSIG) return -22;
+	if (sig <= 0 || sig > NSIG) return -EINVAL;
 	int32_t  si_code = 0;
 	uint64_t si_value = 0;
-	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -14;
-	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -14;
+	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -EFAULT;
+	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
 	process_t *p = proc_get_user(pid);
-	if (!p) return -3; /* ESRCH */
+	if (!p) return -ESRCH;
 	process_t *cur = task_current();
 	long r = signal_may_send(cur, p, sig)
 	       ? task_signal_info(p, sig, si_code, (pid_t)cur->pid, cur->euid, si_value, 0) : -1;
@@ -191,11 +191,11 @@ static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 
 static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *uinfo)
 {
-	if (tgid <= 0 || tid <= 0 || sig <= 0 || sig > NSIG) return -22;
+	if (tgid <= 0 || tid <= 0 || sig <= 0 || sig > NSIG) return -EINVAL;
 	int32_t  si_code = 0;
 	uint64_t si_value = 0;
-	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -14;
-	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -14;
+	if (copy_from_user(&si_code, (const uint8_t *)uinfo + 8, sizeof(si_code)) != 0) return -EFAULT;
+	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
 	process_t *t = proc_get_user(tid);
 	process_t *leader = proc_get_user(tgid);
 	process_t *cur = task_current();

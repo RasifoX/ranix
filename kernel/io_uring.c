@@ -24,6 +24,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/board.h>
+#include <kernel/errno.h>
 
 #define IORING_MAX_ENTRIES 4096
 
@@ -123,18 +124,18 @@ static vfs_iops_t io_ring_iops = { 0 };
 long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 {
 	struct io_uring_params p;
-	if (copy_from_user(&p, uparams, sizeof(p)) != 0) return -14;
-	if (entries == 0 || entries > IORING_MAX_ENTRIES) return -22;
+	if (copy_from_user(&p, uparams, sizeof(p)) != 0) return -EFAULT;
+	if (entries == 0 || entries > IORING_MAX_ENTRIES) return -EINVAL;
 	/* No flags supported yet (no SQPOLL/IOPOLL/CQSIZE); reject the rest so a
 	 * caller relying on them fails loudly rather than silently degrading. */
-	if (p.flags != 0) return -22;
-	for (int i = 0; i < 4; i++) if (((uint32_t *)&p.resv)[i]) return -22;
+	if (p.flags != 0) return -EINVAL;
+	for (int i = 0; i < 4; i++) if (((uint32_t *)&p.resv)[i]) return -EINVAL;
 
 	uint32_t sq = roundup_pow2(entries);
 	uint32_t cq = sq * 2;   /* Linux default: CQ twice the SQ */
 
 	io_ring_t *r = kmalloc(sizeof(*r));
-	if (!r) return -12;
+	if (!r) return -ENOMEM;
 	memset(r, 0, sizeof(*r));
 	r->sq_entries = sq;
 	r->cq_entries = cq;
@@ -171,7 +172,7 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 	r->sqes_order = order_for(sq * sizeof(struct io_uring_sqe));
 	r->ring_phys  = buddy_alloc(r->ring_order);
 	r->sqes_phys  = buddy_alloc(r->sqes_order);
-	if (!r->ring_phys || !r->sqes_phys) { io_ring_free(r); return -12; }
+	if (!r->ring_phys || !r->sqes_phys) { io_ring_free(r); return -ENOMEM; }
 
 	memset((void *)PHYS_TO_VIRT((uint64_t)r->ring_phys), 0, (size_t)PAGE_SIZE << r->ring_order);
 	memset((void *)PHYS_TO_VIRT((uint64_t)r->sqes_phys), 0, (size_t)PAGE_SIZE << r->sqes_order);
@@ -196,7 +197,7 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 
 	vfs_inode_t *inode = kmalloc(sizeof(*inode));
 	vfs_file_t  *file  = kmalloc(sizeof(*file));
-	if (!inode || !file) { kfree(inode); kfree(file); io_ring_free(r); return -12; }
+	if (!inode || !file) { kfree(inode); kfree(file); io_ring_free(r); return -ENOMEM; }
 	memset(inode, 0, sizeof(*inode));
 	inode->mode = S_IFREG | 0600;
 	inode->fops = &io_ring_fops;
@@ -211,7 +212,7 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 
 	process_t *proc = task_current();
 	int fd = fd_alloc(proc->fds, file);
-	if (fd < 0) { kfree(file); kfree(inode); io_ring_free(r); return -24; }
+	if (fd < 0) { kfree(file); kfree(inode); io_ring_free(r); return -EMFILE; }
 
 	p.sq_entries = sq;
 	p.cq_entries = cq;
@@ -224,7 +225,7 @@ long io_uring_setup(uint32_t entries, struct io_uring_params *uparams)
 		.head = cq_off_head, .tail = cq_off_tail, .ring_mask = cq_off_mask,
 		.ring_entries = cq_off_entries, .overflow = cq_off_overflow,
 		.cqes = cq_off_cqes, .flags = cq_off_flags };
-	if (copy_to_user(uparams, &p, sizeof(p)) != 0) { vfs_close(fd); return -14; }
+	if (copy_to_user(uparams, &p, sizeof(p)) != 0) { vfs_close(fd); return -EFAULT; }
 	return fd;
 }
 
@@ -260,7 +261,7 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 	 * straight from user memory, and a negative one indexes /proc's scratch
 	 * buffers and the page files backwards. -1 alone means "current position". */
 	if (s->opcode != IORING_OP_NOP && s->off != (uint64_t)-1 && (int64_t)s->off < 0)
-		return -22;
+		return -EINVAL;
 
 	switch (s->opcode) {
 	case IORING_OP_NOP:
@@ -269,9 +270,9 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 	case IORING_OP_READ:
 	case IORING_OP_RECV: {
 		void *buf = (void *)(uintptr_t)s->addr;
-		if (!access_ok(buf, s->len)) return -14;
+		if (!access_ok(buf, s->len)) return -EFAULT;
 		vfs_file_t *f = fget(p->fds, s->fd);
-		if (!f) return -9;
+		if (!f) return -EBADF;
 		int32_t res;
 		if (sqe_badmode(f, O_WRONLY)) { res = -9; }   /* as read(2) */
 		else if (!f->inode->fops || !f->inode->fops->read) { res = -22; }
@@ -289,9 +290,9 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 	case IORING_OP_WRITE:
 	case IORING_OP_SEND: {
 		const void *buf = (const void *)(uintptr_t)s->addr;
-		if (!access_ok(buf, s->len)) return -14;
+		if (!access_ok(buf, s->len)) return -EFAULT;
 		vfs_file_t *f = fget(p->fds, s->fd);
-		if (!f) return -9;
+		if (!f) return -EBADF;
 		int32_t res;
 		if (sqe_badmode(f, O_RDONLY)) { res = -9; }   /* as write(2) */
 		else if (!f->inode->fops || !f->inode->fops->write) { res = -22; }
@@ -309,14 +310,14 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 	case IORING_OP_WRITEV: {
 		const struct { void *base; size_t len; } *uiov =
 			(const void *)(uintptr_t)s->addr;
-		if (!access_ok(uiov, (size_t)s->len * sizeof(*uiov))) return -14;
+		if (!access_ok(uiov, (size_t)s->len * sizeof(*uiov))) return -EFAULT;
 		vfs_file_t *f = fget(p->fds, s->fd);
-		if (!f) return -9;
+		if (!f) return -EBADF;
 		int is_write = (s->opcode == IORING_OP_WRITEV);
 		vfs_fops_t *fo = f->inode->fops;
 		int32_t total = 0, res = 0;
-		if (!fo || (is_write ? !fo->write : !fo->read)) { fput(f); return -22; }
-		if (sqe_badmode(f, is_write ? O_RDONLY : O_WRONLY)) { fput(f); return -9; }
+		if (!fo || (is_write ? !fo->write : !fo->read)) { fput(f); return -EINVAL; }
+		if (sqe_badmode(f, is_write ? O_RDONLY : O_WRONLY)) { fput(f); return -EBADF; }
 		vfs_file_t tmp = *f;
 		if (s->off != (uint64_t)-1) tmp.pos = (off_t)s->off;
 		for (uint32_t i = 0; i < s->len; i++) {
@@ -338,7 +339,7 @@ static int32_t sqe_execute(const struct io_uring_sqe *s)
 		return 0;   /* ramfs/tmpfs are memory-backed: durable by definition */
 
 	default:
-		return -22; /* EINVAL: unsupported opcode */
+		return -EINVAL;   /* unsupported opcode */
 	}
 }
 
@@ -376,8 +377,8 @@ long io_uring_enter(int fd, uint32_t to_submit, uint32_t min_complete,
 	(void)argp; (void)argsz;
 	process_t *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);
-	if (!f) return -9;
-	if (f->inode->fops != &io_ring_fops) { fput(f); return -22; }
+	if (!f) return -EBADF;
+	if (f->inode->fops != &io_ring_fops) { fput(f); return -EINVAL; }
 	io_ring_t *r = (io_ring_t *)f->priv;
 
 	uint32_t submitted = submit_sqes(r, to_submit);
@@ -387,7 +388,7 @@ long io_uring_enter(int fd, uint32_t to_submit, uint32_t min_complete,
 	 * only ever has to wait if min_complete exceeds what we just produced. */
 	if (flags & IORING_ENTER_GETEVENTS) {
 		while (min_complete && (*r->cq_tail - *r->cq_head) < min_complete) {
-			if (task_has_actionable_signal()) { fput(f); return -4; }
+			if (task_has_actionable_signal()) { fput(f); return -EINTR; }
 			/* r->lock, as completions post under it. sleep_on_locked takes the
 			 * queue's own lock, so the caller must not already hold that one. */
 			uint64_t wf = spin_lock_irq(&r->lock);
@@ -408,8 +409,8 @@ long io_uring_register(int fd, unsigned int opcode, void *arg, unsigned int nr_a
 	(void)arg; (void)nr_args;
 	process_t *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);
-	if (!f) return -9;
-	if (f->inode->fops != &io_ring_fops) { fput(f); return -22; }
+	if (!f) return -EBADF;
+	if (f->inode->fops != &io_ring_fops) { fput(f); return -EINVAL; }
 	fput(f);
 	/* Buffer/file pre-registration is an optimization; accept the calls but do
 	 * not pin anything yet (ops resolve fds/buffers per-SQE). */
@@ -420,6 +421,6 @@ long io_uring_register(int fd, unsigned int opcode, void *arg, unsigned int nr_a
 	case IORING_UNREGISTER_FILES:
 		return 0;
 	default:
-		return -22;
+		return -EINVAL;
 	}
 }

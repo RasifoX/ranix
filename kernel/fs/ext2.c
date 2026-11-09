@@ -14,6 +14,7 @@
 #include <kernel/time.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/fs/ext2.h>
+#include <kernel/errno.h>
 
 /*
  * ext2 / ext4 VFS driver. ext2 reads and writes; on ext4 a file with extents is
@@ -718,7 +719,7 @@ static int jcommit(ext2_fs_t *fs, bc_ent_t **m, uint32_t n)
 	if (need > fs->jlen - fs->jfirst) return 1;
 	if (fs->jhead + need > fs->jlen) {
 		/* the log restarts over old transactions: nothing may still point at them */
-		if (jsb_store(fs, fs->jfirst, fs->jseq) || block_flush_all()) return -5;
+		if (jsb_store(fs, fs->jfirst, fs->jseq) || block_flush_all()) return -EIO;
 		fs->jhead = fs->jfirst;
 	}
 	uint32_t pos = fs->jhead, i = 0;
@@ -740,25 +741,25 @@ static int jcommit(ext2_fs_t *fs, bc_ent_t **m, uint32_t n)
 			off += fs->jtag;
 			if (!k) { memcpy(d + off, fs->juuid, 16); off += 16; }
 		}
-		if (jwrite(fs, pos++, d)) return -5;
+		if (jwrite(fs, pos++, d)) return -EIO;
 		for (uint32_t k = 0; k < c; k++, i++) {
 			bc_ent_t *e = m[i];
 			if (be32(e->buf) == JBD_MAGIC) {
 				memcpy(d, e->buf, bs);
 				memset(d, 0, 4);
-				if (jwrite(fs, pos++, d)) return -5;
+				if (jwrite(fs, pos++, d)) return -EIO;
 			} else if (jwrite(fs, pos++, e->buf)) {
-				return -5;
+				return -EIO;
 			}
 		}
 	}
 	/* the commit block alone decides whether the transaction exists */
-	if (block_flush_all()) return -5;
+	if (block_flush_all()) return -EIO;
 	memset(d, 0, bs);
 	put_be32(d, JBD_MAGIC);
 	put_be32(d + 4, JBD_COMMIT);
 	put_be32(d + 8, fs->jseq);
-	if (jwrite(fs, pos++, d) || block_flush_all()) return -5;
+	if (jwrite(fs, pos++, d) || block_flush_all()) return -EIO;
 	fs->jhead = pos;
 	fs->jseq++;
 	return 0;
@@ -1314,8 +1315,8 @@ static off_t ext2_seek(vfs_file_t *f, off_t off, int whence)
 	if (whence == 0)      new = off;
 	else if (whence == 1) new = f->pos + off;
 	else if (whence == 2) new = (off_t)size + off;
-	else return -22;
-	if (new < 0) return -22;
+	else return -EINVAL;
+	if (new < 0) return -EINVAL;
 	f->pos = new;
 	return new;
 }
@@ -1648,7 +1649,7 @@ static ssize_t ext2_write(vfs_file_t *f, const void *buf, size_t len)
 	const uint8_t *src = buf;
 	uint64_t pos = (uint64_t)f->pos;
 	uint64_t limit = ino_max_blocks(fs) * fs->block_size;
-	if (pos >= limit) return -27;   /* EFBIG */
+	if (pos >= limit) return -EFBIG;
 	if (len > limit - pos) len = (size_t)(limit - pos);
 	size_t done = 0;
 	int err = 0;
@@ -1774,7 +1775,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 	uint8_t nlen = 0; while (name[nlen]) nlen++;
 	uint16_t need = (uint16_t)(((uint32_t)8 + nlen + 3u) & ~3u);
 	uint8_t *blk = ext2_alloc_page();
-	if (!blk) return -12;
+	if (!blk) return -ENOMEM;
 
 	uint64_t dsz = (uint64_t)dir_in->i_size_lo | ((uint64_t)dir_in->i_size_high << 32);
 	uint32_t nblk = (uint32_t)((dsz + fs->block_size - 1) / fs->block_size);
@@ -1805,7 +1806,7 @@ static int dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino, ext2_inode_t *dir_in,
 
 	/* Allocate new block for directory */
 	uint32_t phys = inode_alloc_block(fs, dir_in, dir_ino, nblk);
-	if (!phys) { ext2_free_page(blk); return -28; }
+	if (!phys) { ext2_free_page(blk); return -ENOSPC; }
 
 	memset(blk, 0, fs->block_size);
 	ext2_dirent_t *de = (ext2_dirent_t *)blk;
@@ -1914,8 +1915,8 @@ static void inode_free_blocks(ext2_fs_t *fs, ext2_inode_t *in, uint64_t keep)
 static int do_truncate(ext2_fs_t *fs, ext2_inode_priv_t *priv, vfs_inode_t *vi, uint64_t len)
 {
 	ext2_inode_t *in = &priv->raw;
-	if (in->i_flags & EXT4_EXTENTS_FL) return -30;
-	if (len > ino_max_blocks(fs) * fs->block_size) return -27;   /* EFBIG */
+	if (in->i_flags & EXT4_EXTENTS_FL) return -EROFS;
+	if (len > ino_max_blocks(fs) * fs->block_size) return -EFBIG;
 	uint64_t old = ino_size(in);
 	if (len < old) {
 		uint32_t tail = (uint32_t)(len % fs->block_size);
@@ -1999,7 +2000,7 @@ static int ext2_open(vfs_inode_t *vi, vfs_file_t *f, int flags)
 	ext2_inode_priv_t *priv = vi->priv;
 	ext2_fs_t *fs = priv->fs;
 	int r = 0;
-	if (ext2_hold(fs)) return -2;   /* unmounted since the walk found it */
+	if (ext2_hold(fs)) return -ENOENT;   /* unmounted since the walk found it */
 	mutex_lock(&fs->lock);
 	priv->opens++;
 	if ((flags & O_TRUNC) && (flags & 3) && ino_size(&priv->raw))
@@ -2030,7 +2031,7 @@ static int ext2_dir_open(vfs_inode_t *vi, vfs_file_t *f, int flags)
 {
 	ext2_fs_t *fs = ((ext2_inode_priv_t *)vi->priv)->fs;
 	(void)flags;
-	if (ext2_hold(fs)) return -2;
+	if (ext2_hold(fs)) return -ENOENT;
 	f->priv = fs;
 	return 0;
 }
@@ -2046,7 +2047,7 @@ static int ext2_truncate(vfs_inode_t *vi, off_t len)
 {
 	ext2_inode_priv_t *priv = vi->priv;
 	ext2_fs_t *fs = priv->fs;
-	if (len < 0) return -22;
+	if (len < 0) return -EINVAL;
 	mutex_lock(&fs->lock);
 	int r = do_truncate(fs, priv, vi, (uint64_t)len);
 	mutex_unlock(&fs->lock);
@@ -2122,7 +2123,7 @@ static int ext2_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	ext2_inode_priv_t *dpriv = dir->priv;
 	ext2_fs_t *fs = dpriv->fs;
 	int r = -5;
-	if (strlen(name) > 255) return -36;
+	if (strlen(name) > 255) return -ENAMETOOLONG;
 
 	mutex_lock(&fs->lock);
 	if (dir_find(fs, &dpriv->raw, name, NULL)) { r = -17; goto out; }
@@ -2148,7 +2149,7 @@ static int ext2_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	ext2_inode_priv_t *dpriv = dir->priv;
 	ext2_fs_t *fs = dpriv->fs;
 	int r = -5;
-	if (strlen(name) > 255) return -36;
+	if (strlen(name) > 255) return -ENAMETOOLONG;
 
 	mutex_lock(&fs->lock);
 	if (dir_find(fs, &dpriv->raw, name, NULL)) { r = -17; goto out; }
@@ -2257,7 +2258,7 @@ static int dir_retarget(ext2_fs_t *fs, ext2_inode_t *dir, const char *name, uint
 		}
 		bput(fs, e);
 	}
-	return -2;
+	return -ENOENT;
 }
 
 /* Is ino dir itself or one of its ancestors? Caller holds fs->lock. */
@@ -2276,11 +2277,11 @@ static int dir_under(ext2_fs_t *fs, ext2_inode_priv_t *dir, uint32_t ino)
 static int ext2_remove(ext2_fs_t *fs, ext2_inode_priv_t *dpriv, vfs_inode_t *dir, const char *name)
 {
 	uint32_t ino = dir_find(fs, &dpriv->raw, name, NULL);
-	if (!ino) return -2; /* ENOENT */
+	if (!ino) return -ENOENT;
 	ext2_inode_priv_t *p = iget(fs, ino);
-	if (!p) return -5;
+	if (!p) return -EIO;
 	int isdir = S_ISDIR(p->raw.i_mode);
-	if (isdir && !dir_empty(fs, &p->raw)) return -39;
+	if (isdir && !dir_empty(fs, &p->raw)) return -ENOTEMPTY;
 
 	dir_remove_entry(fs, &dpriv->raw, name);
 	ino_stamp(fs, &dpriv->raw, dir, 1);
@@ -2307,7 +2308,7 @@ static int ext2_rename(vfs_inode_t *odir, const char *oname, vfs_inode_t *ndir, 
 	ext2_fs_t *fs = op->fs;
 	int r = 0;
 	uint8_t ft = 0;
-	if (strlen(nname) > 255) return -36;
+	if (strlen(nname) > 255) return -ENAMETOOLONG;
 
 	mutex_lock(&fs->lock);
 	uint32_t ino = dir_find(fs, &op->raw, oname, &ft);
@@ -2377,7 +2378,7 @@ static int ext2_link(vfs_inode_t *dir, const char *name, vfs_inode_t *target)
 	ext2_inode_priv_t *dpriv = dir->priv, *p = target->priv;
 	ext2_fs_t *fs = dpriv->fs;
 	if (S_ISDIR(target->mode) || S_ISFIFO(target->mode)) return -1;
-	if (strlen(name) > 255) return -36;
+	if (strlen(name) > 255) return -ENAMETOOLONG;
 	mutex_lock(&fs->lock);
 	/* a file whose last name is gone stays gone: a new name would put an orphan
 	 * back in the tree, and its next unlink would release it twice */
@@ -2409,7 +2410,7 @@ static int ext2_mknod(vfs_inode_t *dir, const char *name, mode_t mode, dev_t dev
 	int r = -5;
 	int type = mode & 0170000;
 	if (type != S_IFIFO && type != S_IFCHR && type != S_IFBLK && type != 0140000) return -1;
-	if (strlen(name) > 255) return -36;
+	if (strlen(name) > 255) return -ENAMETOOLONG;
 	uint8_t ft = type == S_IFIFO ? 5 : type == S_IFCHR ? 3 : type == S_IFBLK ? 4 : 6;
 
 	mutex_lock(&fs->lock);
@@ -2442,7 +2443,7 @@ static int ext2_symlink(vfs_inode_t *dir, const char *name, const char *target)
 	ext2_fs_t *fs = dpriv->fs;
 	size_t len = strlen(target);
 	int r;
-	if (len == 0 || len >= fs->block_size || strlen(name) > 255) return -36;
+	if (len == 0 || len >= fs->block_size || strlen(name) > 255) return -ENAMETOOLONG;
 
 	mutex_lock(&fs->lock);
 	if (dir_find(fs, &dpriv->raw, name, NULL)) { r = -17; goto out; }
@@ -2672,7 +2673,7 @@ static int ext2_readlink(vfs_inode_t *vi, char *buf, size_t bufsize)
 static int ext2_statfs(vfs_inode_t *inode, vfs_statfs_t *out)
 {
 	ext2_inode_priv_t *priv = inode->priv;
-	if (!priv || !priv->fs) return -38;
+	if (!priv || !priv->fs) return -ENOSYS;
 	ext2_fs_t *fs = priv->fs;
 	uint64_t rsvd = fs->reserved_blocks;
 

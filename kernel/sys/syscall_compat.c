@@ -7,8 +7,8 @@ typedef struct { int64_t tv_sec, tv_usec; } ktv_t;
 
 static long iov_at(int fd, const iovec_t *iov, int cnt, off_t pos, int write)
 {
-	if (cnt < 0 || cnt > 1024) return -22;   /* IOV_MAX */
-	if (pos < 0) return -22;
+	if (cnt < 0 || cnt > 1024) return -EINVAL;   /* IOV_MAX */
+	if (pos < 0) return -EINVAL;
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
 		iovec_t v;
@@ -40,9 +40,9 @@ static long utimes_common(int dirfd, const char *path, const ktv_t *utv)
 {
 	if (!utv) return do_utimensat(dirfd, path, NULL, 0, 0);
 	ktv_t tv[2];
-	if (copy_from_user(tv, utv, sizeof(tv)) != 0) return -14;
+	if (copy_from_user(tv, utv, sizeof(tv)) != 0) return -EFAULT;
 	if (tv[0].tv_usec < 0 || tv[0].tv_usec >= 1000000 || tv[1].tv_usec < 0 || tv[1].tv_usec >= 1000000)
-		return -22;
+		return -EINVAL;
 	struct { int64_t sec, nsec; } ts[2] = {
 		{ tv[0].tv_sec, tv[0].tv_usec * 1000 }, { tv[1].tv_sec, tv[1].tv_usec * 1000 } };
 	return do_utimensat(dirfd, path, ts, 0, 1);
@@ -55,7 +55,7 @@ static long sys_utime(const char *path, const int64_t *ubuf)
 {
 	if (!ubuf) return do_utimensat(AT_FDCWD, path, NULL, 0, 0);
 	int64_t b[2];
-	if (copy_from_user(b, ubuf, sizeof(b)) != 0) return -14;
+	if (copy_from_user(b, ubuf, sizeof(b)) != 0) return -EFAULT;
 	struct { int64_t sec, nsec; } ts[2] = { { b[0], 0 }, { b[1], 0 } };
 	return do_utimensat(AT_FDCWD, path, ts, 0, 1);
 }
@@ -63,8 +63,8 @@ static long sys_utime(const char *path, const int64_t *ubuf)
 
 static long sys_mincore(uint64_t addr, size_t len, uint8_t *uvec)
 {
-	if (addr & (PAGE_SIZE - 1)) return -22;
-	if (!access_ok((void *)addr, len)) return -12;
+	if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+	if (!access_ok((void *)addr, len)) return -ENOMEM;
 	size_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
 	vm_space_t *vm = task_current()->vm;
 	for (size_t i = 0; i < pages; i++) {
@@ -76,9 +76,9 @@ static long sys_mincore(uint64_t addr, size_t len, uint8_t *uvec)
 			for (vma_t *v = vm->vmas; v && !known; v = v->next)
 				known = va >= v->vaddr && va < v->vaddr + v->size;
 			spin_unlock_irq(&vm->fault_lock, f);
-			if (!known) return -12;   /* ENOMEM: nothing mapped there */
+			if (!known) return -ENOMEM;   /* nothing mapped there */
 		}
-		if (copy_to_user(uvec + i, &in, 1) != 0) return -14;
+		if (copy_to_user(uvec + i, &in, 1) != 0) return -EFAULT;
 	}
 	return 0;
 }
@@ -98,23 +98,23 @@ static long sys_readahead(int fd, off_t off, size_t count)
 
 static long sys_syncfs(int fd)
 {
-	if (!fd_file(fd)) return -9;
+	if (!fd_file(fd)) return -EBADF;
 	return sys_sync();
 }
 
 static long sys_fsetxattr(int fd, const char *n, const void *v, size_t s, int flags)
 {
 	vfs_file_t *f = fd_file(fd);
-	if (!f) return -9;
-	if (f->mnt_flags & MS_RDONLY) return -30;
+	if (!f) return -EBADF;
+	if (f->mnt_flags & MS_RDONLY) return -EROFS;
 	char kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
-	if (s > XATTR_VALUE_MAX) return -7;
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -EFAULT;
+	if (s > XATTR_VALUE_MAX) return -E2BIG;
 	void *kv = NULL;
 	if (s) {
 		kv = kmalloc(s);
-		if (!kv) return -12;
-		if (copy_from_user(kv, v, s) != 0) { kfree(kv); return -14; }
+		if (!kv) return -ENOMEM;
+		if (copy_from_user(kv, v, s) != 0) { kfree(kv); return -EFAULT; }
 	}
 	vfs_iattr_t a = { .valid = ATTR_XATTR_SET, .xname = kname, .xval = kv, .xlen = s, .xflags = flags };
 	int r = vfs_inode_setattr(f->inode, &a);
@@ -125,10 +125,10 @@ static long sys_fsetxattr(int fd, const char *n, const void *v, size_t s, int fl
 static long sys_fremovexattr(int fd, const char *n)
 {
 	vfs_file_t *f = fd_file(fd);
-	if (!f) return -9;
-	if (f->mnt_flags & MS_RDONLY) return -30;
+	if (!f) return -EBADF;
+	if (f->mnt_flags & MS_RDONLY) return -EROFS;
 	char kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -EFAULT;
 	vfs_iattr_t a = { .valid = ATTR_XATTR_REMOVE, .xname = kname };
 	return vfs_inode_setattr(f->inode, &a);
 }
@@ -136,11 +136,11 @@ static long sys_fremovexattr(int fd, const char *n)
 static long sys_flistxattr(int fd, char *ulist, size_t size)
 {
 	vfs_file_t *f = fd_file(fd);
-	if (!f) return -9;
+	if (!f) return -EBADF;
 	if (size == 0) return vfs_inode_listxattr(f->inode, NULL, 0);
 	if (size > XATTR_VALUE_MAX) size = XATTR_VALUE_MAX;
 	char *kl = kmalloc(size);
-	if (!kl) return -12;
+	if (!kl) return -ENOMEM;
 	ssize_t r = vfs_inode_listxattr(f->inode, kl, size);
 	if (r >= 0 && copy_to_user(ulist, kl, (size_t)r) != 0) r = -14;
 	kfree(kl);
@@ -161,8 +161,8 @@ static long sys_setdomainname(const char *name, size_t len)
 	if (!capable_task(cur, CAP_SYS_ADMIN) &&
 	    !(cap_has(cur->cap_effective, CAP_SYS_ADMIN) && cur->uts_ns && cur->uts_ns != &init_uts_ns))
 		return -1;
-	if (len >= sizeof(ns->domainname)) return -22;
-	if (copy_from_user(ns->domainname, name, len) != 0) return -14;
+	if (len >= sizeof(ns->domainname)) return -EINVAL;
+	if (copy_from_user(ns->domainname, name, len) != 0) return -EFAULT;
 	ns->domainname[len] = '\0';
 	return 0;
 }
@@ -184,9 +184,9 @@ static long sys_pkey_mprotect(uint64_t addr, size_t len, int prot, int pkey)
 static long sys_openat2(int dirfd, const char *path, const void *uhow, size_t size)
 {
 	struct { uint64_t flags, mode, resolve; } how;
-	if (size < sizeof(how)) return -22;
-	if (copy_from_user(&how, uhow, sizeof(how)) != 0) return -14;
-	if (how.resolve) return -38;
+	if (size < sizeof(how)) return -EINVAL;
+	if (copy_from_user(&how, uhow, sizeof(how)) != 0) return -EFAULT;
+	if (how.resolve) return -ENOSYS;
 	return sys_openat(dirfd, path, (int)how.flags, (mode_t)how.mode);
 }
 
@@ -194,7 +194,7 @@ static long sys_openat2(int dirfd, const char *path, const void *uhow, size_t si
  * AT_SYMLINK_NOFOLLOW naming one it is EOPNOTSUPP, anything else changes. */
 static long sys_fchmodat2(int d, const char *p, mode_t m, int flags)
 {
-	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -22;   /* EINVAL */
+	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
 	if (flags & AT_EMPTY_PATH) {
 		char t[2];
 		if (strncpy_from_user(t, p, 2) >= 0 && t[0] == '\0') return sys_fchmod(d, m);

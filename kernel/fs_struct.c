@@ -4,6 +4,7 @@
 #include <kernel/proc.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
+#include <kernel/errno.h>
 
 static fs_path_t slash_path = { .ref = -1, .s = "/" };
 
@@ -80,9 +81,9 @@ fs_path_t *fs_cwd_get(fs_struct_t *fs)
 int fs_set_cwd(fs_struct_t *fs, const char *path)
 {
 	size_t n = strlen(path);
-	if (n + 1 > PATH_MAX) return -36;          /* ENAMETOOLONG */
+	if (n + 1 > PATH_MAX) return -ENAMETOOLONG;
 	fs_path_t *c = (n == 1 && path[0] == '/') ? &slash_path : path_new(path, n);
-	if (!c) return -12;
+	if (!c) return -ENOMEM;
 	uint64_t f = spin_lock_irq(&fs->lock);
 	fs_path_t *old = fs->cwd;
 	fs->cwd = c;

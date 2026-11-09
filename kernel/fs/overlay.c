@@ -5,6 +5,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
+#include <kernel/errno.h>
 
 /*
  * overlayfs — read-through union of a read-only lower and a writable upper.
@@ -143,7 +144,7 @@ static int ovl_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 static ssize_t ovl_read(vfs_file_t *f, void *buf, size_t len)
 {
 	vfs_inode_t *real = f->priv;
-	if (!real || !real->fops || !real->fops->read) return -22;
+	if (!real || !real->fops || !real->fops->read) return -EINVAL;
 	vfs_file_t tmp = *f; tmp.inode = real;
 	ssize_t r = real->fops->read(&tmp, buf, len);
 	f->pos = tmp.pos;
@@ -153,9 +154,9 @@ static ssize_t ovl_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t ovl_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	ovl_inode_t *oi = f->inode->priv;
-	if (!oi->upper) { if (copy_up_file(oi) != 0) return -28; f->priv = oi->upper; }
+	if (!oi->upper) { if (copy_up_file(oi) != 0) return -ENOSPC; f->priv = oi->upper; }
 	vfs_inode_t *real = oi->upper;
-	if (!real || !real->fops || !real->fops->write) return -22;
+	if (!real || !real->fops || !real->fops->write) return -EINVAL;
 	vfs_file_t tmp = *f; tmp.inode = real;
 	ssize_t r = real->fops->write(&tmp, buf, len);
 	f->pos = tmp.pos;
@@ -289,20 +290,20 @@ static int ovl_readlink(vfs_inode_t *inode, char *buf, size_t sz)
 	ovl_inode_t *oi = inode->priv;
 	vfs_inode_t *real = active_inode(oi);
 	if (real && real->iops && real->iops->readlink) return real->iops->readlink(real, buf, sz);
-	return -22;
+	return -EINVAL;
 }
 
 static int ovl_truncate(vfs_inode_t *inode, off_t len)
 {
 	ovl_inode_t *oi = inode->priv;
-	if (!oi->upper) { if (copy_up_file(oi) != 0) return -28; }
+	if (!oi->upper) { if (copy_up_file(oi) != 0) return -ENOSPC; }
 	vfs_inode_t *real = oi->upper;
 	if (real && real->iops && real->iops->truncate) {
 		int r = real->iops->truncate(real, len);
 		if (r == 0) inode->size = real->size;
 		return r;
 	}
-	return -22;
+	return -EINVAL;
 }
 
 /* The view inode dies with the lookup: the change has to reach the upper layer. */
@@ -312,7 +313,7 @@ static int ovl_setattr(vfs_inode_t *in, const vfs_iattr_t *a)
 	vfs_iattr_apply(in, a);
 	if (!oi->upper) {
 		int r = S_ISDIR(in->mode) ? dir_copy_up(oi) : S_ISREG(in->mode) ? copy_up_file(oi) : 0;
-		if (r) return -28; /* ENOSPC */
+		if (r) return -ENOSPC;
 		if (!oi->upper) return 0;
 	}
 	return vfs_inode_setattr(oi->upper, a);

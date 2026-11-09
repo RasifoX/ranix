@@ -6,6 +6,7 @@
 #include <kernel/time.h>
 #include <kernel/csprng.h>
 #include <kernel/ptrace.h>
+#include <kernel/errno.h>
 /* ── uname ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -19,7 +20,7 @@ typedef struct {
 
 static long sys_uname(linux_utsname_t *uts)
 {
-	if (!uts) return -14;
+	if (!uts) return -EFAULT;
 	uts_namespace_t *ns = current_uts();
 	linux_utsname_t k;
 	memset(&k, 0, sizeof(k));
@@ -47,23 +48,23 @@ static long sys_uname(linux_utsname_t *uts)
 static long sys_unshare(unsigned long flags)
 {
 	process_t *p = task_current();
-	if (!may_create_ns(p, flags)) return -1; /* EPERM */
+	if (!may_create_ns(p, flags)) return -EPERM;
 	if ((flags & CLONE_FS) && p->fs && p->fs->users > 1) {
 		/* a private copy: chdir and chroot no longer reach the others */
 		fs_struct_t *fs = fs_copy(p->fs);
-		if (!fs) return -12;
+		if (!fs) return -ENOMEM;
 		fs_put(p->fs);
 		p->fs = fs;
 	}
 	if (flags & CLONE_NEWUTS) {
 		uts_namespace_t *ns = uts_ns_clone(p->uts_ns);
-		if (!ns) return -12; /* ENOMEM */
+		if (!ns) return -ENOMEM;
 		uts_ns_put(p->uts_ns);
 		p->uts_ns = ns;
 	}
 	if (flags & CLONE_NEWIPC) {
 		ipc_namespace_t *ns = ipc_ns_clone(p->ipc_ns);
-		if (!ns) return -12; /* ENOMEM */
+		if (!ns) return -ENOMEM;
 		ipc_ns_put(p->ipc_ns);
 		p->ipc_ns = ns;
 	}
@@ -72,13 +73,13 @@ static long sys_unshare(unsigned long flags)
 		 * offsets can still be set via /proc/self/timens_offsets */
 		if (!p->time_ns_new) {
 			time_namespace_t *ns = time_ns_clone(p->time_ns);
-			if (!ns) return -12; /* ENOMEM */
+			if (!ns) return -ENOMEM;
 			p->time_ns_new = ns;
 		}
 	}
 	if (flags & CLONE_NEWNS) {
 		mnt_namespace_t *ns = mnt_ns_clone(p->mnt_ns);
-		if (!ns) return -12; /* ENOMEM */
+		if (!ns) return -ENOMEM;
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = ns;
 	}
@@ -86,7 +87,7 @@ static long sys_unshare(unsigned long flags)
 		/* moves the caller into a new user namespace and makes it all-powerful
 		 * there (rootless-container basis); uid_map is written afterwards */
 		user_namespace_t *ns = user_ns_create_child(p->user_ns ? p->user_ns : &init_user_ns, p->euid);
-		if (!ns) return -12;
+		if (!ns) return -ENOMEM;
 		user_ns_put(p->user_ns);
 		p->user_ns = ns;
 		p->cap_effective = p->cap_permitted = CAP_FULL;
@@ -94,14 +95,14 @@ static long sys_unshare(unsigned long flags)
 	if (flags & CLONE_NEWNET) {
 		/* moves the caller into a new network namespace (only loopback) */
 		net_namespace_t *ns = net_ns_create();
-		if (!ns) return -12;
+		if (!ns) return -ENOMEM;
 		net_ns_put(p->net_ns);
 		p->net_ns = ns;
 	}
 	if (flags & CLONE_NEWCGROUP) {
 		/* the caller's current cgroup becomes the root of the new ns's view */
 		struct cgroup_namespace *ns = cgroup_ns_create();
-		if (!ns) return -12;
+		if (!ns) return -ENOMEM;
 		cgroup_ns_put(p->cgroup_ns);
 		p->cgroup_ns = ns;
 	}
@@ -110,7 +111,7 @@ static long sys_unshare(unsigned long flags)
 		 * not change); the first child becomes nr 1 of the new ns */
 		if (!p->pid_ns_new) {
 			pid_namespace_t *ns = pid_ns_create_child(p->pid_ns ? p->pid_ns : &init_pid_ns);
-			if (!ns) return -12; /* ENOMEM */
+			if (!ns) return -ENOMEM;
 			p->pid_ns_new = ns;
 		}
 	}
@@ -125,8 +126,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 {
 	uts_namespace_t *uts = nsfile_to_uts(f);
 	if (uts) {
-		if (nstype != 0 && nstype != CLONE_NEWUTS) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWUTS) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		uts_ns_get(uts);
 		uts_ns_put(p->uts_ns);
 		p->uts_ns = uts;
@@ -135,8 +136,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	ipc_namespace_t *ipc = nsfile_to_ipc(f);
 	if (ipc) {
-		if (nstype != 0 && nstype != CLONE_NEWIPC) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWIPC) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		ipc_ns_get(ipc);
 		ipc_ns_put(p->ipc_ns);
 		p->ipc_ns = ipc;
@@ -145,8 +146,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	time_namespace_t *tns = nsfile_to_time(f);
 	if (tns) {
-		if (nstype != 0 && nstype != CLONE_NEWTIME) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWTIME) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		time_ns_get(tns);
 		time_ns_put(p->time_ns);
 		p->time_ns = tns;
@@ -155,8 +156,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	mnt_namespace_t *mns = nsfile_to_mnt(f);
 	if (mns) {
-		if (nstype != 0 && nstype != CLONE_NEWNS) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWNS) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		mnt_ns_get(mns);
 		mnt_ns_put(p->mnt_ns);
 		p->mnt_ns = mns;
@@ -165,8 +166,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	pid_namespace_t *pns = nsfile_to_pid(f);
 	if (pns) {
-		if (nstype != 0 && nstype != CLONE_NEWPID) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWPID) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		/* like unshare(CLONE_NEWPID): the caller's own pid ns is unchanged;
 		 * the joined ns becomes the ns for its future children */
 		pid_ns_get(pns);
@@ -177,8 +178,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	user_namespace_t *uns = nsfile_to_user(f);
 	if (uns) {
-		if (nstype != 0 && nstype != CLONE_NEWUSER) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWUSER) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		user_ns_get(uns);
 		user_ns_put(p->user_ns);
 		p->user_ns = uns;
@@ -187,8 +188,8 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	net_namespace_t *nns = nsfile_to_net(f);
 	if (nns) {
-		if (nstype != 0 && nstype != CLONE_NEWNET) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWNET) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		net_ns_get(nns);
 		net_ns_put(p->net_ns);
 		p->net_ns = nns;
@@ -197,22 +198,22 @@ static long setns_file(process_t *p, vfs_file_t *f, int nstype)
 
 	struct cgroup_namespace *cns = nsfile_to_cgroup(f);
 	if (cns) {
-		if (nstype != 0 && nstype != CLONE_NEWCGROUP) return -22;
-		if (!capable_task(p, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (nstype != 0 && nstype != CLONE_NEWCGROUP) return -EINVAL;
+		if (!capable_task(p, CAP_SYS_ADMIN)) return -EPERM;
 		cgroup_ns_get(cns);
 		cgroup_ns_put(p->cgroup_ns);
 		p->cgroup_ns = cns;
 		return 0;
 	}
 
-	return -22; /* EINVAL: not a namespace fd */
+	return -EINVAL;   /* not a namespace fd */
 }
 
 static long sys_setns(int fd, int nstype)
 {
 	process_t *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);
-	if (!f) return -9; /* EBADF */
+	if (!f) return -EBADF;
 	long r = setns_file(p, f, nstype);
 	fput(f);
 	return r;
@@ -318,7 +319,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 	/* Priority inheritance is not here. EOPNOTSUPP is what libraries probe for and
 	 * fall back on; ENOSYS from a futex makes PulseAudio's client abort. */
 	if (cmd >= 6 && cmd <= 8)
-		return -95;
+		return -EOPNOTSUPP;
 	process_t *self = task_current();
 	void *mm = self->vm;
 
@@ -327,8 +328,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
 		if (timeout) {
 			linux_timespec_t kts;
-			if (copy_from_user(&kts, timeout, sizeof(kts)) != 0) return -14;
-			if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L) return -22;
+			if (copy_from_user(&kts, timeout, sizeof(kts)) != 0) return -EFAULT;
+			if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L) return -EINVAL;
 			if (kts.tv_sec > 0x7fffffffffffffffLL / 1000000000LL - 2) timeout = NULL;
 			else {
 				/* FUTEX_WAIT's timeout is a relative span, FUTEX_WAIT_BITSET's an
@@ -350,16 +351,16 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 				timed  = 1;
 			}
 		}
-		if (task_has_actionable_signal()) return -4;   /* the first sleep would not see it */
+		if (task_has_actionable_signal()) return -EINTR;   /* the first sleep would not see it */
 		futex_q_t q = { self, uaddr, mm, 0, NULL };
 		/* Fault the word in before taking the lock: the fault path can sleep and
 		 * allocate, which it must not do under an IRQ-off spinlock. */
 		uint32_t cur;
-		if ((uintptr_t)uaddr & 3) return -22;
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -14;
+		if ((uintptr_t)uaddr & 3) return -EINVAL;
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
 		uint64_t f = spin_lock_irq(&futex_lock);
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -14; }
-		if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -11; }
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -EFAULT; }
+		if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -EAGAIN; }
 		unsigned h = futex_hash(mm, uaddr);
 		q.next = futex_bucket[h]; futex_bucket[h] = &q;
 		uint64_t fs = spin_lock_irq(&sched_lock);
@@ -410,19 +411,19 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 	}
 
 	if (cmd == FUTEX_WAKE_OP) {
-		if (!uaddr2) return -22;
+		if (!uaddr2) return -EINVAL;
 		uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
 		uint32_t oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
 		if (op3 & 8) { oparg = 1u << (oparg & 31); op3 &= ~8u; }
 		uint32_t oldval = 0;
-		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -14;
+		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -EFAULT;
 		uint32_t newval = oldval;
 		switch (op3) {
 		case 0: newval  = oparg; break; case 1: newval += oparg; break;
 		case 2: newval |= oparg; break; case 3: newval &= ~oparg; break;
 		case 4: newval ^= oparg; break;
 		}
-		if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -14;
+		if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -EFAULT;
 		uint64_t f = spin_lock_irq(&futex_lock);
 		int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
 		int do2 = 0;
@@ -441,8 +442,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 	if (cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */) {
 		if (cmd == 4) {
 			uint32_t cur;
-			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -14;
-			if (cur != val3) return -11;
+			if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
+			if (cur != val3) return -EAGAIN;
 		}
 		uint64_t f = spin_lock_irq(&futex_lock);
 		/* onto itself the requeue keeps re-finding the same waiter, up to 2^31
@@ -453,7 +454,7 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		return woken;
 	}
 
-	return -38;
+	return -ENOSYS;
 }
 
 /* Called from sched.c task_exit to wake futex waiters on clear_child_tid. */
@@ -534,7 +535,7 @@ void futex_exit_robust(process_t *p)
 
 static long sys_set_robust_list(void *head, size_t len)
 {
-	if (len != sizeof(struct robust_list_head)) return -22;
+	if (len != sizeof(struct robust_list_head)) return -EINVAL;
 	task_current()->robust_list = head;
 	return 0;
 }
@@ -542,14 +543,14 @@ static long sys_set_robust_list(void *head, size_t len)
 static long sys_get_robust_list(pid_t tid, void **head_ptr, size_t *len_ptr)
 {
 	process_t *t = tid ? proc_get_user(tid) : task_current();
-	if (!t) return -3;
+	if (!t) return -ESRCH;
 	/* the head is a user address of the target: an ASLR leak without this */
 	if (tid && !ptrace_may_access(t)) { proc_put(t); return -1; }
 	void  *head = t->robust_list;
 	size_t len  = sizeof(struct robust_list_head);
 	if (tid) proc_put(t);
-	if (copy_to_user(head_ptr, &head, sizeof(head)) != 0) return -14;
-	if (copy_to_user(len_ptr, &len, sizeof(len)) != 0)    return -14;
+	if (copy_to_user(head_ptr, &head, sizeof(head)) != 0) return -EFAULT;
+	if (copy_to_user(len_ptr, &len, sizeof(len)) != 0)    return -EFAULT;
 	return 0;
 }
 
@@ -644,7 +645,7 @@ static void cpu_time(int64_t *sec, int64_t *nsec)
 
 static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 {
-	if (!tp) return -14;
+	if (!tp) return -EFAULT;
 	linux_timespec_t k;
 	switch (clkid) {
 	case CLOCK_REALTIME:
@@ -671,7 +672,7 @@ static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 		mono_time(&k.tv_sec, &k.tv_nsec);
 		break;
 	default:
-		return -22; /* EINVAL: unknown clock */
+		return -EINVAL;   /* unknown clock */
 	}
 	return copy_to_user(tp, &k, sizeof(k)) ? -14 : 0;
 }
@@ -684,7 +685,7 @@ static long sys_clock_getres(int clkid, linux_timespec_t *res)
 	case CLOCK_PROCESS_CPUTIME_ID: case CLOCK_THREAD_CPUTIME_ID:
 	case CLOCK_REALTIME_COARSE: case CLOCK_MONOTONIC_COARSE:
 		break;
-	default: return -22;
+	default: return -EINVAL;
 	}
 	if (res) {
 		linux_timespec_t r;
@@ -714,11 +715,11 @@ static long sys_gettimeofday(linux_timeval_t *tv, void *tz)
 
 static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 {
-	if (!capable_task(task_current(), CAP_SYS_TIME)) return -1; /* EPERM */
-	if (clkid != CLOCK_REALTIME || !tp) return -22;
+	if (!capable_task(task_current(), CAP_SYS_TIME)) return -EPERM;
+	if (clkid != CLOCK_REALTIME || !tp) return -EINVAL;
 	linux_timespec_t k;
-	if (copy_from_user(&k, tp, sizeof(k)) != 0) return -14;
-	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
+	if (copy_from_user(&k, tp, sizeof(k)) != 0) return -EFAULT;
+	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec  - ms;
 	g_rt_off_nsec = (int64_t)k.tv_nsec - mn;
@@ -736,11 +737,11 @@ static void rtc_sync_to_hw(void)
 static long sys_settimeofday(const linux_timeval_t *tv, const void *tz)
 {
 	(void)tz;
-	if (!capable_task(task_current(), CAP_SYS_TIME)) return -1; /* EPERM */
-	if (!tv) return -14;
+	if (!capable_task(task_current(), CAP_SYS_TIME)) return -EPERM;
+	if (!tv) return -EFAULT;
 	linux_timeval_t k;
-	if (copy_from_user(&k, tv, sizeof(k)) != 0) return -14;
-	if (k.tv_sec < 0 || k.tv_usec < 0 || k.tv_usec >= 1000000L) return -22;
+	if (copy_from_user(&k, tv, sizeof(k)) != 0) return -EFAULT;
+	if (k.tv_sec < 0 || k.tv_usec < 0 || k.tv_usec >= 1000000L) return -EINVAL;
 	int64_t ms, mn; mono_time(&ms, &mn);
 	g_rt_off_sec  = (int64_t)k.tv_sec - ms;
 	g_rt_off_nsec = (int64_t)k.tv_usec * 1000 - mn;
@@ -768,11 +769,11 @@ static int64_t g_tx_freq = 0;   /* steered frequency (scaled ppm, freq/65536 = p
 
 static long sys_adjtimex(k_timex_t *utx)
 {
-	if (!utx) return -14;
+	if (!utx) return -EFAULT;
 	k_timex_t tx;
-	if (copy_from_user(&tx, utx, sizeof(tx)) != 0) return -14;
+	if (copy_from_user(&tx, utx, sizeof(tx)) != 0) return -EFAULT;
 	if (tx.modes != 0 && !capable_task(task_current(), CAP_SYS_TIME))
-		return -1; /* EPERM — read-only adjtimex (modes==0) stays unprivileged */
+		return -EPERM;   /* read-only adjtimex (modes==0) stays unprivileged */
 
 	if (tx.modes & 0x0100) {           /* ADJ_SETOFFSET: step the clock by .time */
 		int64_t add_s = tx.time_sec;
@@ -797,7 +798,7 @@ static long sys_adjtimex(k_timex_t *utx)
 static long sleep_for(const linux_timespec_t *kts, linux_timespec_t *urem)
 {
 	linux_timespec_t k = *kts;
-	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
+	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
 	/* a huge span must saturate: a wrapped end returns at once */
 	uint64_t ticks = (uint64_t)k.tv_sec >= (uint64_t)-1 / 2 / TIMER_HZ ? (uint64_t)-1 / 2
 	               : (uint64_t)k.tv_sec * TIMER_HZ + (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
@@ -809,9 +810,9 @@ static long sleep_for(const linux_timespec_t *kts, linux_timespec_t *urem)
 				linux_timespec_t r;
 				r.tv_sec  = (long)(left / TIMER_HZ);
 				r.tv_nsec = (long)(left % TIMER_HZ) * (1000000000 / TIMER_HZ);
-				if (copy_to_user(urem, &r, sizeof(r)) != 0) return -14;
+				if (copy_to_user(urem, &r, sizeof(r)) != 0) return -EFAULT;
 			}
-			return -4;
+			return -EINTR;
 		}
 		task_sleep_until(end);
 	}
@@ -820,9 +821,9 @@ static long sleep_for(const linux_timespec_t *kts, linux_timespec_t *urem)
 
 static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)
 {
-	if (!req) return -14;
+	if (!req) return -EFAULT;
 	linux_timespec_t k;
-	if (copy_from_user(&k, req, sizeof(k)) != 0) return -14;
+	if (copy_from_user(&k, req, sizeof(k)) != 0) return -EFAULT;
 	return sleep_for(&k, rem);
 }
 
@@ -837,7 +838,7 @@ static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_
     case 0: value = &p->itimer_value; interval = &p->itimer_interval; break; /* REAL    → SIGALRM   */
     case 1: value = &p->vtimer_value; interval = &p->vtimer_interval; break; /* VIRTUAL → SIGVTALRM */
     case 2: value = &p->ptimer_value; interval = &p->ptimer_interval; break; /* PROF    → SIGPROF   */
-    default: return -22; /* EINVAL */
+    default: return -EINVAL;
     }
     uint64_t hz = TIMER_HZ;
     if (old_v) {
@@ -846,14 +847,14 @@ static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_
         oval.it_value.tv_usec   = (int64_t)((*value % hz) * (1000000 / hz));
         oval.it_interval.tv_sec = (int64_t)(*interval / hz);
         oval.it_interval.tv_usec= (int64_t)((*interval % hz) * (1000000 / hz));
-        if (copy_to_user(old_v, &oval, sizeof(oval)) != 0) return -14;
+        if (copy_to_user(old_v, &oval, sizeof(oval)) != 0) return -EFAULT;
     }
     if (new_v) {
         itimerval_t nval;
-        if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -14;
+        if (copy_from_user(&nval, new_v, sizeof(nval)) != 0) return -EFAULT;
         if (nval.it_value.tv_sec < 0 || nval.it_interval.tv_sec < 0 ||
             (uint64_t)nval.it_value.tv_usec >= 1000000 ||
-            (uint64_t)nval.it_interval.tv_usec >= 1000000) return -22;
+            (uint64_t)nval.it_interval.tv_usec >= 1000000) return -EINVAL;
         uint64_t nv = (uint64_t)nval.it_value.tv_sec * hz +
                       (uint64_t)nval.it_value.tv_usec * hz / 1000000;
         uint64_t ni = (uint64_t)nval.it_interval.tv_sec * hz +
@@ -883,14 +884,14 @@ static long sys_times(void *buf)
 		tms[1] = (int64_t)TICKS_USER(p ? p->stime_ticks  : 0);
 		tms[2] = (int64_t)TICKS_USER(p ? p->cutime_ticks : 0);
 		tms[3] = (int64_t)TICKS_USER(p ? p->cstime_ticks : 0);
-		if (copy_to_user(buf, tms, sizeof(tms)) != 0) return -14;
+		if (copy_to_user(buf, tms, sizeof(tms)) != 0) return -EFAULT;
 	}
 	return (long)TICKS_USER(kernel_ticks);
 }
 
 static long sys_sysinfo(void *info)
 {
-	if (!info) return -14;
+	if (!info) return -EFAULT;
 	/* struct sysinfo layout (kernel ABI) */
 	struct {
 		int64_t  uptime;
@@ -935,19 +936,19 @@ static vfs_fops_t pidfd_fops = { .close = pidfd_close_vfs };
 
 static long sys_pidfd_open(pid_t pid, unsigned int flags)
 {
-	if (flags & ~0x800u) return -22;   /* PIDFD_NONBLOCK */
+	if (flags & ~0x800u) return -EINVAL;   /* PIDFD_NONBLOCK */
 	process_t *t = pid > 0 ? proc_get_user(pid) : NULL;
-	if (!t) return -3;   /* ESRCH */
+	if (!t) return -ESRCH;
 	pid_t global = (pid_t)t->pid;   /* the fd can reach another pid namespace */
 	proc_put(t);
 	vfs_inode_t *in = kmalloc(sizeof(*in));
-	if (!in) return -12;
+	if (!in) return -ENOMEM;
 	memset(in, 0, sizeof(*in));
 	in->fops     = &pidfd_fops;
 	in->priv     = (void *)(uint64_t)global;
 	in->refcount = 1;
 	vfs_file_t *f = kmalloc(sizeof(*f));
-	if (!f) { kfree(in); return -12; }
+	if (!f) { kfree(in); return -ENOMEM; }
 	memset(f, 0, sizeof(*f));
 	f->inode    = in;
 	f->refcount = 0;   /* fd_alloc takes the +1 */
@@ -959,10 +960,10 @@ static long sys_pidfd_open(pid_t pid, unsigned int flags)
 static long sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned int flags)
 {
 	(void)info;
-	if (flags) return -22;
+	if (flags) return -EINVAL;
 	vfs_file_t *f = fget(task_current()->fds, pidfd);
-	if (!f) return -9; /* EBADF */
-	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -9; }
+	if (!f) return -EBADF;
+	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -EBADF; }
 	process_t *t = proc_get((pid_t)(uint64_t)f->inode->priv);
 	fput(f);
 	long r = (t && task_pid_nr_ns(t, current_pid_ns())) ? kill_task(t, sig) : -3;
@@ -977,11 +978,11 @@ struct ranix_sched_param { int sched_priority; };
 
 static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
 {
-	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
+	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -EINVAL;
 	/* a real-time spinner starves every normal task on its CPU */
 	if (policy != SCHED_NORMAL && !capable_task(task_current(), CAP_SYS_NICE)) return -1;
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	if (pid && !task_may_control(p, CAP_SYS_NICE)) { proc_put(p); return -1; } /* EPERM */
 	long ret = 0;
 	int prio = 0;
@@ -1002,7 +1003,7 @@ static long sys_sched_setscheduler(pid_t pid, int policy, const void *uparam)
 static long sys_sched_setparam(pid_t pid, const void *uparam)
 {
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	if (pid && !task_may_control(p, CAP_SYS_NICE)) { proc_put(p); return -1; } /* EPERM */
 	long ret = 0;
 	struct ranix_sched_param sp;
@@ -1037,9 +1038,9 @@ struct ranix_sched_attr {
 
 static long sys_sched_getattr(pid_t pid, void *uattr, unsigned int usize, unsigned int flags)
 {
-	if (flags || !uattr || usize < 48 || usize > 4096) return -22;
+	if (flags || !uattr || usize < 48 || usize > 4096) return -EINVAL;
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	struct ranix_sched_attr a;
 	memset(&a, 0, sizeof(a));
 	a.size     = usize < sizeof(a) ? usize : (uint32_t)sizeof(a);
@@ -1052,23 +1053,23 @@ static long sys_sched_getattr(pid_t pid, void *uattr, unsigned int usize, unsign
 
 static long sys_sched_setattr(pid_t pid, const void *uattr, unsigned int flags)
 {
-	if (flags || !uattr) return -22;
+	if (flags || !uattr) return -EINVAL;
 	struct ranix_sched_attr a;
 	memset(&a, 0, sizeof(a));
 	uint32_t sz;
-	if (copy_from_user(&sz, uattr, 4)) return -14;
+	if (copy_from_user(&sz, uattr, 4)) return -EFAULT;
 	if (!sz) sz = 48;
-	if (sz < 48 || sz > 4096) return -7;   /* E2BIG, as Linux */
-	if (copy_from_user(&a, uattr, sz < sizeof(a) ? sz : sizeof(a))) return -14;
+	if (sz < 48 || sz > 4096) return -E2BIG;   /* as Linux */
+	if (copy_from_user(&a, uattr, sz < sizeof(a) ? sz : sizeof(a))) return -EFAULT;
 	int policy = (int)a.policy;
 	if (policy == 3 || policy == 5) policy = SCHED_NORMAL;      /* BATCH, IDLE */
-	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -22;
+	if (policy != SCHED_NORMAL && policy != SCHED_FIFO && policy != SCHED_RR) return -EINVAL;
 	if (policy == SCHED_NORMAL) {
-		if (a.priority) return -22;
+		if (a.priority) return -EINVAL;
 		long r = sys_sched_setscheduler(pid, SCHED_NORMAL, NULL);
 		if (r) return r;
 		process_t *p = pid ? proc_get_user(pid) : task_current();
-		if (!p) return -3;
+		if (!p) return -ESRCH;
 		int nice = a.nice < -20 ? -20 : a.nice > 19 ? 19 : a.nice;
 		if (nice < p->nice && !capable_task(task_current(), CAP_SYS_NICE)) r = -1;
 		else p->nice = nice;
@@ -1079,7 +1080,7 @@ static long sys_sched_setattr(pid_t pid, const void *uattr, unsigned int flags)
 	/* sys_sched_setscheduler copies from user memory: hand it the value through a
 	 * kernel-side path instead */
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	long r = 0;
 	if (!capable_task(task_current(), CAP_SYS_NICE)) r = -1;
 	else if (pid && !task_may_control(p, CAP_SYS_NICE)) r = -1;
@@ -1122,14 +1123,14 @@ out:
 /* The memory of a process being killed goes back as it exits; nothing to hurry. */
 static long sys_process_mrelease(int pidfd, unsigned int flags)
 {
-	if (flags) return -22;
+	if (flags) return -EINVAL;
 	vfs_file_t *f = fget(task_current()->fds, pidfd);
-	if (!f) return -9;
-	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -9; }
+	if (!f) return -EBADF;
+	if (!f->inode || f->inode->fops != &pidfd_fops) { fput(f); return -EBADF; }
 	process_t *t = proc_get((pid_t)(uint64_t)f->inode->priv);
 	fput(f);
-	if (!t) return -3;
-	long r = (t->sig_pending & (1UL << (9 - 1))) || t->state == PROC_ZOMBIE || t->state == PROC_DEAD ? 0 : -22;
+	if (!t) return -ESRCH;
+	long r = (t->sig_pending & (1UL << (SIGKILL - 1))) || t->state == PROC_ZOMBIE || t->state == PROC_DEAD ? 0 : -22;
 	proc_put(t);
 	return r;
 }
@@ -1137,10 +1138,10 @@ static long sys_process_mrelease(int pidfd, unsigned int flags)
 static long sys_sched_getparam(pid_t pid, void *uparam)
 {
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	struct ranix_sched_param sp = { p->rt_priority };
 	if (pid) proc_put(p);
-	if (copy_to_user(uparam, &sp, sizeof(sp)) != 0) return -14;
+	if (copy_to_user(uparam, &sp, sizeof(sp)) != 0) return -EFAULT;
 	return 0;
 }
 
@@ -1148,14 +1149,14 @@ static long sys_sched_get_priority_max(int policy)
 {
 	if (policy == SCHED_FIFO || policy == SCHED_RR) return 99;
 	if (policy == SCHED_NORMAL) return 0;
-	return -22;
+	return -EINVAL;
 }
 
 static long sys_sched_get_priority_min(int policy)
 {
 	if (policy == SCHED_FIFO || policy == SCHED_RR) return 1;
 	if (policy == SCHED_NORMAL) return 0;
-	return -22;
+	return -EINVAL;
 }
 
 /* execveat(dirfd, path, argv, envp, flags): resolve the dirfd-relative (or
@@ -1164,18 +1165,18 @@ static long sys_execveat(int dirfd, const char *path, char * const argv[],
                          char * const envp[], int flags)
 {
 	char first = 0;
-	if (path && get_user(first, path) != 0) return -14;
+	if (path && get_user(first, path) != 0) return -EFAULT;
 	char *kp = kmalloc(PATH_MAX);
-	if (!kp) return -12;
+	if (!kp) return -ENOMEM;
 	if ((flags & AT_EMPTY_PATH) && !first) {
 		vfs_file_t *f = fget(task_current()->fds, dirfd);
-		if (!f) { kfree(kp); return -9; }
-		if (!f->path[0]) { fput(f); kfree(kp); return -9; }
+		if (!f) { kfree(kp); return -EBADF; }
+		if (!f->path[0]) { fput(f); kfree(kp); return -EBADF; }
 		memcpy(kp, f->path, strlen(f->path) + 1);
 		fput(f);
 		return do_execve(kp, argv, envp);
 	}
-	if (!path) { kfree(kp); return -14; }
+	if (!path) { kfree(kp); return -EFAULT; }
 	int r = resolve_path(kp, dirfd, path);
 	if (r) { kfree(kp); return r; }
 	return do_execve(kp, argv, envp);
@@ -1198,7 +1199,7 @@ static int exec_permitted(const vfs_stat_t *st, process_t *p)
 static long sys_execve(const char *path, char * const argv[], char * const envp[])
 {
 	char *kp = kmalloc(PATH_MAX);
-	if (!kp) return -12;
+	if (!kp) return -ENOMEM;
 	int r = copy_path_from_user(kp, path);
 	if (r) { kfree(kp); return r; }
 	return do_execve(kp, argv, envp);
@@ -1209,10 +1210,10 @@ static long sys_execve(const char *path, char * const argv[], char * const envp[
 static long exec_stage_ustr(char *kstrs, int *koff, int budget, const char *u)
 {
 	int room = budget - *koff;
-	if (room <= 0) return -7;
+	if (room <= 0) return -E2BIG;
 	long n = strncpy_from_user(kstrs + *koff, u, (size_t)room);
-	if (n < 0) return -14;
-	if (n >= room) return -7;
+	if (n < 0) return -EFAULT;
+	if (n >= room) return -E2BIG;
 	*koff += (int)n + 1;
 	return 0;
 }
@@ -1224,7 +1225,7 @@ static long exec_count_uvec(char * const *uv, int max)
 	int n = 0;
 	while (uv && n < max) {
 		char *s;
-		if (get_user(s, &uv[n]) != 0) return -14;
+		if (get_user(s, &uv[n]) != 0) return -EFAULT;
 		if (!s) break;
 		n++;
 	}
@@ -1271,7 +1272,7 @@ static int exec_make_absolute(process_t *p, char *kpath)
 	if (i && kpath[0] != '/') {
 		fs_path_t *cwd = fs_cwd_get(p->fs);
 		int bl = strlen(cwd->s);
-		if (bl + 1 + i >= PATH_MAX) { fs_path_put(cwd); return -36; }
+		if (bl + 1 + i >= PATH_MAX) { fs_path_put(cwd); return -ENAMETOOLONG; }
 		memmove(kpath + bl + 1, kpath, i + 1);
 		memcpy(kpath, cwd->s, bl);
 		kpath[bl] = '/';
@@ -1336,7 +1337,7 @@ static long exec_resolve_shebang(process_t *p, char **kpathp, char **pre, int *p
 		kpath = kmalloc(PATH_MAX);
 		if (!kpath) { /* interp string still freeable via pre */
 			for (int _k = 0; _k < shebang_n; _k++) kfree(pre[_k]);
-			return -12;
+			return -ENOMEM;
 		}
 		c = 0; for (; interp[c] && c < PATH_MAX - 1; c++) kpath[c] = interp[c];
 		kpath[c] = '\0';
@@ -1355,7 +1356,7 @@ static long exec_stage_args(exec_args_t *a, char **pre, int shebang_n,
 {
 	memset(a, 0, sizeof(*a));
 	a->kstrs = kmalloc(ARG_STR_MAX);
-	if (!a->kstrs) { for (int k=0;k<shebang_n;k++) kfree(pre[k]); return -12; }
+	if (!a->kstrs) { for (int k=0;k<shebang_n;k++) kfree(pre[k]); return -ENOMEM; }
 
 	/* count args/env (bounded so an unterminated user array can't loop forever) */
 	int max_ptrs = (int)(ARG_WIN_BYTES / sizeof(uint64_t));
@@ -1365,7 +1366,7 @@ static long exec_stage_args(exec_args_t *a, char **pre, int shebang_n,
 	long ucount_env = exec_count_uvec(envp, max_ptrs);
 	if (user_argc < 0 || ucount_env < 0) {
 		for (int k=0;k<shebang_n;k++) kfree(pre[k]);
-		exec_args_free(a); return -14;
+		exec_args_free(a); return -EFAULT;
 	}
 	int user_start = (user_skip && user_argc > 0) ? 1 : 0;
 	int argc = shebang_n + ((int)user_argc - user_start);
@@ -1373,7 +1374,7 @@ static long exec_stage_args(exec_args_t *a, char **pre, int shebang_n,
 
 	a->kargv = kmalloc((size_t)(argc + 1) * sizeof(char *));
 	a->kenvp = kmalloc((size_t)(envc + 1) * sizeof(char *));
-	if (!a->kargv || !a->kenvp) { for (int k=0;k<shebang_n;k++) kfree(pre[k]); exec_args_free(a); return -12; }
+	if (!a->kargv || !a->kenvp) { for (int k=0;k<shebang_n;k++) kfree(pre[k]); exec_args_free(a); return -ENOMEM; }
 
 	char *kstrs = a->kstrs;
 	int koff = 0;
@@ -1511,7 +1512,7 @@ static long exec_load_interp(process_t *p, vm_space_t *new_vm, const elf_info_t 
 	vfs_stat_t ist = {0};
 	int ifd = (vfs_stat(ipath, &ist) != 0 || ist.size == 0) ? -1 : vfs_open(ipath, O_RDONLY, 0);
 	if (iabs) kfree(iabs);
-	if (ifd < 0) return -8;
+	if (ifd < 0) return -ENOEXEC;
 
 	elf_info_t ii = {0};
 	int irc = elf_load_fd(new_vm, ifd, (size_t)ist.size, en->mmap_base, &ii);
@@ -1533,10 +1534,10 @@ static long exec_load_interp(process_t *p, vm_space_t *new_vm, const elf_info_t 
 static long exec_map_stack(process_t *p, vm_space_t *new_vm, uint64_t argpg[ARG_WIN_PAGES])
 {
 	if (cgroup_charge_mem(new_vm, p->cgroup, (USER_STACK_PAGES_ + 1) * PAGE_SIZE) != 0)
-		return -12;
+		return -ENOMEM;
 	for (int j = 0; j < USER_STACK_PAGES_; j++) {
 		void *pg = buddy_alloc(0);
-		if (!pg) return -12;
+		if (!pg) return -ENOMEM;
 		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
 		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
@@ -1798,7 +1799,7 @@ static void exec_switch_vm(process_t *p, vm_space_t *new_vm, const elf_info_t *e
 static long do_execve(char *kpath, char * const argv[], char * const envp[])
 {
 	process_t *p = task_current();
-	if (exec_make_absolute(p, kpath)) { kfree(kpath); return -36; }
+	if (exec_make_absolute(p, kpath)) { kfree(kpath); return -ENAMETOOLONG; }
 
 	char *shebang_pre[SHEBANG_MAX_DEPTH * 3];
 	int   shebang_n = 0;
@@ -1816,11 +1817,11 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 
 	/* read file from VFS */
 	vfs_stat_t st = {0};
-	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -2; }
-	if (st.size == 0)              { EXEC_STAGE_FREE(); return -8; } /* ENOEXEC */
+	if (vfs_stat(kpath, &st) != 0) { EXEC_STAGE_FREE(); return -ENOENT; }
+	if (st.size == 0)              { EXEC_STAGE_FREE(); return -ENOEXEC; } /* ENOEXEC */
 
 	unsigned long mnt_flags = vfs_path_mnt_flags(kpath);
-	if (mnt_flags & MS_NOEXEC) { EXEC_STAGE_FREE(); return -13; } /* EACCES */
+	if (mnt_flags & MS_NOEXEC) { EXEC_STAGE_FREE(); return -EACCES; } /* EACCES */
 
 	/* AT_SECURE/env-scrub kick in only on an id change */
 	uid_t new_euid;
@@ -1830,13 +1831,13 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 	if (secure_exec) a.envc = exec_scrub_env(a.kenvp, a.envc);
 
 	int fd = vfs_open(kpath, O_RDONLY, 0);
-	if (fd < 0) { EXEC_STAGE_FREE(); return -2; }
+	if (fd < 0) { EXEC_STAGE_FREE(); return -ENOENT; }
 	char exe_real[PROC_NAME_MAX];
 	exec_real_path(p, fd, exe_real);
 
 	/* build new address space */
 	vm_space_t *new_vm = vm_create();
-	if (!new_vm) { vfs_close(fd); EXEC_STAGE_FREE(); return -12; }
+	if (!new_vm) { vfs_close(fd); EXEC_STAGE_FREE(); return -ENOMEM; }
 
 	elf_info_t ei = {0};
 	int load_rc = elf_load_fd(new_vm, fd, (size_t)st.size, 0, &ei);
@@ -1879,13 +1880,13 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 	 * and silently corrupt; -E2BIG matches Linux. ~512 bytes covers auxv+padding. */
 	size_t need = (size_t)a.koff + PATH_MAX + 16 + 512 +
 	              (size_t)(a.argc + a.envc + 3) * sizeof(uint64_t);
-	if (need >= ARG_WIN_BYTES) { EXEC_STAGE_FREE(); return -7; }
+	if (need >= ARG_WIN_BYTES) { EXEC_STAGE_FREE(); return -E2BIG; }
 
 	uint64_t *uargv = kmalloc((size_t)(a.argc + 1) * sizeof(uint64_t));
 	uint64_t *uenvp = kmalloc((size_t)(a.envc + 1) * sizeof(uint64_t));
 	uint8_t  *kbuf  = kmalloc(ARG_WIN_BYTES);
 	if (!uargv || !uenvp || !kbuf) {
-		kfree(uargv); kfree(uenvp); kfree(kbuf); EXEC_STAGE_FREE(); return -12;
+		kfree(uargv); kfree(uenvp); kfree(kbuf); EXEC_STAGE_FREE(); return -ENOMEM;
 	}
 	memset(kbuf, 0, ARG_WIN_BYTES);
 
@@ -1961,13 +1962,13 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
                            const iovec_t *uriov, unsigned long rcnt,
                            unsigned long flags, int write)
 {
-	if (flags) return -22;
-	if (lcnt > 16 || rcnt > 16) return -22;        /* EINVAL (we cap at 16 iovecs) */
+	if (flags) return -EINVAL;
+	if (lcnt > 16 || rcnt > 16) return -EINVAL;   /* (we cap at 16 iovecs) */
 	uid_t teuid = 0;
 	process_t *target = proc_get_user(pid);
 	vm_space_t *tvm = target ? proc_get_vm_cred((pid_t)target->pid, &teuid) : NULL;   /* pinned; vm_destroy to release */
 	proc_put(target);
-	if (!tvm) return -3;                               /* ESRCH */
+	if (!tvm) return -ESRCH;
 	process_t *cur = task_current();
 	long ret;
 
@@ -2036,7 +2037,7 @@ static long sys_vfork(uint64_t newsp, uint64_t flags)
 
 static long sys_pipe2(int *pipefd, int flags)
 {
-	if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -22;
+	if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -EINVAL;
 	int kfds[2];
 	int pr = vfs_pipe(kfds);
 	if (pr != 0) return pr == -24 ? -24 : -12;
@@ -2054,7 +2055,7 @@ static long sys_pipe2(int *pipefd, int flags)
 	if (copy_to_user(pipefd, kfds, sizeof(int) * 2) != 0) {
 		vfs_close(kfds[0]);
 		vfs_close(kfds[1]);
-		return -14;
+		return -EFAULT;
 	}
 	return 0;
 }
@@ -2120,16 +2121,16 @@ static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
 				*status = (event == 3) ? ((child->job_stop_sig << 8) | 0x7f) : 0xffff;
 				return (long)result;
 			}
-			if (!any_alive) return -10; /* ECHILD */
+			if (!any_alive) return -ECHILD;
 			if (wnohang)    return 0;
 			arch_yield();
 			p->in_wait = 0;
-			if (task_has_actionable_signal()) return -4; /* EINTR */
+			if (task_has_actionable_signal()) return -EINTR;
 		}
 	}
 
 	process_t *child = pid > 0 ? proc_find_child(p->tgid, current_pid_ns(), (int)pid) : NULL;
-	if (!child) return -10;
+	if (!child) return -ECHILD;
 
 	while (1) {
 		int r = proc_check_or_sleep(child, p, !wnohang, flags);
@@ -2150,7 +2151,7 @@ static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
 		if (wnohang) return 0;
 		arch_yield();
 		p->in_wait = 0;
-		if (task_has_actionable_signal()) return -4; /* EINTR */
+		if (task_has_actionable_signal()) return -EINTR;
 	}
 
 	int st = child->killed_by_sig
@@ -2173,7 +2174,7 @@ static long sys_waitpid(pid_t pid, int *ustatus, int flags, void *rusage)
 {
 	int st = 0;
 	long r = do_waitpid(pid, &st, flags, rusage);
-	if (r > 0 && ustatus && put_user(st, ustatus) != 0) return -14;
+	if (r > 0 && ustatus && put_user(st, ustatus) != 0) return -EFAULT;
 	return r;
 }
 
@@ -2196,7 +2197,7 @@ static long sys_arch_prctl(int code, uint64_t addr)
 		task_current()->user_gs_base = addr;
 		return 0;
 	}
-	return -22;
+	return -EINVAL;
 }
 #endif
 

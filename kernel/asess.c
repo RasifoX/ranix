@@ -8,6 +8,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/vfs.h>
+#include <kernel/errno.h>
 
 /*
  * Agent sessions: a process tree confined from its first instruction. The only
@@ -206,8 +207,8 @@ int asess_prepare_child(process_t *c, asess_t *s)
 	 * behind this check */
 	for (uint32_t i = 0; i < s->nkeep; i++) {
 		vfs_file_t *f = fd_get(c->fds, s->keep[i]);
-		if (!f) return -9;
-		if (!asess_file_allowed(f)) return -22;
+		if (!f) return -EBADF;
+		if (!asess_file_allowed(f)) return -EINVAL;
 	}
 
 	c->uid = c->euid = c->suid = s->uid;
@@ -344,7 +345,7 @@ static int sfd_alloc(asess_t *s)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	vfs_file_t  *f  = kmalloc(sizeof(*f));
-	if (!in || !f) { kfree(in); kfree(f); return -12; }
+	if (!in || !f) { kfree(in); kfree(f); return -ENOMEM; }
 	memset(in, 0, sizeof(*in));
 	memset(f, 0, sizeof(*f));
 	in->fops = &sfd_fops;
@@ -453,22 +454,22 @@ static vfs_dentry_t *resolve_stable(const char *path)
 static int view_bind(asess_t *s, const char *root, const char *dir, const char *src)
 {
 	vfs_dentry_t *d = resolve_stable(src ? src : dir);
-	if (!d || !d->inode) return -2;
-	if (!S_ISDIR(d->inode->mode)) return -20;
-	if (vfs_dentry_is_volatile(d)) return -22;   /* the slot is reused, the mount outlives it */
+	if (!d || !d->inode) return -ENOENT;
+	if (!S_ISDIR(d->inode->mode)) return -ENOTDIR;
+	if (vfs_dentry_is_volatile(d)) return -EINVAL;   /* the slot is reused, the mount outlives it */
 
 	size_t l = strlen(root);
 	while (l && root[l - 1] == '/') l--;
 	const char *rel = dir;
 	if (strncmp(dir, root, l) == 0 && (dir[l] == '/' || dir[l] == '\0')) rel = dir + l;
-	if (rel[0] != '/' && rel[0] != '\0') return -22;
+	if (rel[0] != '/' && rel[0] != '\0') return -EINVAL;
 	if (rel[0] == '/') rel++;
 
 	int err = 0;
 	vfs_dentry_t *mp = view_walk(s, rel, &err);
 	if (!mp) return err;
-	if (vfs_follow_in(s->mnt_ns, mp) != mp) return -16;   /* EBUSY: the view has a mount there */
-	if (src && mp == s->root) return -16;   /* staging the whole root is not supported */
+	if (vfs_follow_in(s->mnt_ns, mp) != mp) return -EBUSY;   /* the view has a mount there */
+	if (src && mp == s->root) return -EBUSY;   /* staging the whole root is not supported */
 	return vfs_bind(s->mnt_ns, mp == d && !src ? NULL : mp, d, rel[0] ? rel - 1 : "/",
 	                MS_NOSUID | MS_NODEV);
 }
@@ -478,7 +479,7 @@ static int view_build(asess_t *s, unsigned tmp_mib)
 	const unsigned long hard = MS_NOSUID | MS_NODEV;
 	int err = 0;
 	s->mnt_ns = mnt_ns_rooted(s->root, MS_RDONLY | hard);
-	if (!s->mnt_ns) return -12;
+	if (!s->mnt_ns) return -ENOMEM;
 
 	char opt[24];
 	memcpy(opt, "size=", 5);
@@ -505,7 +506,7 @@ static int budget_build(asess_t *s, const struct asess_attr *a)
 	long ram = (long)(buddy_total_pages() * PAGE_SIZE);
 	long mem = ram / 2 < ram - gib ? ram / 2 : ram - gib;
 	if (mem < floor) mem = floor;
-	if (mem > ram) return -12;
+	if (mem > ram) return -ENOMEM;
 	if (a->mem_max) mem = (long)a->mem_max;
 	long reserve = gib < ram / 4 ? gib : ram / 4;
 
@@ -545,13 +546,13 @@ static char *path_in(uint64_t upath, long *err)
 static long asess_create(const void *uattr, size_t size)
 {
 	struct asess_attr a;
-	if (size != sizeof(a)) return -22;
-	if (copy_from_user(&a, uattr, sizeof(a)) != 0) return -14;
-	if (a.size != sizeof(a) || a.flags || a.net_mode != ASESS_NET_NONE) return -22;
-	if (a.nkeep > 64) return -22;
+	if (size != sizeof(a)) return -EINVAL;
+	if (copy_from_user(&a, uattr, sizeof(a)) != 0) return -EFAULT;
+	if (a.size != sizeof(a) || a.flags || a.net_mode != ASESS_NET_NONE) return -EINVAL;
+	if (a.nkeep > 64) return -EINVAL;
 
 	asess_t *s = kmalloc(sizeof(*s));
-	if (!s) return -12;
+	if (!s) return -ENOMEM;
 	memset(s, 0, sizeof(*s));
 	s->refcount = 1;
 	s->max_tasks = a.max_tasks ? a.max_tasks : ASESS_DEFAULT_TASKS;
@@ -632,7 +633,7 @@ static long asess_spawn(asess_t *s)
 	int busy = s->spawned;
 	s->spawned = 1;
 	spin_unlock_irq(&asess_lock, f);
-	if (busy) return -16;   /* EBUSY: pid 1 of a session exists once */
+	if (busy) return -EBUSY;   /* pid 1 of a session exists once */
 
 	long pid = proc_fork_asess(s);
 	if (pid < 0) s->spawned = 0;
@@ -642,7 +643,7 @@ static long asess_spawn(asess_t *s)
 static long asess_info(asess_t *s, void *uinfo, size_t size)
 {
 	struct asess_info in;
-	if (size != sizeof(in)) return -22;
+	if (size != sizeof(in)) return -EINVAL;
 	uint64_t f = spin_lock_irq(&asess_lock);
 	in.id = s->id;
 	in.state = (unsigned)asess_state(s);
@@ -662,13 +663,13 @@ long sys_asess(unsigned int op, int sfd, void *arg, size_t size)
 	process_t *c = task_current();
 	if (c->asess) {
 		if (op == ASESS_INFO && sfd == -1) return asess_info(c->asess, arg, size);
-		return -1;   /* EPERM: no nesting, and nothing here to steer from inside */
+		return -EPERM;   /* no nesting, and nothing here to steer from inside */
 	}
 	if (op == ASESS_CREATE) return asess_create(arg, size);
 
 	/* the file reference keeps s alive if a sibling closes sfd meanwhile */
 	vfs_file_t *f = fget(c->fds, sfd);
-	if (!f) return -9;
+	if (!f) return -EBADF;
 	long r = -9;
 	if (f->inode && f->inode->fops == &sfd_fops) {
 		asess_t *s = f->inode->priv;

@@ -29,6 +29,7 @@
 #include <kernel/fb.h>
 #include <input/ps2/synaptics.h>
 #include <drivers/input/ps2.h>
+#include <kernel/errno.h>
 
 /* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
 #pragma weak ps2_aux_report
@@ -182,7 +183,7 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	}
 	case SF_BACKLIGHT: {
 		int v = backlight_get();
-		if (v < 0) return -19;
+		if (v < 0) return -ENODEV;
 		n = put_u64(tmp, (uint64_t)v); tmp[n++] = '\n';
 		break;
 	}
@@ -225,7 +226,7 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos < (off_t)n) {
 		size_t avail = (size_t)(n - f->pos);
 		if (len > avail) len = avail;
-		if (copy_fop_to_user(buf, tmp + (size_t)f->pos, len) != 0) { buddy_free(phys, 0); return -14; }
+		if (copy_fop_to_user(buf, tmp + (size_t)f->pos, len) != 0) { buddy_free(phys, 0); return -EFAULT; }
 		f->pos += (off_t)len;
 		ret = (ssize_t)len;
 	}
@@ -255,10 +256,10 @@ static int sysfs_may_turn(int type)
 static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	sysfs_priv_t *pr = f->inode->priv;
-	if (!pr || (pr->type != SF_BACKLIGHT && pr->type != SF_CSTATE && pr->type != SF_NR_HUGEPAGES && pr->type != SF_KEYMAP && pr->type != SF_VOLUME && pr->type != SF_TOUCHPAD)) return -22;
+	if (!pr || (pr->type != SF_BACKLIGHT && pr->type != SF_CSTATE && pr->type != SF_NR_HUGEPAGES && pr->type != SF_KEYMAP && pr->type != SF_VOLUME && pr->type != SF_TOUCHPAD)) return -EINVAL;
 	char kbuf[32];
 	size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
-	if (copy_fop_from_user(kbuf, buf, n) != 0) return -14;
+	if (copy_fop_from_user(kbuf, buf, n) != 0) return -EFAULT;
 	if (pr->type == SF_VOLUME) {
 		long pct = 0;
 		if (!sysfs_may_turn(SF_VOLUME)) return -1;
@@ -282,7 +283,7 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	if (pr->type == SF_TOUCHPAD) {           /* "tap 0" or "tap 1" */
 		if (!sysfs_may_turn(SF_TOUCHPAD)) return -1;
-		if (n < 5 || memcmp(kbuf, "tap ", 4) != 0 || !&syn_tap) return -22;
+		if (n < 5 || memcmp(kbuf, "tap ", 4) != 0 || !&syn_tap) return -EINVAL;
 		syn_tap = kbuf[4] == '1';
 		return (ssize_t)len;
 	}
@@ -290,7 +291,7 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
 		if (n >= 2 && kbuf[0] == 't' && kbuf[1] == 'r') input_keymap = KEYMAP_TR;
 		else if (n >= 2 && kbuf[0] == 'u' && kbuf[1] == 's') input_keymap = KEYMAP_US;
-		else return -22;
+		else return -EINVAL;
 		return (ssize_t)len;
 	}
 	/* nr_hugepages reserves physical memory: root's decision, not the mode bits' */

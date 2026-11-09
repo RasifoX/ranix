@@ -21,6 +21,7 @@
 #include <asm/io.h>
 #include <kernel/mm/vm.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 
 #define R_GCAP      0x00
@@ -529,7 +530,7 @@ static int hda_ioctl(vfs_file_t *f, uint32_t c, uint64_t arg)
 		return copy_to_user((void *)arg, o, sizeof o) ? -14 : 0;
 	}
 	default:
-		return -25; /* ENOTTY */
+		return -ENOTTY;
 	}
 }
 

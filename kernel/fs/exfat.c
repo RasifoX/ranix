@@ -18,6 +18,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/errno.h>
 
 #ifndef S_IFDIR
 #define S_IFDIR 0040000
@@ -247,7 +248,7 @@ static ssize_t exfat_read(vfs_file_t *f, void *buf, size_t len)
 	if (len > pv->size - pos) len = (size_t)(pv->size - pos);
 	uint32_t cb = clus_bytes(fs);
 	uint8_t *run = kmalloc(RUN_MAX);
-	if (!run) return -12;
+	if (!run) return -ENOMEM;
 	size_t done = 0;
 	while (done < len) {
 		uint64_t p = pos + done;

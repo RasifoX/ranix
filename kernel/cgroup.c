@@ -30,6 +30,7 @@
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/nsproxy.h>
+#include <kernel/errno.h>
 
 
 typedef struct cgroup {
@@ -494,7 +495,7 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 {
 	cg_priv_t *pr = f->inode->priv;
 	char tmp[96]; int n = 0;
-	if (pr->gen != pr->cg->gen) return -19; /* ENODEV */
+	if (pr->gen != pr->cg->gen) return -ENODEV;
 	switch (pr->file) {
 	case CG_PIDS_MAX:
 		if (pr->cg->pids_max < 0) { tmp[n++]='m';tmp[n++]='a';tmp[n++]='x'; }
@@ -535,7 +536,7 @@ static ssize_t cg_file_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -EFAULT;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }
@@ -545,8 +546,8 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	cg_priv_t *pr = f->inode->priv;
 	char kb[64];
 	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
-	if (pr->gen != pr->cg->gen) return -19; /* ENODEV */
-	if (copy_from_user(kb, buf, n) != 0) return -14;
+	if (pr->gen != pr->cg->gen) return -ENODEV;
+	if (copy_from_user(kb, buf, n) != 0) return -EFAULT;
 	kb[n] = '\0';
 
 	if (pr->file == CG_PIDS_MAX) {
@@ -573,7 +574,7 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 	if (pr->file == CG_PROCS) {
 		long pid = 0; for (int i = 0; kb[i] >= '0' && kb[i] <= '9'; i++) pid = pid*10 + (kb[i]-'0');
 		process_t *t = pid ? proc_get_user((pid_t)pid) : task_current();
-		if (!t) return -3; /* ESRCH */
+		if (!t) return -ESRCH;
 		if (!pid) proc_hold(t);
 		ssize_t ret = (ssize_t)len;
 		if (!task_may_control(t, CAP_SYS_ADMIN))
@@ -586,7 +587,7 @@ static ssize_t cg_file_write(vfs_file_t *f, const void *buf, size_t len)
 		proc_put(t);
 		return ret;
 	}
-	return -22; /* EINVAL: read-only file */
+	return -EINVAL;   /* read-only file */
 }
 
 static vfs_fops_t cg_file_fops = { .read = cg_file_read, .write = cg_file_write };
@@ -651,7 +652,7 @@ static int cg_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 {
 	(void)mode;
 	cg_priv_t *dp = dir->priv;
-	if (dp->gen != dp->cg->gen) return -2;
+	if (dp->gen != dp->cg->gen) return -ENOENT;
 	return cg_alloc(dp->cg, name, -1, -1) ? 0 : -12;
 }
 

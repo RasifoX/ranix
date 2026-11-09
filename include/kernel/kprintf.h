@@ -21,8 +21,8 @@
 
 void   kprintf(const char *fmt, ...);
 void   klog_setup(void);           /* once the command line is known */
-void   kpanic(const char *msg);
-void   panic_report(const char *msg, arch_context_t *ctx);
+void   kpanic(const char *msg) __attribute__((noreturn));
+void   panic_report(const char *msg, arch_context_t *ctx) __attribute__((noreturn));
 void   kprintf_set_fb(void);
 void   kprintf_flush(void);
 size_t kprintf_read_log(char *dst, size_t max);

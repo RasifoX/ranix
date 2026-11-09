@@ -305,7 +305,7 @@ void kwatch_tick_local(process_t *cur, cpu_context_t *cc)
 	/* Only a stall someone pays for: another task queued here, or the task killed.
 	 * Timed in kernel_ticks, not in this CPU's tick count: a guest or a slowed
 	 * tick delivers fewer local ticks than wall time passes. */
-	int dead = (cur->sig_pending & (1UL << (9 - 1))) != 0;
+	int dead = (cur->sig_pending & (1UL << (SIGKILL - 1))) != 0;
 	if (!(cc->rq_head || dead)) { kw_cpu[c].waited = 0; return; }
 	if (!kw_cpu[c].waited) kw_cpu[c].waited = kernel_ticks ? kernel_ticks : 1;
 	if (!kw_cpu[c].told && kernel_ticks - kw_cpu[c].waited >= (uint64_t)KW_STALL_SECS * TIMER_HZ) {
@@ -354,7 +354,7 @@ static void kwatch_kill_sweep(uint64_t now)
 		uint32_t secs = 0;
 		if (p && p->magic == PROC_MAGIC && p->pid &&
 		    p->state != PROC_ZOMBIE && p->state != PROC_DEAD &&
-		    (p->sig_pending & (1UL << (9 - 1)))) {
+		    (p->sig_pending & (1UL << (SIGKILL - 1)))) {
 			if (!p->kill_posted_at) p->kill_posted_at = now;
 			if (now - p->kill_posted_at >= (uint64_t)KW_KILL_SECS * TIMER_HZ &&
 			    (!p->kill_reported_at || now - p->kill_reported_at >= 60 * TIMER_HZ)) {
@@ -402,7 +402,7 @@ void kwatch_report(kout_t *o, int with_bt)
 		f = spin_lock_irq(&sched_lock);
 		process_t *p = task_peek_locked(i), *t = NULL;
 		if (p && p->magic == PROC_MAGIC && p->pid && p->state != PROC_ZOMBIE && p->state != PROC_DEAD &&
-		    ((p->sig_pending & (1UL << (9 - 1))) || p->hung_stall_start)) { t = p; t->refcount++; }
+		    ((p->sig_pending & (1UL << (SIGKILL - 1))) || p->hung_stall_start)) { t = p; t->refcount++; }
 		spin_unlock_irq(&sched_lock, f);
 		if (!t) continue;
 		shown++;

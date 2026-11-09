@@ -8,6 +8,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
+#include <kernel/errno.h>
 
 /*
  * hugetlbfs — a filesystem whose regular files are backed by 2 MB huge pages
@@ -85,13 +86,13 @@ static int file_resize(hugetlbfs_file_t *hf, uint64_t bytes)
 
 	if (want > hf->nblocks) {
 		uint64_t *nb = kmalloc((size_t)want * sizeof(uint64_t));
-		if (!nb) return -28;
+		if (!nb) return -ENOSPC;
 		if (hf->blocks) memcpy(nb, hf->blocks, (size_t)hf->nblocks * sizeof(uint64_t));
 		kfree(hf->blocks);
 		hf->blocks = nb;
 		while (hf->nblocks < want) {
 			uint64_t blk = huge2m_alloc();
-			if (!blk) return -28;
+			if (!blk) return -ENOSPC;
 			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_2M_SIZE);
 			hf->blocks[hf->nblocks++] = blk;
 		}
@@ -202,17 +203,17 @@ static int hugetlbfs_create(vfs_inode_t *dir, const char *name, mode_t mode)
 	hugetlbfs_dir_t *hd = dir->priv;
 	if (!hd) return -1;
 	for (hugetlbfs_entry_t *e = hd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = hugetlbfs_inode_alloc(mode | S_IFREG);
-	if (!in) return -12;
+	if (!in) return -ENOMEM;
 	hugetlbfs_file_t *hf = kmalloc(sizeof(*hf));
-	if (!hf) { kfree(in); return -12; }
+	if (!hf) { kfree(in); return -ENOMEM; }
 	memset(hf, 0, sizeof(*hf));
 	in->priv = hf;
 	in->fops = &hugetlbfs_fops;
 
-	if (!dir_new_entry(hd, name, in)) { kfree(hf); kfree(in); return -12; }
+	if (!dir_new_entry(hd, name, in)) { kfree(hf); kfree(in); return -ENOMEM; }
 	return 0;
 }
 
@@ -221,17 +222,17 @@ static int hugetlbfs_mkdir(vfs_inode_t *dir, const char *name, mode_t mode)
 	hugetlbfs_dir_t *hd = dir->priv;
 	if (!hd) return -1;
 	for (hugetlbfs_entry_t *e = hd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = hugetlbfs_inode_alloc(mode | S_IFDIR);
-	if (!in) return -12;
+	if (!in) return -ENOMEM;
 	hugetlbfs_dir_t *nhd = kmalloc(sizeof(*nhd));
-	if (!nhd) { kfree(in); return -12; }
+	if (!nhd) { kfree(in); return -ENOMEM; }
 	memset(nhd, 0, sizeof(*nhd));
 	in->priv = nhd;
 	in->fops = &hugetlbfs_dir_fops;
 
-	if (!dir_new_entry(hd, name, in)) { kfree(nhd); kfree(in); return -12; }
+	if (!dir_new_entry(hd, name, in)) { kfree(nhd); kfree(in); return -ENOMEM; }
 	dir->nlink++;
 	return 0;
 }
@@ -259,7 +260,7 @@ static int hugetlbfs_unlink(vfs_inode_t *dir, const char *name)
 		}
 		pp = &(*pp)->next;
 	}
-	return -2;
+	return -ENOENT;
 }
 
 static int hugetlbfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
@@ -303,9 +304,9 @@ static int hugetlbfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 
 static int hugetlbfs_truncate(vfs_inode_t *inode, off_t len)
 {
-	if (!S_ISREG(inode->mode)) return -22;
+	if (!S_ISREG(inode->mode)) return -EINVAL;
 	hugetlbfs_file_t *hf = inode->priv;
-	if (!hf || len < 0) return -22;
+	if (!hf || len < 0) return -EINVAL;
 	int r = file_resize(hf, (uint64_t)len);
 	if (r != 0) return r;
 	inode->size = hf->size;

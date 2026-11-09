@@ -11,6 +11,7 @@
 #include <kernel/sync.h>
 #include <kernel/proc.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 void task_wake(process_t *p);
 
@@ -74,7 +75,7 @@ static int tcp_tx_seg(socket_t *s, uint8_t flags,
                       const void *data, uint16_t dlen)
 {
     skb_t *skb = skb_alloc();
-    if (!skb) return -12;
+    if (!skb) return -ENOMEM;
 
     /* copy payload */
     if (dlen) { memcpy(skb->data, data, dlen); skb->len = dlen; }
@@ -1245,7 +1246,7 @@ int tcp_connect(socket_t *s)
         seg_enqueue(s, TCP_SYN, s->snd_una, NULL, 0) != 0) {
         tcp_closed(s, 12);
         spin_unlock_irq(&tcp_lock, tl);
-        return -12;
+        return -ENOMEM;
     }
     spin_unlock_irq(&tcp_lock, tl);
     return 0;
@@ -1274,7 +1275,7 @@ int tcp_send(socket_t *s, const void *data, uint16_t len)
             s->persist_deadline = kernel_ticks + (s->rto ? s->rto : TCP_RTO_INIT);
         s->poll_out_blocked = 1;
         spin_unlock_irq(&tcp_lock, tl);
-        return -11;
+        return -EAGAIN;
     }
 
     uint32_t room = wnd - in_flight;
@@ -1283,12 +1284,12 @@ int tcp_send(socket_t *s, const void *data, uint16_t len)
     if (seglen < len && seglen < s->snd_mss && in_flight) {   /* no tiny tails: an ACK is due */
         s->poll_out_blocked = 1;
         spin_unlock_irq(&tcp_lock, tl);
-        return -11;
+        return -EAGAIN;
     }
 
     if (seg_enqueue(s, TCP_ACK | TCP_PSH, s->snd_nxt, data, (uint16_t)seglen) != 0) {
         spin_unlock_irq(&tcp_lock, tl);
-        return -12;
+        return -ENOMEM;
     }
     /* queued now: a frame the device refused is a loss like any other */
     tcp_tx_seg(s, TCP_ACK | TCP_PSH, s->snd_nxt, s->rcv_nxt, data, (uint16_t)seglen);
@@ -1343,7 +1344,7 @@ int tcp_orphan(socket_t *s)
 int tcp_listen(socket_t *s, int backlog)
 {
     (void)backlog;
-    if (!s->local_port) return -22;
+    if (!s->local_port) return -EINVAL;
     uint64_t tl = spin_lock_irq(&tcp_lock);
     s->tcp_state = TCP_LISTEN;
     spin_unlock_irq(&tcp_lock, tl);

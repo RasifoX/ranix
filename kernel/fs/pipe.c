@@ -8,6 +8,7 @@
 #include <kernel/config.h>
 #include <kernel/hal.h>
 #include <kernel/cgroup.h>
+#include <kernel/errno.h>
 
 
 typedef struct {
@@ -49,7 +50,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
 
     if (len == 0) return 0;
     uint8_t *kbuf = kmalloc(len < PIPE_BUF_SIZE ? len : PIPE_BUF_SIZE);
-    if (!kbuf) return -12;
+    if (!kbuf) return -ENOMEM;
 
     while (read < len) {
         uint64_t f = spin_lock_irq(&pipe->lock);
@@ -107,7 +108,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
 
     if (len == 0) return 0;
     uint8_t *kbuf = kmalloc(cap);
-    if (!kbuf) return -12;
+    if (!kbuf) return -ENOMEM;
 
     while (written < len) {
         size_t chunk = (len - written) < cap ? (len - written) : cap;
@@ -215,7 +216,7 @@ static int pipe_poll(vfs_file_t *file)
 
 static int pipe_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
-    if (cmd != FIONREAD) return -25; /* ENOTTY */
+    if (cmd != FIONREAD) return -ENOTTY;
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
     int avail = (int)((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
@@ -244,10 +245,10 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
     pipe_t *pipe = (pipe_t *)inode->priv;
     if (!pipe) {
         pipe = kmalloc(sizeof(*pipe));
-        if (!pipe) { spin_unlock_irq(&fifo_glock, g); return -12; }
+        if (!pipe) { spin_unlock_irq(&fifo_glock, g); return -ENOMEM; }
         memset(pipe, 0, sizeof(*pipe));
         uint64_t bp = (uint64_t)pipe_buffer_alloc(pipe);
-        if (!bp) { kfree(pipe); spin_unlock_irq(&fifo_glock, g); return -12; }
+        if (!bp) { kfree(pipe); spin_unlock_irq(&fifo_glock, g); return -ENOMEM; }
         pipe->buffer = (uint8_t *)PHYS_TO_VIRT(bp);
         pipe->lock = (spinlock_t)SPINLOCK_INIT;
         wait_queue_init(&pipe->rd_wait);
@@ -268,15 +269,15 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
             if (pipe->writers > 0 || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
-            if (task_has_actionable_signal()) { spin_unlock_irq(&pipe->lock, f); return -4; }
+            if (task_has_actionable_signal()) { spin_unlock_irq(&pipe->lock, f); return -EINTR; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     } else if (acc == O_WRONLY) {
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
             if (pipe->readers > 0) { spin_unlock_irq(&pipe->lock, f); break; }
-            if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -6; /* ENXIO */ }
-            if (task_has_actionable_signal()) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -4; }
+            if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -ENXIO; }
+            if (task_has_actionable_signal()) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -EINTR; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     }

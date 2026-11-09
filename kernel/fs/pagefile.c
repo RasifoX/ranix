@@ -9,6 +9,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
+#include <kernel/errno.h>
 
 #define FANOUT_BITS 9
 #define FANOUT      (1U << FANOUT_BITS)
@@ -210,7 +211,7 @@ ssize_t pagefile_read(vfs_file_t *f, void *buf, size_t len)
 {
 	pagefile_t *pf = f->inode->priv;
 	if (!pf) return 0;
-	if (f->pos < 0) return -22;
+	if (f->pos < 0) return -EINVAL;
 	uint64_t pos = (uint64_t)f->pos;
 	size_t done = 0;
 
@@ -230,7 +231,7 @@ ssize_t pagefile_read(vfs_file_t *f, void *buf, size_t len)
 		long rc = copy_fop_to_user((uint8_t *)buf + done, src, n);
 		if (pa) pmm_free((void *)pa);
 		if (rc != 0) {
-			if (!done) return -14;
+			if (!done) return -EFAULT;
 			break;
 		}
 		pos  += n;
@@ -311,8 +312,8 @@ uint64_t pagefile_mmap(vfs_file_t *f, off_t off)
 int pagefile_truncate(vfs_inode_t *in, off_t len)
 {
 	pagefile_t *pf = in->priv;
-	if (!pf || len < 0) return -22;
-	if ((uint64_t)len > MAX_SIZE) return -27; /* EFBIG */
+	if (!pf || len < 0) return -EINVAL;
+	if ((uint64_t)len > MAX_SIZE) return -EFBIG;
 	uint64_t newlen = (uint64_t)len;
 
 	pf_enter(pf);
