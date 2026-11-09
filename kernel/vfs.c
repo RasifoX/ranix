@@ -2706,8 +2706,8 @@ ssize_t vfs_read(int fd, void *buf, size_t len)
 	mode_t m = f->inode->mode;
 	/* Only vfs_open files have these types, so their access mode is real. Without
 	 * this a write-only open reads a file its opener has no read permission on. */
-	if ((S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m)) && (f->flags & 3) == O_WRONLY)
-		r = -9; /* EBADF */
+	if ((S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m) || S_ISFIFO(m)) && (f->flags & 3) == O_WRONLY)
+		r = -9; /* EBADF (a pipe's write end too) */
 	else if (S_ISDIR(m))
 		r = -21; /* EISDIR */
 	else
@@ -2725,7 +2725,7 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 	if (!f) return -EBADF;
 	ssize_t r;
 	mode_t m = f->inode->mode;
-	if ((S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m)) && (f->flags & 3) == O_RDONLY) {
+	if ((S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m) || S_ISFIFO(m)) && (f->flags & 3) == O_RDONLY) {
 		r = -9; /* EBADF */
 	} else if (!f->inode->fops || !f->inode->fops->write) {
 		r = -22; /* EINVAL */
