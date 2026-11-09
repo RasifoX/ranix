@@ -52,6 +52,8 @@ typedef struct {
     in6_addr_t sin6_addr;
     uint32_t   sin6_scope_id;
 } __attribute__((packed)) sockaddr_in6_t;
+#define SIN6_LEN_RFC2133 24     /* sockaddr_in6 without sin6_scope_id: still valid */
+#define SOCK_ADDR_MAX    128    /* sizeof(struct sockaddr_storage): longest address */
 
 /* sockaddr_un */
 typedef struct {

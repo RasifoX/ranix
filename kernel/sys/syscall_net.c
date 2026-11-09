@@ -550,6 +550,17 @@ static long sock_fd_err(int fd)
 
 /* Fill a user sockaddr: at most the caller's *klen bytes, and *klen becomes the
  * full size, so a short buffer is not overrun and the caller sees truncation. */
+/* The caller's address, exactly addrlen bytes of it, into a zeroed kernel
+ * buffer (Linux move_addr_to_kernel). Nothing past addrlen is read: the user
+ * may end the address at the last byte of a page. */
+static long sock_addr_in(uint8_t ka[SOCK_ADDR_MAX], const void *uaddr, uint32_t addrlen)
+{
+    if (addrlen > SOCK_ADDR_MAX) return -EINVAL;
+    memset(ka, 0, SOCK_ADDR_MAX);
+    if (addrlen && copy_from_user(ka, uaddr, addrlen) != 0) return -EFAULT;
+    return 0;
+}
+
 static long sock_name_put(void *uaddr, const void *sa, uint32_t sz, uint32_t *klen)
 {
     uint32_t n = *klen < sz ? *klen : sz;
@@ -943,14 +954,16 @@ static long connect_unix(socket_t *s, const void *uaddr, uint32_t addrlen)
     return 0;
 }
 
-/* Store the peer address (IPv4, IPv6 or v4-mapped IPv6) in the socket. */
-static long connect_set_peer(socket_t *s, const void *uaddr, uint16_t family)
+/* Store the peer address (IPv4, IPv6 or v4-mapped IPv6) in the socket.
+ * ka is the kernel copy (sock_addr_in), zero past addrlen. */
+static long connect_set_peer(socket_t *s, const uint8_t *ka, uint32_t addrlen, uint16_t family)
 {
     uint32_t mapped4 = 0;
     int is_mapped = 0;
+    if (addrlen < (family == AF_INET6 ? SIN6_LEN_RFC2133 : sizeof(sockaddr_in_t))) return -EINVAL;
     if (family == AF_INET6 && (s->type == SOCK_STREAM || s->type == SOCK_DGRAM) && s->proto != IPPROTO_ICMPV6) {
         sockaddr_in6_t m6;
-        if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -EFAULT;
+        memcpy(&m6, ka, sizeof(m6));
         is_mapped = in6_v4mapped(&m6.sin6_addr, &mapped4);
         if (is_mapped && s->v6only) return -ENETUNREACH;
         if (is_mapped) {                                /* go on as IPv4 */
@@ -968,7 +981,7 @@ static long connect_set_peer(socket_t *s, const void *uaddr, uint16_t family)
         /* addresses set above */
     } else if (family == AF_INET6) {
         sockaddr_in6_t sa6;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
+        memcpy(&sa6, ka, sizeof(sa6));
         s->remote_ip6  = sa6.sin6_addr;
         s->remote_port = ntohs(sa6.sin6_port);
         if (s->type == SOCK_DGRAM) {
@@ -980,7 +993,7 @@ static long connect_set_peer(socket_t *s, const void *uaddr, uint16_t family)
         }
     } else {
         sockaddr_in_t sa;
-        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -EFAULT;
+        memcpy(&sa, ka, sizeof(sa));
         s->remote_ip   = ntohl(sa.sin_addr);
         s->remote_port = ntohs(sa.sin_port);
         if (s->domain == AF_INET6 && s->type == SOCK_DGRAM) {
@@ -1023,7 +1036,6 @@ static long connect_tcp_wait(socket_t *s)
 
 static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
 {
-    (void)addrlen;
     process_t  *cp = task_current();
     vfs_file_t *cfile = fd_get(cp->fds, fd);
     if (!cfile) return -EBADF;
@@ -1031,9 +1043,12 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     socket_t *s = (socket_t *)cfile->inode->priv;
     int nonblock = (cfile->flags & O_NONBLOCK) ? 1 : 0;
 
+    uint8_t ka[SOCK_ADDR_MAX];
     uint16_t family = 0;
+    long ar = sock_addr_in(ka, uaddr, addrlen);
+    if (ar) return ar;
     if (addrlen < sizeof(family)) return -EINVAL;
-    if (copy_from_user(&family, uaddr, sizeof(family)) != 0) return -EFAULT;
+    memcpy(&family, ka, sizeof(family));
 
     if (s->domain == AF_NETLINK)
         return connect_netlink(s, uaddr, addrlen);
@@ -1044,7 +1059,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     if (family == AF_UNIX)
         return connect_unix(s, uaddr, addrlen);
 
-    long pr = connect_set_peer(s, uaddr, family);
+    long pr = connect_set_peer(s, ka, addrlen, family);
     if (pr) return pr;
     if (s->type == SOCK_DGRAM) return 0;
     if (s->type != SOCK_STREAM) return -ENOSYS;
@@ -1091,12 +1106,12 @@ static long sendto_unix(socket_t *s, int nonblock, const void *buf, size_t len)
 }
 
 /* a datagram to ::ffff:a.b.c.d from an IPv6 socket on "::" is IPv4 */
-static long sendto_v4mapped(socket_t *s, const void *uaddr)
+static long sendto_v4mapped(socket_t *s, const uint8_t *ka)
 {
     sockaddr_in6_t m6;
     uint32_t v4;
     static const in6_addr_t any6;
-    if (copy_from_user(&m6, uaddr, sizeof(m6)) != 0) return -EFAULT;
+    memcpy(&m6, ka, sizeof(m6));
     if (m6.sin6_family == AF_INET6 && in6_v4mapped(&m6.sin6_addr, &v4)) {
         if (s->v6only || memcmp(&s->local_ip6, &any6, sizeof(any6)) != 0) return -ENETUNREACH;
         s->domain = AF_INET;
@@ -1154,14 +1169,15 @@ static long sendto_udp6(socket_t *s, uint8_t *kb, size_t len, in6_addr_t dst6, u
     return rr;
 }
 
-/* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx */
-static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const void *uaddr)
+/* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx.
+ * ka: kernel copy of the destination (at least SIN6_LEN_RFC2133), or NULL. */
+static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t *ka)
 {
     in6_addr_t dst6;
     uint16_t   dst_port6;
-    if (uaddr) {
+    if (ka) {
         sockaddr_in6_t sa6;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
+        memcpy(&sa6, ka, sizeof(sa6));
         dst6      = sa6.sin6_addr;
         dst_port6 = ntohs(sa6.sin6_port);
     } else {
@@ -1246,20 +1262,22 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
     return r;
 }
 
-/* IPv4 datagram or raw send (also an IPv6 socket that went v4-mapped). */
-static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const void *uaddr)
+/* IPv4 datagram or raw send (also an IPv6 socket that went v4-mapped).
+ * ka: kernel copy of the destination, addrlen bytes of it, or NULL. */
+static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const uint8_t *ka, uint32_t addrlen)
 {
     uint32_t dst_ip; uint16_t dst_port;
     uint16_t dfam = 0;
-    if (uaddr && s->v4mapped && copy_from_user(&dfam, uaddr, sizeof(dfam)) != 0) return -EFAULT;
-    if (uaddr && dfam == AF_INET6) {                    /* ::ffff:a.b.c.d from a mapped socket */
+    if (ka && s->v4mapped) memcpy(&dfam, ka, sizeof(dfam));
+    if (ka && addrlen < (dfam == AF_INET6 ? SIN6_LEN_RFC2133 : sizeof(sockaddr_in_t))) return -EINVAL;
+    if (ka && dfam == AF_INET6) {                       /* ::ffff:a.b.c.d from a mapped socket */
         sockaddr_in6_t sa6;
-        if (copy_from_user(&sa6, uaddr, sizeof(sa6)) != 0) return -EFAULT;
+        memcpy(&sa6, ka, sizeof(sa6));
         if (!in6_v4mapped(&sa6.sin6_addr, &dst_ip)) return -ENETUNREACH;
         dst_port = ntohs(sa6.sin6_port);
-    } else if (uaddr) {
+    } else if (ka) {
         sockaddr_in_t sa;
-        if (copy_from_user(&sa, uaddr, sizeof(sa)) != 0) return -EFAULT;
+        memcpy(&sa, ka, sizeof(sa));
         dst_ip   = ntohl(sa.sin_addr);
         dst_port = ntohs(sa.sin_port);
     } else {
@@ -1286,6 +1304,13 @@ static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const void *ua
 static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
                         const void *uaddr, uint32_t addrlen)
 {
+    uint8_t ka[SOCK_ADDR_MAX];
+    const uint8_t *kaddr = NULL;
+    if (uaddr) {
+        long e = sock_addr_in(ka, uaddr, addrlen);
+        if (e) return e;
+        kaddr = ka;
+    }
     if (s->domain == AF_NETLINK) {
         k_iovec v = { (void *)buf, len };
         return nl_sendv(s, &v, 1, uaddr, addrlen);
@@ -1301,15 +1326,16 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         return tcp_stream_tx(s, buf, len, nonblock, 0);
     if (!s->dev) return -EBADF;
 
-    if (s->domain == AF_INET6 && s->type == SOCK_DGRAM && s->proto != IPPROTO_ICMPV6 && uaddr) {
-        long e = sendto_v4mapped(s, uaddr);
+    if (s->domain == AF_INET6 && kaddr && addrlen < SIN6_LEN_RFC2133) return -EINVAL;
+    if (s->domain == AF_INET6 && s->type == SOCK_DGRAM && s->proto != IPPROTO_ICMPV6 && kaddr) {
+        long e = sendto_v4mapped(s, kaddr);
         if (e) return e;
     }
     if (s->domain == AF_INET6) {
-        return sendto_ipv6(s, buf, len, uaddr);
+        return sendto_ipv6(s, buf, len, kaddr);
     }
 
-    return sendto_ipv4(s, buf, len, uaddr);
+    return sendto_ipv4(s, buf, len, kaddr, addrlen);
 }
 
 static long sys_sendto(int fd, const void *buf, size_t len, int flags,
@@ -1558,6 +1584,9 @@ static long sys_sendmsg(int fd, const void *umsg, int flags)
     k_msghdr m;
     if (copy_from_user(&m, umsg, sizeof(m)) != 0) return -EFAULT;
     if (m.msg_iovlen == 0) return 0;
+    /* Linux: a name of length 0 is no name, a longer one is cut to the maximum */
+    if (m.msg_namelen == 0) m.msg_name = NULL;
+    if (m.msg_namelen > SOCK_ADDR_MAX) m.msg_namelen = SOCK_ADDR_MAX;
     if (m.msg_iovlen > 64) {
         /* A stream may take part of it: the caller sends the rest. Firefox's IPC
          * gathers long messages from hundreds of pieces. */
