@@ -1301,8 +1301,14 @@ static int procfs_pidlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
 	if (!p) return -1;
 	const char *src;
+	fs_struct_t *fs = NULL;
+	fs_path_t *cwd = NULL;
 	switch (pr->kind) {
-	case PIDLINK_CWD:  src = p->cwd[0] ? p->cwd : "/"; break;
+	case PIDLINK_CWD:
+		fs = pr->pid ? fs_of_task((struct process *)p) : NULL;   /* held against its exit */
+		cwd = fs_cwd_get(pr->pid ? fs : p->fs);
+		src = cwd->s;
+		break;
 	case PIDLINK_ROOT: src = "/"; break;
 	default:           src = p->exe_path[0] ? p->exe_path : p->name; break;
 	}
@@ -1310,6 +1316,8 @@ static int procfs_pidlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	size_t n = strlen(src);
 	if (n >= sizeof(path)) n = sizeof(path) - 1;
 	memcpy(path, src, n); path[n] = '\0';
+	fs_path_put(cwd);
+	fs_put(fs);
 	if (pr->pid) proc_put(p);
 	if (n + 1 > sz) return -1;
 	memcpy(buf, path, n + 1);

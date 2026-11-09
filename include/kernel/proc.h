@@ -10,13 +10,13 @@
 #include <kernel/config.h>
 #include <kernel/pid_namespace.h>
 #include <kernel/user_namespace.h>
+#include <kernel/fs_struct.h>
 
 #define PROC_NAME_MAX  256
 #define PROC_MAGIC     0x52414e58u   /* "RANX" — set at PCB alloc, checked at teardown */
 
-/* The PCB is buddy-allocated as a single power-of-two block. cwd holds a full
- * PATH_MAX path, so the struct no longer fits one page — use order 1 (2 pages).
- * Every PCB alloc/free must pass PCB_ORDER (not a literal 0). */
+/* The PCB is buddy-allocated as a single power-of-two block of order 1 (2
+ * pages). Every PCB alloc/free must pass PCB_ORDER (not a literal 0). */
 #define PCB_ORDER      1
 
 /* scheduling policies (sched_setscheduler) */
@@ -209,9 +209,7 @@ typedef struct process {
 
 	/* ── open files ──────────────────────────── */
 	fd_table_t     *fds;
-	char            cwd[PATH_MAX];
-	mode_t          umask;
-	void           *root;   /* chroot dir (vfs_dentry_t*); NULL = global root "/" */
+	struct fs_struct *fs;   /* root, cwd, umask: shared under CLONE_FS (fs_struct.h) */
 
 	/* controlling terminal: object + its fops, set on TIOCSCTTY, cleared on
 	 * exit/hangup. /dev/tty routes a session leader's I/O here. */
@@ -412,9 +410,10 @@ void       vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags);
 void       vma_clip(process_t *p, uint64_t va, uint64_t len);
 pid_t      proc_fork(uint64_t clone_flags, uint64_t newsp);
 pid_t      proc_fork_asess(struct asess *s);   /* fork with the child inside s; see asess_spawn */
+int        fs_shared_outside_group(process_t *p);   /* setuid exec must not raise ids */
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);
 pid_t      proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
-                                int as_process);
+                                int as_process, int share_fs);
 int        proc_move_cgroup(process_t *t, void *cg);  /* 0, -1 at pids.max, -3 no live thread */
 process_t *proc_find(pid_t pid);           /* lookup, no reference — safe only under sched_lock or for an existence check */
 process_t *proc_find_child(pid_t ppid, struct pid_namespace *ns, int nr);

@@ -636,7 +636,7 @@ void sched_init(void)
 	p->next  = p;
 	p->kstack = idle_kstack;
 	p->ticks_remaining = sched_quantum_val;
-	p->umask = 022;   /* pid 1 inherits this; 0 would make every file world-writable */
+	p->fs = &init_fs;   /* pid 1 inherits its umask (022) */
 	memcpy(p->name, "idle", 5);
 
 	uint8_t *sp_top = idle_kstack + KSTACK_SIZE;

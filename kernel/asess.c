@@ -222,8 +222,8 @@ int asess_prepare_child(process_t *c, asess_t *s)
 
 	mnt_ns_put(c->mnt_ns);
 	c->mnt_ns = mnt_ns_get(s->mnt_ns);
-	c->root = s->root;
-	c->cwd[0] = '/'; c->cwd[1] = '\0';
+	c->fs->root = s->root;   /* the fork gave it a private copy (no CLONE_FS) */
+	fs_set_cwd(c->fs, "/");
 	c->ctty = NULL; c->ctty_fops = NULL;
 	return 0;
 }

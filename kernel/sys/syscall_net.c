@@ -641,15 +641,16 @@ static int unix_path_reachable(const sockaddr_un_t *su, int connecting)
     size_t slen = 0;
     while (slen < 107 && su->sun_path[slen]) slen++;
     size_t n = 0;
-    if (su->sun_path[0] != '/') n = strlen(task_current()->cwd) + 1;
+    fs_path_t *cwd = fs_cwd_get(task_current()->fs);
+    if (su->sun_path[0] != '/') n = strlen(cwd->s) + 1;
     /* cwd may be up to PATH_MAX-1 long: the joined name must still fit kp */
-    if (n + slen >= PATH_MAX) return -36;   /* ENAMETOOLONG */
-    char *kp = kmalloc(PATH_MAX);
-    if (!kp) return -12;
+    char *kp = n + slen >= PATH_MAX ? NULL : kmalloc(PATH_MAX);
+    if (!kp) { fs_path_put(cwd); return n + slen >= PATH_MAX ? -36 : -12; }   /* ENAMETOOLONG */
     if (n) {
-        memcpy(kp, task_current()->cwd, n - 1);
+        memcpy(kp, cwd->s, n - 1);
         kp[n - 1] = '/';
     }
+    fs_path_put(cwd);
     memcpy(kp + n, su->sun_path, slen);
     kp[n + slen] = '\0';
     int r = vfs_path_searchable(kp);
@@ -666,7 +667,8 @@ static int unix_path_key(sockaddr_un_t *su)
     int slen = 0;
     while (slen < 107 && su->sun_path[slen]) slen++;
     if (su->sun_path[0] != '/') {
-        const char *cwd = task_current()->cwd;
+        fs_path_t *held = fs_cwd_get(task_current()->fs);
+        const char *cwd = held->s;
         int n = (int)strlen(cwd);
         int sep = n && cwd[n - 1] != '/';
         if (n + sep + slen <= 107) {
@@ -676,6 +678,7 @@ static int unix_path_key(sockaddr_un_t *su)
             slen += n + sep;
             su->sun_path[slen] = '\0';
         }
+        fs_path_put(held);
     }
     return slen + 1;
 }
@@ -827,7 +830,7 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
         /* The name is visible in the file system, as programs check with
          * stat() before they connect. A node left by a closed socket is reused. */
         if (su.sun_path[0] == '/')
-            vfs_mknod(su.sun_path, 0140000 /* S_IFSOCK */ | (0777 & ~task_current()->umask), 0);
+            vfs_mknod(su.sun_path, 0140000 /* S_IFSOCK */ | (0777 & ~fs_umask_of((struct process *)task_current())), 0);
         return unix_reg_add(s->unix_path, pathlen, s);
     }
 
