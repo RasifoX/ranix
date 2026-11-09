@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * cgroups v2 — pids controller (fork-bomb protection).
  *
  * A cgroup hierarchy mounted at /sys/fs/cgroup. Each cgroup has a pids.max

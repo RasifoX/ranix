@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroup namespace: after unshare(CLONE_NEWCGROUP) the caller's current
  * cgroup becomes the root of its /proc/self/cgroup view. Moving into /test2
  * shows "0::/test2"; unshering then re-roots the view to "0::/". */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── SysV IPC: shared memory + semaphores ─────────────────── */
 
 typedef int32_t key_t;

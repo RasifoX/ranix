@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pseudo-terminal: open /dev/ptmx, get the slave number via TIOCGPTN, open
  * /dev/pts/N, and check bytes pass both ways (master->slave, slave->master). */
 #include <stdio.h>

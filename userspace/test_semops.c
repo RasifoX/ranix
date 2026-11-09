@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SysV semaphore semantics: every sleeper is woken, values stay in
  * 0..SEMVMX (ERANGE otherwise), sem_op 0 waits for zero, SETALL wakes
  * sleepers, and one IPC namespace cannot take every array. */

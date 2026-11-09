@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SMP lost-wakeup hunt: hammer the primitives glibc/liblzma condvars sit on.
  * Two phases, both bounded so a lost wakeup hangs (caught by the test timeout)
  * rather than silently passing.

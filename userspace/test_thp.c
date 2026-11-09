@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Transparent hugepages via madvise(MADV_HUGEPAGE): an anonymous region mapped
  * with 4K pages is collapsed into 2 MB blocks. Confirms AnonHugePages rises,
  * the data survives the collapse, and a forked child's COW (whole 2 MB copied,

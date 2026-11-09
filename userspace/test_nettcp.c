@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/net/tcp speaks Linux: a listening socket shows state 0A and its owner's
  * uid, so netstat, ss and a door listing see what is open and whose it is.
  * Prints OK, or FAIL with what was wrong. */

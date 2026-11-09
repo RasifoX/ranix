@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* setns(2): pin the current UTS namespace with an open fd, unshare into a
  * fresh one, then rejoin the pinned namespace and see its hostname again. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* eventfd: write a counter, poll reports it readable, read returns the value
  * and resets. Exercises the eventfd read/write/poll path. */
 #include <stdio.h>

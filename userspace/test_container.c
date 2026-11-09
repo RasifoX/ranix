@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Capstone: build a rootless container by composing all the namespaces.
  * New user ns (mapped root) → new uts/ipc/mount/net/cgroup → set hostname →
  * new pid ns whose first child is the container's pid 1. Inside, the process

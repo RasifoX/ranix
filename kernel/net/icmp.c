@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/net/icmp.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/net.h>

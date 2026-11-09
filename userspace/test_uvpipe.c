@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The syscall shape libuv/Node use on a stdout pipe: FIONBIO + fcntl, epoll +
  * eventfd, write-until-EAGAIN against a slow reader, then process exit while
  * helper threads sit blocked. Each case runs in its own child under a watchdog,

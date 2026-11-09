@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* KDSETMODE keeps the console off the framebuffer.
  *
  * In KD_GRAPHICS a line of console text must not touch the pixels, even when

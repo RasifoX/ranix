@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Creating namespaces takes CAP_SYS_ADMIN in the initial user namespace. Without
  * it, the way in is CLONE_NEWUSER, alone or in the same call. */
 #define _GNU_SOURCE

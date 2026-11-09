@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* 1 GB hugepage (MAP_HUGETLB | MAP_HUGE_1GB). Skips where no 1 GB pool is
  * reserved (small-RAM boots). Always exercises map / write / read / unmap of a
  * 1 GB block; when a second block is available it also forks and has the child

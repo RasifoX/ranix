@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ".." at the root of a bind mount. A walk that came in through the bind leaves
  * it through the bind's mountpoint; a walk that reached the same directory by
  * its own path goes to its own parent. Found by code reading (2026-11-09): ".."

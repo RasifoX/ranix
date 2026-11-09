@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/hwdiag: the hardware readings behind fjord doctor.
  * Format: first line "hwdiag 1", then "<class> <name> key=value ..." lines.
  * Under the test VM (ich9-ahci disk, qemu-xhci with a USB stick) this checks:

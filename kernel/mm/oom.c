@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Out-of-memory killer. When a user-page allocation can't be satisfied (page
  * fault, brk/mmap growth, COW) the buddy is empty; rather than panic, pick the
  * largest-footprint user process and SIGKILL it so its exit frees memory. The

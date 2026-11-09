@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Watchdog policy: arm from the cmdline, decide when the machine has earned a
  * pet, and make every panic end in a reset. Hardware access is in itco.c.
  *

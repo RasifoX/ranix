@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * POSIX per-process timers (timer_create and friends). Expiry runs in one kernel
  * thread, not the tick: posting a real-time signal allocates. Times are kept on
  * the monotonic clock, so an absolute CLOCK_REALTIME time is converted when set;

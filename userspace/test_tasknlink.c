@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/task link count is 2 + threads, like Linux. Chromium's sandbox
  * (GPU process too, even with --no-sandbox) stops a thread and waits until
  * st_nlink of /proc/self/task says it is gone; a fixed 2 aborted it with

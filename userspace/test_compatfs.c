@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What chroots, debootstrap and Chromium need of the kernel:
  *  - device nodes on a disk filesystem (ext2/4): /dev/null and /dev/zero by number
  *  - mount --bind of a directory, and its umount

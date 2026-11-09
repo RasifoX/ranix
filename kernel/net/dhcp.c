@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Minimal DHCP client (RFC 2131): DISCOVER → OFFER → REQUEST → ACK, then sets
  * the device's ip/gw/mask and returns the offered DNS server. Runs at boot by
  * busy-polling the NIC, bypassing the socket layer (we have no IP yet, and the

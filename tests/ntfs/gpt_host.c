@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* gpt.c and mbr.c against mutated disk heads, under ASan and UBSan: nothing they parse may
  * put a partition outside the disk. usage: gpt_host DISK.img SEED ROUNDS [LBASIZE] */
 #include "shim.h"

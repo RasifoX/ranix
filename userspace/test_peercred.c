@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SO_PEERCRED on AF_UNIX (kernel/sys/syscall_net.c): the peer's pid/uid/gid as of
  * connect() or socketpair(). fjord-sys uses it to tell a person at the desktop
  * from an agent over ssh. socketpair: both ends are us. listen/connect: the

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Nothing outside can be named from inside: signals, ptrace, process memory,
  * /proc, sockets, IPC. The sentinel shares the session's uid, so uid rules allow
  * everything here and only the session boundary refuses. */

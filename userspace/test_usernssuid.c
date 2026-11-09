@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* exec of a setuid/setgid file inside a user namespace: the file's owner must
  * have an id in that namespace, or the bits do nothing (Linux bprm_fill_uid).
  * Otherwise a user who makes a namespace and runs a setuid-root binary there

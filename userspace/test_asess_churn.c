@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Sessions come and go while the network runs: every one creates and destroys a
  * namespace and a loopback that the receive thread is walking. Each session
  * leaves a socket open, so its last references drop on the way out. */

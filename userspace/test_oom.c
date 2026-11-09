@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* OOM survival: a child mmaps and touches anonymous memory until the kernel
  * can't satisfy it — either the OOM killer SIGKILLs the child (it is the
  * biggest user process) or mmap/the fault returns ENOMEM/SIGSEGV. Either way

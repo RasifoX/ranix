@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 echo NT-START
 c() { [ "$2" = "$3" ] && echo "PASS: $1" || echo "FAIL: $1 want [$2] got [$3]"; }
 r() { cat /sys/block/$1/ro; }

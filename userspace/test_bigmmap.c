@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* V8-cage acceptance check: a single 4 GB PROT_NONE reservation must succeed
  * (it returned ENOMEM under the old 2 GB ceiling), then sub-regions mprotect to
  * RW and are touchable without SIGSEGV, then munmap cleanly. Mirrors how V8's

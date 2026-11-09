@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* setrlimit(RLIMIT_NOFILE) actually lowers the limit: after dropping it, opening
  * past the cap returns EMFILE, and getrlimit round-trips the stored value. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* abstract-namespace AF_UNIX sockets (sun_path[0]=='\0') — the binding D-Bus,
  * systemd and X11 use. A server binds an abstract name (no filesystem entry),
  * a client connects to it and they exchange a message. */

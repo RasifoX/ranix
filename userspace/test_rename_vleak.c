@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* rename that walks through directories the dentry cache does not keep (procfs
  * pid directories) gives back what the walks made: thousands of renames that
  * fail leave kernel memory where it was.

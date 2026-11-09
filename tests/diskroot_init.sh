@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Runs as the disk root's /test.sh after init pivots into it. That this script
 # runs at all (instead of the initramfs's 307-test suite) already proves the
 # pivot happened — /test.sh differs between ramfs and disk. /etc/diskroot-id is

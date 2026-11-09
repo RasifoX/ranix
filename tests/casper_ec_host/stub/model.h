@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What drivers/platform/casper_ec.c needs from the kernel, for the host model in
  * tests/casper_ec_host/model.c. */
 #ifndef CASPER_EC_MODEL_H

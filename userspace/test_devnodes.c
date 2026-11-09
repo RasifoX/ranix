@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /dev/kmsg (kernel log ring, dmesg) and /dev/rtc0 (RTC_RD_TIME). */
 #define _GNU_SOURCE
 #include <stdio.h>

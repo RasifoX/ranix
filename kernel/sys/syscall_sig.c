@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── signal-management syscalls ──────────────────────────────────────────────
  * Installing handlers (rt_sigaction), blocking/unblocking signals
  * (rt_sigprocmask), and sending them (kill/tgkill). The actual delivery — where

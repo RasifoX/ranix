@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* named pipes (FIFO): mkfifo creates an S_IFIFO node; open() blocks until both
  * a reader and a writer are present (rendezvous), then data flows like a pipe.
  * Used by shells and assorted IPC. */

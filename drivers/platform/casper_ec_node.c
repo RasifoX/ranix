@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * /sys/kernel/ranix_ec: the door to the Casper EC's "OS present" flags. Root
  * only, both ways (0600, and the uid is checked again here). Reading shows the
  * cached state and touches no hardware; writing "on", "off" or "read" acts.

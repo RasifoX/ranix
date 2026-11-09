@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* clone(CLONE_NEWUTS): the child starts in a fresh UTS namespace without
  * calling unshare, so its hostname change never reaches the parent. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* seccomp_data as a filter sees it, checked the way Chromium's policy compiler
  * checks it: every 64-bit field is two 32-bit loads (lo word at the lower
  * offset), a 32-bit argument passes when its hi word is 0 or 0xffffffff, flags

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Hardware model interface for the iTCO host test; see tests/itco_host/model.c. */
 #ifndef ITCO_MODEL_H
 #define ITCO_MODEL_H

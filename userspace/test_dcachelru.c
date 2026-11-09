@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The dentry cache stays bounded under a find-style walk, and dropping cached
  * names breaks nothing. Past vfs_dentry_max the oldest unheld disk-filesystem
  * dentries are dropped; a walk over more files than the limit must not grow the

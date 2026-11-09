@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* times(2): reports real per-process user/system CPU time (was all zeros).
  * Burning CPU in user mode grows tms_utime; a reaped child's time rolls up
  * into the parent's tms_cutime. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Signal semantics sweep: handler delivery, blocking via sigprocmask, sigpending
  * reporting, and sigaction oldact round-trip. Prints the first failure or OK. */
 #include <stdio.h>

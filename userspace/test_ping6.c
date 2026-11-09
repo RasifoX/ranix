@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ICMPv6 echo over IPv6: send an echo request on a raw AF_INET6 socket and
  * verify a matching reply. With no argument it pings ::1 (loopback — exercises
  * the IPv6 header, ICMPv6, pseudo-header checksum). With an address argument it

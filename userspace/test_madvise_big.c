@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* madvise(DONTNEED / FREE) over a huge, mostly empty reservation, the way V8
  * drops its cage: 256 GB PROT_NONE with a few pages made writable and touched.
  * The call must cost the populated part, not every 4 KB of the range (a page

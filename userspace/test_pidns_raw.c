@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Inside a pid namespace every syscall taking a pid resolves it there: a global
  * number of an outside task is ESRCH, local numbers work, and the numbers the
  * kernel hands back are local too. Raw syscalls: musl stubs some sched_* out. */

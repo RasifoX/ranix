@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mmap of ext2 files when a block is smaller than a page (1 KiB, 2 KiB):
  *   test_ext2_mmap_bs DEV DIR OFFSET BSIZE
  * mounts the ext2 at OFFSET bytes into DEV on DIR and checks:

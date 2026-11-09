@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* terminal job control over a pty. A session-leader child (L) owns the pty as
  * its controlling terminal and runs the job-control checks against background
  * grandchildren whose pgrp is non-orphaned (parent L is in the same session,

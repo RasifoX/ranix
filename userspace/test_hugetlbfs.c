@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * hugetlbfs file-backed huge-page mapping. Reserve a few 2 MB pages, mount the
  * fs, create a file, size it, mmap it, and write/read through the mapping —
  * which is backed by the 2 MB pool, not ordinary anon pages.

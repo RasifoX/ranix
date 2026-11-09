@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Bulk TCP over loopback: a forked server reads N bytes and echoes them back;
  * the parent sends a known pattern, reads it all back, and checks integrity.
  * Exercises multi-segment send/receive (window, retransmit, reassembly) beyond

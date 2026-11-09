@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* An SQE runs a read or write on any file, so it may sleep: on an empty pipe here,
  * and the ring must not keep a lock or the CPU's interrupts while it does. Also
  * SQEs keep read(2)'s access-mode gate, and SEND works on a socket. OK or FAIL. */

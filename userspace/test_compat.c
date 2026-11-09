@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The thin calls: positioned vectored I/O, the older time setters, fd forms of the
  * xattr calls, mincore. Each is a library's first choice on some path. */
 #define _GNU_SOURCE

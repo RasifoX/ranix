@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Resource limits (getrlimit/setrlimit/prlimit64). The numbers are Linux's.
  * Limits belong to the thread group: every thread holds the same copy, a change
  * is written to all of them (rlimit_store_group), a new thread copies its

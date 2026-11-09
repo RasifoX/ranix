@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* poll() and select() blocking + timeout on a pipe: a timed poll on an empty
  * pipe returns 0, a blocking poll/select wakes when a child writes. Exercises
  * the kernel's fd readiness wait path. */

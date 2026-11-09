@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* AF_UNIX names are per network namespace: abstract and path binds neither reach
  * across nor collide, a namespace filling its table leaves the others alone, and a
  * socket keeps its namespace alive after the last process in it is gone. */

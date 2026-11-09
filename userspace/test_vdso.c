@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* vDSO: the kernel advertises AT_SYSINFO_EHDR and libc routes
  * clock_gettime(CLOCK_REALTIME)/gettimeofday through the mapped vDSO (no
  * syscall). Confirm the aux entry is present and the time it returns is

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* NSS: musl resolves users from /etc/passwd and hosts from /etc/hosts with no
  * nsswitch indirection. getpwnam/getpwuid round-trip the root entry, and
  * gethostbyname("localhost") yields the loopback address from /etc/hosts. */

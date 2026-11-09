@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Robust futexes (NPTL robust-mutex handoff). A thread registers its own
  * robust_list_head via set_robust_list, "locks" a raw futex word by writing its
  * tid, links the lock onto the list, then dies via raw SYS_exit without

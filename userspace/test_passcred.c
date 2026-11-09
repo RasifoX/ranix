@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SO_PASSCRED reads back as set (Chromium's crashpad handler checks it with
  * getsockopt and gave up on ENOPROTOOPT), and TCP keepalive timing options
  * are accepted (Chromium sets TCP_KEEPIDLE on every connection). */

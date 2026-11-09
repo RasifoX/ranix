@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SCM_CREDENTIALS: a socket that set SO_PASSCRED hears who sent each message,
  * next to any passed descriptors. Chromium's zygote learns its children's real
  * pids so (RecvMsgWithPid) and VS Code could not open a window without it. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* sendfile/splice copy through a kernel buffer, so every driver's read and write
  * must accept one. `echo hi | cat` printed nothing when the console refused it:
  * busybox cat tries sendfile first and the bytes were gone before it fell back. */

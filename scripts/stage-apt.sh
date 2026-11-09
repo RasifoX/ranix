@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Stage apt + its dependency closure into the Debian rootfs and build a tiny
 # local file:// repo so `apt-get update && apt-get install -y tree` runs
 # on-device, offline and deterministic.

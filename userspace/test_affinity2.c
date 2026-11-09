@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* sched_setaffinity actually pins: round-trip the mask, reject an empty mask,
  * and confirm a task restricted to CPU 0 only ever reports running on CPU 0. */
 #define _GNU_SOURCE

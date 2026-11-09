@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* NETLINK_ROUTE from the raw ABI up: framing, port ids, dumps, single gets,
  * errors, namespace scoping, and libc's getifaddrs on top. Prints one line per
  * case; the last line is OK or the number of failures. */

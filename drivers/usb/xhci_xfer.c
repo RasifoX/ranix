@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Transfers: control transfers on EP0, bulk transfers, and recovery of a halted
  * endpoint.
  *

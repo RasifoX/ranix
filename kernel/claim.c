@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── Ranix claims: visible, expiring holds on machine resources ───────────────
  * 2026-11-08: several agents shared one laptop through a flock file on another
  * machine. A reboot by one cut another's GPU test; the people at the desk could

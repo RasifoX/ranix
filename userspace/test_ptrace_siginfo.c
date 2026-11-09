@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* PTRACE_SETSIGINFO changes the siginfo a stopped tracee receives, as gdb
  * expects (it saves and restores siginfo around inferior calls):
  * - in a signal-delivery-stop for SIGUSR1, GETSIGINFO shows SI_USER; after

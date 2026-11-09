@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ranix-sess -S end to end: what a session writes is staged, commit applies it,
  * rollback leaves no trace, snapshots restore, and a killed session or a cut
  * commit leaves the directory either untouched or finishable. */

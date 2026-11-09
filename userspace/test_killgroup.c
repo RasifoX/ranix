@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Process-directed signals (kill(2)) go to a thread that hasn't blocked them,
  * not blindly to the group leader: main blocks SIGUSR1, the worker unblocks it,
  * and kill(getpid(),SIGUSR1) must be handled by the worker. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The kernel must treat every user pointer as hostile: a kernel address, an
  * unmapped one, a read-only one. Each case runs in a forked child, so a failure is
  * a line of output and a kernel bug is a panic that stops the run. First failure

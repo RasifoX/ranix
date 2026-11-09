@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * USB keyboards and mice (HID boot and report protocol), fed from interrupt
  * endpoints that stay queued all the time.
  *

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Intel TCO watchdog, written from the public Intel datasheets (ICH9, 100 Series
  * PCH) and from register dumps of real hardware. See docs/watchdog_pstore.md.
  *

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* kill(2) process-group / broadcast semantics:
  *   kill(-pgrp,sig) and killpg() deliver to every member of the group;
  *   kill(0,sig) delivers to the caller's group;

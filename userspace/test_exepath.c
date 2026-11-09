@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/exe after exec through a link: it must name the real file, not
  * the link. Chromium (VS Code) starts its helpers as execv("/proc/self/exe"),
  * and ld.so takes $ORIGIN from /proc/self/exe; "/proc/self" there meant

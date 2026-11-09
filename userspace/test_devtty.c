@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A new session has no controlling terminal, so /dev/tty does not open
  * (ENXIO). "bash -i" with stderr on a pipe opens /dev/tty to find its
  * terminal; given the console it looped waiting to be its foreground (VS Code

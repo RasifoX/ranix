@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* statx flag semantics: AT_SYMLINK_NOFOLLOW must report the symlink itself (not
  * its target) — ls -l / find rely on this — and AT_EMPTY_PATH stats the open fd.
  * Without the fix statx always followed and ignored the fd. */

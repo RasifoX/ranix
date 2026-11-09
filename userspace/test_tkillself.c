@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* tkill and pthread_kill name one thread. If the kernel treats them as signals to
  * the process, a sibling that does not block the signal takes it and the sender,
  * blocking it until sigsuspend, sleeps forever. QEMU's coroutines do exactly this. */

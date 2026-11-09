@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pivot_root: switch the calling process's root to a new directory. A child
  * pivots into /tmp/nr and then sees its marker as /hello, while paths outside
  * the new root (/tmp) are no longer reachable. The parent's root is untouched,

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Real Casper, read-only checks: nothing here may touch sata0, sata0p0 or sata0p1.
 sleep 12
 {

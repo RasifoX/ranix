@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TCP over loopback: a parent server (bind/listen/accept/echo) and a forked
  * client (connect/send/recv) exchange a message via 127.0.0.1. Exercises the
  * full TCP path — three-way handshake, data, teardown — through the kernel's

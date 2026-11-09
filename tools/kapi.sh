@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Pre-merge gate (kod-kalitesi-denetimi.md §3.6, §5). Run from the source root:
 #   tools/kapi.sh            check the tree against tools/kapi-taban.txt
 #   tools/kapi.sh --taban    write the current exceptions as the new baseline

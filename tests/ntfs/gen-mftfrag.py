@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """Force $MFT itself into many extents so record 0 needs an $ATTRIBUTE_LIST: fill the volume
 with one-cluster files, free every other one, then make enough new records that the MFT must
 grow into the gaps. Usage: gen-mftfrag.py MOUNT"""

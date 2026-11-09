@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroups v2 pids controller: put ourselves in a cgroup with pids.max=4,
  * then fork until rejected. self + 3 children = 4, so the 4th fork must
  * fail with EAGAIN. */

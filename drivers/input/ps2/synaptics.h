@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef DRIVERS_INPUT_SYNAPTICS_H
 #define DRIVERS_INPUT_SYNAPTICS_H
 #if __has_include(<uapi/types.h>)

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A slave write into a full pty must wait for the master to read, never drop
  * bytes or return 0. Checked with output processing on (OPOST|ONLCR, every
  * '\n' becomes "\r\n") and off (raw). O_NONBLOCK on a full ring is EAGAIN, a

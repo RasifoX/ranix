@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Sunrise Point register model for drivers/watchdog/itco.c. QEMU has no such
  * chipset, so this is the only way that path runs before real hardware does.
  *

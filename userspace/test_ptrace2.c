@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What strace and gdb are built on: syscall stops told apart from traps, events for
  * fork and exec, every signal stopping first and the tracer deciding its fate, the
  * register sets, and attaching to a task that is not a child. */

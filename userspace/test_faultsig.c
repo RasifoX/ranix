@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A program's own fault reaches its handler: JITs, the Go runtime and sanitizers
  * turn SIGSEGV, SIGILL and SIGFPE into language-level errors. Without a handler
  * the process dies by that signal, whatever it blocks or ignores. */

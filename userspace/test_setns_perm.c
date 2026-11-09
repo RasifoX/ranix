@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* setns into a mnt, net, pid or user namespace takes CAP_SYS_ADMIN in the initial
  * user namespace: a namespace fd alone is no way in. */
 #define _GNU_SOURCE

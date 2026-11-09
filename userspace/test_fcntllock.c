@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* POSIX fcntl record locks (F_SETLK/F_GETLK): byte-range advisory locks across
  * processes — overlapping write locks conflict (EAGAIN), non-overlapping ones
  * coexist, F_GETLK reports the holder, and locks release on close. (sqlite,

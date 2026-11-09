@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* CLONE_FS: tasks made with it share one root, working directory and umask
  * (Linux); without it each task has its own copy.
  *   1. chdir and umask by a CLONE_FS child are seen by the parent; by a plain

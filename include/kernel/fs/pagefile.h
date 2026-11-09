@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef KERNEL_FS_PAGEFILE_H
 #define KERNEL_FS_PAGEFILE_H
 

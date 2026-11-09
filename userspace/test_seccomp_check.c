@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A seccomp program is checked when it is installed, the way Linux's
  * bpf_check_classic + seccomp_check_filter check it, and refused with EINVAL:
  * - an opcode outside the seccomp list (LD|H|ABS, LDX|W|ABS, MOD, junk);

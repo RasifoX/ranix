@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A signal landing just before a task goes to sleep must not be lost, and a task
  * stopped by ptrace while running in user mode must come back from the stop whole:
  * that one used to reset the machine. The windows are a few instructions wide, so

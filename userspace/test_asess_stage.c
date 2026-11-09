@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A host directory bound at another directory's place in a session (rw_src): the
  * session reads and writes the copy, the place it covers stays as it was, and no
  * way out of the bind reaches the covered directory or the host's copy by path. */

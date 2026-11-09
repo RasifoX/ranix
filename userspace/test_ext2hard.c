@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The corners of a disk filesystem, in the directory given as argv[1]: names at
  * the limit, rename across directories, every level of the indirect tree, the
  * size limit, a disk run full. Run on a small disk, then e2fsck the image: a

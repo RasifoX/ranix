@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A lookup relative to a directory fd starts at that directory itself (Linux):
  * not at whatever its path names now. So it still works after the caller
  * chroots away from it (Chromium's sandbox reads /proc/self/fd through a /proc

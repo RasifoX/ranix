@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TCP that does not leave a peer hanging. Over loopback, with firewall rules in
  * the role of a lost path: half-close, zero-window recovery with the window update
  * lost, data sent just before close, and the RST after retransmits run out.

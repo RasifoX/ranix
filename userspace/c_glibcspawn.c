@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* glibc posix_spawn + vfork + fork/exec smoke test, mirroring how dpkg-deb
  * spawns helpers (it posix_spawns a decompressor and pipes its output to tar).
  * Built with the stock glibc host toolchain like c_glibc.c. Exercises glibc's

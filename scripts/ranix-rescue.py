@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """ranix-rescue: talk to a Ranix machine's kernel rescue channel (kernel/rescue.c).
 
 Works when SSH and the rest of userspace are gone, as long as the kernel answers

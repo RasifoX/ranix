@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SIGKILL and SIGSTOP are uncatchable: sigaction() must reject them (EINVAL),
  * while an ordinary signal like SIGTERM is accepted. */
 #include <signal.h>

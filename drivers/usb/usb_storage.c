@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * USB mass storage: Bulk-Only Transport, SCSI commands, the block device each
  * LUN 0 becomes, and the configuration parsing that finds the BOT interface.
  *

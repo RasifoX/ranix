@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A GPT partition labelled ranix-sesslog stays inside the kernel: no node, no mount,
  * while its neighbours appear as usual. Needs a disk with that label; without one
  * the kernel logged nothing to check and the test says so. */

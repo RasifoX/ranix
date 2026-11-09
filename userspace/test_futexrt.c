@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* FUTEX_WAIT_BITSET with FUTEX_CLOCK_REALTIME times out at its wall-clock instant.
  *
  * The deadline used to be read on the boot clock, so a 2026 wall-clock instant

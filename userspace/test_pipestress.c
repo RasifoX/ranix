@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Repro tool for the chronic SMP residual: a tight fork+pipe+wait loop reliably
  * deadlocks (a woken reader/waiter that never gets scheduled — "PROC_READY stuck
  * on a runqueue"). 200 rounds: pipe → fork → child writes "hello" → parent reads

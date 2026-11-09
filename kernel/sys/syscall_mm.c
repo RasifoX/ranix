@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── memory-management syscalls ──────────────────────────────────────────────
  * The user side of the virtual-memory layer: growing the heap (brk), mapping
  * and unmapping regions (mmap/munmap), and changing their protection

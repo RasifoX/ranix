@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * x86_64 AP trampoline — copied to physical 0x7000 at runtime.
  * APs start in 16-bit real mode here.
  * Data area at page-relative offset 0xF00.

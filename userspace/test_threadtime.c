@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A process's CPU time includes the threads that have finished: `time` and wait4
  * report it, and a program doing its work in threads must not show zero. */
 #define _GNU_SOURCE

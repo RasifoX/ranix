@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A person's session (D-04): the desktop starts as root, takes on uid 1000 with
  * the video, input and audio groups, and from then on:
  *  - its ids and groups are what it set, children inherit them, and there is no

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Threads belong to their process's cgroup: pids.max counts them, memory charged
  * by a thread outlives it, cgroup.freeze stops them and a move takes them along. */
 #define _GNU_SOURCE

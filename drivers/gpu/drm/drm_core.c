@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Ranix DRM core: /dev/dri/card0 and /dev/dri/renderD128, the ioctl dispatcher,
  * per-open state (GEM handles, syncobjs, the event queue), GEM objects with dumb
  * buffers and mmap, PRIME (dma-buf fds), syncobj with sync_file export.

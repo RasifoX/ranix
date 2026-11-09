@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #pragma once
 /* Just enough of the kernel for gpt.c and mbr.c under ASan on the host. */
 #include <stdint.h>

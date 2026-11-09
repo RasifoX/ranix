@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* kill and its relatives need a uid match or CAP_KILL from the initial user
  * namespace, kill(-1) stops at the caller's pid namespace, and setpgid reaches
  * only the caller and its children in the same session. */

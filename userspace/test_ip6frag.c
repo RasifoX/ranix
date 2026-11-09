@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* IPv6 UDP fragmentation + reassembly over loopback (::1): send a datagram
  * larger than the link MTU so ipv6_tx emits Fragment-header'd packets, and
  * verify the receiver reassembles the exact bytes. */

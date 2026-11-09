@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /dev/input/mice: the PS/2 aux port (mouse or touchpad) end to end.
  * The test VM has QEMU's PS/2 mouse. Bytes written by root go to the i8042
  * "write aux output buffer" command and come back through IRQ12, so this

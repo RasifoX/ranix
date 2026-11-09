@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A one-node machine still answers the NUMA calls libnuma makes at load. */
 #include <errno.h>
 #include <stdio.h>

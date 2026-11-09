@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Two-boot persistence proof: an ext2 write on the disk must survive a reboot.
 #
 # Boot 1 starts from a freshly formatted disk image, so the suite finds no

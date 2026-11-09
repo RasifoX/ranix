@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── kill-always-wins watch ───────────────────────────────────────────────────
  * Two invariants the 2026-11-08 Casper wedge broke (an ioctl looping forever
  * while holding drm_lock; SIGKILL lost; shutdown waited on it for good):

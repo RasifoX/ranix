@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <drivers/input/ps2.h>
 #include <drivers/irqchip/irqchip.h>
 #include <kernel/irq.h>

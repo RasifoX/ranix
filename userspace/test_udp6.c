@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* UDP over IPv6 loopback (::1): the parent binds and blocks in recvfrom while a
  * forked child sends a datagram to ::1. Exercises the IPv6 UDP tx/rx path and
  * the mandatory IPv6 UDP pseudo-header checksum. */

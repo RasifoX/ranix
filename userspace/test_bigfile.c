@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* tmpfs and ramfs files past the largest single allocation: whole, sparse,
  * truncated, mapped, executed, and charged to the right session. Two writers
  * growing one file must neither lose data nor miscount it. */

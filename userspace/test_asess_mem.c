@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A session's memory budget: a cgroup of its own, with a default. Every way of
  * holding memory counts against it, every way of letting go gives it back, and a
  * session at its limit leaves the host running. */

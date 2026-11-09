@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Intel High Definition Audio, from the Intel HD Audio specification. One codec,
  * one output stream, playback only. The codec's widget graph is walked from each
  * connected output pin back to a converter, and everything on the way is powered

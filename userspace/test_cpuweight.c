@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroup cpu controller: cpu.weight round-trips, and a process placed in a
  * weighted cgroup still schedules and runs to completion (the weight scales
  * its time slice without breaking the scheduler). */

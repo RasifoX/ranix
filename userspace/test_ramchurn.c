@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Reproduce the Python-zip memory corruption: a large resident ramfs file
  * (forces an order-12 buddy block) kept warm, plus heavy concurrent create /
  * grow-write / stat / lookup / unlink churn of many small files in the same

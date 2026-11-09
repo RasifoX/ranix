@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/mem: read and write our own memory through the procfs file, using
  * the variable's address as the file offset (the gdb mechanism). */
 #include <stdio.h>

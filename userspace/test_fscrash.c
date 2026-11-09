@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What a crash may and may not cost a disk filesystem. "run DIR" keeps four
  * processes writing until killed or reset, recording in fsynced logs what the
  * kernel has promised. "check DIR", possibly on the next boot or under another

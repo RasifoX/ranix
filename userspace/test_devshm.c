@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /dev/shm must be a real tmpfs: shm_open + ftruncate + mmap + read-back. */
 #include <stdio.h>
 #include <string.h>

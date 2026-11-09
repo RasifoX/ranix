@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Realtek RTL8168H / RTL8111H PCI Express gigabit Ethernet — polled driver.
  *
  * Status: runs on one real chip, DHCP on the Casper Nirvana; QEMU has no RTL8168

@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * vDSO image layout (x86_64 and aarch64).
  *
  * The kernel copies this image into every process as one flat block and passes

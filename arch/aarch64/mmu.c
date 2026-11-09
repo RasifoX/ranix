@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <asm/mmu.h>

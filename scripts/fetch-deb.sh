@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Fetch a Debian package + its runtime-library closure as .deb files into a
 # cache dir, for shipping into the initramfs (offline dpkg/apt on Ranix).
 #

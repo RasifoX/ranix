@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── shared mappings of files without a page cache ───────────────────────────
  * Most filesystems here cannot hand out a page of their own for a file (ext2
  * with 1 or 2 KiB blocks, FAT, ...), so mmap gives the process copies of the

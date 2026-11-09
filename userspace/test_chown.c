@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* chown/fchown actually change ownership (were no-op stubs), honour the -1
  * "don't change" sentinel, and clear the set-user/group-ID bits like Linux —
  * what tar -p, cp -a, install and package managers rely on. (Runs as root.) */

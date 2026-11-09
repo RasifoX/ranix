@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * FP/SIMD-across-signal regression test.
  *
  * The kernel must preserve the full FP/SIMD register state across signal

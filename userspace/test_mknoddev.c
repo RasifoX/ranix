@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mknod(2) device nodes: creating a char node with a major:minor routes to the
  * matching driver (devfs registry), so a hand-made /dev/null behaves like the
  * real one. This is what minimal-rootfs setup (debootstrap-style) does. (root) */

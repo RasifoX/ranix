@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* sigwait, sigwaitinfo and sigtimedwait take a signal without a handler: the usual
  * way a threaded daemon handles signals, and how libc runs timer callbacks. */
 #define _GNU_SOURCE

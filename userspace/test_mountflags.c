@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* per-mount flag enforcement (MS_RDONLY/NOEXEC/NOSUID/NODEV). Runs as root so it
  * can mount(2); each case mounts a fresh tmpfs and asserts Linux semantics. */
 #define _GNU_SOURCE

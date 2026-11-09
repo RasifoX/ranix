@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Mount flags follow the mount a path really reaches, however it is spelled:
  * through a symlink, "..", /proc/self/cwd or a chroot. The string prefix of the
  * mountpoint used to decide this, and none of those spellings match it. */

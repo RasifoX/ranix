@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A dentry freed by unlink or rename gives its slot back, so churn cannot walk the
  * cache into its cap, where every lookup turns volatile. Paths through volatile
  * directories must keep resolving, with "..", chroot and a create at the end. */

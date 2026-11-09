@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* device-node permissions: a disk exposed at /dev/<name> is mode 0660 owned
  * by root, so an unprivileged process must be denied (EACCES) when it tries to
  * open the raw block device — only root may read/write disks directly. */

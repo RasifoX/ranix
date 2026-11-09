@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * A blocking futex (pthread_cond_wait) must NOT wake with EINTR for a pending
  * signal that is ignored (SIG_IGN) — Linux only interrupts a blocking syscall
  * for a signal that is actually delivered to a handler (or a fatal default).

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A sticky directory: a name goes only by its file's owner, the directory's owner
  * or root, through unlink, rmdir and rename, on either side of a rename, and on
  * each in-memory filesystem. */

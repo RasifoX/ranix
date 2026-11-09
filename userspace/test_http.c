@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Real-internet TCP check: resolve a host, open a TCP connection out through the
  * gateway (SLIRP NAT), send an HTTP/1.0 GET, and print the status line. Proves
  * off-link routing + the full TCP stack against a real server. Ad-hoc — needs a

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* execve(2) #! interpreter handling + execute-permission enforcement:
  *  - a #!/bin/sh script run via execve is handed to the interpreter;
  *  - argv[1] passed by the shebang line reaches the interpreter as the script;

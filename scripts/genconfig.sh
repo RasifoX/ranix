@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # .config -> include/generated/autoconf.h (C) + include/generated/auto.conf (Make).
 # Lines are KEY=value or "# CONFIG_X is not set". y/n are booleans: enabled emits
 # "#define CONFIG_X 1", disabled emits nothing so IS_ENABLED()/#ifdef see it off.

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The kernel log: a call site that keeps firing is cut off after a burst, the rest
  * is summed up in one line when its window ends, and a debug line lands in the ring
  * even though it never reaches the console. First failure or OK. */

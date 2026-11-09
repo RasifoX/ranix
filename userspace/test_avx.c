@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The upper halves of ymm survive preemption, syscalls and signal handlers. */
 #define _GNU_SOURCE
 #ifndef __x86_64__

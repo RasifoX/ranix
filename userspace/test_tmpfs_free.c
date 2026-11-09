@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* File data in tmpfs and ramfs goes back to the allocator: on unlink, on overwrite
  * by rename, on umount and when a session's private /tmp ends, whatever is left
  * open or mapped at that moment. Each loop moves far more data than the machine

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Build and run the Casper EC mailbox model natively; any host compiler works.
 set -e
 D=$(cd "$(dirname "$0")" && pwd)

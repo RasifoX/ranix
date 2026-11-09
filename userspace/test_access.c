@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* access(2) honours R_OK/W_OK/X_OK (was existence-only). Root is denied X_OK on
  * a file with no execute bit; an unprivileged process is denied R/W on a
  * root-owned 0600 file. configure scripts and shell test -r/-w/-x rely on this. */

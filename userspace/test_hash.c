@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* crc32 and sha256 are kernel code with no user interface of their own: the kernel
  * runs them against the FIPS 180-4 examples and the CRC check value at boot, and
  * reports the result here. */

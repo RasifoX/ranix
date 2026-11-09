@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/fd/N names where a file really is, whatever path opened it.
  *
  * open() used to keep the path as written, so a directory reached through

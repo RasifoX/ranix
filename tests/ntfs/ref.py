@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """The reference listing of a tree: sha256, size and path of every regular file, walking
 by directory descriptor so a path past PATH_MAX is no obstacle. Usage: ref.py DIR"""
 import hashlib, os, stat, sys

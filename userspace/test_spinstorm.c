@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Scheduler-lock storm: threads on every CPU hammer the paths that take
  * sched_lock and the TLB shootdown lock at once (yield, futex wait/wake,
  * signals, short sleeps, fork/exit/wait, mprotect/munmap in a shared address

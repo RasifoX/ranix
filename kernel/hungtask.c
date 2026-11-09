@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── hung-task detector (khungtaskd parity) ──────────────────────────────────
  * A always-on, cheap net for the failure that today just hangs in silence: a
  * task the scheduler believes will make progress that never does — a lost

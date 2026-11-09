@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* vDSO kernel side: copy the built vDSO image into physical pages, map it (and
  * the shared vvar timekeeping page below it) into every process at exec, and
  * refresh vvar from the timer tick. The user-space half is vdso/vdso.c; the

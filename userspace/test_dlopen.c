@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Runtime shared-library load: dlopen + dlsym must map libfoo.so on demand
  * and resolve foo(). */
 #define _GNU_SOURCE

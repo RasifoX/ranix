@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* timer_create under load: many short one-shot SIGEV_SIGNAL timers, each armed
  * just after the expiry thread's scan that fired a "kick" timer, when that thread
  * is about to go idle. First in one process, then in one process per CPU, each

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A datagram cut short says so, as on Linux:
  * - recvmsg into a smaller buffer returns what fit and sets MSG_TRUNC in
  *   msg_flags; one that fits leaves msg_flags 0;

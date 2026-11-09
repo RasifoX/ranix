@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* close_range: close a contiguous fd range. Closed fds become EBADF, the fds
  * outside the range stay open; last==~0 closes everything from `first` up. */
 #include <stdio.h>

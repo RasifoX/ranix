@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Blocking syscalls must be interruptible by signals (Linux EINTR semantics):
  *  1. SIGKILL aborts a child blocked in read() on an empty pipe (child dies).
  *  2. SIGINT with an installed handler makes a blocked read() return -1/EINTR.

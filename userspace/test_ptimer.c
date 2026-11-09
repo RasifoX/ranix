@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* timer_create: one-shot and periodic signals with their value, timer_gettime, deletion, and the SIGEV_THREAD form libc builds on top.
  * Unimplemented, it was the most frequent syscall in Ranix's own log. */
 #define _GNU_SOURCE

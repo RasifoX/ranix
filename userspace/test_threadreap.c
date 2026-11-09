@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A joined thread gives back its pid. If exited threads wait for a parent that
  * never collects them, a long-lived process exhausts the pid space and nothing on
  * the machine can fork. Threads are also not children: wait(-1) must skip them. */

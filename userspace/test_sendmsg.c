@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* sendmsg/recvmsg over an AF_UNIX socketpair: a 2-iovec sendmsg concatenates
  * correctly on a stream socket, recvmsg reads it back, and recvmsg reports
  * msg_controllen 0 (no ancillary data handled yet). */

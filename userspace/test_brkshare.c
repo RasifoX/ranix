@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Threads share one address space, so they share one break. With a break kept per
  * task, a thread that starts before the heap grows "grows" it again from its old
  * value and maps zero pages over memory the program is using. */

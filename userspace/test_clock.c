@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * test_clock — clock_gettime sanity + monotonicity regression test.
  *
  * Guards the high-resolution clock work: clock_gettime(CLOCK_MONOTONIC) must

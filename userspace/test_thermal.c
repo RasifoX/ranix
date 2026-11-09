@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /sys/kernel/ranix_thermal: the package thermal guard reports either "off (...)"
  * (QEMU, non-Intel) or its state with every field present and sane. Prints OK. */
 #include <stdio.h>

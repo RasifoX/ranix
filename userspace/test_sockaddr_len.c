@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* connect/sendto/sendmsg read exactly the address length the caller gave, the
  * way Linux's move_addr_to_kernel does, and refuse a length that cannot hold
  * the family's address:

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mremap: without MREMAP_MAYMOVE nothing moves. musl's pthread_getattr_np probes
  * the main stack with it, and a moved stack page came back as zeroes. */
 #define _GNU_SOURCE

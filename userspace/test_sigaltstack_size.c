@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* sigaltstack(2): a stack smaller than MINSIGSTKSZ must fail with ENOMEM
  * (the kernel gave EINVAL); a large enough one must succeed and read back.
  * The raw syscall is checked too: musl's wrapper rejects small sizes itself,

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SA_RESETHAND and SA_NODEFER. A handler that re-raises its own signal is how a
  * process dies by that signal after cleaning up; Node does this for SIGTERM.
  * First failure or OK. */

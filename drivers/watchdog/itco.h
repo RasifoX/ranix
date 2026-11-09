@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef DRIVERS_WATCHDOG_ITCO_H
 #define DRIVERS_WATCHDOG_ITCO_H
 

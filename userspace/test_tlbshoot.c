@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Cross-CPU TLB shootdown test.
  *
  * Reader threads pinned to distinct CPUs tight-loop reading a shared page,

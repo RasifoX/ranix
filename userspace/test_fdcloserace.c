@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * fd close-race UAF regression test.
  *
  * fd_get() returns an unpinned vfs_file_t*; holding it across a blocking

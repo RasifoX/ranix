@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* overlayfs: read-through union of lower+upper, copy-up on write, and a
  * whiteout that hides a lower file after delete. First failure or OK. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /sys/kernel/ranix_ec, the Casper EC "OS present" door: 0600, root reads its
  * state, an unprivileged user can neither read nor write it, a bad command is
  * refused, and on any other machine (QEMU) "on" is refused with ENODEV. Never

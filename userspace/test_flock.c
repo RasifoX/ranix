@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* flock(2): BSD advisory whole-file locks. Two independent open files contend;
  * exclusive locks conflict, shared locks coexist, LOCK_NB reports EWOULDBLOCK,
  * and a lock is released when its open file is closed. (dpkg/sqlite/daemons.) */

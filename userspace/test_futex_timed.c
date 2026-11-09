@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Timed futex path (pthread_cond_timedwait): a wait that must time out, and a
  * wait that must be woken before its deadline. Exercises the kernel's
  * event-driven timed futex (sleeping_on_queue + wake_deadline deadline sweep).

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SCM_RIGHTS on a stream socket: many descriptors in one message, and one read
  * never swallows the next message's descriptors. Firefox's IPC needs both. */
 #define _GNU_SOURCE

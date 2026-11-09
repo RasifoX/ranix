@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* seccomp(SECCOMP_SET_MODE_FILTER) flags as on Linux:
  * - TSYNC puts the filter on every thread of the group (and no_new_privs);
  *   without it only the caller is filtered;

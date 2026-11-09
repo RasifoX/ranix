@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/<pid>/ns/<kind> identity: stat() of the link gives the namespace's
  * own number as st_ino, as Linux nsfs does, so two processes sharing a
  * namespace agree and the number matches readlink's "mnt:[N]". gdb compares

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 .set MB2_MAGIC,    0xe85250d6
 .set MB2_ARCH,     0
 .set MB2_LEN,      (mb2_end - mb2_start)

@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * FAT filesystem — FAT12 / FAT16 / FAT32, read-only with long-filename (VFAT)
  * support. The one on-disk format Linux ships for every removable/EFI medium;
  * Ranix mounts it so USB sticks, SD cards and ESP partitions are readable.

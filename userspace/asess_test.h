@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Shared by the test_asess_* programs. */
 #ifndef ASESS_TEST_H
 #define ASESS_TEST_H

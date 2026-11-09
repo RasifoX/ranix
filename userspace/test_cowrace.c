@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * COW double-free regression test.
  *
  * A page that is COW-shared across two address spaces (parent + forked

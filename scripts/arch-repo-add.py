@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Minimal host-side `repo-add`: build <repodir>/myrepo.db (a gzipped tar of
 # <pkg>/desc records) over one or more .pkg.tar.zst files, so `pacman -Sy` can
 # read a local file:// repo on Ranix. The host has no pacman/repo-add; we derive

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SA_RESTART: a handler returning leaves the interrupted read waiting, as if no
  * signal had come. Without the flag, or for a sleep, the call reports EINTR. */
 #define _GNU_SOURCE

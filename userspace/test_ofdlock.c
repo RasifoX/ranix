@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Open file description locks (F_OFD_GETLK/SETLK/SETLKW). QEMU probes for them
  * with F_OFD_GETLK and then locks image bytes with them; when the kernel took the
  * commands as no-ops, F_OFD_GETLK left l_type as asked and QEMU refused every

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TIOCSPGRP accepts only a group of the caller's session on the caller's own
  * terminal, TIOCSCTTY cannot take a terminal another session holds, and the
  * console, where init's shell has no controlling terminal, keeps working. */

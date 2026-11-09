@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* One directory of the host bound writable into a session: writes land on the
  * host at once, and nothing else of the host becomes writable or visible. Both
  * shapes: a directory the view has anyway, and one under the private /tmp, which

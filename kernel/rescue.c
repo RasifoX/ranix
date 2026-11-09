@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── Ranix rescue channel ─────────────────────────────────────────────────────
  * 2026-11-08, Casper: a task looped forever inside an ioctl holding drm_lock.
  * ping still answered (the kernel was fine), but sshd had been stopped by the

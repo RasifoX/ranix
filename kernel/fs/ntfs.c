@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * NTFS mount for the VFS, over the parser in ntfs_core.c. Read-only without a switch
  * to change that: the operation tables below hold no create, write, truncate, rename
  * or setattr, the mount is locked read-only, and no call reaches block_write.

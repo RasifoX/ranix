@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Unprivileged syscall fuzzer. Random arguments against the x86_64 syscall table,
  * drawn from pools of live fds, mapped and unmapped buffers, kernel addresses,
  * boundary integers and paths.

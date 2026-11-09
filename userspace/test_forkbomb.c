@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* RLIMIT_NPROC: a non-root process may not fork past its soft cap on live
  * processes; fork returns EAGAIN at the limit and the count recovers once
  * children exit. Root is exempt. The suite runs as uid 0, so the bounded half

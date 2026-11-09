@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Every way of making a task keeps it in the session: fork, vfork, clone, clone3,
  * threads, posix_spawn, double fork with setsid. So does exec, of a setuid helper
  * or through ld.so. The task budget holds across all of them. */

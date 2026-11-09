@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* PR_SET_PDEATHSIG delivers its signal when the parent dies. A child relying on it
  * to go down with a killed parent otherwise runs on, and holds whatever it holds. */
 #define _GNU_SOURCE

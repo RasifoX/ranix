@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Ranix configuration — the catalogue of every CONFIG_ option, its type, default
 # and meaning. This is documentation + source of truth; the build reads .config
 # (a flat KEY=value file), not this. Edit a copy of defconfig/tinyconfig as

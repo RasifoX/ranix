@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * The /sys entries libdrm and Mesa's loader read to find a DRM device and its bus:
  *
  *   /sys/dev/char/226:{0,128}/{dev,uevent,subsystem@,device/}

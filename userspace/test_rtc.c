@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* real wall-clock from the RTC: CLOCK_REALTIME and file mtimes are real dates
  * (after 2020-01-01 = 1577836800), not uptime/1970. clock_settime round-trips
  * (then restores so the rest of the suite keeps a sane clock). */

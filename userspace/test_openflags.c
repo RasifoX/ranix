@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* open(2) flag enforcement:
  *  O_CREAT|O_EXCL on an existing file -> EEXIST
  *  O_DIRECTORY on a regular file      -> ENOTDIR

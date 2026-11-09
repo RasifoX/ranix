@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Credentials and limits (audit step 2, items #3 and #4).
  *  - Limits are the thread group's: a thread sees the limit its group set, and a
  *    limit set from a thread holds for the whole group.

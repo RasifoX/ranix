@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TCP throughput probe over loopback: a forked sender blasts N bytes, the parent
  * receives them and times it. Reports MB/s — the stack's processing ceiling. */
 #include <stdio.h>

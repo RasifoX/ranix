@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include "synaptics.h"
 
 #define Z_DOWN    30      /* pressure of a landing finger */

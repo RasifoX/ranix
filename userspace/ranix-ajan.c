@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ranix-ajan: claims on machine resources, for agents and people.
  * Kernel side: kernel/claim.c, include/uapi/claim.h (/dev/claim).
  *
