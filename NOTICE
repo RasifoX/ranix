@@ -65,6 +65,38 @@ as long as its notice is kept.
               macros (FIELD_PREP, BIT, ...) so the i915 code above compiles.
    Licence:   BSD-2-Clause (SPDX line in each file).
 
+5. FreeBSD rtwn(4) parts in the RTL8723BE Wi-Fi driver
+   Path:      drivers/net/rtw8723.c
+   Origin:    clean-room rewrite (2026-11-09) from FreeBSD sys/dev/rtwn (main
+              branch): rtl8723b/, rtl8723b/usb/, rtl8192e/, rtl8188e/pci/,
+              rtl8192c/, rtl8192c/pci/, pci/, if_rtwn*.c. Register names,
+              power-on, firmware upload, efuse and PCIe ring steps were adapted.
+              No Linux or other GPL source was used; the sources read are
+              logged in ranix-inceleme/ozel-CR/KAYNAKLAR.md.
+   Copyright: Copyright (c) 2010 Damien Bergamini; (c) 2014, 2017 Kevin Lo;
+              (c) 2015 Stefan Sperling; (c) 2015-2016 Andriy Voskoboinyk;
+              (c) 2017-2018 Farhan Khan; (c) 2026 Ahmad Khalifa
+   Licence:   ISC (Bergamini, Lo 2014, Sperling, Voskoboinyk, Khan) and
+              BSD-2-Clause (Lo 2017, Khalifa). Both texts are in the file header.
+              SPDX: EUPL-1.2 AND ISC AND BSD-2-Clause.
+   Firmware:  the driver loads rtlwifi/rtl8723befw_36.bin, which is not part of
+              Ranix. It comes from linux-firmware under Realtek's binary
+              redistribution licence (LICENCE.rtlwifi_firmware.txt: redistribution
+              in binary form without modification, notice and disclaimer kept,
+              no reverse engineering). It is not GPL. An image that ships the
+              file must ship that licence text with it.
+
+6. FreeBSD GENET parts in the Raspberry Pi 4 Ethernet driver
+   Path:      drivers/net/bcmgenet.c
+   Origin:    clean-room rewrite (2026-11-09) from FreeBSD
+              sys/arm64/broadcom/genet/if_genet.c and if_genetreg.h, themselves
+              derived from NetBSD's bcmgenet.c. Register map, reset, ring set-up,
+              MDIO and RX filter steps were adapted. No U-Boot, Linux or other
+              GPL source was used (log: ranix-inceleme/ozel-CR/KAYNAKLAR.md).
+   Copyright: Copyright (c) 2020 Michael J Karels; (c) 2016, 2020 Jared McNeill
+   Licence:   BSD-2-Clause. Full text in the file header.
+              SPDX: EUPL-1.2 AND BSD-2-Clause.
+
 -------------------------------------------------------------------------------
 Interfaces and reference material (no code copied)
 -------------------------------------------------------------------------------
@@ -79,16 +111,21 @@ drivers/net/rtl8168.c: FreeBSD and OpenBSD re(4), SerenityOS, Realtek
 datasheets).
 
 -------------------------------------------------------------------------------
-Removed before the first EUPL release
+Removed or replaced before the first EUPL release
 -------------------------------------------------------------------------------
 
 - kernel/tty/font8x16.h: matched the Linux kernel's GPL-2.0 font_8x16.c. Unused;
   deleted. Spleen (above) is the console font.
 - doomgeneric/: GPL-2.0-or-later (one file GPL-3.0-or-later). Not part of the
   kernel; moved out of this tree.
-- drivers/net/bcmgenet.c (Raspberry Pi 4 Ethernet): its own header named GPL
-  drivers as its documentation, and a similarity scan found the structure of
-  U-Boot's GPL-2.0+ driver in it. Withdrawn pending a clean rewrite.
+- drivers/net/bcmgenet.c (Raspberry Pi 4 Ethernet): the earlier version's
+  header named GPL drivers as its documentation, and a similarity scan found the
+  structure of U-Boot's GPL-2.0+ driver in it. Replaced by a clean-room rewrite
+  from FreeBSD's BSD-2-Clause driver (item 6 above).
+- drivers/net/rtw8723.c (Realtek RTL8723BE Wi-Fi): a side-by-side reading found
+  the bring-up sequences and constants of Linux rtlwifi/rtl8723be (GPL-2.0) in
+  the earlier version, although its header said otherwise. Replaced by a
+  clean-room rewrite from FreeBSD rtwn(4), ISC and BSD-2-Clause (item 5 above).
 - arch/aarch64/linker_raspi4.ld and vdso/vdso_layout.lds were rewritten from
   scratch; the old raspi4 script carried lines from the MIT-licensed
   raspi3-tutorial (Copyright bzt). Output is byte-identical.
