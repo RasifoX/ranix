@@ -211,6 +211,8 @@ check "c-devshm"      "OK" "$(timeout 10 /bin/test_devshm 2>/dev/null)"
 check "proc-net-unix" "1"  "$(cat /proc/net/unix | head -1 | grep -c RefCount)"
 check "proc-task-dir" "same" "$( [ \"$(timeout 8 cat /proc/1/task/1/comm 2>/dev/null)\" = \"$(timeout 8 cat /proc/1/comm 2>/dev/null)\" ] && echo same )"
 
+check "c-tmpmode"     "OK" "$(timeout 10 /bin/test_tmpmode 2>/dev/null)"   # boot /tmp 01777, before the suite mounts tmpfs on it
+
 # ── 23. mount ─────────────────────────────────────────────────
 check "mount-tmpfs"  "ok"  "$(mount -t tmpfs tmpfs /tmp && echo ok)"
 check "mount-write"  "hi"  "$(echo hi > /tmp/x && cat /tmp/x)"

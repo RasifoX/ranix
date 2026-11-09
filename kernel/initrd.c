@@ -166,7 +166,8 @@ void initrd_init(void)
         vfs_kernel_install("/etc/environment", (const uint8_t *)environ, sizeof(environ) - 1);
     /* standard directories */
     vfs_mkdir("/root", 0700);
-    vfs_mkdir("/tmp",  0777);
+    vfs_mkdir("/tmp",  01777);
+    inode_apply_meta("/tmp", 0, 0, 01777);   /* root 1777 whatever the cpio entry or umask said */
     vfs_mkdir("/run",  0755);
     vfs_mkdir("/sys",  0555);
     vfs_mkdir("/var",  0755);

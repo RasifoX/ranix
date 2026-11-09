@@ -340,7 +340,11 @@ static void mount_early_filesystems(void)
 	vfs_mount("/", "ramfs", NULL);
 	vfs_mkdir("/dev",  0755);
 	vfs_mkdir("/proc", 0555);
-	vfs_mkdir("/tmp",  0777);
+	vfs_mkdir("/tmp",  01777);
+	{   /* sticky 1777 as on Linux, set directly so no umask can narrow it */
+		vfs_dentry_t *t = vfs_dentry_resolve("/tmp");
+		if (t && t->inode) t->inode->mode = (t->inode->mode & 0170000) | 01777;
+	}
 	vfs_mkdir("/mnt",  0755);
 	vfs_mount("/proc", "proc",  NULL);
 	vfs_mount("/dev",  "devfs", NULL);
