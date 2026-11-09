@@ -13,6 +13,8 @@
 #   dup     a check name tests/ranix_test.sh runs twice: twice at top level, or at top level and
 #           inside a block (alternatives inside if/else branches are fine). Allowed repeats, by a
 #           human decision only: tools/kapi-dup-taban.txt
+#   ikili   a built ELF binary in the source tree (outside build/): make may run it instead of
+#           rebuilding from the newer source, and git never sees it
 #   ezme    with KAPI_BASE=<tree before the change>: a userspace/test_*.c that exists in both trees
 #           but lost more than 80% of its lines (another test written over it)
 # The baseline only shrinks: when you fix an exception, run --taban and commit it.
@@ -105,6 +107,17 @@ for name in sorted(set(top) | set(inner)):
     if (len(t) > 1 or (t and i)) and name not in dup_ok:
         dup_bad.append(f'dup\ttests/ranix_test.sh\t{name}\tlines {",".join(map(str, sorted(t + i)))}')
 
+# ikili: built binaries belong in build/, never next to their sources
+ikili_bad = []
+for dp, dn, fn in os.walk('.'):
+    dn[:] = sorted(d for d in dn if not (dp == '.' and d in ('build', '.git', '.cache')))
+    for f in sorted(fn):
+        q = os.path.join(dp, f)
+        try:
+            with open(q, 'rb') as h: magic = h.read(4)
+        except OSError: continue
+        if magic == b'\x7fELF': ikili_bad.append(f'ikili\t{q[2:]}   (built binary in the source tree: delete it)')
+
 # ezme: a test file overwritten by another test (needs the tree before the change)
 ezme_bad, kb = [], os.environ.get('KAPI_BASE')
 if kb:
@@ -142,7 +155,7 @@ for e in sorted(found, key=fmt):
 keys = {tuple(str(x) for x in (e[:-1] if e[0] in ('fn', 'ad') else e)) for e in found}
 note += ['\t'.join(k) + '   (fixed: run --taban)' for k in base if k not in keys]
 for n in note: print('kapi: note  ', n)
-bad += dup_bad + ezme_bad
+bad += dup_bad + ezme_bad + ikili_bad
 for b in bad: print('kapi: FAIL  ', b)
 print(f'kapi: {len(found)} known exceptions, {len(bad)} new' + (' -- needs a fix or a human decision' if bad else ', ok'))
 sys.exit(1 if bad else 0)
