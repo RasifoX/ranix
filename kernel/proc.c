@@ -496,8 +496,10 @@ static int fork_namespaces(process_t *child, process_t *parent, uint64_t clone_f
 /* Make the child a task: charge it, give it a pid, put it on the lists and the
  * run queue, all under sched_lock. Returns its pid as the caller sees it, or
  * -EAGAIN/-ENOMEM with nothing published. */
+#define CLONE_PARENT 0x00008000   /* the child is the caller's sibling */
+
 static pid_t fork_publish(process_t *child, process_t *parent, struct asess *enter,
-                          pid_namespace_t *target_pidns)
+                          pid_namespace_t *target_pidns, int hold)
 {
 	pid_t ret;
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -531,7 +533,7 @@ static pid_t fork_publish(process_t *child, process_t *parent, struct asess *ent
 	child->next = proctab[0]->next;
 	proctab[0]->next = child;
 	ptrace_follow_fork(parent, child);
-	runqueue_add(child);
+	if (!hold) runqueue_add(child);   /* hold: the caller still writes the child's memory */
 	proctab[pid] = child;
 	pidns_attach(child, target_pidns, pid);
 	/* setns can aim a child at a pid ns the parent cannot see */
@@ -560,7 +562,18 @@ static void fork_undo(process_t *child)
 	if (child->cgroup_ns) cgroup_ns_put(child->cgroup_ns);
 }
 
-static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
+/* CLONE_CHILD_SETTID on a fork: the tid goes into the child's own copy of
+ * memory (breaking COW there, not in ours), then the held child may run */
+static void fork_start_settid(process_t *child, uint32_t *ctid)
+{
+	uint32_t v = (uint32_t)task_vpid(child);
+	vm_access_remote(child->vm, (uint64_t)(uintptr_t)ctid, &v, sizeof(v), 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	runqueue_add(child);
+	spin_unlock_irq(&sched_lock, f);
+}
+
+static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter, uint32_t *ctid)
 {
 	reap_dead_threads();
 	process_t *parent = task_current();
@@ -572,6 +585,8 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	if (!enter && !may_create_ns(parent, clone_flags & ~0xffUL)) return -EPERM;
 	/* a shared root and cwd would reach across the new mount namespace (Linux EINVAL) */
 	if ((clone_flags & (CLONE_NEWNS | CLONE_FS)) == (CLONE_NEWNS | CLONE_FS)) return -EINVAL;
+	/* init has no parent to give a sibling to (Linux EINVAL) */
+	if ((clone_flags & CLONE_PARENT) && parent->tgid == 1) return -EINVAL;
 	arch_save_tls(parent);
 
 	/* RLIMIT_NPROC: a non-root caller may not exceed its soft cap on live
@@ -603,7 +618,9 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 		             : (parent->pid_ns ? parent->pid_ns : &init_pid_ns);
 	}
 
-	child->ppid      = parent->tgid;   /* a child belongs to the group, not the thread */
+	/* a child belongs to the group, not the thread; CLONE_PARENT makes it a
+	 * sibling: the caller's parent gets it (and its SIGCHLD, and reaps it) */
+	child->ppid      = (clone_flags & CLONE_PARENT) ? parent->ppid : parent->tgid;
 	child->pgrp      = parent->pgrp;
 	child->sid       = parent->sid;
 	child->state     = PROC_READY;
@@ -662,9 +679,10 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 		err = -12;
 	}
 
-	pid_t ret = fork_publish(child, parent, enter, target_pidns);
+	pid_t ret = fork_publish(child, parent, enter, target_pidns, ctid != NULL);
 	if (ret < 0) { err = ret; goto fail_early; }
 	if (owns_pidns) pid_ns_put(target_pidns);   /* child holds its own ref now */
+	if (ctid) fork_start_settid(child, ctid);
 	return ret;
 
 fail_early:
@@ -676,12 +694,17 @@ fail_early:
 
 pid_t proc_fork(uint64_t clone_flags, uint64_t newsp)
 {
-	return do_fork(clone_flags, newsp, NULL);
+	return do_fork(clone_flags, newsp, NULL, NULL);
+}
+
+pid_t proc_fork_settid(uint64_t clone_flags, uint64_t newsp, uint32_t *ctid)
+{
+	return do_fork(clone_flags, newsp, NULL, ctid);
 }
 
 pid_t proc_fork_asess(struct asess *s)
 {
-	return do_fork(ASESS_CLONE_NS, 0, s);
+	return do_fork(ASESS_CLONE_NS, 0, s, NULL);
 }
 
 /* A thread has no parent to collect it, and an exited one keeps its pid and PCB
