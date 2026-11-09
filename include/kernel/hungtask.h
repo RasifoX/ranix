@@ -26,10 +26,12 @@ extern volatile uint64_t hung_task_count;
  * not, then emits a greppable marker. Panics on a logic error. */
 void hung_task_selftest(void);
 
-/* kwatch: the kill-always-wins and kernel-stall watch */
-struct cpu_context;
-extern volatile uint64_t kwatch_unkillable_count, kwatch_kstall_count;
-void kwatch_tick_local(struct process *cur, struct cpu_context *cc);
-void kwatch_report(kout_t *o, int with_bt);
+/* For kwatch (kernel/kwatch.c): a state's name, and a task's call trace into
+ * the log from its saved frame. */
+struct process;
+const char *hung_state_name(uint64_t st);
+void hung_backtrace(struct process *p);
+
+#include <kernel/kwatch.h>
 
 #endif

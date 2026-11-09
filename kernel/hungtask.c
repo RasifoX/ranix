@@ -37,7 +37,6 @@
 #include <kernel/smp.h>
 
 volatile uint64_t hung_task_count;
-static void kwatch_kill_sweep(uint64_t now);
 
 /* Default 20s. Overridable at boot
  * with hung_task_timeout_secs= (0 disables). Read once, lazily. */
@@ -60,7 +59,7 @@ static uint64_t hung_timeout_ticks(void)
 	return timeout_ticks;
 }
 
-static const char *state_name(uint64_t st)
+const char *hung_state_name(uint64_t st)
 {
 	switch (st) {
 	case PROC_RUNNING:  return "RUNNING";
@@ -106,7 +105,7 @@ static uint64_t hung_eval(process_t *p, uint64_t now, uint64_t to)
 	return 0;
 }
 
-static void hung_backtrace(process_t *p)
+void hung_backtrace(process_t *p)
 {
 	arch_context_t *ctx = p->ctx;
 	if (!ctx) return;
@@ -132,44 +131,124 @@ static void hung_backtrace(process_t *p)
 	}
 }
 
+/* What hung_report prints about one CPU, copied under sched_lock: another CPU
+ * changes its queue and current task while we print. cur is pinned (refcount)
+ * so it cannot be freed before hung_snap_put. */
+struct hung_cpu_snap {
+	process_t *cur;
+	int        pid, state, sys, rq, rqn, slow, resched, on_cpu;
+	uint64_t   wd;
+};
+static struct hung_cpu_snap hung_snap[MAX_CPUS];   /* hung_task_check runs on one CPU at a time */
+
+/* Under sched_lock: where p is queued and current (-1: nowhere), and, when
+ * cpus is set, every CPU's state into hung_snap. Returns the CPUs copied. */
+static int hung_snapshot(process_t *p, int *queued_on, int *current_on, int cpus)
+{
+	int n = 0, where = -1, cur = -1;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	for (int i = 0; i < smp_ncpus && where < 0; i++) {
+		int guard = 0;
+		for (process_t *q = all_cpus[i] ? all_cpus[i]->rq_head : NULL; q && guard < 4096; q = q->sched_next, guard++)
+			if (q == p) { where = i; break; }
+	}
+	for (int i = 0; i < smp_ncpus; i++) if (all_cpus[i] && all_cpus[i]->current == p) cur = i;
+	for (int i = 0; cpus && i < smp_ncpus && i < MAX_CPUS; i++) {
+		cpu_context_t *c = all_cpus[i];
+		struct hung_cpu_snap *s = &hung_snap[i];
+		memset(s, 0, sizeof(*s));
+		s->pid = -1; s->state = -1; s->sys = -1;
+		if (!c) continue;
+		process_t *q = c->current;
+		if (q) {
+			s->cur = q; q->refcount++;           /* proc_hold, sched_lock is held */
+			s->pid = (int)q->pid; s->state = (int)q->state; s->sys = q->last_syscall;
+			s->on_cpu = q->on_cpu;
+		}
+		for (process_t *r = c->rq_head; r && s->rq < 4096; r = r->sched_next) s->rq++;
+		s->rqn = (int)c->rq_n;
+		s->slow = c->tick_slow; s->resched = c->need_resched; s->wd = c->wd_ticks;
+		n = i + 1;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	*queued_on = where; *current_on = cur;
+	return n;
+}
+
+/* Drop the pins hung_snapshot took on the first n CPUs' current tasks. */
+static void hung_snap_put(int n)
+{
+	for (int i = 0; i < n; i++) { proc_put(hung_snap[i].cur); hung_snap[i].cur = NULL; }
+}
+
 /* Loud, marked, greppable. Distinct from a panic: a hung task is a diagnosis, not
  * a reason to take the machine down — the rest of the system is still running. */
 static void hung_report(process_t *p, uint64_t stalled_ticks)
 {
 	hung_task_count++;
 	kprintf(KERN_WARN "hung: task pid=%d (%s) %s for %lu s, last_syscall=%d\n",
-	        (int)p->pid, p->name, state_name(p->state),
+	        (int)p->pid, p->name, hung_state_name(p->state),
 	        stalled_ticks / TIMER_HZ, p->last_syscall);
 	if (p->state == PROC_READY) {     /* runnable and not run: is it on a queue at all? */
-		int where = -1;
-		for (int i = 0; i < smp_ncpus && where < 0; i++) {
-			int guard = 0;
-			for (process_t *q = all_cpus[i] ? all_cpus[i]->rq_head : NULL; q && guard < 4096; q = q->sched_next, guard++)
-				if (q == p) { where = i; break; }
-		}
-		int cur = -1;
-		for (int i = 0; i < smp_ncpus; i++) if (all_cpus[i] && all_cpus[i]->current == p) cur = i;
+		static uint64_t last_dump;
+		int dump = kernel_ticks - last_dump > 5 * TIMER_HZ;
+		if (dump) last_dump = kernel_ticks;
+		int where, cur;
+		int n = hung_snapshot(p, &where, &cur, dump);
 		kprintf(KERN_WARN "hung: in_rq=%d on_cpu=%d queued_on=%d current_on=%d\n",
 		        (int)p->in_rq, (int)p->on_cpu, where, cur);
-		static uint64_t last_dump;
-		if (kernel_ticks - last_dump > 5 * TIMER_HZ) {
-			last_dump = kernel_ticks;
-			for (int i = 0; i < smp_ncpus; i++) {
-				cpu_context_t *c = all_cpus[i];
-				if (!c) continue;
-				process_t *q = c->current;
-				int n = 0;
-				for (process_t *r = c->rq_head; r && n < 4096; r = r->sched_next) n++;
-				kprintf(KERN_WARN "hung: cpu%d current pid=%d (%s) state=%d syscall=%d rq=%d slow=%d resched=%d wd=%lu\n", i,
-				        q ? (int)q->pid : -1, q ? q->name : "-", q ? (int)q->state : -1,
-				        q ? q->last_syscall : -1, n, c->tick_slow, c->need_resched, (unsigned long)c->wd_ticks);
-				if (q && q->pid) hung_backtrace(q);
+		for (int i = 0; i < n; i++) {
+			struct hung_cpu_snap *s = &hung_snap[i];
+			if (!all_cpus[i]) continue;
+			kprintf(KERN_WARN "hung: cpu%d current pid=%d (%s) state=%d syscall=%d rq=%d slow=%d resched=%d wd=%lu\n", i,
+			        s->pid, s->cur ? s->cur->name : "-", s->state,
+			        s->sys, s->rq, s->slow, s->resched, (unsigned long)s->wd);
+			/* a running task's saved frame is stale and its stack is live */
+			if (s->cur && s->pid) {
+				if (s->on_cpu) kprintf(KERN_WARN "hung:   (running on a cpu: no saved frame)\n");
+				else hung_backtrace(s->cur);
 			}
 		}
+		hung_snap_put(n);
 	}
 	kprintf(KERN_WARN "hung: call trace\n");
 	hung_backtrace(p);
 	kprintf(KERN_WARN "hung: end pid=%d\n", (int)p->pid);
+}
+
+/* Once, on the first sweep (early in boot: most CPUs are still in their idle
+ * task): the snapshot places a task that is on no queue and runs nowhere at -1,
+ * counts each queue as long as its rq_n says (both read under the one lock), and
+ * pins what it reports. A CPU's current is either its idle task (pid 0, static
+ * or per-CPU PCB from sched_init/secondary_cpu_main, never PROC_MAGIC, never
+ * freed) or a PCB from proc_create/proc_exec/clone, which carries PROC_MAGIC
+ * until its last pin is dropped. hung_report relies on pid 0 meaning idle. */
+static void hung_snapshot_selftest(void)
+{
+	process_t t;
+	memset(&t, 0, sizeof(t));
+	int where, cur, bad = 0, ncpu = 0, nidle = 0;
+	int n = hung_snapshot(&t, &where, &cur, 1);
+	for (int i = 0; i < n; i++) {
+		struct hung_cpu_snap *s = &hung_snap[i];
+		if (!all_cpus[i]) continue;
+		ncpu++;
+		if (s->rq < 4096 && s->rq != s->rqn) bad |= 1;
+		if (!s->cur) continue;
+		if (s->cur->refcount == 0) bad |= 32;                  /* the pin is not held */
+		if (s->cur == all_cpus[i]->idle) {
+			nidle++;
+			if (s->pid != 0) bad |= 16;                        /* idle must read as pid 0 */
+		} else {
+			if (s->pid == 0) bad |= 16;                        /* pid 0 that is not idle */
+			if (s->cur->magic != PROC_MAGIC) bad |= 2;         /* pinned: cannot be freed */
+		}
+	}
+	hung_snap_put(n);
+	if (where != -1 || cur != -1) bad |= 4;
+	if (n != smp_ncpus && n < MAX_CPUS) bad |= 8;
+	if (bad) kprintf(KERN_ERR "hung: snapshot selftest FAILED bad=%d cpus=%d idle=%d\n", bad, ncpu, nidle);
+	else     kprintf(KERN_INFO "hung: snapshot selftest ok cpus=%d idle=%d\n", ncpu, nidle);
 }
 
 /* One sweep. Gated by the caller to run a few times a minute, so the O(nproc)
@@ -179,6 +258,8 @@ void hung_task_check(void)
 {
 	uint64_t to = hung_timeout_ticks();
 	if (!to) return;   /* disabled */
+	static int snap_tested;
+	if (!snap_tested) { snap_tested = 1; hung_snapshot_selftest(); }
 
 	uint64_t now = kernel_ticks;
 	int n = task_count(), shown = 0, more = 0;
@@ -251,174 +332,4 @@ void hung_task_selftest(void)
 	if (hung_eval(&t, now, to) != 0) kpanic("hungtask: interruptible sleeper flagged");
 
 	kprintf(KERN_INFO "hung: selftest ok, detector fired %lu times\n", hung_task_count);
-}
-
-/* ── kill-always-wins watch ───────────────────────────────────────────────────
- * Two invariants the 2026-11-08 Casper wedge broke (an ioctl looping forever
- * while holding drm_lock; SIGKILL lost; shutdown waited on it for good):
- *   kill:   a task with SIGKILL pending must be gone within KW_KILL_SECS.
- *   kstall: a task must not run inside one syscall for KW_STALL_SECS without
- *           giving the CPU up while someone waits for it (or while it is killed).
- * Ranix cannot unwind a kernel loop that never checks, so the watch cannot fix a
- * breach; it names it (pid, syscall, backtrace) in the log, in a ring the rescue
- * channel serves (kernel/rescue.c), and in counters a test asserts stay at 0.
- * ─────────────────────────────────────────────────────────────────────────── */
-#include <kernel/kout.h>
-#include <kernel/smp.h>
-
-#define KW_KILL_SECS   10
-#define KW_STALL_SECS  10
-#define KW_RING        8
-
-volatile uint64_t kwatch_unkillable_count;
-volatile uint64_t kwatch_kstall_count;
-
-struct kw_event { uint64_t at; int pid; int sys; uint32_t secs; char kind; char name[16]; };
-static struct kw_event kw_ring[KW_RING];
-static volatile uint32_t kw_ring_n;
-static spinlock_t kw_lock = SPINLOCK_INIT;
-
-static void kw_note(char kind, process_t *p, uint32_t secs)
-{
-	uint64_t f = spin_lock_irq(&kw_lock);
-	struct kw_event *e = &kw_ring[kw_ring_n++ % KW_RING];
-	e->at = kernel_ticks; e->pid = (int)p->pid; e->sys = p->last_syscall; e->secs = secs; e->kind = kind;
-	int i = 0;
-	for (; i < 15 && p->name[i]; i++) e->name[i] = p->name[i];
-	e->name[i] = 0;
-	spin_unlock_irq(&kw_lock, f);
-}
-
-static struct { process_t *task; uint64_t sw, since, waited; uint8_t told; } kw_cpu[MAX_CPUS];
-
-/* From sched_tick_local on every CPU, for the task the tick interrupted. */
-void kwatch_tick_local(process_t *cur, cpu_context_t *cc)
-{
-	int c = (int)cc->cpu_id;
-	if (c < 0 || c >= MAX_CPUS) return;
-	if (!cur || !cur->pid || !cur->in_syscall) { kw_cpu[c].task = NULL; return; }
-	if (kw_cpu[c].task != cur || kw_cpu[c].sw != cur->hung_switches) {
-		kw_cpu[c].task = cur; kw_cpu[c].sw = cur->hung_switches;
-		kw_cpu[c].since = kernel_ticks; kw_cpu[c].waited = 0; kw_cpu[c].told = 0;
-		return;
-	}
-	/* Only a stall someone pays for: another task queued here, or the task killed.
-	 * Timed in kernel_ticks, not in this CPU's tick count: a guest or a slowed
-	 * tick delivers fewer local ticks than wall time passes. */
-	int dead = (cur->sig_pending & (1UL << (SIGKILL - 1))) != 0;
-	if (!(cc->rq_head || dead)) { kw_cpu[c].waited = 0; return; }
-	if (!kw_cpu[c].waited) kw_cpu[c].waited = kernel_ticks ? kernel_ticks : 1;
-	if (!kw_cpu[c].told && kernel_ticks - kw_cpu[c].waited >= (uint64_t)KW_STALL_SECS * TIMER_HZ) {
-		kw_cpu[c].told = 1;
-		kwatch_kstall_count++;
-		uint32_t secs = (uint32_t)((kernel_ticks - kw_cpu[c].since) / TIMER_HZ);
-		kw_note('S', cur, secs);
-		kprintf(KERN_ERR "kstall: cpu%d pid=%d (%s) in syscall %d for %u s without yielding%s\n",
-		        c, (int)cur->pid, cur->name, cur->last_syscall, secs,
-		        dead ? ", SIGKILL pending: UNKILLABLE" : "");
-	}
-}
-
-/* Backtrace of a task that is not on a CPU, into o (one frame per line). */
-void kwatch_backtrace(process_t *p, kout_t *o)
-{
-	if (p->on_cpu) { kout_s(o, "    (running on a cpu: no saved frame)\n"); return; }
-	arch_context_t *ctx = p->ctx;
-	if (!ctx) return;
-#if defined(__x86_64__)
-	uint64_t pc = ctx->rip, fp = ctx->rbp;
-#else
-	uint64_t pc = ctx->elr, fp = ctx->regs[29];
-#endif
-	for (int i = 0; i < 12; i++) {
-		uint64_t off = 0;
-		const char *s = ksym_lookup(pc, &off);
-		kout_s(o, "    ");
-		if (s) { kout_s(o, s); kout_s(o, "+"); kout_x(o, off); } else kout_x(o, pc);
-		kout_c(o, '\n');
-		if (fp < 0xFFFF000000000000UL || (fp & 7)) break;
-		uint64_t next = ((uint64_t *)fp)[0];
-		pc = ((uint64_t *)fp)[1];
-		if (!pc || next <= fp) break;
-		fp = next;
-	}
-}
-
-/* From hung_task_check (~every 5 s): SIGKILL posted and the task still here. */
-static void kwatch_kill_sweep(uint64_t now)
-{
-	int n = task_count();
-	for (int i = 0; i < n; i++) {
-		uint64_t f = spin_lock_irq(&sched_lock);
-		process_t *p = task_peek_locked(i), *victim = NULL;
-		uint32_t secs = 0;
-		if (p && p->magic == PROC_MAGIC && p->pid &&
-		    p->state != PROC_ZOMBIE && p->state != PROC_DEAD &&
-		    (p->sig_pending & (1UL << (SIGKILL - 1)))) {
-			if (!p->kill_posted_at) p->kill_posted_at = now;
-			if (now - p->kill_posted_at >= (uint64_t)KW_KILL_SECS * TIMER_HZ &&
-			    (!p->kill_reported_at || now - p->kill_reported_at >= 60 * TIMER_HZ)) {
-				p->kill_reported_at = now;
-				secs = (uint32_t)((now - p->kill_posted_at) / TIMER_HZ);
-				victim = p;
-				victim->refcount++;
-			}
-		}
-		spin_unlock_irq(&sched_lock, f);
-		if (!victim) continue;
-		kwatch_unkillable_count++;
-		kw_note('K', victim, secs);
-		kprintf(KERN_ERR "unkillable: pid=%d (%s) ignored SIGKILL for %u s, state=%s in_syscall=%d syscall=%d\n",
-		        (int)victim->pid, victim->name, secs, state_name(victim->state),
-		        victim->in_syscall, victim->last_syscall);
-		hung_backtrace(victim);
-		proc_put(victim);
-	}
-}
-
-/* Rescue/status text: counters, the event ring, and every task now breaking an
- * invariant (killed but alive, or in a long syscall), with backtraces. */
-void kwatch_report(kout_t *o, int with_bt)
-{
-	kout_s(o, "kwatch unkillable="); kout_u(o, kwatch_unkillable_count);
-	kout_s(o, " kstall="); kout_u(o, kwatch_kstall_count);
-	kout_s(o, " hung="); kout_u(o, hung_task_count); kout_c(o, '\n');
-	uint64_t f = spin_lock_irq(&kw_lock);
-	uint32_t n = kw_ring_n, first = n > KW_RING ? n - KW_RING : 0;
-	struct kw_event ev[KW_RING];
-	for (uint32_t i = first; i < n; i++) ev[i - first] = kw_ring[i % KW_RING];
-	spin_unlock_irq(&kw_lock, f);
-	for (uint32_t i = 0; i < n - first; i++) {
-		kout_s(o, ev[i].kind == 'K' ? "event unkillable" : "event kstall");
-		kout_s(o, " ago_s="); kout_u(o, (kernel_ticks - ev[i].at) / TIMER_HZ);
-		kout_s(o, " pid="); kout_u(o, (uint64_t)ev[i].pid);
-		kout_s(o, " comm="); kout_s(o, ev[i].name);
-		kout_s(o, " syscall="); kout_i(o, ev[i].sys);
-		kout_s(o, " secs="); kout_u(o, ev[i].secs); kout_c(o, '\n');
-	}
-	uint64_t now = kernel_ticks;
-	int nt = task_count(), shown = 0;
-	for (int i = 0; i < nt && shown < 16; i++) {
-		f = spin_lock_irq(&sched_lock);
-		process_t *p = task_peek_locked(i), *t = NULL;
-		if (p && p->magic == PROC_MAGIC && p->pid && p->state != PROC_ZOMBIE && p->state != PROC_DEAD &&
-		    ((p->sig_pending & (1UL << (SIGKILL - 1))) || p->hung_stall_start)) { t = p; t->refcount++; }
-		spin_unlock_irq(&sched_lock, f);
-		if (!t) continue;
-		shown++;
-		kout_s(o, "stuck pid="); kout_u(o, t->pid); kout_s(o, " comm="); kout_s(o, t->name);
-		kout_s(o, " state="); kout_s(o, state_name(t->state));
-		kout_s(o, " in_syscall="); kout_i(o, t->in_syscall);
-		kout_s(o, " syscall="); kout_i(o, t->last_syscall);
-		if (t->kill_posted_at) { kout_s(o, " killed_s="); kout_u(o, (now - t->kill_posted_at) / TIMER_HZ); }
-		kout_c(o, '\n');
-		if (with_bt) kwatch_backtrace(t, o);
-		proc_put(t);
-	}
-	for (int c = 0; c < smp_ncpus && c < MAX_CPUS; c++) {
-		process_t *t = kw_cpu[c].task;
-		if (!t || now - kw_cpu[c].since < 2 * TIMER_HZ) continue;
-		kout_s(o, "cpu"); kout_u(o, (uint64_t)c); kout_s(o, " in-syscall-without-yield s=");
-		kout_u(o, (now - kw_cpu[c].since) / TIMER_HZ); kout_c(o, '\n');
-	}
 }
