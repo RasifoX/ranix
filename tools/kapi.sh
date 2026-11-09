@@ -10,6 +10,11 @@
 #   mode    a device node registered world-writable (mode & 0002)
 #   ad      "agent", "ajan" or "AI" in kernel code (principle 1: neutral names)
 #   test    a userspace/test_*.c that no script under tests/ runs
+#   dup     a check name tests/ranix_test.sh runs twice: twice at top level, or at top level and
+#           inside a block (alternatives inside if/else branches are fine). Allowed repeats, by a
+#           human decision only: tools/kapi-dup-taban.txt
+#   ezme    with KAPI_BASE=<tree before the change>: a userspace/test_*.c that exists in both trees
+#           but lost more than 80% of its lines (another test written over it)
 # The baseline only shrinks: when you fix an exception, run --taban and commit it.
 cd "$(dirname "$0")/.." || exit 2
 exec python3 -I - "$@" <<'PY'
@@ -87,6 +92,35 @@ for p in sorted(os.listdir('userspace')):
     m = re.match(r'(test_\w+)\.c$', p)
     if m and not re.search(r'\b' + m.group(1) + r'\b', run): found.add(('test', m.group(1)))
 
+# dup: a check that runs twice hides a missing test and inflates the count
+DUPTABAN = 'tools/kapi-dup-taban.txt'
+top, inner = {}, {}
+for n, l in enumerate(open('tests/ranix_test.sh', errors='replace'), 1):
+    m = re.match(r'(\s*)check\s+"([^"]+)"', l)
+    if m: (inner if m.group(1) else top).setdefault(m.group(2), []).append(n)
+dup_ok = {l.split()[0] for l in open(DUPTABAN) if l.strip() and not l.startswith('#')} if os.path.exists(DUPTABAN) else set()
+dup_bad = []
+for name in sorted(set(top) | set(inner)):
+    t, i = top.get(name, []), inner.get(name, [])
+    if (len(t) > 1 or (t and i)) and name not in dup_ok:
+        dup_bad.append(f'dup\ttests/ranix_test.sh\t{name}\tlines {",".join(map(str, sorted(t + i)))}')
+
+# ezme: a test file overwritten by another test (needs the tree before the change)
+ezme_bad, kb = [], os.environ.get('KAPI_BASE')
+if kb:
+    import difflib
+    for f in sorted(os.listdir('userspace')):
+        if not re.match(r'test_\w+\.c$', f): continue
+        old = os.path.join(kb, 'userspace', f)
+        if not os.path.isfile(old): continue
+        a = open(old, errors='replace').read().splitlines(); b = open(os.path.join('userspace', f), errors='replace').read().splitlines()
+        if len(a) < 10: continue
+        kept = sum(bl.size for bl in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+        gone = (len(a) - kept) / len(a)
+        if gone > 0.80: ezme_bad.append(f'ezme\tuserspace/{f}\t{int(gone * 100)}% of {len(a)} lines gone   (another test written over it?)')
+else:
+    print('kapi: note   ezme check skipped: set KAPI_BASE=<tree before the change>')
+
 def fmt(e): return '\t'.join(str(x) for x in e)
 if sys.argv[1:] == ['--taban']:
     with open(TABAN, 'w') as f:
@@ -108,6 +142,7 @@ for e in sorted(found, key=fmt):
 keys = {tuple(str(x) for x in (e[:-1] if e[0] in ('fn', 'ad') else e)) for e in found}
 note += ['\t'.join(k) + '   (fixed: run --taban)' for k in base if k not in keys]
 for n in note: print('kapi: note  ', n)
+bad += dup_bad + ezme_bad
 for b in bad: print('kapi: FAIL  ', b)
 print(f'kapi: {len(found)} known exceptions, {len(bad)} new' + (' -- needs a fix or a human decision' if bad else ', ok'))
 sys.exit(1 if bad else 0)
