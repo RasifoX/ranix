@@ -312,8 +312,8 @@ static int syscall_restartable(long n)
 }
 
 /* ── seccomp BPF (cBPF subset) ───────────────────────────────────────────────
- * Runs the installed classic-BPF program over a seccomp_data record and maps
- * the SECCOMP_RET action onto our dispatch decision: <0 ALLOW, 0 KILL, >0 errno. */
+ * Runs the installed classic-BPF programs over a seccomp_data record; the
+ * action they return (SECCOMP_RET_*, with its data) is applied in syscall_gate. */
 struct seccomp_data { uint32_t nr; uint32_t arch; uint64_t instruction_pointer; uint64_t args[6]; };
 
 #if defined(__aarch64__)
@@ -324,10 +324,23 @@ struct seccomp_data { uint32_t nr; uint32_t arch; uint64_t instruction_pointer; 
 
 static long seccomp_action(uint32_t r)
 {
+	return (long)r;
+}
+
+/* An action's rank. Every filter runs and the most restrictive action wins, as
+ * on Linux: KILL_PROCESS, KILL_THREAD, TRAP, ERRNO, USER_NOTIF, TRACE, LOG,
+ * ALLOW. An action it does not know counts as KILL_PROCESS. */
+static int seccomp_rank(uint32_t r)
+{
 	switch (r & 0xffff0000u) {
-	case 0x7fff0000u: return -1;                       /* ALLOW */
-	case 0x00050000u: { uint32_t e = r & 0xffff; return e ? (long)e : 1; } /* ERRNO */
-	default:          return 0;                        /* KILL/TRAP/TRACE → kill */
+	case 0x00000000u: return 1;   /* KILL_THREAD */
+	case 0x00030000u: return 2;   /* TRAP */
+	case 0x00050000u: return 3;   /* ERRNO */
+	case 0x7fc00000u: return 4;   /* USER_NOTIF */
+	case 0x7ff00000u: return 5;   /* TRACE */
+	case 0x7ffc0000u: return 6;   /* LOG */
+	case 0x7fff0000u: return 7;   /* ALLOW */
+	default:          return 0;   /* KILL_PROCESS, unknown */
 	}
 }
 
@@ -360,23 +373,63 @@ static long seccomp_run_filter(const struct seccomp_filter *flt, const struct se
 	return 0;   /* fell off the end without RET → kill */
 }
 
-/* Every filter in the chain runs. KILL beats ERRNO beats ALLOW; among ERRNOs the
- * newest filter decides. */
-static long seccomp_run_chain(process_t *p, long nr,
-                              long a0, long a1, long a2, long a3, long a4, long a5)
+/* Every filter in the chain runs; the highest-ranked action wins, and among
+ * equals the newest filter's (its data). */
+static uint32_t seccomp_run_chain(process_t *p, uint64_t ip, long nr,
+                                  long a0, long a1, long a2, long a3, long a4, long a5)
 {
 	struct seccomp_data d;
-	d.nr = (uint32_t)nr; d.arch = SECCOMP_AUDIT_ARCH; d.instruction_pointer = 0;
+	d.nr = (uint32_t)nr; d.arch = SECCOMP_AUDIT_ARCH; d.instruction_pointer = ip;
 	d.args[0]=(uint64_t)a0; d.args[1]=(uint64_t)a1; d.args[2]=(uint64_t)a2;
 	d.args[3]=(uint64_t)a3; d.args[4]=(uint64_t)a4; d.args[5]=(uint64_t)a5;
 
-	long act = -1;
+	uint32_t act = 0x7fff0000u;   /* ALLOW */
 	for (const struct seccomp_filter *f = p->seccomp_filter; f; f = f->prev) {
-		long r = seccomp_run_filter(f, &d);
-		if (r == 0) return 0;
-		if (r > 0 && act < 0) act = r;
+		uint32_t r = (uint32_t)seccomp_run_filter(f, &d);
+		if (seccomp_rank(r) < seccomp_rank(act)) act = r;
 	}
 	return act;
+}
+
+/* seccomp: filter the syscall before dispatch. STRICT allows only
+ * read/write/exit/sigreturn; FILTER runs the installed BPF program. A session
+ * is gated first, so no filter a task installs can change the gate's answer.
+ * 1: the syscall is not run, and *ret is its result. */
+static int syscall_gate(process_t *sc, uint64_t ip, long n, const long *a, long *ret)
+{
+	if (sc->asess && !asess_syscall_allowed(sc, n, a[0], a[1], a[2])) {
+		*ret = -1;   /* EPERM */
+		return 1;
+	} else if (sc->seccomp_mode == 1) {
+		if (n != SYS_ARCH_READ && n != SYS_ARCH_WRITE && n != SYS_ARCH_EXIT &&
+		    n != SYS_ARCH_EXIT_GROUP && n != SYS_ARCH_RT_SIGRETURN) {
+			task_signal_group(sc, 9 /*SIGKILL*/);
+			return 1;
+		}
+	} else if (sc->seccomp_mode == 2) {
+		uint32_t r = seccomp_run_chain(sc, ip, n, a[0], a[1], a[2], a[3], a[4], a[5]);
+		uint32_t data = r & 0xffffu;
+		switch (r & 0xffff0000u) {
+		case 0x7fff0000u:            /* ALLOW */
+		case 0x7ffc0000u:            /* LOG */
+			return 0;
+		case 0x00050000u:            /* ERRNO: -data, at most MAX_ERRNO; 0 is success */
+			*ret = -(long)(data > 4095 ? 4095 : data);
+			return 1;
+		case 0x00030000u:            /* TRAP: not run, ENOSYS, and SIGSYS on the way out */
+			*ret = -38;
+			task_force_seccomp(ip, (int)n, SECCOMP_AUDIT_ARCH, (int)data);
+			return 1;
+		case 0x7ff00000u:            /* TRACE, USER_NOTIF: no tracer or listener here */
+		case 0x7fc00000u:
+			*ret = -38;
+			return 1;
+		default:                     /* KILL_THREAD, KILL_PROCESS */
+			task_signal_group(sc, 9);
+			return 1;
+		}
+	}
+	return 0;
 }
 
 /* Syscalls whose first argument is a fd. Their handlers look the file up and may
@@ -461,32 +514,8 @@ void syscall_handle(arch_context_t *ctx)
 	task_current()->walk_denied = 0;
 	ptrace_stop_check(ctx, 0);
 
-	/* seccomp: filter the syscall before dispatch. STRICT allows only
-	 * read/write/exit/sigreturn; FILTER runs the installed BPF program. A session
-	 * is gated first, so no filter a task installs can change the gate's answer. */
-	int sec_skip = 0;
-	{
-		process_t *sc = task_current();
-		if (sc->asess && !asess_syscall_allowed(sc, n, arg0, arg1, arg2)) {
-			ret = -1;   /* EPERM */
-			sec_skip = 1;
-		} else if (sc->seccomp_mode == 1) {
-			if (n != SYS_ARCH_READ && n != SYS_ARCH_WRITE && n != SYS_ARCH_EXIT &&
-			    n != SYS_ARCH_EXIT_GROUP && n != SYS_ARCH_RT_SIGRETURN) {
-				task_signal_group(sc, 9 /*SIGKILL*/);
-				sec_skip = 1;
-			}
-		} else if (sc->seccomp_mode == 2) {
-			long act = seccomp_run_chain(sc, n, arg0, arg1, arg2, arg3, arg4, arg5);
-			if (act == 0) {              /* SECCOMP_RET_KILL_* */
-				task_signal_group(sc, 9);
-				sec_skip = 1;
-			} else if (act > 0) {        /* SECCOMP_RET_ERRNO: return -errno, skip */
-				ret = -act;
-				sec_skip = 1;
-			}                            /* act < 0 → ALLOW */
-		}
-	}
+	long sargs[6] = { arg0, arg1, arg2, arg3, arg4, arg5 };
+	int sec_skip = syscall_gate(task_current(), CTX_SYSCALL_IP(ctx), n, sargs, &ret);
 
 	vfs_file_t *fd0_pin = (!sec_skip && syscall_takes_fd0(n))
 	                    ? fget(task_current()->fds, (int)arg0) : NULL;
