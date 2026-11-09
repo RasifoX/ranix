@@ -726,12 +726,22 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 	/* bytes read from these cannot be put back if the write side then fails */
 	mode_t m = in->inode->mode;
 	int stream = !S_ISREG(m) && !S_ISBLK(m) && !S_ISCHR(m);
+	int in_wronly = (in->flags & 3) == O_WRONLY;
 	fput(in);
+	vfs_file_t *out = fget(p->fds, out_fd);
+	mode_t om = out ? out->inode->mode : 0;   /* access mode as vfs_write checks it */
+	int out_rdonly = out && (S_ISREG(om) || S_ISBLK(om) || S_ISCHR(om) || S_ISFIFO(om)) &&
+	                 (out->flags & 3) == O_RDONLY;
+	if (out) fput(out);
+	if (!out || out_rdonly || in_wronly) return -EBADF;
 	if (stream) return -EINVAL;
+	/* With an offset the read starts there and in_fd's own position stays */
+	long pos = 0, start = 0;
 	if (offset) {
-		long off;
-		if (copy_from_user(&off, offset, sizeof(off)) != 0) return -EFAULT;
-		vfs_seek(in_fd, off, 0);
+		if (copy_from_user(&start, offset, sizeof(start)) != 0) return -EFAULT;
+		if (start < 0) return -EINVAL;
+		pos = (long)vfs_seek(in_fd, 0, 1);
+		vfs_seek(in_fd, start, 0);
 	}
 	/* /dev/zero to /dev/null never runs dry: stop at Linux's MAX_RW_COUNT and on
 	 * a signal, or this loop cannot be killed */
@@ -752,7 +762,8 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 		sent += (size_t)w;
 	}
 	if (offset) {
-		long off = (long)vfs_seek(in_fd, 0, 1);
+		long off = start + (long)sent;
+		vfs_seek(in_fd, pos, 0);
 		if (copy_to_user(offset, &off, sizeof(off)) != 0 && !sent) return -EFAULT;
 	}
 	return sent ? (long)sent : err;
