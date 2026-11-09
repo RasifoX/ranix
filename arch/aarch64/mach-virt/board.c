@@ -6,6 +6,7 @@
 #include <kernel/irq.h>
 #include <kernel/mm/vm.h>
 #include <asm/mmu.h>
+#include <kernel/smp.h>
 
 static board_config_t config = {
 	.name          = "QEMU virt",
@@ -48,7 +49,6 @@ void board_irq_init(void)
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 	timer_init(TIMER_HZ);
-	extern void smp_ipi_handler(void);
 	irq_register(0, smp_ipi_handler);  /* SGI #0 = reschedule IPI */
 	pl011_irq_init();
 }
@@ -56,10 +56,8 @@ void board_irq_init(void)
 void board_secondary_irq_init(void)
 {
 	/* Initialize GIC CPU interface on secondary CPU */
-	extern void irqchip_secondary_init(uint64_t cpu_base);
 	irqchip_secondary_init(config.gic_cpu_base);
 	/* Initialize per-CPU timer */
-	extern void timer_secondary_init(void);
 	timer_secondary_init();
 }
 

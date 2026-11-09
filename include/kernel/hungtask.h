@@ -2,6 +2,7 @@
 #define KERNEL_HUNGTASK_H
 
 #include <uapi/types.h>
+#include <kernel/kout.h>
 
 /* khungtaskd parity: a always-on, cheap safety net that fires when a task the
  * scheduler believes is making progress stops doing so. The check runs from the
@@ -24,5 +25,11 @@ extern volatile uint64_t hung_task_count;
  * synthetic blocked task to prove it fires, and a healthy one to prove it does
  * not, then emits a greppable marker. Panics on a logic error. */
 void hung_task_selftest(void);
+
+/* kwatch: the kill-always-wins and kernel-stall watch */
+struct cpu_context;
+extern volatile uint64_t kwatch_unkillable_count, kwatch_kstall_count;
+void kwatch_tick_local(struct process *cur, struct cpu_context *cc);
+void kwatch_report(kout_t *o, int with_bt);
 
 #endif

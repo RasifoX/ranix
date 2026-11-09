@@ -81,4 +81,8 @@ socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
 /* Find a LISTEN socket by local port + family */
 socket_t *tcp_listen_find(struct net_namespace *ns, uint16_t local_port, int domain);
 
+void     tcp_rx_consumed(socket_t *s, uint32_t n);
+uint16_t alloc_port(void);
+void     tcp_sock_free(socket_t *s);
+
 #endif

@@ -10,6 +10,8 @@
 #include <kernel/net/udp.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
+#include <kernel/time.h>
+#include <kernel/proc.h>
 
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER    2
@@ -127,8 +129,6 @@ static skb_t *dhcp_poll_reply(netdev_t *dev, uint32_t xid, int want_type,
                               uint32_t *dns, uint32_t *serverid, uint64_t deadline,
                               int can_sleep)
 {
-	extern volatile uint64_t kernel_ticks;
-	extern void task_sleep_until(uint64_t deadline);
 	while (kernel_ticks < deadline) {
 		if (dev->poll) dev->poll(dev);
 		skb_t *skb;
@@ -146,7 +146,6 @@ static skb_t *dhcp_poll_reply(netdev_t *dev, uint32_t xid, int want_type,
  * server (host order, 0 if none). Returns -1 on timeout. */
 static int dhcp_exchange(netdev_t *dev, uint32_t *out_dns, int can_sleep)
 {
-	extern volatile uint64_t kernel_ticks;
 	uint32_t xid = htonl((uint32_t)(0x52414e00u ^ (kernel_ticks * 2654435761u)));
 	uint32_t yiaddr = 0, mask = 0, gw = 0, dns = 0, serverid = 0;
 

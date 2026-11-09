@@ -73,4 +73,7 @@ void arch_vm_switch(uint64_t root_phys, uint32_t asid);
  * no-op. Must NOT be called while holding vs->fault_lock. */
 void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end);
 
+uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+void vma_free_space(vm_space_t *vs);
+
 #endif

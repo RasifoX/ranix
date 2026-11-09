@@ -12,14 +12,13 @@
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/nsproxy.h>
 
-extern unsigned long ns_inum_alloc(void);
 
 pid_namespace_t init_pid_ns = {
 	.refcount = 1, .inum = 0xF0000005UL, .parent = NULL, .level = 0,
 };
 static spinlock_t pidns_lock = SPINLOCK_INIT;
-extern spinlock_t sched_lock;
 
 pid_namespace_t *current_pid_ns(void)
 {

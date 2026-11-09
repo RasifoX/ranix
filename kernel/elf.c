@@ -8,6 +8,7 @@
 #include <kernel/cgroup.h>
 #include <kernel/proc.h>
 #include <kernel/hal.h>
+#include <kernel/mm/vm.h>
 
 /* Image source: a buffer already in memory, or an open file. Reading through
  * this keeps a large executable out of one contiguous kernel allocation. */
@@ -71,7 +72,6 @@ static int elf_load_src(vm_space_t *vm, const elf_src_t *src,
 		}
 	}
 
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 
 	uint64_t load_end   = 0;
 	uint64_t load_start = ~0UL;

@@ -152,7 +152,6 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	/* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already
 	 * there. Wine lays out its address space with it. */
 	if ((flags & 0x100000) && addr) {
-		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 		if (addr & (PAGE_SIZE - 1)) return -22;
 		if (!access_ok((void *)addr, len)) return -12;
 		uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
@@ -524,7 +523,6 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	 * A sibling faulting in the gap sees the new VMA prot: if the page is still
 	 * mapped a read just succeeds, and once it is unmapped the PROT_NONE VMA
 	 * denies the refault — never a fresh zero page into a protected region. */
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
 		uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
 		if (pa) {
@@ -598,7 +596,6 @@ static void thp_collapse(process_t *p, uint64_t va)
 	if (!(vma->flags & VMA_ANON) || !(vma->flags & VMA_WRITE) || (vma->flags & VMA_SHARED))
 		return;
 
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	uint64_t pa0 = arch_vm_get_paddr(p->vm->root, va);
 	if (!pa0) return;
 	for (int j = 0; j < 512; j++) {
@@ -663,7 +660,6 @@ static uint64_t vma_next_after(process_t *p, uint64_t va)
  * a later touch never faults. Best-effort: a dry buddy just stops early. */
 static void mm_prefault(process_t *p, uint64_t addr, size_t len)
 {
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 	for (uint64_t va = start; va < end; va += PAGE_SIZE) {

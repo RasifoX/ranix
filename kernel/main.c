@@ -20,9 +20,18 @@
 #include <kernel/fs/mbr.h>
 #include <kernel/fs/gpt.h>
 
-extern void initrd_init(void);
 #include <kernel/tty/fb_tty.h>
 #include <kernel/vfs.h>
+#include <kernel/init.h>
+#include <kernel/sync.h>
+#include <kernel/hungtask.h>
+#include <kernel/csprng.h>
+#include <kernel/net/net.h>
+#include <kernel/time.h>
+#include <kernel/smp.h>
+#include <asm/cpu.h>
+#include <kernel/tty/tty_core.h>
+#include <kernel/vdso.h>
 
 /* Boot-path pets. Long steps with bounded timeouts (DHCP, disk probing) must not
  * add up to a false reset, and a step that truly hangs stops the pets. */
@@ -32,14 +41,10 @@ extern void initrd_init(void);
 #define WD_BOOT_PROGRESS() do { } while (0)
 #endif
 
-extern char     __kernel_phys_end;
-extern uint64_t _dtb_ptr;
 
 fb_info_t global_fb;
 uint64_t  global_fb_phys = 0;
 
-extern uint64_t boot_initrd_start;
-extern uint64_t boot_initrd_size;
 
 /* Add [base, end) to buddy, skipping exclusion windows in exc[0..n-1]. */
 static void add_range(uint64_t base, uint64_t end,
@@ -223,7 +228,6 @@ static void setup_physical_memory(uint64_t fb_phys, uint64_t fb_size,
 	 * boundary), and the direct-map VA must actually resolve through the kernel
 	 * page tables — i.e. arch_map_high_memory really mapped the top of RAM. */
 	{
-		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 		uint64_t top = (max_limit - PAGE_SIZE) & PAGE_MASK;
 		uint64_t va  = PHYS_TO_VIRT(top);
 		if (VIRT_TO_PHYS(va) != top)
@@ -265,13 +269,10 @@ void kernel_main(void)
 	mmu_init();
 	fdt_remap();
 	arch_cpu_init();
-	extern volatile int spin_diag_on;
 	spin_diag_on = 1;
 
-	extern void atomic_selftest(void);
 	atomic_selftest();
 
-	extern void hung_task_selftest(void);
 	hung_task_selftest();
 
 	if (fdt_ok == 0) {
@@ -321,7 +322,7 @@ void kernel_main(void)
 #endif
 	}
 
-	{ extern void csprng_init(void); csprng_init(); }
+	csprng_init();
 	vfs_init();
 	kprintf(KERN_INFO "hash: self-test %s\n", hash_selftest() == 0 ? "ok" : "FAILED");
 	vfs_mount("/", "ramfs", NULL);
@@ -351,18 +352,14 @@ void kernel_main(void)
 	process_t *idle = task_current();
 	if (!idle->fds) idle->fds = fd_table_create();
 
-	extern void net_init(void);
 	net_init();
 
 	irq_enable();
-	extern void rtc_init(void);   /* read hardware clock → real wall-clock epoch */
 	rtc_init();
-	extern void smp_init(void);
 	smp_init();
 #if defined(__x86_64__)
-	{ extern void arch_idle_init(void); arch_idle_init(); }
+	arch_idle_init();
 #endif
-	extern int smp_ncpus;
 	buddy_init_percpu(smp_ncpus);   /* enable per-CPU order-0 page caches */
 #if defined(__x86_64__)
 	watchdog_start();
@@ -370,26 +367,16 @@ void kernel_main(void)
 	WD_BOOT_PROGRESS();
 	board_drivers_register();
 	WD_BOOT_PROGRESS();
-	extern void net_dhcp_all(void);
 	net_dhcp_all();
 	WD_BOOT_PROGRESS();
-	extern void fbdev_init(void);
 	fbdev_init();
-	extern void drm_init(void);
 	drm_init();                     /* /dev/dri: KMS on the firmware's mode */
-	extern void thermal_guard_init(void);
 	thermal_guard_init();           /* package temperature limit until ACPI drives the fan */
-	extern void rescue_init(void);
 	rescue_init();                  /* udp rescue channel + /dev/rescue (kernel/rescue.c) */
-	extern void claim_init(void);
 	claim_init();                   /* /dev/claim: visible resource claims (kernel/claim.c) */
-	extern void input_core_init(void);
 	input_core_init();
-	extern void tty_core_init(void);
 	tty_core_init();
-	extern void pty_init(void);
 	pty_init();
-	extern void vdso_init(void);
 	vdso_init();
 
 	/* Auto-detect and mount first ext2/ext4 disk partition */
@@ -517,14 +504,12 @@ void kernel_main(void)
 	watchdog_boot_done();
 #endif
 
-	extern void net_poll(void);
 	while (1) {
 		net_poll();
 		/* Non-preemptible kernel: cpu0's idle yields voluntarily when a task
 		 * became runnable here (irq_handler preempts only user space). */
 		cpu_context_t *c = arch_get_cpu_ctx();
 		if (c->need_resched) {
-			extern void sched_bsp_wake(void);
 			sched_bsp_wake();
 			c->need_resched = 0;
 			yield();

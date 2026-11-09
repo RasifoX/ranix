@@ -30,4 +30,7 @@ void smp_ipi_resched(int cpu_id);
  * caller's responsibility / implied by the IPI round-trip. */
 void smp_membarrier(void);
 
+extern uint8_t **ap_kstacks;                     /* boot stacks of the secondary CPUs */
+void smp_ipi_handler(void);
+
 #endif

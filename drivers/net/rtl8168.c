@@ -65,6 +65,7 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <asm/idt.h>
+#include <kernel/init.h>
 
 /* ── MAC registers (BAR2, MMIO) ──────────────────────────── */
 #define REG_IDR0        0x00    /* station address, 6 bytes */

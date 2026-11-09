@@ -2,6 +2,7 @@
 #include <kernel/pci.h>
 #include <kernel/sync.h>
 #include <asm/idt.h>
+#include <asm/cpu.h>
 
 void irq_enable(void)  { __asm__ volatile("sti"); }
 void irq_disable(void) { __asm__ volatile("cli"); }
@@ -21,7 +22,6 @@ void irq_disable(void) { __asm__ volatile("cli"); }
 
 int pci_msi_enable(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t vector)
 {
-	extern uint32_t lapic_self_id(void);
 	uint8_t cap = pci_find_cap(bus, dev, fn, PCI_CAP_MSI);
 	if (!cap) return -1;
 

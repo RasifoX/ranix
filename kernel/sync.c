@@ -6,6 +6,8 @@
 #include <kernel/kprintf.h>
 #include <kernel/ksyms.h>
 #include <kernel/smp.h>
+#include <kernel/time.h>
+#include <kernel/proc.h>
 
 /* v8.0-safe atomic RMW (cortex-a72 has no LSE, so we cannot let the compiler
  * emit ldadd/etc via __atomic — it would be an undefined instruction). x86
@@ -248,7 +250,6 @@ volatile uint32_t spin_bad_unlocks;   /* total, for tests via /proc or the log *
 #define SPIN_STUCK_NS   10000000000ULL
 #define SPIN_STUCK_MAX  (1ULL << 36)   /* backstop if the clock does not move */
 
-extern uint64_t mono_ns(void);
 
 static void spin_print_pc(const char *pre, void *pc)
 {
@@ -330,7 +331,6 @@ spin_deadlock(spinlock_t *l, uint32_t my, int self, void *pc,
 	        (const char *)arch_get_cpu_ctx()->wd_where : "?");
 
 	int served = -1;
-	extern int smp_ncpus;
 	for (int c = 0; c < smp_ncpus && c < MAX_CPUS; c++) {
 		struct spin_cpu *sc = &spin_cpus[c];
 		if (sc->wait) {
@@ -454,7 +454,6 @@ void spin_unlock_irq(spinlock_t *l, uint64_t flags)
 
 void mutex_lock(mutex_t *m)
 {
-	extern volatile uint64_t kernel_ticks;
 	uint64_t since = 0;
 	int told = 0;
 	while (1) {
@@ -482,8 +481,6 @@ void mutex_lock(mutex_t *m)
 
 int mutex_lock_killable(mutex_t *m)
 {
-	extern volatile uint64_t kernel_ticks;
-	extern int fatal_signal_pending(struct process *p);
 	uint64_t since = 0;
 	int told = 0;
 	while (1) {
@@ -692,7 +689,6 @@ void poll_arm(void)
 
 void poll_block(uint64_t deadline)
 {
-	extern volatile uint64_t kernel_ticks;
 	process_t *c = task_current();
 	uint64_t cap = kernel_ticks + TIMER_HZ / 10;  /* backstop re-check */
 	uint64_t d   = (deadline < cap) ? deadline : cap;

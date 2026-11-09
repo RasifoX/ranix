@@ -28,4 +28,10 @@ void   kprintf_flush(void);
 size_t kprintf_read_log(char *dst, size_t max);
 size_t kprintf_log_len(void);
 
+/* /proc/sys/kernel/dmesg_restrict (procfs.c): when set, only a privileged task
+ * may read the kernel log ring; the boot log carries addresses and device
+ * details useful to an attacker. Writes (logging) stay open. */
+extern int dmesg_restrict;
+void klog_pstore_beat(uint64_t ticks);
+
 #endif

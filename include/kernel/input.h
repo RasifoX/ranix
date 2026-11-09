@@ -45,4 +45,5 @@ void input_set_source(int src);
 int  input_get_source(void);
 void input_activity(int src, int pointer);   /* one key or pointer event happened */
 
+
 #endif

@@ -6,7 +6,6 @@
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 
-extern unsigned long ns_inum_alloc(void);
 
 /* init ns: identity map (n_uid/n_gid == 0 means 1:1) */
 user_namespace_t init_user_ns = { .refcount = 1, .inum = 0xF0000006UL, .level = 0 };

@@ -10,6 +10,8 @@
 #include <kernel/proc.h>
 #include <kernel/capabilities.h>
 #include <kernel/asess.h>
+#include <kernel/csprng.h>
+#include <kernel/fs/devfs.h>
 
 /*
  * devfs — virtual device filesystem at /dev.
@@ -85,7 +87,6 @@ static vfs_fops_t full_fops = {
 static ssize_t urandom_read(vfs_file_t *f, void *buf, size_t len)
 {
 	(void)f;
-	extern void csprng_bytes(void *, size_t);
 	if (!access_ok(buf, len)) { csprng_bytes(buf, len); return (ssize_t)len; }
 	uint8_t tmp[256];
 	size_t done = 0;
@@ -107,11 +108,6 @@ static vfs_fops_t urandom_fops = {
 /* Reads walk the kernel log ring a line at a time, then EOF until more is logged,
  * so `dmesg` shows the boot log; writes append
  * to the same ring via kprintf (the printk(3)/logger path). */
-
-/* dmesg_restrict (/proc/sys/kernel/dmesg_restrict): when set, only a privileged
- * task may read the kernel log ring — the boot log carries addresses and device
- * details useful to an attacker. Writes (logging) stay open. */
-extern int dmesg_restrict;
 
 static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 {
@@ -689,7 +685,6 @@ int devfs_mount(vfs_mount_t *mnt, void *data)
 
 void devfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("devfs", devfs_mount);
 	vfs_register_fs("devtmpfs", devfs_mount);   /* keep the name for /proc/mounts + statfs */
 	devfs_register_device("kmsg", S_IFCHR | 0644, 0x010b, &kmsg_fops);     /* 1:11 */

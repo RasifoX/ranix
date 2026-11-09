@@ -1,7 +1,5 @@
 #include <kernel/extable.h>
 
-extern struct ex_entry __start___ex_table[];
-extern struct ex_entry __stop___ex_table[];
 
 unsigned long search_extable(unsigned long pc)
 {

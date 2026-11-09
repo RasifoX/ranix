@@ -1,6 +1,7 @@
 #include <kernel/fdt.h>
 #include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
+#include <kernel/init.h>
 
 static void *_dtb;
 static uint64_t _dtb_phys;
@@ -113,8 +114,6 @@ const void *fdt_get_prop(const char *path, const char *prop_name, uint32_t *out_
     return NULL;
 }
 
-extern uint64_t boot_initrd_start;
-extern uint64_t boot_initrd_size;
 
 /* ── parse DTB into fdt_info_t ───────────────────────────── */
 

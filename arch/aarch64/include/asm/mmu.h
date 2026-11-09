@@ -1,6 +1,8 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
+#include <uapi/types.h>
+
 /* TTBR1 (48-bit, T1SZ=16) linear map. VIRT_OFFSET sits at L0 slot 256, so the
  * kernel image + direct map span slots 256..510 (~127 TB of RAM); slot 511 is
  * left for ioremap. PHYS_TO_VIRT is a single linear offset over that range. */
@@ -37,5 +39,10 @@
 #define PTE_ATTR_DEVICE     (MT_DEVICE_nGnRnE << 2)
 #define PTE_ATTR_NORMAL     (MT_NORMAL        << 2 | PTE_SHARE)
 #define PTE_ATTR_NORMAL_NC  (MT_NORMAL_NC     << 2 | PTE_SHARE)
+
+/* Boot page tables (mmu.c) and the MMU switch-on (mmu_asm.S). */
+extern uint64_t kernel_l0[], kernel_l0_high[], kernel_l1[];
+void enable_mmu(uint64_t ttbr0_phys, uint64_t ttbr1_phys);
+void mmu_clean_tables_poc(void);
 
 #endif

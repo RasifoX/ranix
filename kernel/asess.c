@@ -167,7 +167,6 @@ int asess_syscall_allowed(process_t *p, long nr, long a0, long a1, long a2)
  * device) would reach past the view, so it stays out. */
 int asess_file_allowed(vfs_file_t *f)
 {
-	extern int vfs_file_is_socket(vfs_file_t *f);
 	vfs_inode_t *in = f->inode;
 	if (!in) return 0;
 	if (S_ISFIFO(in->mode) || vfs_file_is_socket(f)) return 1;

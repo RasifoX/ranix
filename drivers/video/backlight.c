@@ -8,6 +8,7 @@
 #include <kernel/mm/vm.h>
 #include <kernel/hal.h>
 #include <asm/mmu.h>
+#include <kernel/fb.h>
 
 #if defined(__x86_64__)
 #define BLC_PWM_PCH_CTL1 0xC8250

@@ -29,11 +29,10 @@
 #include <kernel/fs/devfs.h>
 #include <kernel/lib/string.h>
 #include <uapi/claim.h>
+#include <kernel/time.h>
+#include <kernel/init.h>
+#include <kernel/claim.h>
 
-extern volatile uint64_t kernel_ticks;
-extern spinlock_t sched_lock;
-extern void ranix_walltime(int64_t *sec, int64_t *nsec);
-extern void poll_notify(void);
 
 
 #define NCLAIM      64

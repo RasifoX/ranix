@@ -6,6 +6,8 @@
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <asm/mmu.h>
+#include <kernel/smp.h>
+#include <kernel/init.h>
 
 static board_config_t config = {
 	.name          = "Raspberry Pi 4",
@@ -70,7 +72,6 @@ void board_irq_init(void)
 	irq_register(27, timer_handler);
 	irqchip_enable_irq(27);
 
-	extern void smp_ipi_handler(void);
 	irq_register(0, smp_ipi_handler);  /* SGI #0 = reschedule IPI */
 
 	timer_init(TIMER_HZ);
@@ -82,13 +83,13 @@ void board_drivers_register(void)
 {
 	/* already initialized early */
 	pi4_sd_init();
-	extern void bcmgenet_init(void);   /* Pi 4 built-in gigabit ethernet */
 	bcmgenet_init();
 }
 
 board_config_t *board_get_config(void) { return &config; }
 
 #include <kernel/fdt.h>
+#include <kernel/time.h>
 
 struct _fmr { void (*cb)(uint64_t, uint64_t, void *); void *ud; int n; };
 static void _fmr_wrap(uint64_t b, uint64_t s, void *ud)
@@ -109,10 +110,8 @@ void board_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud)
 
 void board_secondary_irq_init(void)
 {
-	extern void irqchip_secondary_init(uint64_t cpu_base);
 	irqchip_secondary_init(config.gic_cpu_base);
 
-	extern void timer_secondary_init(void);
 	timer_secondary_init();
 
 	/* Route this core's virtual-timer IRQ to itself via the BCM2711 local

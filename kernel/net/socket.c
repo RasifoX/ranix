@@ -5,6 +5,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/proc.h>
 #include <kernel/cgroup.h>
+#include <kernel/net/tcp.h>
 
 /* ── global socket table (dynamic) ──────────────────────── */
 
@@ -87,7 +88,7 @@ void sock_put(socket_t *s)
     if (atomic_sub_fetch32((volatile uint32_t *)&s->refcount, 1) != 0) return;
     skb_t *skb = s->recv_head;
     while (skb) { skb_t *n = skb->next; skb_free(skb); skb = n; }
-    if (s->type == SOCK_STREAM) { extern void tcp_sock_free(socket_t *); tcp_sock_free(s); }
+    if (s->type == SOCK_STREAM) { tcp_sock_free(s); }
     net_ns_put(s->net_ns);
     cgroup_file_release(s->cg, sizeof(*s));
     kfree(s);

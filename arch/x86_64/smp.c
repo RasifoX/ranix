@@ -10,6 +10,8 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <kernel/tick.h>
+#include <asm/cpu.h>
+#include <kernel/sync.h>
 void pic8259_mask(uint32_t irq);
 #include <kernel/board.h>
 #include <kernel/sync.h>
@@ -53,7 +55,6 @@ void pic8259_mask(uint32_t irq);
 static volatile uint32_t *lapic;
 
 /* logical cpu index -> physical APIC id (filled by ACPI MADT parse) */
-extern uint32_t cpu_apic_id[];
 
 static inline uint32_t lapic_read(uint32_t reg)        { return lapic[reg / 4]; }
 static inline void     lapic_write(uint32_t reg, uint32_t val) { lapic[reg / 4] = val; }
@@ -174,8 +175,6 @@ void lapic_timer_irq(void)
 	lapic_write(LAPIC_EOI, 0);
 }
 
-extern char trampoline_start[];
-extern char trampoline_end[];
 
 static void setup_trampoline(int cpu_id)
 {
@@ -187,13 +186,10 @@ static void setup_trampoline(int cpu_id)
 
 	/* Top-level table the AP loads into CR3 — PML5 under 5-level, else PML4.
 	 * Same VIRT_TO_PHYS convention as the BSP path that already boots APs. */
-	extern uint64_t pml4[], pml5[];
-	extern uint8_t  la57_enabled;
 	uint64_t pml4_phys = la57_enabled ? VIRT_TO_PHYS((uint64_t)pml5)
 	                                   : VIRT_TO_PHYS((uint64_t)pml4);
 
 	/* Virtual stack top for C code (secondary_cpu_main uses virtual addresses) */
-	extern uint8_t **ap_kstacks;
 	uint64_t sp_virt = (uint64_t)(ap_kstacks[cpu_id] + KSTACK_SIZE);
 
 	*(uint64_t *)(data + TDATA_PML4)   = pml4_phys;
@@ -243,7 +239,6 @@ void arch_secondary_init(int cpu_id)
 	);
 
 	/* Load per-CPU GDT and shared IDT */
-	extern void idt_load(void);
 	gdt_init(cpu_id);
 	idt_load();
 
@@ -257,10 +252,8 @@ void arch_secondary_init(int cpu_id)
 	__asm__ volatile("mov %%cr4, %0" : "=r"(cr4_val));
 	cr4_val |= (3ULL << 9);
 	/* The entry stubs touch ymm on every CPU once the boot CPU has switched AVX on */
-	extern void arch_pat_init(void), arch_hwp_init(void);
 	arch_pat_init();
 	arch_hwp_init();
-	extern uint8_t avx_on;
 	if (avx_on) cr4_val |= (1ULL << 18);
 	__asm__ volatile("mov %0, %%cr4" :: "r"(cr4_val));
 	if (avx_on)
@@ -271,7 +264,6 @@ void arch_secondary_init(int cpu_id)
 		lapic_write(LAPIC_SPIV, lapic_read(LAPIC_SPIV) | 0x100 | 0xFF);
 
 	/* Enable syscall instruction on this AP (EFER.SCE + LSTAR/STAR/SFMASK) */
-	extern void arch_syscall_init(void);
 	arch_syscall_init();
 
 	/* Per-CPU periodic timer — the PIT only reaches the BSP, so without this a
@@ -365,13 +357,10 @@ void arch_tlb_shootdown_all(void)
 	/* Turning IRQs on under a caller's IRQ-off spinlock lets the timer tick
 	 * take that same lock on this CPU. Callers must drop such locks first. */
 	{
-		extern int spin_held_count(void);
-		extern void spin_note_violation(void *lock, void *pc);
 		if (!(f & 0x200) && spin_held_count() > 0) {
 			spin_note_violation(&tlb_shoot_lock, __builtin_return_address(0));
 			static int told;
 			if (told++ < 3) {          /* who holds what: the note alone names only us */
-				extern void spin_dump_held(void);
 				kprintf(KERN_ERR "tlb: shootdown with IRQs off under a lock, from %p %p\n",
 				        __builtin_return_address(0), __builtin_return_address(1));
 				spin_dump_held();

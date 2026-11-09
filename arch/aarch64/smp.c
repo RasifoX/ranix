@@ -4,13 +4,14 @@
 #include <kernel/board.h>
 #include <kernel/fdt.h>
 #include <asm/mmu.h>
+#include <asm/cpu.h>
+#include <arch/aarch64/exceptions.h>
 
 #define PSCI_CPU_ON  0xC4000003UL
 #define GICD_SGIR    0xF00
 
 void arch_smp_boot_cpu(int cpu_id)
 {
-	extern void secondary_trampoline(void);
 	uint64_t entry_phys = (uint64_t)secondary_trampoline;
 
 	/* Prefer the spin-table release address the firmware actually published
@@ -58,7 +59,6 @@ void arch_secondary_init(int cpu_id)
 	__asm__ volatile("msr tpidr_el1, %0" :: "r"(cpu));
 
 	/* Install exception vector table */
-	extern void exceptions_init(void);
 	exceptions_init();
 
 	uint64_t cpacr;

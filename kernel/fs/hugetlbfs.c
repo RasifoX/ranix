@@ -357,6 +357,5 @@ int hugetlbfs_mount(vfs_mount_t *mnt, void *data)
 
 void hugetlbfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("hugetlbfs", hugetlbfs_mount);
 }

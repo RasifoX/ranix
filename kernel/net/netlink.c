@@ -16,6 +16,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/proc.h>
 #include <kernel/sync.h>
+#include <kernel/time.h>
 
 /* wire format */
 typedef struct { uint32_t len; uint16_t type, flags; uint32_t seq, pid; } nl_hdr_t;
@@ -512,7 +513,6 @@ int netlink_request(socket_t *s, const void *buf, size_t len)
 long netlink_recv(socket_t *s, const k_iovec *iov, uint64_t niov, int flags,
                   int nonblock, int *out_flags)
 {
-    extern volatile uint64_t kernel_ticks;
     uint64_t deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
     int peek = flags & MSG_PEEK_;
     /* a peeked skb stays queued for a sibling thread to free: copy it under the lock */

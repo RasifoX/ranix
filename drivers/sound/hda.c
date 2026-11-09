@@ -20,8 +20,8 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <kernel/mm/vm.h>
+#include <kernel/time.h>
 
-extern volatile uint64_t kernel_ticks;
 
 #define R_GCAP      0x00
 #define R_GCTL      0x08

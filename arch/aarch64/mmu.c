@@ -14,7 +14,6 @@ __attribute__((section(".bss.boot"), aligned(4096))) static uint64_t l2[512];
 
 #define VIRT_OFFSET_L0_IDX  256   /* (0xFFFF800000000000 >> 39) & 0x1FF */
 
-extern void enable_mmu(uint64_t ttbr0_phys, uint64_t ttbr1_phys);
 
 __attribute__((section(".text.boot")))
 void mmu_tables_init(void)

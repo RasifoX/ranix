@@ -6,6 +6,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/hal.h>
 #include <asm/mmu.h>
+#include <kernel/init.h>
 
 /*
  * NVMe controller (PCI class 01:08:02), polling. Resets + enables the

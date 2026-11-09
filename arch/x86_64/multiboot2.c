@@ -3,6 +3,8 @@
 #include <kernel/fb.h>
 #include <kernel/cmdline.h>
 #include <asm/mmu.h>
+#include <kernel/init.h>
+#include <asm/cpu.h>
 
 #define MB2_TAG_TYPE_END        0
 #define MB2_TAG_TYPE_CMDLINE    1
@@ -63,8 +65,6 @@ int mb2_get_fb(fb_info_t *out)
 	return 0;
 }
 
-extern uint64_t boot_initrd_start;
-extern uint64_t boot_initrd_size;
 
 static uint64_t _mb2_base = 0;
 static uint32_t _mb2_size = 0;

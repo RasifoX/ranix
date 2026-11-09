@@ -190,7 +190,6 @@ static long sys_shmdt(const void *shmaddr)
 
     /* the segment is the one whose pages sit there; another of the same size must
      * not lose a count */
-    extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
     uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
     uint64_t fl = spin_lock_irq(&shm_lock);
     for (int i = 0; pa && i < SHM_MAX; i++) {

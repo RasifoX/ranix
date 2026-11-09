@@ -20,4 +20,6 @@ struct ex_entry {
 
 unsigned long search_extable(unsigned long pc);
 
+extern struct ex_entry __start___ex_table[], __stop___ex_table[];   /* linker script */
+
 #endif

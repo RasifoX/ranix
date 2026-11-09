@@ -226,7 +226,6 @@ static void init_build_stack(process_t *p, const process_t *current, const char 
                              arch_context_t *ctx)
 {
 	/* Switch to new VM to write to user stack */
-	extern vm_space_t *kernel_vm_space;
 	vm_space_t *old_vm = current->vm;
 	arch_vm_switch((uint64_t)p->vm->root, p->vm->asid);
 
@@ -235,7 +234,7 @@ static void init_build_stack(process_t *p, const process_t *current, const char 
 
 	sp -= 16;
 	uint64_t at_random = sp;
-	{ extern void csprng_bytes(void *, size_t); csprng_bytes((void *)at_random, 16); }
+	csprng_bytes((void *)at_random, 16);
 
 	size_t nlen_full = 0;
 	while (name[nlen_full] && nlen_full < PATH_MAX - 1) nlen_full++;
@@ -521,7 +520,7 @@ static pid_t fork_publish(process_t *child, process_t *parent, struct asess *ent
 	seccomp_fork(child, parent);
 	child->next = proctab[0]->next;
 	proctab[0]->next = child;
-	{ extern void ptrace_follow_fork(process_t *, process_t *); ptrace_follow_fork(parent, child); }
+	ptrace_follow_fork(parent, child);
 	runqueue_add(child);
 	proctab[pid] = child;
 	pidns_attach(child, target_pidns, pid);
@@ -779,7 +778,7 @@ static pid_t thread_publish(process_t *child, process_t *parent, int as_process,
 	 * be observed runnable on another CPU. On weakly-ordered aarch64 a stale
 	 * tid=0 read makes musl's __tl_lock a no-op and corrupts the thread list. */
 	smp_mb();
-	{ extern void ptrace_follow_clone(process_t *, process_t *); ptrace_follow_clone(parent, child); }
+	ptrace_follow_clone(parent, child);
 	runqueue_add(child);
 
 	spin_unlock_irq(&sched_lock, f);
@@ -1097,7 +1096,6 @@ int oom_victim_pending(void)
 	return r;
 }
 
-extern uint64_t buddy_total_pages(void);
 process_t *oom_select_victim(long *charged)
 {
 	uint64_t bit = 1UL << (SIGKILL - 1);
@@ -1190,7 +1188,6 @@ void proc_wait(pid_t pid)
  * release resources belonging to the process we just switched away from.
  */
 
-extern void tty_task_gone(pid_t pid);
 
 /* A vfork child that execs or exits lets its parent go on. */
 void vfork_release(process_t *c)
@@ -1393,7 +1390,6 @@ void task_exit(void)
 	vfork_release(p);
 	if (p->killed_by_sig && !p->group_exiting)
 		task_group_exit(p, p->exit_code, 1);
-	extern void vfs_posix_drop_pid(int pid);
 	/* release the process's fcntl record locks: they are the thread group's,
 	 * so only the last thread using its fd table lets them go */
 	if (!p->fds || (int32_t)p->fds->refcount <= 1)
@@ -1449,7 +1445,6 @@ void task_exit(void)
 		}
 	exit_free_tracees(p);
 	if (!group_left) {
-		extern void ptimer_drop(pid_t tgid);
 		ptimer_drop(p->tgid);
 	}
 	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next) {

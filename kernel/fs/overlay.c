@@ -418,6 +418,5 @@ int overlay_mount(vfs_mount_t *mnt, void *data)
 
 void overlay_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("overlay", overlay_mount);
 }

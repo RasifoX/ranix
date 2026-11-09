@@ -30,7 +30,6 @@ static inline uint64_t pte_xn(uint32_t flags)
 	return PTE_PXN | ((flags & VM_EXEC) ? 0 : PTE_UXN);
 }
 
-extern uint64_t kernel_l1[];
 
 static uint64_t alloc_table(void)
 {
@@ -148,7 +147,6 @@ void vm_destroy(vm_space_t *vs)
 	KASSERT(vs->magic == VM_SPACE_MAGIC);
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
 
-	extern void vma_free_space(vm_space_t *);
 	vma_free_space(vs);   /* last thread gone — the address space's regions die with it */
 
 	asid_free(vs->asid);   /* invalidates this tag's TLB entries on all CPUs */

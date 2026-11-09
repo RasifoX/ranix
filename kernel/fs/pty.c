@@ -5,6 +5,8 @@
 #include <kernel/proc.h>
 #include <kernel/config.h>
 #include <kernel/hal.h>
+#include <kernel/fs/devfs.h>
+#include <kernel/init.h>
 
 /*
  * Unix98 pseudo-terminals. Opening /dev/ptmx allocates a master/slave pair and
@@ -15,6 +17,8 @@
  * ISIG signal chars before a slave read sees them; slave writes get ONLCR output
  * processing on the way back to the master.
  */
+
+vfs_fops_t *pts_fops_ptr(void);   /* the slave ops, defined below */
 
 #define PTY_MAX   CONFIG_PTY_MAX
 #define PTY_BUF   4096
@@ -95,7 +99,6 @@ static void ring_put(uint8_t *ring, uint32_t *h, uint32_t t, uint8_t c)
 	ring[*h] = c; *h = (*h + 1) % PTY_BUF;
 }
 
-extern int task_has_actionable_signal(void);
 
 /* Read from ring [buf,h,t]; block on `wq` until data, EOF when `peer_open`==0,
  * or interrupt on a pending signal (EINTR). */
@@ -338,7 +341,6 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 		/* Acquiring the controlling terminal makes the caller's process group
 		 * the foreground group, so an interactive shell's tcgetpgrp() matches
 		 * its own pgrp and it skips the SIGTTIN job-control wait. */
-		extern vfs_fops_t *pts_fops_ptr(void);
 		process_t *cur = task_current();
 		int r = tty_acquire(p, pts_fops_ptr(), arg == 1);
 		if (r < 0) return r;
@@ -585,7 +587,6 @@ vfs_fops_t *pts_fops_ptr(void) { return &pts_fops; }
 
 void pty_init(void)
 {
-	extern void devfs_register_device(const char *, mode_t, dev_t, vfs_fops_t *);
 	devfs_register_device("ptmx", S_IFCHR | 0666, (5 << 8) | 2, &ptmx_fops);
 	static char names[PTY_MAX][8];
 	for (int i = 0; i < PTY_MAX; i++) {

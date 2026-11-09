@@ -1,6 +1,8 @@
 #ifndef ASM_MMU_H
 #define ASM_MMU_H
 
+#include <uapi/types.h>
+
 #define VIRT_OFFSET      0xFFFFFFFF80000000UL   /* kernel text link offset */
 #define DIRECT_MAP_BASE  0xFFFF800000000000UL   /* physical 0..N at this VA */
 
@@ -44,5 +46,10 @@
 #define PTE_BLOCK  PTE_HUGE    /* 2 MB huge page */
 #define PTE_SHARE  0UL         /* x86 has no explicit shareability bits */
 #define PTE_RO     0UL         /* read-only: clear PTE_WRITE */
+
+/* Boot page tables (boot.S); pml4/pml5 are physical addresses when cast. */
+extern uint64_t pml4[], pml5[], pdpt_dm[];
+extern uint8_t  la57_enabled;                    /* boot.S found 5-level paging */
+void arch_vm_set_la57(int v);                    /* vm.c */
 
 #endif

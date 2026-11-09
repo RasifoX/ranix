@@ -12,6 +12,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
 #include <asm/context.h>
+#include <kernel/time.h>
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
@@ -25,7 +26,6 @@ static volatile int kprintf_unlocked;   /* panic: the lock's holder may be wedge
 
 void kprintf_set_fb(void) { fb_ready = 1; }
 
-extern volatile uint64_t kernel_ticks;
 
 /* ── kernel log ring buffer ───────────────────────────────── */
 

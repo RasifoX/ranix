@@ -18,6 +18,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/pstore.h>
 #include <asm/mmu.h>
+#include <kernel/init.h>
 
 #define PSTORE_BASE     0x20000000UL
 #define PSTORE_SIZE     (1UL << 20)
@@ -134,7 +135,6 @@ static int parse_hex(const char *s, uint64_t *out)
 
 int pstore_region(uint64_t lowest_free, uint64_t *base, uint64_t *size)
 {
-	extern uint64_t boot_initrd_start, boot_initrd_size;
 	uint64_t want = PSTORE_BASE;
 	char buf[24];
 

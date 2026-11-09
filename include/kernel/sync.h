@@ -110,4 +110,14 @@ void poll_notify_key(const void *key);
 void poll_note_key(const void *key);
 void poll_block(uint64_t deadline);
 
+/* lock diagnostics (sync.c) */
+extern volatile int spin_diag_on;
+int  spin_held_count(void);
+void spin_dump_held(void);
+void spin_note_violation(void *lock, void *pc);
+void spin_report_bad_unlocks(void);
+void atomic_selftest(void);                      /* boot self-test */
+
+extern volatile uint64_t poll_gen;               /* counts readiness changes */
+
 #endif

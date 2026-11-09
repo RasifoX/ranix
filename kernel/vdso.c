@@ -11,12 +11,12 @@
 #include <uapi/vdso.h>
 #include <asm/mmu.h>
 
-extern void ranix_walltime(int64_t *sec, int64_t *nsec);
-extern void ranix_monotime(int64_t *sec, int64_t *nsec);
-extern void *memcpy(void *, const void *, unsigned long);
-extern void *memset(void *, int, unsigned long);
 
 #include "vdso_image.h"   /* generated: vdso_image[], vdso_image_len */
+#include <kernel/time.h>
+#include <kernel/lib/string.h>
+#include <asm/cpu.h>
+#include <kernel/vdso.h>
 
 #define VDSO_MAXPG 4
 
@@ -59,12 +59,10 @@ void vdso_init(void)
 	if (frq) { cnt_shift = 20; cnt_mult = (uint32_t)((1000000000ULL << 20) / frq); cnt_valid = 1; }
 #else
 	/* x86: the TSC when it can be trusted, else the per-tick base. */
-	extern uint64_t tsc_mult;
-	extern void tsc_calibrate(void);
 	tsc_calibrate();
 	/* the wall clock was set against the clock monotonic time had then, which may
 	 * have been the tick before the counters were up: set it again against this one */
-	{ extern void rtc_init(void); rtc_init(); }
+	rtc_init();
 	cnt_shift = 28;
 	cnt_mult = (uint32_t)tsc_mult;
 	cnt_valid = tsc_mult != 0;
@@ -109,7 +107,6 @@ void vdso_time_changed(void) { vdso_update(); }
 static spinlock_t vdso_lock = SPINLOCK_INIT;
 static void vdso_update(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	if (!vvar_k) return;
 	/* between updates the counter carries it; without one, every tick counts */
 	if (cnt_valid && kernel_ticks % (TIMER_HZ / 100)) return;

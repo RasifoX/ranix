@@ -19,4 +19,13 @@ typedef struct {
 	int (*set_virt_offset)(u32 x, u32 y);
 } fb_info_t;
 
+extern fb_info_t global_fb;                      /* the boot framebuffer (main.c) */
+extern uint64_t  global_fb_phys;
+
+/* drivers/video/backlight.c */
+int  backlight_get(void);
+int  backlight_set(int pct);
+void backlight_unblank(void);
+int  igd_scanline(uint32_t *total);
+
 #endif
