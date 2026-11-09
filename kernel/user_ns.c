@@ -228,8 +228,11 @@ int may_create_ns(struct process *p, unsigned long flags)
 	if (!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID |
 	               CLONE_NEWNET | CLONE_NEWCGROUP | CLONE_NEWTIME)))
 		return 1;
-	return (flags & CLONE_NEWUSER) || (t->user_ns && t->user_ns != &init_user_ns) ||
-	       cap_has(t->cap_effective, CAP_SYS_ADMIN);
+	/* Linux ns_capable(current_user_ns(), CAP_SYS_ADMIN): the effective set
+	 * counts in the caller's own user namespace, so a process there that
+	 * dropped CAP_SYS_ADMIN (or lost it at exec) makes none. A new user
+	 * namespace comes first and gives the rest its full set. */
+	return (flags & CLONE_NEWUSER) || cap_has(t->cap_effective, CAP_SYS_ADMIN);
 }
 
 /* May p give itself the uid or gid id it does not already hold (set*id)? The
