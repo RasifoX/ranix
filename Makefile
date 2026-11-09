@@ -171,6 +171,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/block/nvme.c \
         drivers/usb/xhci.c \
         drivers/net/virtio_net.c \
+        drivers/virtio/virtio_pci.c \
         drivers/net/rtl8168.c \
         drivers/net/rtw8723.c \
         drivers/sound/hda.c
@@ -211,7 +212,7 @@ SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c))
     $(wildcard kernel/tty/*.c) \
     drivers/video/fbdev.c \
     drivers/video/backlight.c \
-    $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/thermal/*.c drivers/platform/*.c) \
+    $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/gpu/drm/virtio/*.c drivers/thermal/*.c drivers/platform/*.c) \
     drivers/input/input_core.c
 
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
@@ -959,6 +960,9 @@ pi-demo:
 	@echo "[OK] Ranix Pi demo → pi4-dist/ (kernel8.img + initramfs.cpio + config.txt)"
 
 TEST_TIMEOUT ?= 180
+# The test VM's second display: KMS takes the virtio-gpu (c-virtio-gpu). Empty
+# (make test TEST_GPU=) leaves KMS on the firmware framebuffer, as on hardware.
+TEST_GPU ?= -device virtio-gpu-pci,xres=1280,yres=720
 TEST_LOG = $(BUILD_DIR)/serial-test.log
 
 ifeq ($(ARCH),x86_64)
@@ -975,6 +979,7 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-
 	    -device usb-storage,bus=xhci.0,drive=u0 \
 	    -drive file=$(BUILD_DIR)/nvme-test.img,if=none,id=nvm0,format=raw \
 	    -device nvme,drive=nvm0,serial=ranix0 \
+	    $(TEST_GPU) \
 	    -audiodev none,id=a0 -device intel-hda -device hda-output,audiodev=a0 || true
 else
 test: initramfs $(TARGET)

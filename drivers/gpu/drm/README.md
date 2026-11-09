@@ -30,10 +30,11 @@ dma-buf fds: mmap, lseek(SEEK_END) = size, DMA_BUF_IOCTL_SYNC, EXPORT/IMPORT_SYN
 Properties: connector DPMS, non-desktop; plane type. Formats XRGB/ARGB/XBGR/ABGR8888, RGB565.
 
 ## Display
-No modeset: the CRTC keeps the mode the firmware (GOP) set; SETCRTC accepts only that size.
+No modeset on real hardware: the CRTC keeps the mode the firmware (GOP) set; SETCRTC accepts
+only that size. A virtio-gpu (below) lists sizes and switches between them.
 
 `drm_kms.c` is generic: it knows no hardware. A display back end (`drm_display_t` in
-`drm_priv.h`; today only `i915/intel_display.c`) supplies the vblank counter, the
+`drm_priv.h`; `i915/intel_display.c` and `virtio/virtio_gpu.c`) supplies the vblank counter, the
 direct flip and the per-tick hook; without one KMS copies and keeps a 60 Hz clock.
 
 - **copy** (every machine with a firmware framebuffer): the client buffer is copied into
@@ -63,6 +64,23 @@ firmware buffer black.
 
 While a client's buffer is on screen the kernel text console is switched to graphics mode
 (as KDSETMODE does) and restored when the CRTC goes off.
+
+## virtio-gpu (`virtio/virtio_gpu.c`, VMs)
+QEMU `-device virtio-gpu-pci` or `-vga virtio`: the first back end probed; it needs no
+firmware framebuffer. Spec: OASIS virtio 1.2 §5.7, over the modern virtio-PCI transport in
+`drivers/virtio/virtio_pci.c` (polled from the 1 ms tick, no interrupts).
+- Modes: the host's size (GET_DISPLAY_INFO, re-read when the host window changes) preferred,
+  the current one, then common sizes up to 2560x1600. SETCRTC to any listed size switches.
+- KMS's copy target is a RAM "shadow" resource; what KMS copies there is sent with
+  TRANSFER_TO_HOST_2D + RESOURCE_FLUSH (the `damage` hook).
+- Flip: a dumb buffer becomes a resource (its own pages, ATTACH_BACKING) on first flip; each
+  flip sends the pixels, SET_SCANOUT and RESOURCE_FLUSH. It lands when the host has processed
+  the flush; KMS's 60 Hz clock paces completions. DIRTYFB on the front buffer sends the clips.
+- Cursor: up to 64x64 on the host's cursor queue (UPDATE/MOVE_CURSOR), so it stays on while
+  buffers are flipped; bigger ones are drawn by KMS.
+- `ranix_flip` shows `virtio-gpu mode= pref= screen= res= flips= damages= cursor= err=`.
+- No 3D yet (arastirma/virtio-gpu-3d.md). Test: `userspace/test_virtio_gpu.c` (`c-virtio-gpu`;
+  the suite VM has `TEST_GPU`, `make test TEST_GPU=` runs it on the firmware framebuffer).
 
 ## Measured on Casper (i5-7200U, HD 620, 1366x768 eDP, 2026-11-08)
 - copy: 300 flips at 16.67 ms (60.0 fps), worst 17.3 ms; PAGE_FLIP blocks until the vblank
