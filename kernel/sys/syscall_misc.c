@@ -537,6 +537,7 @@ static long sys_setreuid(uid_t ruid, uid_t euid)
 	p->euid = new_e;
 	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != old_r))
 		p->suid = new_e;
+	p->fs_uid_set = 0;   /* the fsuid follows the euid again */
 	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
@@ -556,6 +557,7 @@ static long sys_setregid(gid_t rgid, gid_t egid)
 	p->egid = new_e;
 	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != old_r))
 		p->sgid = new_e;
+	p->fs_gid_set = 0;
 	return 0;
 }
 
@@ -570,6 +572,7 @@ static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	if (!may_take_uid(p, new_r) || !may_take_uid(p, new_e) || !may_take_uid(p, new_s))
 		return -EPERM;
 	p->uid = new_r; p->euid = new_e; p->suid = new_s;
+	p->fs_uid_set = 0;
 	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
@@ -592,6 +595,7 @@ static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 	if (!may_take_gid(p, new_r) || !may_take_gid(p, new_e) || !may_take_gid(p, new_s))
 		return -EPERM;
 	p->gid = new_r; p->egid = new_e; p->sgid = new_s;
+	p->fs_gid_set = 0;
 	return 0;
 }
 
@@ -604,17 +608,20 @@ static long sys_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
 	return 0;
 }
 
-/* fsuid/fsgid: the credential used for filesystem access checks. An unprivileged
- * process may only set it to one of ruid/euid/suid (or fsuid); root anything.
- * Returns the *previous* fsuid, which is euid until first overridden. */
+/* fsuid/fsgid: the ids file access is checked for (kernel/fscred.c). A task
+ * may set them to one of its real, effective, saved or current fs ids; any
+ * other takes CAP_SETUID / CAP_SETGID. An invalid id (-1) changes nothing.
+ * Returns the previous value either way, as Linux; the fsuid is the euid until
+ * set, and again after any set*uid. */
 static long sys_setfsuid(uid_t fsuid)
 {
 	process_t *p = task_current();
-	uid_t prev = p->fs_uid_set ? p->fsuid : p->euid;
-	if (fsuid == p->uid || fsuid == p->euid || fsuid == p->suid ||
-	    (p->fs_uid_set && fsuid == p->fsuid) || p->euid == 0) {
+	uid_t prev = task_fsuid(p);
+	if (fsuid == (uid_t)-1) return (long)prev;
+	if (fsuid == prev || may_take_uid(p, fsuid)) {
 		p->fsuid = fsuid;
 		p->fs_uid_set = 1;
+		cred_fsuid_fixup(p, prev);
 	}
 	return (long)prev;
 }
@@ -622,9 +629,9 @@ static long sys_setfsuid(uid_t fsuid)
 static long sys_setfsgid(gid_t fsgid)
 {
 	process_t *p = task_current();
-	gid_t prev = p->fs_gid_set ? p->fsgid : p->egid;
-	if (fsgid == p->gid || fsgid == p->egid || fsgid == p->sgid ||
-	    (p->fs_gid_set && fsgid == p->fsgid) || p->euid == 0) {
+	gid_t prev = task_fsgid(p);
+	if (fsgid == (gid_t)-1) return (long)prev;
+	if (fsgid == prev || may_take_gid(p, fsgid)) {
 		p->fsgid = fsgid;
 		p->fs_gid_set = 1;
 	}

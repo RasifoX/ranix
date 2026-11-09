@@ -17,6 +17,7 @@
 #define CAP_SETGID           6
 #define CAP_SETUID           7
 #define CAP_SETPCAP          8
+#define CAP_LINUX_IMMUTABLE  9
 #define CAP_NET_BIND_SERVICE 10
 #define CAP_NET_RAW          13
 #define CAP_SYSLOG           34
@@ -30,6 +31,7 @@
 #define CAP_SYS_RESOURCE     24
 #define CAP_SYS_TIME         25
 #define CAP_SETFCAP          31
+#define CAP_MAC_OVERRIDE     32
 
 #define CAP_FULL  (~0ULL)  /* all capabilities */
 #define CAP_NONE  (0ULL)

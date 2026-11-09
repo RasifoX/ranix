@@ -42,6 +42,7 @@
 #include <kernel/fs/ramfs.h>
 #include <kernel/errno.h>
 #include <kernel/mm/filecopy.h>
+#include <kernel/fscred.h>
 
 /* mmap flags */
 #define MAP_SHARED    0x01

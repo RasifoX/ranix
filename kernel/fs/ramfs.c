@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/fs/ramfs.h>
+#include <kernel/fscred.h>
 #include <kernel/fs/pagefile.h>
 #include <kernel/vfs.h>
 #include <kernel/hal.h>
@@ -56,8 +57,8 @@ static vfs_inode_t *ramfs_inode_alloc(mode_t mode)
 	in->refcount = 1;
 	in->cached   = 1;   /* fs-owned: freed via unlink/evict, never by the VFS transient-free path */
 	process_t *p = task_current();
-	in->uid = p ? p->euid : 0;
-	in->gid = p ? p->egid : 0;
+	in->uid = task_fsuid(p);
+	in->gid = task_fsgid(p);
 	int64_t s, ns; ranix_walltime(&s, &ns);
 	in->atime = in->mtime = in->ctime = s;
 	in->atime_nsec = in->mtime_nsec = in->ctime_nsec = (uint32_t)ns;

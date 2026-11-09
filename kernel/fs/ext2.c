@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/vfs.h>
+#include <kernel/fscred.h>
 #include <kernel/hal.h>
 #include <kernel/block.h>
 #include <kernel/mm/buddy.h>
@@ -2130,8 +2131,8 @@ static ext2_inode_priv_t *ino_new(ext2_fs_t *fs, ext2_inode_priv_t *dp, uint16_t
 	p->raw.i_mode        = mode;
 	p->raw.i_links_count = links;
 	process_t *t = task_current();
-	p->raw.i_uid_lo = t ? (uint16_t)t->euid : 0;
-	p->raw.i_gid_lo = t ? (uint16_t)t->egid : 0;
+	p->raw.i_uid_lo = (uint16_t)task_fsuid(t);
+	p->raw.i_gid_lo = (uint16_t)task_fsgid(t);
 	if (fs->inode_size >= sizeof(ext2_inode_t)) p->raw.i_extra_isize = 32;
 	ino_stamp(fs, &p->raw, NULL, 1);
 	p->raw.i_atime = p->raw.i_mtime;

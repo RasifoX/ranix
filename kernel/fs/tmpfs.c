@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/fs/tmpfs.h>
+#include <kernel/fscred.h>
 #include <kernel/fs/pagefile.h>
 #include <kernel/vfs.h>
 #include <kernel/hal.h>
@@ -109,8 +110,8 @@ static vfs_inode_t *tmpfs_inode_alloc(tmpfs_sb_t *sb, mode_t mode)
 	in->cached   = 1;   /* fs-owned: freed via unlink/evict, never by the VFS transient-free path */
 	in->i_sb     = sb;
 	process_t *p = task_current();
-	in->uid = p ? p->euid : 0;
-	in->gid = p ? p->egid : 0;
+	in->uid = task_fsuid(p);
+	in->gid = task_fsgid(p);
 	int64_t s, ns; ranix_walltime(&s, &ns);
 	in->atime = in->mtime = in->ctime = s;
 	in->atime_nsec = in->mtime_nsec = in->ctime_nsec = (uint32_t)ns;

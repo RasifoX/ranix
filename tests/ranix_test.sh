@@ -785,6 +785,10 @@ CR=$(timeout 15 /bin/test_setxid_caps 2>&1); echo "$CR" | grep -v "^OK$" | sed '
 check "c-setxid-caps"  "OK"  "$(echo "$CR" | tail -1)"
 CR=$(timeout 15 /bin/test_setreuid 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  setreuid: /'
 check "c-setreuid"     "OK"  "$(echo "$CR" | tail -1)"
+CR=$(timeout 15 /bin/test_setfsuid 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  setfsuid: /'
+check "c-setfsuid"     "OK"  "$(echo "$CR" | tail -1)"
+CR=$(timeout 15 /bin/test_dac_caps 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  dac-caps: /'
+check "c-dac-caps"     "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──

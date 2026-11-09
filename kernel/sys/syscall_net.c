@@ -632,22 +632,14 @@ static spinlock_t unix_reg_lock = SPINLOCK_INIT;
 /* The registry holds names, not inodes: nothing on the way to a socket would
  * otherwise be asked. An abstract name has no way to be asked about. */
 /* connect: like open for writing, the socket file's mode decides who may
- * talk to it (root always may). No file there: the registry answers. */
+ * talk to it (fs_permission, as for any file). No file there: the registry answers. */
 static int unix_may_connect(const char *kp)
 {
     vfs_stat_t vs = {0};
     if (vfs_stat(kp, &vs) != 0 || (vs.mode & 0170000) != 0140000) return 0;
-    process_t *p = task_current();
-    if (!p || p->euid == 0) return 0;
-    int shift = 0;
-    if (vs.uid == p->euid) shift = 6;
-    else {
-        int in_group = (vs.gid == p->egid);
-        for (int i = 0; !in_group && i < p->ngroups; i++)
-            if (p->groups[i] == vs.gid) in_group = 1;
-        if (in_group) shift = 3;
-    }
-    return ((vs.mode >> shift) & 2) ? 0 : -13;   /* EACCES */
+    fs_cred_t c;
+    fs_cred_task(task_current(), &c);
+    return fs_permission(&c, vs.mode, vs.uid, vs.gid, FS_MAY_WRITE);
 }
 
 static int unix_path_reachable(const sockaddr_un_t *su, int connecting)

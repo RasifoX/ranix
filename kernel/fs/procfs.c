@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/smp.h>
+#include <kernel/fscred.h>
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/capabilities.h>
@@ -327,12 +328,12 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_u64(&b, p->uid);  pb_char(&b, '\t');
 	pb_u64(&b, p->euid); pb_char(&b, '\t');
 	pb_u64(&b, p->suid); pb_char(&b, '\t');
-	pb_u64(&b, p->euid); pb_char(&b, '\n'); /* fsuid = euid */
+	pb_u64(&b, task_fsuid(p)); pb_char(&b, '\n');
 	pb_str(&b, "Gid:\t");
 	pb_u64(&b, p->gid);  pb_char(&b, '\t');
 	pb_u64(&b, p->egid); pb_char(&b, '\t');
 	pb_u64(&b, p->sgid); pb_char(&b, '\t');
-	pb_u64(&b, p->egid); pb_char(&b, '\n'); /* fsgid = egid */
+	pb_u64(&b, task_fsgid(p)); pb_char(&b, '\n');
 	pb_str(&b, "Groups:\t");
 	for (int _i = 0; _i < p->ngroups; _i++) {
 		if (_i) pb_char(&b, ' ');
