@@ -65,6 +65,7 @@ void        vm_set_kernel_pt(uint64_t phys);
 void        vm_init_kernel(uint64_t root_phys);
 void       *ioremap(uint64_t phys_addr, size_t size, uint32_t flags);
 int         vm_handle_fault(uint64_t vaddr, int is_write);
+void        vm_fault_quiet(int on);   /* no error log for an expected kernel fault */
 size_t      vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write);
 
 /* arch-specific: load page table into hardware. asid is the address space's

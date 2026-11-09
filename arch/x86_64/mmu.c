@@ -26,7 +26,10 @@ static int kernel_read_faults(uint64_t va)
  * Run once the IDT and the per-CPU task are up: the fault path needs both. */
 void mmu_null_guard_selftest(void)
 {
-	if (kernel_read_faults(0))
+	vm_fault_quiet(1);
+	int faulted = kernel_read_faults(0);
+	vm_fault_quiet(0);
+	if (faulted)
 		kprintf(KERN_INFO "mm: null page guard ok\n");
 	else
 		kprintf(KERN_ERR "mm: null page guard MISSING: kernel VA 0 is mapped\n");
