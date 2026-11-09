@@ -14,7 +14,6 @@ ad	kernel/fs/hugetlbfs.c	1
 ad	kernel/fs/procfs.c	1
 ad	kernel/signal.c	1
 ad	kernel/sys/syscall_misc.c	1
-extern	drivers/gpu/drm/drm_core.c	extern uint64_t slowsys_ns(void);
 extern	kernel/mm/mmu.c	extern void enable_mmu(uint64_t table_addr);
 fn	arch/x86_64/vm.c	vm_copy	127
 fn	drivers/usb/xhci.c	enumerate	172

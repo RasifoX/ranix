@@ -9,6 +9,7 @@
 #include <kernel/vfs.h>
 #include <kernel/sync.h>
 #include <kernel/fb.h>
+#include <kernel/time.h>
 #include "drm_uapi.h"
 
 #define DRM_MAJOR        226
@@ -208,13 +209,8 @@ int drm_ioctl_wait_vblank(drm_filep_t *fp, void *d);       /* called without drm
 int drm_ioctl_crtc_get_sequence(drm_filep_t *fp, void *d);
 int drm_ioctl_crtc_queue_sequence(drm_filep_t *fp, void *d);
 
-/* sysfs (drm_sysfs.c) */
-struct vfs_inode *drm_sysfs_root(const char *which);   /* "dev" or "class/drm" */
-
-/* the loader's framebuffer (kernel/main.c) and the 1 kHz tick: no kernel header yet */
-extern fb_info_t global_fb;
-extern uint64_t  global_fb_phys;
-extern volatile uint64_t kernel_ticks;
+/* drm_sysfs_root ("dev" or "class/drm") is declared in kernel/vfs.h, the boot
+ * framebuffer in kernel/fb.h, kernel_ticks and mono_ns in kernel/time.h */
 int drm_is_ready(void);
 
 /* PCI function of the display, for sysfs and the busid */
