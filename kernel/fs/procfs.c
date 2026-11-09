@@ -1041,7 +1041,22 @@ static int procfs_fdlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	return ret;
 }
 
-static vfs_iops_t procfs_fdlink_iops = { .readlink = procfs_fdlink_readlink };
+/* The open file itself, pinned, for a walk that cannot follow the text */
+static vfs_file_t *procfs_fdlink_file(vfs_inode_t *in)
+{
+	procfs_fdlink_priv_t *pr = in->priv;
+	if (!pr) return NULL;
+	int self = (pr->pid == 0);
+	fd_table_t *fds = self ? task_current()->fds : proc_get_fds((pid_t)pr->pid);
+	if (!fds) return NULL;
+	vfs_file_t *f = fget(fds, pr->fd_n);
+	if (!self) fd_table_put(fds);
+	return f;
+}
+
+static vfs_iops_t procfs_fdlink_iops = {
+	.readlink = procfs_fdlink_readlink, .link_file = procfs_fdlink_file,
+};
 
 static vfs_inode_t *procfs_fdlink_inode(int pid, int fd_n)
 {
@@ -1064,12 +1079,16 @@ static vfs_inode_t *procfs_fdlink_inode(int pid, int fd_n)
 
 typedef struct { int pid; } procfs_fddir_priv_t;
 
+static int procfs_fds_visible(int pid);
+
+/* fd/N of a task the reader may not see is not there: the link names the
+ * file, and walking it reaches the file's attributes (walk_fdlink) */
 static vfs_inode_t *procfs_fddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	int fd_n = 0; const char *s = name;
-	if (!*s) return NULL;
+	if (!*s || !procfs_fds_visible(pid)) return NULL;
 	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
 	if (*s) return NULL;
 	int self = (pid == 0);
@@ -2883,10 +2902,9 @@ static int procfs_self_readlink(vfs_inode_t *in, char *buf, size_t sz)
 	(void)in;
 	process_t *cur = task_current();
 	uint64_t pid = cur ? (uint64_t)task_vpid(cur) : 0;
-	/* build "/proc/N" */
+	/* "N", as on Linux: relative, so it is walked inside this procfs whatever the
+	 * reader's root (a /proc fd held from before a chroot reaches self/ too) */
 	char tmp[32]; int ti = 0;
-	const char *prefix = "/proc/";
-	while (prefix[ti]) { tmp[ti] = prefix[ti]; ti++; }
 	if (pid == 0) { tmp[ti++] = '0'; }
 	else {
 		char rev[20]; int ri = 0;

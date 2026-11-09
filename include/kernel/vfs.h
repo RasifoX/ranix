@@ -118,6 +118,8 @@ typedef struct {
     void              (*evict)(struct vfs_inode *inode); /* free a deferred-unlink inode at last close */
     int               (*setattr)(struct vfs_inode *in, const struct vfs_iattr *a);  /* NULL: in-core edit only */
     void              (*release)(struct vfs_inode *in); /* this in-core copy is being freed; may run under vfs_lock */
+    struct vfs_file  *(*link_file)(struct vfs_inode *link); /* a link to an open file (procfs fd/N):
+                                                              * that file, pinned (fput), or NULL */
 } vfs_iops_t;
 
 /* A metadata change. Every chmod, chown, utimens and xattr write comes through
@@ -210,6 +212,8 @@ typedef struct vfs_file {
     char        *lpath;      /* kmalloc'd absolute path when it does not fit path[]; else NULL */
     void        *bdev;       /* block device of the filesystem it is on, held while open */
     uint32_t     sdev;       /* st_dev of that filesystem, for fstat */
+    struct vfs_dirpos *at;   /* an open directory: where it stands; see vfs_file_dirpath */
+    const void  *opened_root; /* the root its path starts from; compared, never followed (walk_fdlink) */
 } vfs_file_t;
 
 /* ── directory entry (path tree node) ───────────────────── */
@@ -225,6 +229,8 @@ typedef struct vfs_dentry {
     struct vfs_dentry **pprev;   /* the link pointing here (parent->child or a sibling's next); NULL if in no list */
     struct vfs_dentry *lru_prev, *lru_next;   /* cache order, newest first; under vfs_lock */
     uint32_t           keep;     /* some task's root: never evicted */
+    uint32_t           holds;    /* open directories standing here: not evicted, and freed
+                                  * after the last one closes; under grave_lock */
 } vfs_dentry_t;
 
 /* ── mount ───────────────────────────────────────────────── */
@@ -330,6 +336,8 @@ int        vfs_may_search(vfs_inode_t *dir); /* 1, or 0 and the syscall reports 
 int        vfs_path_searchable(const char *path); /* 0 unless a directory on the way refuses */
 struct process;
 void       vfs_walk_anchor(struct process *p, const char *path);
+int        vfs_walk_from(struct process *p, vfs_dentry_t *top);
+int        vfs_file_dirpath(vfs_file_t *f, char *out, vfs_dentry_t **top);
 void       vfs_dentry_pin(vfs_dentry_t *d);
 void       vfs_dentry_keep(vfs_dentry_t *d);   /* d becomes a task's root: never evicted */
 vfs_dentry_t *vfs_empty_root(void);           /* an empty root nothing can be made in */
