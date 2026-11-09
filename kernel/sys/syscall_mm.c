@@ -130,6 +130,308 @@ static void map_undo(process_t *p, uint64_t va, uint64_t v, uint64_t len)
 #define USER_SPAN (1UL << 39)
 #endif
 
+/* PROT_* as the VMA's permission bits. */
+static uint32_t vma_prot(int prot)
+{
+	uint32_t vf = 0;
+	if (prot & PROT_READ)  vf |= VMA_READ;
+	if (prot & PROT_WRITE) vf |= VMA_WRITE;
+	if (prot & PROT_EXEC)  vf |= VMA_EXEC;
+	return vf;
+}
+
+/* RLIMIT_AS: would a mapping of len bytes push the address space over the
+ * soft limit? (rlim_set==0 means uninitialized → unlimited.) */
+static int mmap_over_rlimit(process_t *p, size_t len)
+{
+	if (p->rlim_set && p->rlim_cur[RLIMIT_AS] != RLIM_INFINITY) {
+		uint64_t used = 0;
+		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
+		spin_unlock_irq(&p->vm->fault_lock, cf);
+		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
+		if (used + req > p->rlim_cur[RLIMIT_AS]) return 1;
+	}
+	return 0;
+}
+
+/* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already
+ * there. Wine lays out its address space with it. 0: the range is free. */
+static long mmap_noreplace_check(process_t *p, uint64_t addr, size_t len)
+{
+	if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+	if (!access_ok((void *)addr, len)) return -ENOMEM;
+	uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
+	int hit = arch_vm_get_paddr(p->vm->root, addr) != 0;   /* the heap has no VMA */
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	for (vma_t *v = p->vm->vmas; v && !hit; v = v->next)
+		hit = v->vaddr < end && v->vaddr + v->size > addr;
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	if (hit) return -EEXIST;
+	return 0;
+}
+
+/* MAP_HUGETLB | MAP_HUGE_1GB: back the region with 1 GB blocks from the
+ * reserved pool, in the process's own high VA window. Eagerly populated. */
+static long mmap_huge_1g(process_t *p, uint64_t addr, size_t len, int prot, int flags, uint32_t vmflags)
+{
+	if (len > (uint64_t)-1 - (HUGE_1G_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
+	len = (len + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
+	uint64_t va;
+	if ((flags & MAP_FIXED) && addr) va = addr & HUGE_1G_MASK;
+	else {
+		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+		uint64_t next = (p->vm->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
+		if (next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* cursor overflow */
+		va = next; p->vm->huge1g_next = next + len;
+		spin_unlock_irq(&p->vm->fault_lock, cf);
+	}
+	if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
+	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
+	for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
+		uint64_t blk = huge1g_alloc();
+		if (!blk || vm_map_huge_1g(p->vm, v, blk, vmflags) != 0) {
+			if (blk) huge1g_put(blk);
+			for (uint64_t u = va; u < v; u += HUGE_1G_SIZE) vm_unmap(p->vm, u);
+			cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
+			return -ENOMEM;
+		}
+		memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_1G_SIZE);
+	}
+	uint32_t vf = VMA_USER | VMA_ANON | VMA_HUGE | VMA_HUGE_1G | vma_prot(prot);
+	if (flags & MAP_SHARED) vf |= VMA_SHARED;
+	vma_replace(p, va, len, vf);
+	return (long)va;
+}
+
+/* MAP_HUGETLB: back the region with 2 MB blocks. Both length and address
+ * round to the huge-page boundary; pages are populated eagerly so there is
+ * no demand-fault path to teach about blocks. */
+static long mmap_huge_2m(process_t *p, uint64_t addr, size_t len, int prot, int flags, uint32_t vmflags)
+{
+	if (len > (uint64_t)-1 - (HUGE_PAGE_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
+	len = (len + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+	uint64_t va;
+	if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
+	else {
+		uint64_t ceil = HUGE1G_VA_BASE;   /* mmap window ends below the 1 GB-hugepage window, itself below the stack */
+		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+		uint64_t next = (p->vm->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
+		if (next + len > ceil || next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* over window / wrap */
+		va = next; p->vm->mmap_next = next + len;
+		spin_unlock_irq(&p->vm->fault_lock, cf);
+	}
+	if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
+	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
+	for (uint64_t v = va; v < va + len; v += HUGE_PAGE_SIZE) {
+		void *blk = buddy_alloc(9);   /* 2 MB = 512 pages */
+		if (!blk || vm_map_huge(p->vm, v, (uint64_t)blk, vmflags) != 0) {
+			if (blk) buddy_free((uint64_t)blk, 9);
+			for (uint64_t u = va; u < v; u += HUGE_PAGE_SIZE) vm_unmap(p->vm, u);
+			cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
+			return -ENOMEM;
+		}
+		memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_PAGE_SIZE);
+	}
+	uint32_t vf = VMA_USER | VMA_ANON | VMA_HUGE | vma_prot(prot);
+	if (flags & MAP_SHARED) vf |= VMA_SHARED;
+	vma_replace(p, va, len, vf);
+	return (long)va;
+}
+
+/* Pick the address of a page-granular mapping: the caller's for MAP_FIXED,
+ * else the next free stretch of the mmap window. 0, or -ENOMEM: no room. */
+static long mmap_pick_va(process_t *p, uint64_t addr, size_t len, int flags, uint64_t *vap)
+{
+	if ((flags & MAP_FIXED) && addr) { *vap = addr & ~(uint64_t)(PAGE_SIZE - 1); return 0; }
+	/* The bump cursor lives on the (thread-shared) address space; bump it
+	 * under fault_lock so two threads mmap'ing at once get distinct ranges
+	 * instead of the same VA. The window ends below the 1 GB-hugepage window
+	 * (itself below the stack); refuse a VA that would overrun it (Linux
+	 * returns ENOMEM when no region fits) rather than colliding. */
+	uint64_t ceil = HUGE1G_VA_BASE;
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	if (p->vm->mmap_next + len > ceil || p->vm->mmap_next + len < p->vm->mmap_next) {
+		spin_unlock_irq(&p->vm->fault_lock, cf);
+		return -ENOMEM;
+	}
+	*vap = p->vm->mmap_next; p->vm->mmap_next += len;
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	return 0;
+}
+
+/* Anonymous memory at va. */
+static long mmap_anon(process_t *p, uint64_t va, size_t len, int prot, int flags, uint32_t vmflags)
+{
+	/* Private anonymous memory is demand-zero: vm_handle_fault supplies each
+	 * page from the VMA on first touch. Runtimes reserve far more address
+	 * space than they use (JavaScriptCore asks for 128 GB), and only a fresh
+	 * VA from the bump cursor is known to hold no old pages. */
+	int lazy = !(flags & MAP_SHARED) && (prot & PROT_READ) &&
+	           !(flags & (MAP_LOCKED | MAP_POPULATE_)) && !p->mlock_future;
+	if (prot != 0 && !lazy) {
+		/* eager: past all of RAM this only OOM-kills other tasks before failing */
+		if (len / PAGE_SIZE > buddy_total_pages()) return -ENOMEM;
+		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; } /* over memory.max */
+		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+			void *pg = mm_alloc_page_oom();
+			if (!pg) { map_undo(p, va, v, len); kprintf(KERN_WARN "mm: mmap out of memory pid=%u va=0x%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -ENOMEM; }
+			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+			vm_map(p->vm, v, (uint64_t)pg, vmflags);
+		}
+	}
+	uint32_t vf = VMA_USER | VMA_ANON | vma_prot(prot);
+	if (flags & MAP_SHARED) vf |= VMA_SHARED;
+	if ((flags & MAP_LOCKED) || p->mlock_future) vf |= VMA_LOCKED;
+	vma_replace(p, va, len, vf);
+	return (long)va;
+}
+
+/* A file-backed mapping as sys_mmap checked it. f stays pinned by the caller. */
+typedef struct {
+	process_t  *p;
+	vfs_file_t *f;
+	uint64_t    va, off;
+	size_t      len;
+	int         prot, flags, ro_shared;
+	uint32_t    vmflags;
+} mmap_file_t;
+
+/* Freshly mapped instructions must reach the instruction cache (aarch64 keeps
+ * the two caches apart). */
+static void mmap_sync_icache(uintptr_t pp)
+{
+#if defined(__aarch64__)
+	for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
+		__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
+	__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+#else
+	(void)pp;
+#endif
+}
+
+/* The file hands out its own pages one at a time (mmap_page fop). */
+static long mmap_file_pages(const mmap_file_t *m)
+{
+	process_t *p = m->p; vfs_file_t *f = m->f;
+	uint64_t va = m->va; size_t len = m->len; int prot = m->prot;
+	int shared = (m->flags & MAP_SHARED) != 0;
+	int swrite = shared && (prot & PROT_WRITE);
+	uint32_t pte_flags = shared ? m->vmflags : m->vmflags & ~(uint32_t)VM_WRITE;
+	uint64_t file_off = m->off;
+	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+		uint64_t phys = f->inode->fops->mmap_page(f, (off_t)file_off, swrite);
+		if (!phys) {
+			for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
+			return -ENOMEM;
+		}
+		vm_map(p->vm, v, phys, pte_flags);
+		file_off += PAGE_SIZE;
+		if (prot & PROT_EXEC) mmap_sync_icache((uintptr_t)PHYS_TO_VIRT(phys));
+	}
+	uint32_t vf = VMA_USER | vma_prot(prot);
+	if (shared) vf |= VMA_SHARED;
+	if (m->ro_shared) vf |= VMA_NOWRITE;
+	vma_replace(p, va, len, vf);
+	return (long)va;
+}
+
+/* Mapping backed by an inode-owned page via the mmap fop. Two kinds:
+ *  - cacheable (ramfs/tmpfs): the fop returns a page of the file's own
+ *    write-back buffer. MAP_SHARED maps it directly so stores land in the
+ *    file and are seen by read() and other mappers. The fop's extra page ref
+ *    is the mapping's: unmap and exit drop it, so the page outlives the file
+ *    while mapped.
+ *    MAP_PRIVATE takes the copy path (mmap_file_copy) for COW semantics.
+ *  - device/hugetlb: non-cacheable, no write-back. */
+static long mmap_file_fop(const mmap_file_t *m)
+{
+	process_t *p = m->p; vfs_file_t *f = m->f;
+	uint64_t va = m->va; size_t len = m->len;
+	int cacheable = f->inode->fops->mmap_cacheable;
+	uint64_t file_off = m->off;
+	uint32_t pte_flags = m->vmflags | (cacheable ? 0 : VM_NOCACHE);
+#ifdef __x86_64__
+	if (f->inode->fops->mmap_wc) pte_flags = (pte_flags & ~(uint32_t)VM_NOCACHE) | VM_WC;
+#endif
+	if (f->inode->fops->mmap_keep_pages) pte_flags |= VM_NOFREE;
+	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+		uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
+		if (!phys) {
+			for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
+			return -EINVAL;   /* offset past backing */
+		}
+		vm_map(p->vm, v, phys, pte_flags);
+		file_off += PAGE_SIZE;
+	}
+	uint32_t vf = VMA_USER | vma_prot(m->prot);
+	if ((cacheable || f->inode->fops->mmap_keep_pages) && (m->flags & MAP_SHARED))
+		vf |= VMA_SHARED;
+	if (m->ro_shared) vf |= VMA_NOWRITE;
+	vma_replace(p, va, len, vf);
+	return (long)va;
+}
+
+/* Private copy: read the file into fresh pages, eagerly. */
+static long mmap_file_copy(const mmap_file_t *m)
+{
+	process_t *p = m->p; vfs_file_t *f = m->f;
+	uint64_t va = m->va; size_t len = m->len;
+	if (!f->inode->fops || !f->inode->fops->read) return -ENODEV;
+	if (len / PAGE_SIZE > buddy_total_pages()) return -ENOMEM;      /* copied eagerly */
+	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) return -ENOMEM;
+
+	uint64_t file_off = m->off;
+	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
+		void *pg = buddy_alloc(0);
+		if (!pg) { map_undo(p, va, v, len); return -ENOMEM; }
+		void *pg_virt = (void *)PHYS_TO_VIRT(pg);
+		memset(pg_virt, 0, PAGE_SIZE);
+
+		/* read one page from file at current offset via a temporary file handle */
+		vfs_file_t tmp_f = *f;
+		tmp_f.pos = (off_t)file_off;
+		ssize_t nr = f->inode->fops->read(&tmp_f, pg_virt, PAGE_SIZE);
+		(void)nr;
+		file_off += PAGE_SIZE;
+
+		vm_map(p->vm, v, (uint64_t)pg, m->vmflags);
+		if (m->prot & PROT_EXEC) mmap_sync_icache((uintptr_t)pg_virt);
+	}
+	vma_replace(p, va, len, VMA_USER | vma_prot(m->prot));
+	return (long)va;
+}
+
+/* File-backed mmap at va: checks the open mode, then maps by the file's kind. */
+static long mmap_file(process_t *p, uint64_t va, size_t len, int prot, int flags, int fd, uint64_t off, uint32_t vmflags)
+{
+	vfs_file_t *f = fget(p->fds, fd);   /* pin across the blocking map loop */
+	if (!f) return -EBADF;
+	long r;
+
+	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { r = -EACCES; goto out; }
+	/* a mapping reads the file; O_WRONLY may have been all the opener could get */
+	if (f->path[0] == '/' && (f->flags & 3) == O_WRONLY) { r = -EACCES; goto out; }
+
+	/* stores through a shared mapping land in the file; files with no path, like
+	 * the io_uring rings, carry no access mode */
+	int ro_shared = (flags & MAP_SHARED) && f->path[0] == '/' && (f->flags & 3) == O_RDONLY;
+	if (ro_shared && (prot & PROT_WRITE)) { r = -EACCES; goto out; }
+
+	mmap_file_t m = { .p = p, .f = f, .va = va, .off = off, .len = len, .prot = prot,
+	                  .flags = flags, .ro_shared = ro_shared, .vmflags = vmflags };
+	const vfs_fops_t *ops = f->inode->fops;
+	if (ops && ops->mmap_page)
+		r = mmap_file_pages(&m);
+	else if (ops && ops->mmap && (!ops->mmap_cacheable || (flags & MAP_SHARED)))
+		r = mmap_file_fop(&m);
+	else
+		r = mmap_file_copy(&m);
+out:
+	fput(f);
+	return r;
+}
+
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
 	if (len == 0 || (off & (PAGE_SIZE - 1)) || (int64_t)off < 0 || off + len < off) return -EINVAL;
@@ -138,29 +440,11 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	if (len >= USER_SPAN) return -ENOMEM;   /* more than all of user space; rounding must not wrap */
 	process_t *p = task_current();
 
-	/* RLIMIT_AS: refuse a mapping that would push the address space over the
-	 * soft limit (rlim_set==0 means uninitialized → unlimited). */
-	if (p->rlim_set && p->rlim_cur[RLIMIT_AS] != RLIM_INFINITY) {
-		uint64_t used = 0;
-		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
-		spin_unlock_irq(&p->vm->fault_lock, cf);
-		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
-		if (used + req > p->rlim_cur[RLIMIT_AS]) return -ENOMEM;
-	}
+	if (mmap_over_rlimit(p, len)) return -ENOMEM;
 
-	/* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already
-	 * there. Wine lays out its address space with it. */
-	if ((flags & 0x100000) && addr) {
-		if (addr & (PAGE_SIZE - 1)) return -EINVAL;
-		if (!access_ok((void *)addr, len)) return -ENOMEM;
-		uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
-		int hit = arch_vm_get_paddr(p->vm->root, addr) != 0;   /* the heap has no VMA */
-		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-		for (vma_t *v = p->vm->vmas; v && !hit; v = v->next)
-			hit = v->vaddr < end && v->vaddr + v->size > addr;
-		spin_unlock_irq(&p->vm->fault_lock, cf);
-		if (hit) return -EEXIST;
+	if ((flags & 0x100000) && addr) {   /* MAP_FIXED_NOREPLACE */
+		long e = mmap_noreplace_check(p, addr, len);
+		if (e) return e;
 		flags |= MAP_FIXED;
 	}
 
@@ -178,265 +462,21 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	if (prot & PROT_WRITE) vmflags |= VM_WRITE;
 	if (prot & PROT_EXEC)  vmflags |= VM_EXEC;
 
-	/* MAP_HUGETLB | MAP_HUGE_1GB: back the region with 1 GB blocks from the
-	 * reserved pool, in the process's own high VA window. Eagerly populated. */
 	if ((flags & MAP_HUGETLB) && ((flags >> MAP_HUGE_SHIFT) & 0x3F) == 30 &&
-	    (flags & MAP_ANONYMOUS) && prot != 0) {
-		if (len > (uint64_t)-1 - (HUGE_1G_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
-		len = (len + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
-		uint64_t va;
-		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_1G_MASK;
-		else {
-			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-			uint64_t next = (p->vm->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
-			if (next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* cursor overflow */
-			va = next; p->vm->huge1g_next = next + len;
-			spin_unlock_irq(&p->vm->fault_lock, cf);
-		}
-		if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
-		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
-		for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
-			uint64_t blk = huge1g_alloc();
-			if (!blk || vm_map_huge_1g(p->vm, v, blk, vmflags) != 0) {
-				if (blk) huge1g_put(blk);
-				for (uint64_t u = va; u < v; u += HUGE_1G_SIZE) vm_unmap(p->vm, u);
-				cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
-				return -ENOMEM;
-			}
-			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_1G_SIZE);
-		}
-		{
-			uint32_t vf = VMA_USER | VMA_ANON | VMA_HUGE | VMA_HUGE_1G;
-			if (prot & PROT_READ)  vf |= VMA_READ;
-			if (prot & PROT_WRITE) vf |= VMA_WRITE;
-			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_replace(p, va, len, vf);
-		}
-		return (long)va;
-	}
-
-	/* MAP_HUGETLB: back the region with 2 MB blocks. Both length and address
-	 * round to the huge-page boundary; pages are populated eagerly so there is
-	 * no demand-fault path to teach about blocks. */
-	if ((flags & MAP_HUGETLB) && (flags & MAP_ANONYMOUS) && prot != 0) {
-		if (len > (uint64_t)-1 - (HUGE_PAGE_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
-		len = (len + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-		uint64_t va;
-		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
-		else {
-			uint64_t ceil = HUGE1G_VA_BASE;   /* mmap window ends below the 1 GB-hugepage window, itself below the stack */
-			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-			uint64_t next = (p->vm->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-			if (next + len > ceil || next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* over window / wrap */
-			va = next; p->vm->mmap_next = next + len;
-			spin_unlock_irq(&p->vm->fault_lock, cf);
-		}
-		if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
-		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
-		uint64_t done = 0;
-		for (uint64_t v = va; v < va + len; v += HUGE_PAGE_SIZE) {
-			void *blk = buddy_alloc(9);   /* 2 MB = 512 pages */
-			if (!blk || vm_map_huge(p->vm, v, (uint64_t)blk, vmflags) != 0) {
-				if (blk) buddy_free((uint64_t)blk, 9);
-				for (uint64_t u = va; u < v; u += HUGE_PAGE_SIZE) vm_unmap(p->vm, u);
-				cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
-				return -ENOMEM;
-			}
-			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_PAGE_SIZE);
-			done += HUGE_PAGE_SIZE;
-		}
-		(void)done;
-		{
-			uint32_t vf = VMA_USER | VMA_ANON | VMA_HUGE;
-			if (prot & PROT_READ)  vf |= VMA_READ;
-			if (prot & PROT_WRITE) vf |= VMA_WRITE;
-			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			vma_replace(p, va, len, vf);
-		}
-		return (long)va;
-	}
+	    (flags & MAP_ANONYMOUS) && prot != 0)
+		return mmap_huge_1g(p, addr, len, prot, flags, vmflags);
+	if ((flags & MAP_HUGETLB) && (flags & MAP_ANONYMOUS) && prot != 0)
+		return mmap_huge_2m(p, addr, len, prot, flags, vmflags);
 
 	len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
 	uint64_t va;
-	if ((flags & MAP_FIXED) && addr) va = addr & ~(uint64_t)(PAGE_SIZE - 1);
-	else {
-		/* The bump cursor lives on the (thread-shared) address space; bump it
-		 * under fault_lock so two threads mmap'ing at once get distinct ranges
-		 * instead of the same VA. The window ends below the 1 GB-hugepage window
-		 * (itself below the stack); refuse a VA that would overrun it (Linux
-		 * returns ENOMEM when no region fits) rather than colliding. */
-		uint64_t ceil = HUGE1G_VA_BASE;
-		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-		if (p->vm->mmap_next + len > ceil || p->vm->mmap_next + len < p->vm->mmap_next) {
-			spin_unlock_irq(&p->vm->fault_lock, cf);
-			return -ENOMEM;
-		}
-		va = p->vm->mmap_next; p->vm->mmap_next += len;
-		spin_unlock_irq(&p->vm->fault_lock, cf);
-	}
+	if (mmap_pick_va(p, addr, len, flags, &va) != 0) return -ENOMEM;
 	/* a page left under the new one would be lost to its owner and to the allocator */
 	if (flags & MAP_FIXED) drop_old_pages(p, va, len);
 
-	if (flags & MAP_ANONYMOUS) {
-		/* Private anonymous memory is demand-zero: vm_handle_fault supplies each
-		 * page from the VMA on first touch. Runtimes reserve far more address
-		 * space than they use (JavaScriptCore asks for 128 GB), and only a fresh
-		 * VA from the bump cursor is known to hold no old pages. */
-		int lazy = !(flags & MAP_SHARED) && (prot & PROT_READ) &&
-		           !(flags & (MAP_LOCKED | MAP_POPULATE_)) && !p->mlock_future;
-		if (prot != 0 && !lazy) {
-			/* eager: past all of RAM this only OOM-kills other tasks before failing */
-			if (len / PAGE_SIZE > buddy_total_pages()) return -ENOMEM;
-			if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; } /* over memory.max */
-			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-				void *pg = mm_alloc_page_oom();
-				if (!pg) { map_undo(p, va, v, len); kprintf(KERN_WARN "mm: mmap out of memory pid=%u va=0x%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -ENOMEM; }
-				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-				vm_map(p->vm, v, (uint64_t)pg, vmflags);
-			}
-		}
-		{
-			uint32_t vf = VMA_USER | VMA_ANON;
-			if (prot & PROT_READ)  vf |= VMA_READ;
-			if (prot & PROT_WRITE) vf |= VMA_WRITE;
-			if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-			if (flags & MAP_SHARED) vf |= VMA_SHARED;
-			if ((flags & MAP_LOCKED) || p->mlock_future) vf |= VMA_LOCKED;
-			vma_replace(p, va, len, vf);
-		}
-		return (long)va;
-	}
-
-	/* File-backed mmap */
-	vfs_file_t *f = fget(p->fds, fd);   /* pin across the blocking map loop */
-	if (!f) return -EBADF;
-
-	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { fput(f); return -EACCES; } /* EACCES */
-	/* a mapping reads the file; O_WRONLY may have been all the opener could get */
-	if (f->path[0] == '/' && (f->flags & 3) == O_WRONLY) { fput(f); return -EACCES; }
-
-	/* stores through a shared mapping land in the file; files with no path, like
-	 * the io_uring rings, carry no access mode */
-	int ro_shared = (flags & MAP_SHARED) && f->path[0] == '/' && (f->flags & 3) == O_RDONLY;
-	if (ro_shared && (prot & PROT_WRITE)) { fput(f); return -EACCES; } /* EACCES */
-
-	if (f->inode->fops && f->inode->fops->mmap_page) {
-		int shared = (flags & MAP_SHARED) != 0;
-		int swrite = shared && (prot & PROT_WRITE);
-		uint32_t pte_flags = shared ? vmflags : vmflags & ~(uint32_t)VM_WRITE;
-		uint64_t file_off = off;
-		for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-			uint64_t phys = f->inode->fops->mmap_page(f, (off_t)file_off, swrite);
-			if (!phys) {
-				for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
-				fput(f);
-				return -ENOMEM;
-			}
-			vm_map(p->vm, v, phys, pte_flags);
-			file_off += PAGE_SIZE;
-#if defined(__aarch64__)
-			if (prot & PROT_EXEC) {
-				uintptr_t pp = (uintptr_t)PHYS_TO_VIRT(phys);
-				for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
-					__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
-				__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
-			}
-#endif
-		}
-		uint32_t vf = VMA_USER;
-		if (prot & PROT_READ)  vf |= VMA_READ;
-		if (prot & PROT_WRITE) vf |= VMA_WRITE;
-		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-		if (shared) vf |= VMA_SHARED;
-		if (ro_shared) vf |= VMA_NOWRITE;
-		vma_replace(p, va, len, vf);
-		fput(f);
-		return (long)va;
-	}
-
-	/* Mapping backed by an inode-owned page via the mmap fop. Two kinds:
-	 *  - cacheable (ramfs/tmpfs): the fop returns a page of the file's own
-	 *    write-back buffer. MAP_SHARED maps it directly so stores land in the
-	 *    file and are seen by read() and other mappers. The fop's extra page ref
-	 *    is the mapping's: unmap and exit drop it, so the page outlives the file
-	 *    while mapped.
-	 *    MAP_PRIVATE falls through to the copy path below for COW semantics.
-	 *  - device/hugetlb: non-cacheable, no write-back. */
-	if (f->inode->fops && f->inode->fops->mmap) {
-		int cacheable = f->inode->fops->mmap_cacheable;
-		if (!cacheable || (flags & MAP_SHARED)) {
-			uint64_t file_off = off;
-			uint32_t pte_flags = vmflags | (cacheable ? 0 : VM_NOCACHE);
-#ifdef __x86_64__
-			if (f->inode->fops->mmap_wc) pte_flags = (pte_flags & ~(uint32_t)VM_NOCACHE) | VM_WC;
-#endif
-			if (f->inode->fops->mmap_keep_pages) pte_flags |= VM_NOFREE;
-			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-				uint64_t phys = f->inode->fops->mmap(f, (off_t)file_off);
-				if (!phys) {
-					for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
-					fput(f);
-					return -EINVAL;   /* offset past backing */
-				}
-				vm_map(p->vm, v, phys, pte_flags);
-				file_off += PAGE_SIZE;
-			}
-			{
-				uint32_t vf = VMA_USER;
-				if (prot & PROT_READ)  vf |= VMA_READ;
-				if (prot & PROT_WRITE) vf |= VMA_WRITE;
-				if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-				if ((cacheable || f->inode->fops->mmap_keep_pages) && (flags & MAP_SHARED))
-					vf |= VMA_SHARED;
-				if (ro_shared) vf |= VMA_NOWRITE;
-				vma_replace(p, va, len, vf);
-			}
-			fput(f);
-			return (long)va;
-		}
-	}
-
-	if (!f->inode->fops || !f->inode->fops->read) { fput(f); return -ENODEV; }   /* ENODEV */
-	if (len / PAGE_SIZE > buddy_total_pages()) { fput(f); return -ENOMEM; }      /* copied eagerly */
-	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { fput(f); return -ENOMEM; }
-
-	uint64_t file_off = off;
-	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
-		void *pg = buddy_alloc(0);
-		if (!pg) { map_undo(p, va, v, len); fput(f); return -ENOMEM; }
-		void *pg_virt = (void *)PHYS_TO_VIRT(pg);
-		memset(pg_virt, 0, PAGE_SIZE);
-
-		/* read one page from file at current offset via a temporary file handle */
-		vfs_file_t tmp_f = *f;
-		tmp_f.pos = (off_t)file_off;
-		ssize_t nr = f->inode->fops->read(&tmp_f, pg_virt, PAGE_SIZE);
-		(void)nr;
-		file_off += PAGE_SIZE;
-
-		vm_map(p->vm, v, (uint64_t)pg, vmflags);
-
-#if defined(__aarch64__)
-		if (prot & PROT_EXEC) {
-			uintptr_t pp = (uintptr_t)pg_virt;
-			for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
-				__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
-			__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
-		}
-#endif
-	}
-	{
-		uint32_t vf = VMA_USER;
-		if (prot & PROT_READ)  vf |= VMA_READ;
-		if (prot & PROT_WRITE) vf |= VMA_WRITE;
-		if (prot & PROT_EXEC)  vf |= VMA_EXEC;
-		vma_replace(p, va, len, vf);
-	}
-	fput(f);
-	return (long)va;
+	if (flags & MAP_ANONYMOUS)
+		return mmap_anon(p, va, len, prot, flags, vmflags);
+	return mmap_file(p, va, len, prot, flags, fd, off, vmflags);
 }
 
 /* Unmap a range and drop any VMA fully contained in it. */

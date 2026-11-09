@@ -670,45 +670,49 @@ void signal_dispatch(arch_context_t *tf)
 	}
 }
 
-static void signal_dispatch_one(arch_context_t *tf)
+/* The frame could not be written to the user stack: the task dies of SIGSEGV
+ * (Linux force_sigsegv), it does not fault in the kernel. */
+static void sig_kill_badframe(process_t *p)
 {
-	arch_get_cpu_ctx()->wd_where = "signal_dispatch";
-	/* Only deliver signals when returning to user space */
-#if defined(__x86_64__)
-	if ((tf->cs & 3) != 3) return;
-#elif defined(__aarch64__)
-	if ((tf->spsr & 0xF) != 0) return;
-#endif
-	process_t *p = task_current();
-	if (!p) return;
+	p->exit_code = 11; p->killed_by_sig = 1;
+	arch_get_cpu_ctx()->wd_where = "sig:badframe";
+	task_exit();
+}
 
-	/* Catch a kernel-stack overflow in the same trap that caused it. */
-	kstack_check();
+/* siginfo_t's first 32 bytes, the rest zero: signo, errno, code, pid, uid, value. */
+static void sig_put_siginfo(uint8_t *info, const sigqueue_t *si)
+{
+	memset(info, 0, 128);
+	*(int32_t  *)(info +  0) = si->si_signo;
+	*(int32_t  *)(info +  4) = si->si_errno;
+	*(int32_t  *)(info +  8) = si->si_code;
+	*(int32_t  *)(info + 16) = (int32_t)si->si_pid;
+	*(uint32_t *)(info + 20) = (uint32_t)si->si_uid;
+	*(uint64_t *)(info + 24) = si->si_value;
+}
 
-	/* (Re)arm single-step TF on this user return, independent of signals. */
-	ptrace_apply_singlestep(tf);
-
-	if (p->group_exiting) task_exit();
-
+/* Take the lowest unblocked pending signal off p and fill *si for it.
+ * Returns it, or 0 when nothing is deliverable. */
+static int sig_take_next(process_t *p, sigqueue_t *si)
+{
 	uint64_t mask = p->sig_pending & ~p->sig_mask;
-	if (!mask) return;
+	if (!mask) return 0;
 
 	int sig = 0;
 	for (int i = 0; i < NSIG; i++) {
 		if (mask & (1UL << i)) { sig = i + 1; break; }
 	}
-	if (!sig) return;
+	if (!sig) return 0;
 
 	/* Serialize with the lock-holding signal posters (task_signal*, and
 	 * sched_tick's SIGALRM/SIGVTALRM/SIGPROF). On aarch64 a timer tick can nest
 	 * into this IRQ-on syscall-return path; without the lock this read-modify-
 	 * write could erase a bit a poster OR'd in concurrently — a silently dropped
 	 * signal. (Cross-CPU on both arches.) */
-	sigqueue_t si;
 	int have_si = 0;
 	uint64_t sigf = spin_lock_irq(&sched_lock);
 	if (sig >= SIGRTMIN && sig <= SIGRTMAX) {
-		have_si = sigq_pop_locked(p, sig, &si);
+		have_si = sigq_pop_locked(p, sig, si);
 		/* Keep the pending bit set if more instances of this RT signal remain
 		 * queued, so the next delivery picks them up; otherwise clear it. */
 		if (!sigq_has_locked(p, sig))
@@ -719,24 +723,21 @@ static void signal_dispatch_one(arch_context_t *tf)
 	spin_unlock_irq(&sched_lock, sigf);
 
 	if (!have_si) {
-		si.si_signo = sig;
-		si.si_errno = 0;
-		si.si_code  = 0;   /* SI_USER */
-		si.si_pid   = 0;
-		si.si_uid   = 0;
-		si.si_value = 0;
-		if (p->fault_sig == sig) fault_siginfo(p, &si);
+		si->si_signo = sig;
+		si->si_errno = 0;
+		si->si_code  = 0;   /* SI_USER */
+		si->si_pid   = 0;
+		si->si_uid   = 0;
+		si->si_value = 0;
+		if (p->fault_sig == sig) fault_siginfo(p, si);
 	}
+	return sig;
+}
 
-	/* A traced task shows the tracer each signal first; stops have their own path */
-	if (p->tracer && sig != SIGKILL && !(sig == SIGSTOP || sig_default_stop(sig))) {
-		int s2 = ptrace_signal_stop(tf, sig, &si);
-		if (!s2) return;              /* the tracer dropped it */
-		if (s2 != sig) { sig = s2; si.si_signo = s2; si.si_code = 0; }
-	}
-
-	sigaction_t *sa = &p->sighand->actions[sig - 1];
-	void (*handler)(int) = sa->sa_handler;
+/* Everything but running a user handler: stop, continue, ignore or the default
+ * action. 1: the signal was dealt with here. */
+static int sig_no_handler(arch_context_t *tf, process_t *p, int sig, void (*handler)(int))
+{
 
 	/* Job-control stop: SIG_DFL for SIGSTOP/TSTP/TTIN/TTOU stops the process.
 	 * SIGSTOP is uncatchable. We sleep here on the user-return path; SIGCONT (or
@@ -756,7 +757,7 @@ static void signal_dispatch_one(arch_context_t *tf)
 		/* Sleeping here saved a deeper frame in p->ctx, and the return path
 		 * restores from p->ctx: point it back, or it resumes from a dead frame. */
 		p->ctx = tf;
-		return;
+		return 1;
 	}
 
 	/* SIGCONT: default action is continue+ignore; the resume already happened at
@@ -765,11 +766,11 @@ static void signal_dispatch_one(arch_context_t *tf)
 		process_t *par = proc_find(p->ppid);
 		if (par) task_wake(par);
 		proc_wake_waiters(p->ppid);
-		return;
+		return 1;
 	}
 
 	/* SIG_IGN = 1 */
-	if ((uintptr_t)handler == 1) return;
+	if ((uintptr_t)handler == 1) return 1;
 
 	/* SIG_DFL = 0 or NULL */
 	if (!handler) {
@@ -780,28 +781,17 @@ static void signal_dispatch_one(arch_context_t *tf)
 			arch_get_cpu_ctx()->wd_where = "sig:kill";
 			task_exit();
 		}
-		return;
+		return 1;
 	}
-	arch_get_cpu_ctx()->wd_where = "sig:frame";
-
-	if (p->sys_intr) {
-		p->sys_intr = 0;
-		if (sa->sa_flags & SA_RESTART) syscall_rewind(tf, p);
-	}
-
-	/* Deliver to user handler: redirect the trap frame */
-	/* Block this signal during handler execution; save old mask for restore */
-	uint64_t old_mask = p->sig_mask_saved ? p->sig_saved_mask : p->sig_mask;
-	p->sig_mask_saved = 0;
-	if (!(sa->sa_flags & SA_NODEFER)) p->sig_mask |= (1UL << (sig - 1));
-	p->sig_mask |= sa->sa_mask;
-
-	int siginfo_wanted = (sa->sa_flags & 4) != 0;   /* SA_SIGINFO */
-	/* Node's SIGTERM handler resets stdio and re-raises: without the reset it runs
-	 * again for ever, and no SIGTERM ends the process */
-	if (sa->sa_flags & SA_RESETHAND) sa->sa_handler = NULL;
+	return 0;
+}
 
 #if defined(__aarch64__)
+/* Build the handler frame on the user stack and point tf at the handler. */
+static void sig_setup_frame(arch_context_t *tf, process_t *p, int sig, void (*handler)(int),
+                            const sigaction_t *sa, const sigqueue_t *si, uint64_t old_mask)
+{
+	int siginfo_wanted = (sa->sa_flags & 4) != 0;   /* SA_SIGINFO */
 	/* Frame layout — 736 bytes, 16-byte aligned:
 	 *   [sp+  0]  orig_elr  (PC to resume)
 	 *   [sp+  8]  orig_x30  (LR)
@@ -823,9 +813,7 @@ static void signal_dispatch_one(arch_context_t *tf)
 	/* If the user stack can't hold the frame (bad/overflowed sp), writing it
 	 * would fault in EL1 and panic. Linux force_sigsegv's the task instead. */
 	if (!access_ok((void *)usp, 864)) {   /* a lazy page is fine: copy_to_user below faults it in */
-		p->exit_code = 11; p->killed_by_sig = 1;
-		arch_get_cpu_ctx()->wd_where = "sig:badframe";
-		task_exit();
+		sig_kill_badframe(p);
 	}
 	/* Staged in the kernel: a frame on a read-only stack passes the mapped check
 	 * above and would fault on a raw store. */
@@ -844,21 +832,10 @@ static void signal_dispatch_one(arch_context_t *tf)
 	*(uint32_t *)(usp + 204) = tf->fpcr;
 	for (int _i = 0; _i < 64; _i++)
 		*(uint64_t *)(usp + 208 + (uint64_t)_i * 8) = tf->qregs[_i];
-	if (siginfo_wanted) {
-		uint8_t *info = (uint8_t *)(usp + 736);
-		memset(info, 0, 128);
-		*(int32_t  *)(info +  0) = si.si_signo;
-		*(int32_t  *)(info +  4) = si.si_errno;
-		*(int32_t  *)(info +  8) = si.si_code;
-		*(int32_t  *)(info + 16) = (int32_t)si.si_pid;
-		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
-		*(uint64_t *)(info + 24) = si.si_value;
-	}
+	if (siginfo_wanted) sig_put_siginfo((uint8_t *)(usp + 736), si);
 	usp = uframe;
 	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
-		p->exit_code = 11; p->killed_by_sig = 1;
-		arch_get_cpu_ctx()->wd_where = "sig:badframe";
-		task_exit();
+		sig_kill_badframe(p);
 	}
 	tf->sp                   = usp;
 	tf->regs[30]             = sa->sa_restorer ? (uint64_t)sa->sa_restorer
@@ -869,7 +846,36 @@ static void signal_dispatch_one(arch_context_t *tf)
 		tf->regs[2] = 0;           /* ucontext * (unused by RT sigqueue clients) */
 	}
 	tf->elr                  = (uint64_t)handler;
+}
 #elif defined(__x86_64__)
+/* ucontext_t: flags, link, stack (SS_DISABLE), mcontext gregs[23] in
+ * REG_R8..REG_CR2 order, fpregs → the fxsave area, sigmask */
+static void sig_fill_ucontext(arch_context_t *tf, process_t *p, int sig, uint8_t *uc,
+                              uint64_t uframe, uint64_t old_mask)
+{
+	memset(uc, 0, 432);
+	*(int32_t  *)(uc + 24) = 2;                      /* uc_stack.ss_flags = SS_DISABLE */
+	uint64_t *g = (uint64_t *)(uc + 40);
+	g[0]  = tf->r8;  g[1]  = tf->r9;  g[2]  = tf->r10; g[3]  = tf->r11;
+	g[4]  = tf->r12; g[5]  = tf->r13; g[6]  = tf->r14; g[7]  = tf->r15;
+	g[8]  = tf->rdi; g[9]  = tf->rsi; g[10] = tf->rbp; g[11] = tf->rbx;
+	g[12] = tf->rdx; g[13] = tf->rax; g[14] = tf->rcx; g[15] = tf->rsp;
+	g[16] = tf->rip; g[17] = tf->rflags;
+	g[18] = 0x33;                                    /* csgsfs: user cs */
+	if (p->fault_sig == sig) {
+		g[19] = p->fault_err;  g[20] = p->fault_trap;  g[22] = p->fault_addr;
+		p->fault_sig = 0;
+	}
+	g[21] = old_mask;
+	*(uint64_t *)(uc + 224) = uframe + 168;          /* fpregs */
+	*(uint64_t *)(uc + 296) = old_mask;              /* uc_sigmask */
+}
+
+/* Build the handler frame on the user stack and point tf at the handler. */
+static void sig_setup_frame(arch_context_t *tf, process_t *p, int sig, void (*handler)(int),
+                            const sigaction_t *sa, const sigqueue_t *si, uint64_t old_mask)
+{
+	int siginfo_wanted = (sa->sa_flags & 4) != 0;   /* SA_SIGINFO */
 	/* Frame layout — 168 bytes, rsp kept 8 mod 16 (post-call ABI convention):
 	 *   [rsp+  0]  return addr (sa_restorer → rt_sigreturn)
 	 *   [rsp+  8]  old_mask
@@ -909,9 +915,7 @@ static void signal_dispatch_one(arch_context_t *tf)
 	/* Bad/overflowed user sp: writing the frame would fault in the kernel and
 	 * panic. Force-kill with SIGSEGV instead. */
 	if (!access_ok((void *)usp, 1496)) {   /* a lazy page is fine: copy_to_user below faults it in */
-		p->exit_code = 11; p->killed_by_sig = 1;
-		arch_get_cpu_ctx()->wd_where = "sig:badframe";
-		task_exit();
+		sig_kill_badframe(p);
 	}
 	/* Staged in the kernel: a frame on a read-only stack passes the mapped check
 	 * above and would fault on a raw store. */
@@ -941,42 +945,11 @@ static void signal_dispatch_one(arch_context_t *tf)
 	*(uint64_t *)(usp + 160) = 0;
 	memcpy((void *)(usp + 168), tf->fxsave, sizeof(tf->fxsave));  /* 16-aligned */
 	memcpy((void *)(usp + 1240), tf->ymmh, sizeof(tf->ymmh));
-	if (siginfo_wanted) {
-		uint8_t *info = (uint8_t *)(usp + 680);
-		memset(info, 0, 128);
-		*(int32_t  *)(info +  0) = si.si_signo;
-		*(int32_t  *)(info +  4) = si.si_errno;
-		*(int32_t  *)(info +  8) = si.si_code;
-		*(int32_t  *)(info + 16) = (int32_t)si.si_pid;
-		*(uint32_t *)(info + 20) = (uint32_t)si.si_uid;
-		*(uint64_t *)(info + 24) = si.si_value;
-	}
-	{
-		/* ucontext_t: flags, link, stack (SS_DISABLE), mcontext gregs[23] in
-		 * REG_R8..REG_CR2 order, fpregs → the fxsave area, sigmask */
-		uint8_t *uc = (uint8_t *)(usp + 808);
-		memset(uc, 0, 432);
-		*(int32_t  *)(uc + 24) = 2;                      /* uc_stack.ss_flags = SS_DISABLE */
-		uint64_t *g = (uint64_t *)(uc + 40);
-		g[0]  = tf->r8;  g[1]  = tf->r9;  g[2]  = tf->r10; g[3]  = tf->r11;
-		g[4]  = tf->r12; g[5]  = tf->r13; g[6]  = tf->r14; g[7]  = tf->r15;
-		g[8]  = tf->rdi; g[9]  = tf->rsi; g[10] = tf->rbp; g[11] = tf->rbx;
-		g[12] = tf->rdx; g[13] = tf->rax; g[14] = tf->rcx; g[15] = tf->rsp;
-		g[16] = tf->rip; g[17] = tf->rflags;
-		g[18] = 0x33;                                    /* csgsfs: user cs */
-		if (p->fault_sig == sig) {
-			g[19] = p->fault_err;  g[20] = p->fault_trap;  g[22] = p->fault_addr;
-			p->fault_sig = 0;
-		}
-		g[21] = old_mask;
-		*(uint64_t *)(uc + 224) = uframe + 168;          /* fpregs */
-		*(uint64_t *)(uc + 296) = old_mask;              /* uc_sigmask */
-	}
+	if (siginfo_wanted) sig_put_siginfo((uint8_t *)(usp + 680), si);
+	sig_fill_ucontext(tf, p, sig, (uint8_t *)(usp + 808), uframe, old_mask);
 	usp = uframe;
 	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
-		p->exit_code = 11; p->killed_by_sig = 1;
-		arch_get_cpu_ctx()->wd_where = "sig:badframe";
-		task_exit();
+		sig_kill_badframe(p);
 	}
 	tf->rsp                  = usp;
 	tf->rdi                  = (uint64_t)sig;
@@ -985,5 +958,61 @@ static void signal_dispatch_one(arch_context_t *tf)
 		tf->rdx = usp + 808;   /* ucontext_t * */
 	}
 	tf->rip                  = (uint64_t)handler;
+}
 #endif
+
+static void signal_dispatch_one(arch_context_t *tf)
+{
+	arch_get_cpu_ctx()->wd_where = "signal_dispatch";
+	/* Only deliver signals when returning to user space */
+#if defined(__x86_64__)
+	if ((tf->cs & 3) != 3) return;
+#elif defined(__aarch64__)
+	if ((tf->spsr & 0xF) != 0) return;
+#endif
+	process_t *p = task_current();
+	if (!p) return;
+
+	/* Catch a kernel-stack overflow in the same trap that caused it. */
+	kstack_check();
+
+	/* (Re)arm single-step TF on this user return, independent of signals. */
+	ptrace_apply_singlestep(tf);
+
+	if (p->group_exiting) task_exit();
+
+	sigqueue_t si;
+	int sig = sig_take_next(p, &si);
+	if (!sig) return;
+
+	/* A traced task shows the tracer each signal first; stops have their own path */
+	if (p->tracer && sig != SIGKILL && !(sig == SIGSTOP || sig_default_stop(sig))) {
+		int s2 = ptrace_signal_stop(tf, sig, &si);
+		if (!s2) return;              /* the tracer dropped it */
+		if (s2 != sig) { sig = s2; si.si_signo = s2; si.si_code = 0; }
+	}
+
+	sigaction_t *sa = &p->sighand->actions[sig - 1];
+	void (*handler)(int) = sa->sa_handler;
+
+	if (sig_no_handler(tf, p, sig, handler)) return;
+	arch_get_cpu_ctx()->wd_where = "sig:frame";
+
+	if (p->sys_intr) {
+		p->sys_intr = 0;
+		if (sa->sa_flags & SA_RESTART) syscall_rewind(tf, p);
+	}
+
+	/* Deliver to user handler: redirect the trap frame */
+	/* Block this signal during handler execution; save old mask for restore */
+	uint64_t old_mask = p->sig_mask_saved ? p->sig_saved_mask : p->sig_mask;
+	p->sig_mask_saved = 0;
+	if (!(sa->sa_flags & SA_NODEFER)) p->sig_mask |= (1UL << (sig - 1));
+	p->sig_mask |= sa->sa_mask;
+
+	/* Node's SIGTERM handler resets stdio and re-raises: without the reset it runs
+	 * again for ever, and no SIGTERM ends the process */
+	if (sa->sa_flags & SA_RESETHAND) sa->sa_handler = NULL;
+
+	sig_setup_frame(tf, p, sig, handler, sa, &si, old_mask);
 }
