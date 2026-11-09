@@ -615,6 +615,8 @@ check "c-ipfrag"     "OK"  "$(timeout 10 /bin/test_ipfrag 2>/dev/null)"
 check "c-ip6frag"    "OK"  "$(timeout 10 /bin/test_ip6frag 2>/dev/null)"
 check "c-sockopt"    "OK"  "$(timeout 10 /bin/test_sockopt 2>/dev/null)"
 check "c-recvmsg-iov" "OK" "$(timeout 20 /bin/test_recvmsg_iov 2>&1 | tail -1)"
+RT=$(timeout 20 /bin/test_recv_trunc 2>&1); echo "$RT" | grep -v "^OK$" | sed 's/^/  recv-trunc: /'
+check "c-recv-trunc" "OK" "$(echo "$RT" | tail -1)"
 check "proc-if-inet6" "1" "$(grep -c '00000000000000000000000000000001' /proc/net/if_inet6 2>/dev/null)"
 check "c-execveat"   "OK"  "$(timeout 10 /bin/test_execveat 2>/dev/null)"
 check "c-pidfd"      "OK"  "$(timeout 10 /bin/test_pidfd 2>/dev/null)"
