@@ -947,6 +947,156 @@ static void tcp_rx_data(socket_t *s, uint32_t seq, const uint8_t *data, uint16_t
     tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
 }
 
+/* A segment for no connection: a SYN to a listener opens one (SYN-ACK sent,
+ * socket in SYN_RECV); anything else is answered with a RST. Frees skb. */
+static void tcp_no_socket(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key, tcp_hdr_t *th,
+                          uint32_t seq, uint16_t dlen, int syn_ws, int syn_sack, uint32_t syn_mss,
+                          int rx_has_ts, uint32_t rx_tsval)
+{
+    uint16_t src_port = ntohs(th->src_port);
+    uint16_t dst_port = ntohs(th->dst_port);
+    uint32_t src_ip   = key->src4;
+    uint8_t  flags    = th->flags;
+    int      v6        = (key->family == AF_INET6);
+    /* check for listen socket */
+    socket_t *ls = tcp_listen_find(dev->net_ns, dst_port, key->family);
+    if (ls && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
+        /* incoming SYN → create new socket, send SYN-ACK */
+        socket_t *ns = sock_alloc(key->family, SOCK_STREAM, IP_PROTO_TCP);
+        if (!ns) { skb_free(skb); sock_put(ls); return; }
+        /* this runs on no task of the listener's: it pays for its connections */
+        if (cgroup_charge_to(ls->cg, sizeof(*ns), 0) != 0) {
+            sock_put(ns); skb_free(skb); sock_put(ls); return;
+        }
+        ns->cg = ls->cg;
+        /* sock_alloc took the namespace of whichever task runs this RX path */
+        net_ns_put(ns->net_ns);
+        ns->net_ns      = net_ns_get(dev->net_ns);
+        ns->dev         = dev;
+        if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
+        else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
+        ns->local_port  = dst_port;
+        ns->remote_port = src_port;
+        if (!v6 && (ls->domain == AF_INET6 || ls->v4mapped)) ns->v4mapped = 1;
+        ns->rcv_nxt     = seq + 1;
+        ns->snd_nxt     = 0x12340000;
+        ns->snd_una     = ns->snd_nxt;
+        ns->tcp_state   = TCP_SYN_RECV;
+        ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
+        if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
+        if (syn_sack) ns->sack_ok = 1;
+        if (rx_has_ts) { ns->ts_ok = 1; ns->ts_recent = rx_tsval; }
+        tcp_set_mss(ns, syn_mss);
+        tcp_cc_init(ns);
+        ns->orphan = 1;      /* TCP's own until it reaches the accept queue */
+        sock_register(ns);
+
+        tcp_tx_seg(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, ns->rcv_nxt, NULL, 0);
+        if (seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0) != 0)
+            ns->tcp_state = TCP_CLOSED;
+        ns->snd_nxt++;
+
+        skb_free(skb); sock_put(ls); return;
+    }
+    /* unexpected segment → RST */
+    if (!(flags & TCP_RST)) {
+        uint16_t seglen = dlen + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
+        if (v6) send_rst6(dev, &key->src6, &key->dst6, th, seglen);
+        else    send_rst_v4(dev, key->src4, key->dst4, th, seglen);
+    }
+    sock_put(ls);
+    skb_free(skb); return;
+}
+
+/* SYN_SENT: the peer's SYN-ACK completes our connect(). */
+static void tcp_synsent_in(socket_t *s, tcp_hdr_t *th, uint32_t seq, uint32_t ack, uint8_t flags,
+                           int syn_ws, int syn_sack, uint32_t syn_mss, int rx_has_ts, uint32_t rx_tsval)
+{
+    if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
+        if (ack != s->snd_nxt) return;   /* stale/duplicate SYN-ACK — unlock+free below */
+        s->rcv_nxt    = seq + 1;
+        s->snd_una    = ack;
+        s->snd_wnd    = ntohs(th->window);   /* SYN-ACK window is unscaled */
+        if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
+        if (syn_sack) s->sack_ok = 1;
+        if (rx_has_ts) { s->ts_ok = 1; s->ts_recent = rx_tsval; }
+        tcp_set_mss(s, syn_mss);
+        s->tcp_state  = TCP_ESTABLISHED;
+        tcp_cc_init(s);
+        seg_ack(s, ack, 0);
+        tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        tcp_wake_connect(s);
+    }
+}
+
+/* move to listen socket's accept queue */
+static int tcp_to_accept_queue(socket_t *s)
+{
+    socket_t *ls = tcp_listen_find(s->net_ns, s->local_port, s->domain);
+    if (ls) {
+        /* enqueue on the listener's accept list and wake the acceptor —
+         * all under ls->recv_lock so it can't race accept()'s dequeue */
+        s->orphan = 0;
+        uint64_t af = spin_lock_irq(&ls->recv_lock);
+        s->accept_head = NULL; /* reuse field as list link */
+        if (!ls->accept_head) ls->accept_head = s;
+        else                  ls->accept_tail->accept_head = s;
+        ls->accept_tail = s;
+        process_t *aw = ls->accept_waiter;
+        ls->accept_waiter = NULL;
+        spin_unlock_irq(&ls->recv_lock, af);
+        if (aw) task_wake(aw);
+        poll_notify_key(ls);
+    } else {                    /* the listener went away during the handshake */
+        tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        tcp_closed(s, 0);
+        return 0;
+    }
+    sock_put(ls);
+    return 1;
+}
+
+/* An established (or closing) connection: ACK, data, window probe, FIN. */
+static void tcp_established_in(socket_t *s, skb_t *skb, tcp_hdr_t *th, uint32_t seq, uint32_t ack,
+                               uint8_t flags, uint16_t dlen, uint8_t rx_hlen,
+                               int rx_has_ts, uint32_t rx_tsval, uint32_t rx_tsecr)
+{
+    if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
+    if (flags & TCP_ACK) {
+        tcp_ack_in(s, ack, th, rx_hlen, rx_has_ts, rx_tsecr, dlen, flags);
+        if (ack == s->snd_nxt) tcp_fin_acked(s);
+        if (s->tcp_state == TCP_CLOSED) return;
+    }
+    if (!tcp_can_rx(s)) {
+        /* past the peer's FIN: anything more with a length is a retransmission */
+        if (dlen || (flags & TCP_FIN) || seq_lt(seq, s->rcv_nxt))
+            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        return;
+    }
+    if (dlen) {
+        /* nobody will read it; left unanswered the peer retransmits to no end */
+        if (s->orphan && seq_lt(s->rcv_nxt, seq + dlen)) {
+            tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+            tcp_closed(s, 0);
+            return;
+        }
+        tcp_rx_data(s, seq, skb->data, dlen);
+    } else if (seq_lt(seq, s->rcv_nxt)) {
+        /* a window probe: only an answer tells the prober the window */
+        tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+    }
+    /* FIN from remote: only in order, or it ends the stream before data it
+     * follows; the peer sends it again */
+    if ((flags & TCP_FIN) && seq + dlen == s->rcv_nxt) {
+        s->rcv_nxt++;
+        tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
+        if (s->tcp_state == TCP_ESTABLISHED)      s->tcp_state = TCP_CLOSE_WAIT;
+        else if (s->tcp_state == TCP_FIN_WAIT1)   s->tcp_state = TCP_CLOSING;
+        else                                      tcp_enter_time_wait(s);
+        tcp_wake_recv(s);   /* a blocked recv sees EOF and returns 0 */
+    }
+}
+
 static void tcp_input(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key)
 {
     if (skb->len < (uint16_t)sizeof(tcp_hdr_t)) { skb_free(skb); return; }
@@ -979,54 +1129,8 @@ find:;
         : tcp_sock_find(dev->net_ns, key->dst4, dst_port, src_ip, src_port);
 
     if (!s) {
-        /* check for listen socket */
-        socket_t *ls = tcp_listen_find(dev->net_ns, dst_port, key->family);
-        if (ls && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
-            /* incoming SYN → create new socket, send SYN-ACK */
-            socket_t *ns = sock_alloc(key->family, SOCK_STREAM, IP_PROTO_TCP);
-            if (!ns) { skb_free(skb); sock_put(ls); return; }
-            /* this runs on no task of the listener's: it pays for its connections */
-            if (cgroup_charge_to(ls->cg, sizeof(*ns), 0) != 0) {
-                sock_put(ns); skb_free(skb); sock_put(ls); return;
-            }
-            ns->cg = ls->cg;
-            /* sock_alloc took the namespace of whichever task runs this RX path */
-            net_ns_put(ns->net_ns);
-            ns->net_ns      = net_ns_get(dev->net_ns);
-            ns->dev         = dev;
-            if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
-            else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
-            ns->local_port  = dst_port;
-            ns->remote_port = src_port;
-            if (!v6 && (ls->domain == AF_INET6 || ls->v4mapped)) ns->v4mapped = 1;
-            ns->rcv_nxt     = seq + 1;
-            ns->snd_nxt     = 0x12340000;
-            ns->snd_una     = ns->snd_nxt;
-            ns->tcp_state   = TCP_SYN_RECV;
-            ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
-            if (syn_ws >= 0) { ns->snd_wscale = (uint8_t)syn_ws; ns->rcv_wscale = TCP_WSCALE; }
-            if (syn_sack) ns->sack_ok = 1;
-            if (rx_has_ts) { ns->ts_ok = 1; ns->ts_recent = rx_tsval; }
-            tcp_set_mss(ns, syn_mss);
-            tcp_cc_init(ns);
-            ns->orphan = 1;      /* TCP's own until it reaches the accept queue */
-            sock_register(ns);
-
-            tcp_tx_seg(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, ns->rcv_nxt, NULL, 0);
-            if (seg_enqueue(ns, TCP_SYN | TCP_ACK, ns->snd_nxt, NULL, 0) != 0)
-                ns->tcp_state = TCP_CLOSED;
-            ns->snd_nxt++;
-
-            skb_free(skb); sock_put(ls); return;
-        }
-        /* unexpected segment → RST */
-        if (!(flags & TCP_RST)) {
-            uint16_t seglen = dlen + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
-            if (v6) send_rst6(dev, &key->src6, &key->dst6, th, seglen);
-            else    send_rst_v4(dev, key->src4, key->dst4, th, seglen);
-        }
-        sock_put(ls);
-        skb_free(skb); return;
+        tcp_no_socket(dev, skb, key, th, seq, dlen, syn_ws, syn_sack, syn_mss, rx_has_ts, rx_tsval);
+        return;
     }
 
     /* serialise the per-socket state machine against the syscalls */
@@ -1044,21 +1148,7 @@ find:;
     switch (s->tcp_state) {
 
     case TCP_SYN_SENT:
-        if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
-            if (ack != s->snd_nxt) break;   /* stale/duplicate SYN-ACK — unlock+free below */
-            s->rcv_nxt    = seq + 1;
-            s->snd_una    = ack;
-            s->snd_wnd    = ntohs(th->window);   /* SYN-ACK window is unscaled */
-            if (syn_ws >= 0) { s->snd_wscale = (uint8_t)syn_ws; s->rcv_wscale = TCP_WSCALE; }
-            if (syn_sack) s->sack_ok = 1;
-            if (rx_has_ts) { s->ts_ok = 1; s->ts_recent = rx_tsval; }
-            tcp_set_mss(s, syn_mss);
-            s->tcp_state  = TCP_ESTABLISHED;
-            tcp_cc_init(s);
-            seg_ack(s, ack, 0);
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            tcp_wake_connect(s);
-        }
+        tcp_synsent_in(s, th, seq, ack, flags, syn_ws, syn_sack, syn_mss, rx_has_ts, rx_tsval);
         break;
 
     case TCP_SYN_RECV:
@@ -1074,28 +1164,7 @@ find:;
             s->tcp_state = TCP_ESTABLISHED;
             tcp_cc_init(s);
             seg_ack(s, ack, 0);
-            /* move to listen socket's accept queue */
-            socket_t *ls = tcp_listen_find(s->net_ns, s->local_port, s->domain);
-            if (ls) {
-                /* enqueue on the listener's accept list and wake the acceptor —
-                 * all under ls->recv_lock so it can't race accept()'s dequeue */
-                s->orphan = 0;
-                uint64_t af = spin_lock_irq(&ls->recv_lock);
-                s->accept_head = NULL; /* reuse field as list link */
-                if (!ls->accept_head) ls->accept_head = s;
-                else                  ls->accept_tail->accept_head = s;
-                ls->accept_tail = s;
-                process_t *aw = ls->accept_waiter;
-                ls->accept_waiter = NULL;
-                spin_unlock_irq(&ls->recv_lock, af);
-                if (aw) task_wake(aw);
-                poll_notify_key(ls);
-            } else {                    /* the listener went away during the handshake */
-                tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-                tcp_closed(s, 0);
-                break;
-            }
-            sock_put(ls);
+            if (!tcp_to_accept_queue(s)) break;
             /* The handshake ACK may carry the peer's first bytes. */
             if (dlen > 0 || (flags & TCP_FIN)) goto established;
         }
@@ -1119,40 +1188,7 @@ find:;
     case TCP_CLOSING:
     case TCP_LAST_ACK:
     established:
-        if (s->ts_ok && rx_has_ts && seq == s->rcv_nxt) s->ts_recent = rx_tsval;
-        if (flags & TCP_ACK) {
-            tcp_ack_in(s, ack, th, rx_hlen, rx_has_ts, rx_tsecr, dlen, flags);
-            if (ack == s->snd_nxt) tcp_fin_acked(s);
-            if (s->tcp_state == TCP_CLOSED) break;
-        }
-        if (!tcp_can_rx(s)) {
-            /* past the peer's FIN: anything more with a length is a retransmission */
-            if (dlen || (flags & TCP_FIN) || seq_lt(seq, s->rcv_nxt))
-                tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            break;
-        }
-        if (dlen) {
-            /* nobody will read it; left unanswered the peer retransmits to no end */
-            if (s->orphan && seq_lt(s->rcv_nxt, seq + dlen)) {
-                tcp_tx_seg(s, TCP_RST | TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-                tcp_closed(s, 0);
-                break;
-            }
-            tcp_rx_data(s, seq, skb->data, dlen);
-        } else if (seq_lt(seq, s->rcv_nxt)) {
-            /* a window probe: only an answer tells the prober the window */
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-        }
-        /* FIN from remote: only in order, or it ends the stream before data it
-         * follows; the peer sends it again */
-        if ((flags & TCP_FIN) && seq + dlen == s->rcv_nxt) {
-            s->rcv_nxt++;
-            tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);
-            if (s->tcp_state == TCP_ESTABLISHED)      s->tcp_state = TCP_CLOSE_WAIT;
-            else if (s->tcp_state == TCP_FIN_WAIT1)   s->tcp_state = TCP_CLOSING;
-            else                                      tcp_enter_time_wait(s);
-            tcp_wake_recv(s);   /* a blocked recv sees EOF and returns 0 */
-        }
+        tcp_established_in(s, skb, th, seq, ack, flags, dlen, rx_hlen, rx_has_ts, rx_tsval, rx_tsecr);
         break;
 
     default: break;

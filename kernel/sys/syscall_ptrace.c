@@ -320,7 +320,8 @@ static long ptrace_regset(process_t *tracee, uint64_t type, uint64_t uiov, int w
 	return -EINVAL;
 }
 
-static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
+/* Options, event message and signal info of a stopped tracee. */
+static long ptrace_info_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
 {
 	switch (request) {
 	case PTRACE_SETOPTIONS:
@@ -347,6 +348,15 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	case PTRACE_SETSIGINFO:
 		return tracee->tracer == (pid_t)p->pid ? 0 : -3;
 
+	default:
+		return -ENOSYS;
+	}
+}
+
+/* Read or write the tracee's registers (general, FP, by offset, by regset). */
+static long ptrace_regs_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
+{
+	switch (request) {
 	case PTRACE_GETREGSET:
 	case PTRACE_SETREGSET:
 		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
@@ -390,6 +400,31 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	}
 #endif
 
+	case PTRACE_GETREGS: {
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;   /* only the tracer may peek */
+		ptrace_regs_t ur;
+		int r = ptrace_get_regs(tracee, &ur);
+		if (r) return r;
+		return copy_to_user((void *)data, &ur, sizeof(ur)) ? -14 : 0;
+	}
+
+	case PTRACE_SETREGS: {
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
+		ptrace_regs_t ur;
+		if (copy_from_user(&ur, (const void *)data, sizeof(ur)) != 0)
+			return -EFAULT;
+		return ptrace_set_regs(tracee, &ur);
+	}
+
+	default:
+		return -ENOSYS;
+	}
+}
+
+/* Attach, detach, and resume (continue, syscall stop, single step). */
+static long ptrace_run_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
+{
+	switch (request) {
 	case PTRACE_ATTACH:
 		if (tracee->tgid == p->tgid) return -1;   /* no thread can trace its own group */
 		if (!ptrace_may_access(tracee))
@@ -433,22 +468,15 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 		}
 		return 0;
 
-	case PTRACE_GETREGS: {
-		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;   /* only the tracer may peek */
-		ptrace_regs_t ur;
-		int r = ptrace_get_regs(tracee, &ur);
-		if (r) return r;
-		return copy_to_user((void *)data, &ur, sizeof(ur)) ? -14 : 0;
+	default:
+		return -ENOSYS;
 	}
+}
 
-	case PTRACE_SETREGS: {
-		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
-		ptrace_regs_t ur;
-		if (copy_from_user(&ur, (const void *)data, sizeof(ur)) != 0)
-			return -EFAULT;
-		return ptrace_set_regs(tracee, &ur);
-	}
-
+/* Read or write one word of the tracee's memory. */
+static long ptrace_mem_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
+{
+	switch (request) {
 	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA: {
 		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
@@ -473,6 +501,45 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 		vm_destroy(vm);
 		return put == sizeof(data) ? 0 : -14;
 	}
+
+	default:
+		return -ENOSYS;
+	}
+}
+
+static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
+{
+	switch (request) {
+	case PTRACE_SETOPTIONS:
+	case PTRACE_GETEVENTMSG:
+	case PTRACE_GETSIGINFO:
+	case PTRACE_SETSIGINFO:
+		return ptrace_info_req(p, tracee, request, addr, data);
+
+	case PTRACE_GETREGSET:
+	case PTRACE_SETREGSET:
+#if defined(__x86_64__)
+	case PTRACE_GETFPREGS:
+	case PTRACE_SETFPREGS:
+	case PTRACE_PEEKUSER:
+	case PTRACE_POKEUSER:
+#endif
+	case PTRACE_GETREGS:
+	case PTRACE_SETREGS:
+		return ptrace_regs_req(p, tracee, request, addr, data);
+
+	case PTRACE_ATTACH:
+	case PTRACE_DETACH:
+	case PTRACE_CONT:
+	case PTRACE_SYSCALL:
+	case PTRACE_SINGLESTEP:
+		return ptrace_run_req(p, tracee, request, addr, data);
+
+	case PTRACE_PEEKTEXT:
+	case PTRACE_PEEKDATA:
+	case PTRACE_POKETEXT:
+	case PTRACE_POKEDATA:
+		return ptrace_mem_req(p, tracee, request, addr, data);
 
 	default:
 		return -ENOSYS;
