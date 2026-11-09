@@ -2958,48 +2958,52 @@ int vfs_path_searchable(const char *path)
 	return 0;
 }
 
+/* A walk that ends in a directory the dentry cache does not keep hands the
+ * caller an inode of its own (cached 0); the caller frees it. */
+static void put_walked(vfs_inode_t *in)
+{
+	if (in && !in->cached) vfs_inode_free(in);
+}
+
 int vfs_rename(const char *old_path, const char *new_path)
 {
 	const char *old_name, *new_name;
 	char *old_dir = vfs_parent_alloc(old_path, &old_name);
 	char *new_dir = vfs_parent_alloc(new_path, &new_name);
-	if (!old_dir || !new_dir) { kfree(old_dir); kfree(new_dir); return -ENOMEM; }
+	vfs_inode_t *old_in = NULL, *new_in = NULL;
+	int ret;
+	if (!old_dir || !new_dir) { ret = -ENOMEM; goto out; }
 
 	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
-	if (!old_parent || !old_parent->inode) { kfree(old_dir); kfree(new_dir); return -ENOENT; }
-	vfs_inode_t *old_in = old_parent->inode;   /* the next resolve may reuse a volatile dentry */
+	if (!old_parent || !old_parent->inode) { ret = -ENOENT; goto out; }
+	old_in = old_parent->inode;   /* the next resolve may reuse a volatile dentry */
 	int ro = vfs_dentry_readonly(old_parent);
 	vfs_dentry_t *old_mnt = dentry_mnt_root(old_parent);
 	/* two uncached directories both come back in the task's one volatile slot:
 	 * equal pointers then say nothing about the directories being the same */
 	int old_vol = vfs_dentry_is_volatile(old_parent);
 	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
-	if (!new_parent || !new_parent->inode) { kfree(old_dir); kfree(new_dir); return -ENOENT; }
-	if (ro || vfs_dentry_readonly(new_parent)) { kfree(old_dir); kfree(new_dir); return -EROFS; } /* EROFS */
-	if (old_mnt != dentry_mnt_root(new_parent)) { kfree(old_dir); kfree(new_dir); return -EXDEV; } /* EXDEV */
-	int pr = may_change(old_in);
-	if (!pr) pr = may_change(new_parent->inode);
-	if (pr) { kfree(old_dir); kfree(new_dir); return pr; }
+	if (!new_parent || !new_parent->inode) { ret = -ENOENT; goto out; }
+	new_in = new_parent->inode;
+	if (ro || vfs_dentry_readonly(new_parent)) { ret = -EROFS; goto out; }
+	if (old_mnt != dentry_mnt_root(new_parent)) { ret = -EXDEV; goto out; }
+	ret = may_change(old_in);
+	if (!ret) ret = may_change(new_in);
+	if (ret) goto out;
 	int same_dir = !old_vol && old_parent == new_parent;
-	if (same_dir && strcmp(old_name, new_name) == 0) {
-		kfree(old_dir); kfree(new_dir); return 0;
-	}
+	if (same_dir && strcmp(old_name, new_name) == 0) goto out;
 	/* a directory moved under itself would detach a cycle from the tree */
 	size_t ol = strlen(old_path);
-	if (strncmp(old_path, new_path, ol) == 0 && new_path[ol] == '/') {
-		kfree(old_dir); kfree(new_dir); return -EINVAL;
-	}
-	if (dentry_child_pinned(new_parent, new_name)) { kfree(old_dir); kfree(new_dir); return -EBUSY; } /* EBUSY */
-	if (old_in->iops && new_parent->inode->iops &&
-	    (sticky_denied(old_in, old_name) || sticky_denied(new_parent->inode, new_name))) {
-		kfree(old_dir); kfree(new_dir); return -EPERM;
+	if (strncmp(old_path, new_path, ol) == 0 && new_path[ol] == '/') { ret = -EINVAL; goto out; }
+	if (dentry_child_pinned(new_parent, new_name)) { ret = -EBUSY; goto out; }
+	if (old_in->iops && new_in->iops &&
+	    (sticky_denied(old_in, old_name) || sticky_denied(new_in, new_name))) {
+		ret = -EPERM; goto out;
 	}
 
-	if (!old_in->iops || !old_in->iops->rename) {
-		kfree(old_dir); kfree(new_dir); return -ENOSYS;
-	}
+	if (!old_in->iops || !old_in->iops->rename) { ret = -ENOSYS; goto out; }
 
-	int ret = old_in->iops->rename(old_in, old_name, new_parent->inode, new_name);
+	ret = old_in->iops->rename(old_in, old_name, new_in, new_name);
 	if (ret == 0 && vfs_inotify_hook) {
 		vfs_inotify_hook(old_dir, 0x00000040 /*IN_MOVED_FROM*/, old_name);
 		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/,   new_name);
@@ -3031,6 +3035,9 @@ int vfs_rename(const char *old_path, const char *new_path)
 		}
 		spin_unlock_irq(&vfs_lock, f);
 	}
+out:
+	put_walked(old_in);
+	if (new_in != old_in) put_walked(new_in);
 	kfree(old_dir); kfree(new_dir);
 	return ret;
 }
