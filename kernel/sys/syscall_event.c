@@ -584,7 +584,7 @@ static long sys_inotify_add_watch(int ifd, const char *upath, uint32_t mask)
     int rp = resolve_path(kpath, AT_FDCWD, upath);
     if (rp) return rp;
     if (strlen(kpath) >= 256) return -ENAMETOOLONG;    /* inot_watch_t.path */
-    long ar = access_check(kpath, 4, 1);     /* a watch reads the directory's names */
+    long ar = access_check(kpath, 4, AT_EACCESS);     /* a watch reads the directory's names */
     if (ar) return ar;
 
     uint64_t f = spin_lock_irq(&inst->lock);
