@@ -994,6 +994,10 @@ void cred_setxuid_fixup(process_t *p, int was_priv, uid_t old_euid)
 	} else if (old_euid == 0 && p->euid != 0) {
 		p->cap_effective = 0;
 	}
+	/* Linux cap_emulate_setxuid: a temporary drop (seteuid(user)) comes back
+	 * with seteuid(0), and the effective set with it */
+	if (old_euid != 0 && p->euid == 0)
+		p->cap_effective = p->cap_permitted;
 }
 
 /* ptrace_may_access gate for cross-process /proc readers (maps, mem). Pins the

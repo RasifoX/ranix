@@ -830,12 +830,37 @@ static long sys_setpgid(pid_t pid, pid_t pgid) {
 	if (pid) proc_put(p);
 	return r;
 }
+/* set*id: a process may move among the ids it holds; any other id takes
+ * CAP_SETUID / CAP_SETGID (capable_setid), whatever the current ids are. */
+static int uid_held(const process_t *p, uid_t id)
+{
+	return id == p->uid || id == p->euid || id == p->suid;
+}
+
+static int gid_held(const process_t *p, gid_t id)
+{
+	return id == p->gid || id == p->egid || id == p->sgid;
+}
+
+static int may_take_uid(process_t *p, uid_t id)
+{
+	return uid_held(p, id) || capable_setid((struct process *)p, CAP_SETUID, id);
+}
+
+static int may_take_gid(process_t *p, gid_t id)
+{
+	return gid_held(p, id) || capable_setid((struct process *)p, CAP_SETGID, id);
+}
+
+/* Linux __sys_setuid: with CAP_SETUID all of r/e/s; else only the effective
+ * uid, and only to the real or saved one. */
 static long sys_setuid(uid_t uid)
 {
 	process_t *p = task_current();
 	uid_t old_euid = p->euid;
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
-	if (p->euid == 0) {
+	if (uid == (uid_t)-1) return -EINVAL;
+	if (capable_setid((struct process *)p, CAP_SETUID, uid)) {
 		p->uid = p->euid = p->suid = uid;
 	} else if (uid == p->uid || uid == p->suid) {
 		p->euid = uid;
@@ -849,7 +874,8 @@ static long sys_setuid(uid_t uid)
 static long sys_setgid(gid_t gid)
 {
 	process_t *p = task_current();
-	if (p->egid == 0) {
+	if (gid == (gid_t)-1) return -EINVAL;
+	if (capable_setid((struct process *)p, CAP_SETGID, gid)) {
 		p->gid = p->egid = p->sgid = gid;
 	} else if (gid == p->gid || gid == p->sgid) {
 		p->egid = gid;
