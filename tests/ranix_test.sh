@@ -420,6 +420,7 @@ check "c-uidmap"      "OK"            "$(timeout 10 /bin/test_uidmap 2>&1 | tail
 US=$(timeout 15 /bin/test_usernssuid 2>&1)   # its detail lines show why, should it fail
 [ "$(echo "$US" | tail -1)" = OK ] || echo "$US" | sed 's/^/  usernssuid: /'
 check "c-usernssuid"  "OK"            "$(echo "$US" | tail -1)"
+check "c-writev-pipe" "OK"            "$(timeout 30 /bin/test_writev_pipe 2>&1 | tail -1)"
 check "c-fdinfo"      "OK"            "$(timeout 15 /bin/test_fdinfo 2>&1 | tail -1)"
 check "c-usernschroot" "OK"           "$(timeout 15 /bin/test_usernschroot 2>&1 | tail -1)"
 check "c-clonefs"     "OK"            "$(timeout 120 /bin/test_clonefs 2>&1 | tail -1)"
