@@ -5,6 +5,8 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/vm.h>
 #include <asm/mmu.h>
+#include <kernel/extable.h>
+#include <kernel/kprintf.h>
 
 /* physical — VMA=LMA (in .bss.boot, before high-half section).
  * 48-bit VA / 4-level: L0 is the TTBR root. L0[0]→L1 (TTBR0, low 512GB) and
@@ -64,10 +66,59 @@ void mmu_tables_init(void)
 	enable_mmu((uint64_t)kernel_l0, (uint64_t)kernel_l0_high);
 }
 
+/* The identity map (TTBR0 slot 0) also covered VA 0, so a kernel NULL
+ * dereference read or wrote physical page 0: on a Pi 4 that is RAM, the
+ * firmware stub and the secondary CPUs' spin table. The identity map gets its
+ * own first-gigabyte table whose first 2 MB are 4 KB pages with page 0 left
+ * out. The direct map keeps the shared l2, so PHYS_TO_VIRT(0) still reaches
+ * the spin table, and a kernel loaded at 0x80000 stays mapped. */
+static uint64_t ident_l2[512] __attribute__((aligned(4096)));
+static uint64_t ident_l3[512] __attribute__((aligned(4096)));
+#define NG_BLOCK_PA 0x0000FFFFFFE00000UL   /* a 2 MB block's address bits */
+
+static void null_guard_install(void)
+{
+	uint64_t b0 = l2[0];
+	if ((b0 & 3) != (PTE_BLOCK | PTE_VALID)) return;   /* not the boot 2 MB block */
+	uint64_t attrs = b0 & ~NG_BLOCK_PA & ~3UL;
+	for (int i = 0; i < 512; i++) ident_l2[i] = l2[i];
+	ident_l3[0] = 0;
+	for (int i = 1; i < 512; i++)
+		ident_l3[i] = ((b0 & NG_BLOCK_PA) + (uint64_t)i * 4096) | attrs | PTE_TABLE | PTE_VALID;   /* page */
+	ident_l2[0] = VIRT_TO_PHYS((uint64_t)ident_l3) | PTE_TABLE | PTE_VALID;
+	__asm__ volatile("dsb ishst" ::: "memory");
+	kernel_l1[0] = VIRT_TO_PHYS((uint64_t)ident_l2) | PTE_TABLE | PTE_VALID;
+	__asm__ volatile("dsb ishst\n tlbi vmalle1is\n dsb ish\n isb" ::: "memory");
+}
+
 void mmu_init(void)
 {
 	vm_init_kernel((uint64_t)kernel_l0_high);
 	vm_set_kernel_pt((uint64_t)kernel_l0);
+	null_guard_install();
+}
+
+/* 1 if a kernel read of va faulted (recovered through the exception table) */
+static int kernel_read_faults(uint64_t va)
+{
+	int ok = 0;
+	uint64_t v = 0;
+	__asm__ volatile("1: ldr %1, [%2]\n"
+	                 "   mov %w0, #1\n"
+	                 "2:\n"
+	                 _ASM_EXTABLE("1b", "2b")
+	                 : "+r"(ok), "+r"(v) : "r"(va) : "memory");
+	return !ok;
+}
+
+/* A NULL dereference in the kernel must fault, not reach physical page 0.
+ * Run once the vectors and the per-CPU task are up: the fault path needs both. */
+void mmu_null_guard_selftest(void)
+{
+	if (kernel_read_faults(0))
+		kprintf(KERN_INFO "mm: null page guard ok\n");
+	else
+		kprintf(KERN_ERR "mm: null page guard MISSING: kernel VA 0 is mapped\n");
 }
 
 /* Clean the boot page tables to the point of coherency so a secondary CPU,
@@ -86,6 +137,8 @@ void mmu_clean_tables_poc(void)
 	clean_page(kernel_l1);
 	clean_page(kernel_l1_high);
 	clean_page(l2);
+	clean_page(ident_l2);
+	clean_page(ident_l3);
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
