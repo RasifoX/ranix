@@ -324,6 +324,7 @@ typedef struct process {
 
 	struct asess   *asess;         /* agent session; set before the task can run, cleared only at exit */
 	int             walk_denied;   /* this syscall's path walk stopped at a directory it may not search */
+	int             walk_err;      /* errno of its first walk that failed for another reason than a missing name */
 	int             walking;       /* this syscall has walked a path; see the deferred frees in vfs.c */
 	char           *walk_anchor[2]; /* this syscall's dirfd paths; see walk_anchored in vfs.c */
 	struct vfs_dentry *walk_top;   /* this syscall's held directory above the root; see vfs_walk_from */

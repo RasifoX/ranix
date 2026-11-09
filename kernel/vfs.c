@@ -481,6 +481,14 @@ int vfs_may_search(vfs_inode_t *dir)
 	return 0;
 }
 
+/* Why a walk stopped, when not at a missing name: the syscall says so (ENOTDIR,
+ * ELOOP, ENAMETOOLONG) instead of the ENOENT every caller reports. The first wins. */
+static void walk_fail(int err)
+{
+	process_t *p = task_current();
+	if (p && !p->walk_err) p->walk_err = err;
+}
+
 /* In a sticky directory a name goes only by its file's owner, the directory's,
  * or a holder of CAP_FOWNER over the file (Linux check_sticky). */
 static int sticky_denied(vfs_inode_t *dir, const char *name)
@@ -1154,7 +1162,12 @@ static int walk_fdlink(walk_t *w, vfs_dentry_t *child, const char *end)
 static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *end,
                         const char **pp, unsigned long *mflags, int *depth)
 {
-	if (++*depth > 8 || !child->inode->iops || !child->inode->iops->readlink) {
+	if (++*depth > 40) {                    /* Linux's MAXSYMLINKS */
+		spin_unlock_irq(&vfs_lock, w->f);
+		walk_fail(ELOOP);
+		return -1;
+	}
+	if (!child->inode->iops || !child->inode->iops->readlink) {
 		spin_unlock_irq(&vfs_lock, w->f);
 		return -1;
 	}
@@ -1313,6 +1326,12 @@ static vfs_dentry_t *resolve_walk_ms(const char *path, unsigned long *mflags, ch
 		while (i < 255 && p[i] && p[i] != '/') { tmp[i] = p[i]; i++; }
 		tmp[i] = '\0';
 		const char *end = p + i;
+		if (*end && *end != '/') {              /* a name over NAME_MAX */
+			spin_unlock_irq(&vfs_lock, w.f);
+			if (w.prev_volatile) { vfs_inode_free(w.prev_volatile); w.prev_volatile = NULL; }
+			walk_fail(ENAMETOOLONG);
+			w.d = NULL; goto out;
+		}
 
 		size_t len = (size_t)i;
 		if (len == 0) break;
@@ -1329,9 +1348,10 @@ static vfs_dentry_t *resolve_walk_ms(const char *path, unsigned long *mflags, ch
 		 * filesystem's lookup op may reinterpret the inode's private data by type
 		 * (ramfs reads it as a dir entry list), so calling it on a regular file
 		 * walks file bytes as a pointer chain and faults. Reject here. */
-		if ((w.d->inode && !S_ISDIR(w.d->inode->mode)) ||
-		    (!walk_anchored(work, end, w.outside) && !vfs_may_search(w.d->inode))) {
+		int notdir = w.d->inode && !S_ISDIR(w.d->inode->mode);
+		if (notdir || (!walk_anchored(work, end, w.outside) && !vfs_may_search(w.d->inode))) {
 			spin_unlock_irq(&vfs_lock, w.f);
+			if (notdir) walk_fail(ENOTDIR);
 			if (w.prev_volatile) { vfs_inode_free(w.prev_volatile); w.prev_volatile = NULL; }
 			w.d = NULL; goto out;
 		}
