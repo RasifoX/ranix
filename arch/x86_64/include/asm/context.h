@@ -41,6 +41,7 @@ typedef struct {
 #define CTX_SYSCALL_ARG4(ctx)   ((ctx)->r8)
 #define CTX_SYSCALL_ARG5(ctx)   ((ctx)->r9)
 #define CTX_SYSCALL_RET(ctx, v) ((ctx)->rax = (uint64_t)(long)(v))
+#define CTX_SYSCALL_IP(ctx)     ((ctx)->rip)   /* just past the syscall instruction */
 
 /* x86_64 syscall numbers */
 /* Linux syscall numbers (sorted by number; the dispatch in syscall.c

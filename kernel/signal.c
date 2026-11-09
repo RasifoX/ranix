@@ -576,16 +576,57 @@ int task_dequeue_signal(process_t *p, uint64_t set, sigqueue_t *si, int *have)
 /* The task's own instruction faulted. It cannot go on past the fault, so unlike a
  * posted signal this one is not optional: blocked or ignored, it takes the default
  * action. A handler runs as usual, and may fix the cause or longjmp away. */
-void task_force_fault(arch_context_t *tf, int sig, int code, uint64_t addr, uint64_t err, uint64_t trap)
+/* A synchronous fault's siginfo: si_addr shares si_pid and si_uid */
+static void fault_siginfo(process_t *p, sigqueue_t *si)
 {
-	process_t *p = task_current();
+	si->si_code = p->fault_code;
+	si->si_pid  = (pid_t)(uint32_t)p->fault_addr;
+	si->si_uid  = (uid_t)(p->fault_addr >> 32);
+	si->si_errno = p->fault_errno;
+	si->si_value = p->fault_value;   /* SIGSYS: _syscall, _arch */
+}
+
+/* Blocked or ignored, a forced signal takes its default action. Caller holds
+ * sched_lock. */
+static void force_unblock(process_t *p, int sig)
+{
 	uint64_t bit = 1UL << (sig - 1);
-	uint64_t f = spin_lock_irq(&sched_lock);
 	sigaction_t *sa = &p->sighand->actions[sig - 1];
 	if ((p->sig_mask & bit) || (uintptr_t)sa->sa_handler == 1) {
 		sa->sa_handler = 0;
 		p->sig_mask &= ~bit;
 	}
+}
+
+/* SECCOMP_RET_TRAP (Linux force_sig_seccomp): SIGSYS on the way out of the
+ * syscall the filter did not let run. si_code SYS_SECCOMP, si_call_addr just
+ * past the syscall instruction, si_syscall and si_arch, si_errno the filter's
+ * data. Forced: blocked or ignored, it kills. */
+void task_force_seccomp(uint64_t call_addr, int nr, uint32_t arch, int data)
+{
+	process_t *p = task_current();
+	int sig = 31;   /* SIGSYS */
+	uint64_t f = spin_lock_irq(&sched_lock);
+	force_unblock(p, sig);
+	p->fault_sig   = sig;
+	p->fault_code  = 1;   /* SYS_SECCOMP */
+	p->fault_addr  = call_addr;
+	p->fault_err   = 0;
+	p->fault_trap  = 0;
+	p->fault_value = (uint32_t)nr | ((uint64_t)arch << 32);
+	p->fault_errno = data;
+	p->sig_pending |= 1UL << (sig - 1);
+	spin_unlock_irq(&sched_lock, f);
+}
+
+void task_force_fault(arch_context_t *tf, int sig, int code, uint64_t addr, uint64_t err, uint64_t trap)
+{
+	process_t *p = task_current();
+	uint64_t bit = 1UL << (sig - 1);
+	uint64_t f = spin_lock_irq(&sched_lock);
+	force_unblock(p, sig);
+	p->fault_value = 0;
+	p->fault_errno = 0;
 	p->fault_sig  = sig;
 	p->fault_code = code;
 	p->fault_addr = addr;
@@ -686,11 +727,7 @@ static void signal_dispatch_one(arch_context_t *tf)
 		si.si_pid   = 0;
 		si.si_uid   = 0;
 		si.si_value = 0;
-		if (p->fault_sig == sig) {           /* si_addr shares si_pid and si_uid */
-			si.si_code = p->fault_code;
-			si.si_pid  = (pid_t)(uint32_t)p->fault_addr;
-			si.si_uid  = (uid_t)(p->fault_addr >> 32);
-		}
+		if (p->fault_sig == sig) fault_siginfo(p, &si);
 	}
 
 	/* A traced task shows the tracer each signal first; stops have their own path */

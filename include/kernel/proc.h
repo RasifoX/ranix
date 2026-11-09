@@ -161,6 +161,8 @@ typedef struct process {
 	int             fault_sig;            /* a synchronous fault's signal, until delivered */
 	int             fault_code;           /* si_code */
 	uint64_t        fault_addr, fault_err, fault_trap;
+	uint64_t        fault_value;          /* si_value: SIGSYS's syscall | arch << 32 */
+	int             fault_errno;          /* si_errno: SIGSYS's SECCOMP_RET_DATA */
 	uint8_t         in_freeze;        /* stopped by cgroup.freeze on the way to user mode */
 	uint8_t         in_wait;          /* asleep in wait: any thread of the group may be woken by a child */
 	int             last_syscall;     /* arch syscall number last entered (watchdog/diag) */
@@ -393,6 +395,7 @@ int        tty_acquire(void *tty, vfs_fops_t *fops, int steal);  /* 0 taken, 1 a
 long       tty_check_fg(void *tty, int need_ctty, pid_t nr, pid_t *out);
 void       signal_dispatch(arch_context_t *tf);
 void       task_force_fault(arch_context_t *tf, int sig, int code, uint64_t addr, uint64_t err, uint64_t trap);
+void       task_force_seccomp(uint64_t call_addr, int nr, uint32_t arch, int data);
 int        task_fault_fatal(int sig);
 int        task_dequeue_signal(process_t *p, uint64_t set, sigqueue_t *si, int *have);
 void       task_exit(void);
