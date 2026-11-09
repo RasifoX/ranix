@@ -193,6 +193,7 @@ typedef struct vfs_inode {
     int          in_grave;   /* queued for iops->evict */
     void        *retired_by; /* who queued it: a debugging aid */
     int          dotdot_lookup; /* no_cache dir: lookup("..") names its parent, NULL at the mount root */
+    int          lookup_copy;   /* made by lookup for one dentry: the cache may drop both, nothing is lost */
     struct vfs_inode *grave_next;
 } vfs_inode_t;
 
@@ -221,6 +222,9 @@ typedef struct vfs_dentry {
     uint32_t           pins;     /* mounts holding this dentry; unlink and umount refuse */
     uint32_t           retired;  /* waiting in the grave: a walk may still read it */
     struct vfs_dentry *grave_next;   /* its own link: next stays what a walker follows */
+    struct vfs_dentry **pprev;   /* the link pointing here (parent->child or a sibling's next); NULL if in no list */
+    struct vfs_dentry *lru_prev, *lru_next;   /* cache order, newest first; under vfs_lock */
+    uint32_t           keep;     /* some task's root: never evicted */
 } vfs_dentry_t;
 
 /* ── mount ───────────────────────────────────────────────── */
@@ -327,6 +331,7 @@ int        vfs_path_searchable(const char *path); /* 0 unless a directory on the
 struct process;
 void       vfs_walk_anchor(struct process *p, const char *path);
 void       vfs_dentry_pin(vfs_dentry_t *d);
+void       vfs_dentry_keep(vfs_dentry_t *d);   /* d becomes a task's root: never evicted */
 void       vfs_dentry_unpin(vfs_dentry_t *d);
 void       vfs_dentry_free_tree(vfs_dentry_t *root, int free_inodes);
 /* Per-mount state for a filesystem that keeps none of its own: drops the tree on

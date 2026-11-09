@@ -161,7 +161,7 @@ void vfs_inode_free(vfs_inode_t *in)
  * What is retired waits in new, moves to old when the previous generation has
  * drained, and goes when the one after it has: two tasks taking turns in a walk
  * cannot hold it up, as they could with a single count. */
-typedef struct { vfs_inode_t *in; vfs_dentry_t *de; vfs_deferred_t *call; } grave_t;
+typedef struct { vfs_inode_t *in; vfs_dentry_t *de; vfs_deferred_t *call; vfs_inode_t *fr; } grave_t;
 
 static spinlock_t grave_lock = SPINLOCK_INIT;
 static uint32_t   walk_gen, walkers[2];
@@ -192,6 +192,18 @@ static void grave_free(grave_t g)
 		vfs_dentry_t *d = g.de;
 		g.de = d->grave_next;
 		kfree(d);
+	}
+	/* inodes of dentries the cache dropped (in_grave 2): a walk that got this far
+	 * may have opened one, and then its last close frees it */
+	while (g.fr) {
+		vfs_inode_t *in = g.fr;
+		g.fr = in->grave_next;
+		uint64_t f = spin_lock_irq(&grave_lock);
+		int opened = in->open_refs != 0;
+		in->in_grave = 0;
+		in->cached = 0;
+		spin_unlock_irq(&grave_lock, f);
+		if (!opened) vfs_inode_free(in);
 	}
 	/* last: a filesystem freed here may be what the inodes above evicted into */
 	while (g.call) {
@@ -426,6 +438,100 @@ int vfs_may_enter(vfs_inode_t *dir)
 
 /* ── dentry pool ─────────────────────────────────────────── */
 
+/* A cached dentry whose inode lookup can make again (lookup_copy: a disk
+ * filesystem's) is also on the cache order list, newest first. When the cache
+ * passes its limit the oldest unheld leaves are dropped, and their inodes once no
+ * walk can still hold them. tmpfs and the like keep their files in their inodes:
+ * they are never on the list. Caller holds vfs_lock for all of this. */
+static vfs_dentry_t *lru_head, *lru_tail;
+
+static void lru_remove(vfs_dentry_t *d)
+{
+	if (d->lru_prev) d->lru_prev->lru_next = d->lru_next; else if (lru_head == d) lru_head = d->lru_next;
+	if (d->lru_next) d->lru_next->lru_prev = d->lru_prev; else if (lru_tail == d) lru_tail = d->lru_prev;
+	d->lru_prev = d->lru_next = NULL;
+}
+
+static void lru_push(vfs_dentry_t *d)
+{
+	d->lru_prev = NULL;
+	d->lru_next = lru_head;
+	if (lru_head) lru_head->lru_prev = d; else lru_tail = d;
+	lru_head = d;
+}
+
+/* a cache hit: d moves to the young end (if it is on the list at all) */
+static void lru_touch(vfs_dentry_t *d)
+{
+	if (!d->lru_prev) return;   /* at the head, or not on the list */
+	lru_remove(d);
+	lru_push(d);
+}
+
+static void dentry_link(vfs_dentry_t *parent, vfs_dentry_t *d)
+{
+	d->parent = parent;
+	d->next   = parent->child;
+	if (d->next) d->next->pprev = &d->next;
+	parent->child = d;
+	d->pprev  = &parent->child;
+	if (d->inode && d->inode->lookup_copy) lru_push(d);
+}
+
+/* Out of its parent's child list and the cache order. next is left as it was:
+ * the dentry goes to the grave, and nothing follows it from here. */
+static void dentry_unlink(vfs_dentry_t *d)
+{
+	if (!d->pprev) return;
+	*d->pprev = d->next;
+	if (d->next) d->next->pprev = d->pprev;
+	d->pprev = NULL;
+	lru_remove(d);
+}
+
+/* A leaf no one holds: not a mountpoint or bind root (pins), not a task's root,
+ * not open, and its inode a copy lookup can make again. A mount's own root is in
+ * no child list (pprev NULL). */
+static int dentry_evictable(vfs_dentry_t *d)
+{
+	vfs_inode_t *in = d->inode;
+	return d->pprev && !d->child && !d->pins && !d->keep && !d->retired &&
+	       in && in->lookup_copy && !in->open_refs && !in->in_grave && d != root_dentry;
+}
+
+static void dentry_evict(vfs_dentry_t *d)
+{
+	vfs_inode_t *in = d->inode;
+	dentry_unlink(d);
+	uint64_t f = spin_lock_irq(&grave_lock);
+	in->in_grave = 2;
+	in->grave_next = grave_new.fr;
+	grave_new.fr = in;
+	spin_unlock_irq(&grave_lock, f);
+	dentry_retire(d);
+	dentry_count--;
+}
+
+/* Drop up to want of the oldest evictable dentries, looking at no more than eight
+ * times as many: one held for long goes to the young end and is not met again
+ * soon. except is the directory a caller is about to cache into. */
+static void dcache_evict(int want, vfs_dentry_t *except)
+{
+	int got = 0;
+	for (int seen = 0; lru_tail && got < want && seen < want * 8; seen++) {
+		vfs_dentry_t *d = lru_tail;
+		if (d != except && dentry_evictable(d)) {
+			dentry_evict(d);
+			got++;
+		} else {
+			lru_remove(d);
+			lru_push(d);
+		}
+	}
+}
+
+#define DCACHE_EVICT_BATCH 64
+
 static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inode_t *inode)
 {
 	/* The lookup that returned inode ran unlocked, so unlink may have overtaken
@@ -442,6 +548,7 @@ static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_
 	d->name[nlen] = '\0';
 
 	if (vfs_dentry_is_volatile(parent)) parent = NULL;   /* holds no child list */
+	if (parent && parent->retired) parent = NULL;        /* dropped meanwhile: nothing would find it */
 
 	d->inode  = inode;
 	d->parent = parent;
@@ -450,10 +557,19 @@ static vfs_dentry_t *_dentry_create(vfs_dentry_t *parent, const char *name, vfs_
 	d->pins   = 0;
 	d->retired = 0;
 	d->grave_next = NULL;
+	d->pprev  = NULL;
+	d->lru_prev = d->lru_next = NULL;
+	d->keep   = 0;
 
 	if (parent) {
-		d->next        = parent->child;
-		parent->child  = d;
+		/* full: make room among the oldest first, never under the new name */
+		if (dentry_count >= dentry_max_val) dcache_evict(DCACHE_EVICT_BATCH, parent);
+		static int warned;
+		if (dentry_count >= dentry_max_val && !warned) {   /* everything left is held */
+			warned = 1;
+			kprintf(KERN_WARN "vfs: %d dentries cached, past the limit (vfs_dentry_max)\n", dentry_count);
+		}
+		dentry_link(parent, d);
 		/* Caching a dentry is not a hard link: nlink is the directory-entry
 		 * count, managed by the filesystem (create/link/unlink), not bumped on
 		 * every path lookup. */
@@ -474,6 +590,13 @@ vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inod
 	if (!d) d = _dentry_create(parent, name, inode);
 	spin_unlock_irq(&vfs_lock, f);
 	return d;
+}
+
+void vfs_dentry_keep(vfs_dentry_t *d)
+{
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	d->keep = 1;
+	spin_unlock_irq(&vfs_lock, f);
 }
 
 void vfs_dentry_pin(vfs_dentry_t *d)
@@ -514,7 +637,7 @@ void vfs_dentry_free_tree(vfs_dentry_t *root, int free_inodes)
 	for (;;) {
 		while (d->child) d = d->child;
 		vfs_dentry_t *up = d == root ? NULL : d->parent;
-		if (up) up->child = d->next;
+		dentry_unlink(d);
 		if (free_inodes && d->inode) {
 			d->inode->cached = 0;
 			if (!d->inode->open_refs) vfs_inode_free(d->inode);
@@ -789,6 +912,7 @@ static vfs_dentry_t *walk_lookup(walk_t *w, const char *name)
 		while (child && strcmp(child->name, name) != 0) child = child->next;
 	}
 	if (child) {
+		lru_touch(child);
 		/* Found in dentry cache; free any prior volatile inode */
 		if (w->prev_volatile) { vfs_inode_free(w->prev_volatile); w->prev_volatile = NULL; }
 		w->d_is_volatile = 0;
@@ -813,14 +937,9 @@ static vfs_dentry_t *walk_lookup(walk_t *w, const char *name)
 		return NULL;
 	}
 	/* Cache only if parent is real (in dentry tree) and caching is allowed */
-	/* Past the limit a name is still cached: with no eviction yet, the
-	 * other choice is the volatile slot, where chroot, bind and a
-	 * chain of first-time names do not work. The limit only warns. */
-	static int warned;
-	if (dentry_count >= dentry_max_val && !warned) {
-		warned = 1;
-		kprintf(KERN_WARN "vfs: %d dentries cached, past the limit (vfs_dentry_max)\n", dentry_count);
-	}
+	/* Cached even past the limit: _dentry_create makes room by eviction, and
+	 * the volatile slot (where chroot, bind and a chain of first-time names
+	 * do not work) stays for directories that ask for it. */
 	if (!parent_was_volatile && !dir_inode->no_cache) {
 		/* Re-check: another task may have added this dentry while unlocked */
 		child = d->child;
@@ -2337,7 +2456,7 @@ int vfs_unlink(const char *path)
 		while (*dp) {
 			if (strcmp((*dp)->name, fname) == 0) {
 				vfs_dentry_t *dead = *dp;
-				*dp = dead->next;
+				dentry_unlink(dead);
 				dentry_retire(dead);
 				dentry_count--;
 				break;
@@ -2544,7 +2663,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 		vfs_dentry_t **tp = &new_parent->child;
 		while (*tp) {
 			if (strcmp((*tp)->name, new_name) == 0) {
-				vfs_dentry_t *dead = *tp; *tp = dead->next; dentry_retire(dead); dentry_count--; break;
+				vfs_dentry_t *dead = *tp; dentry_unlink(dead); dentry_retire(dead); dentry_count--; break;
 			}
 			tp = &(*tp)->next;
 		}
@@ -2558,10 +2677,8 @@ int vfs_rename(const char *old_path, const char *new_path)
 			memcpy(d->name, new_name, nlen);
 			d->name[nlen] = '\0';
 			if (old_parent != new_parent) {
-				*pp = d->next;
-				d->parent = new_parent;
-				d->next   = new_parent->child;
-				new_parent->child = d;
+				dentry_unlink(d);
+				dentry_link(new_parent, d);
 			}
 		}
 		spin_unlock_irq(&vfs_lock, f);

@@ -581,6 +581,7 @@ static long asess_create(const void *uattr, size_t size)
 	if (!S_ISDIR(d->inode->mode)) goto fail_path;
 	r = -22;
 	if (vfs_dentry_is_volatile(d)) goto fail_path;   /* the slot is reused, p->root outlives it */
+	vfs_dentry_keep(d);
 	s->root = d;
 
 	r = view_build(s, a.tmp_mib ? a.tmp_mib : ASESS_DEFAULT_TMP_MIB);

@@ -1228,6 +1228,7 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
 	}
 	/* FIFOs and device nodes keep no tie to priv, so they are not on the list */
 	if (vi->iops == &ext2_iops) {
+		vi->lookup_copy = 1;   /* the disk keeps the file: the dcache may drop this copy */
 		uint64_t f = spin_lock_irq(&fs->vn_lock);
 		vn->next = priv->vnodes;
 		priv->vnodes = vn;
