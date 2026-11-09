@@ -2531,6 +2531,40 @@ static spinlock_t    plock_lock = SPINLOCK_INIT;
 static int pl_overlap(posix_lock_t *l, int64_t s, int64_t e)
 { return l->start <= e && s <= l->end; }
 
+/* touching or overlapping: [s,e] and l could be one range (an end of
+ * 0x7FFF... is "to EOF and beyond", which has no next byte) */
+#define PL_EOF 0x7FFFFFFFFFFFFFFFLL
+static int pl_touch(posix_lock_t *l, int64_t s, int64_t e)
+{
+	return (e == PL_EOF || l->start <= e + 1) && (l->end == PL_EOF || s <= l->end + 1);
+}
+
+/* Take [start,end] out of pid's records on inode, as Linux does: a record inside
+ * it goes, one that sticks out keeps the part outside, one around it is split in
+ * two. An owner's records never overlap, so a split is the only one touched.
+ * Caller holds plock_lock. -ENOMEM (nothing changed) if the split finds no memory. */
+static int pl_cut(void *inode, long pid, int64_t start, int64_t end)
+{
+	posix_lock_t **pp = &g_plocks;
+	while (*pp) {
+		posix_lock_t *l = *pp;
+		if (l->inode != inode || l->pid != pid || !pl_overlap(l, start, end)) { pp = &l->next; continue; }
+		if (l->start < start && l->end > end) {
+			posix_lock_t *r = kmalloc(sizeof(*r));
+			if (!r) return -ENOMEM;
+			*r = *l;
+			r->start = end + 1;
+			l->end = start - 1;
+			l->next = r;
+			return 0;
+		}
+		if (l->start < start)    { l->end = start - 1; pp = &l->next; }
+		else if (l->end > end)   { l->start = end + 1; pp = &l->next; }
+		else                     { *pp = l->next; kfree(l); }
+	}
+	return 0;
+}
+
 /* returns 0 if granted, -11 (EAGAIN) on conflict; F_UNLCK via vfs_posix_unlock */
 int vfs_posix_setlk(void *inode, long pid, int type, int64_t start, int64_t end)
 {
@@ -2542,16 +2576,16 @@ int vfs_posix_setlk(void *inode, long pid, int type, int64_t start, int64_t end)
 			return -EAGAIN;   /* conflicting lock held by another process */
 		}
 	}
-	/* drop this pid's existing records overlapping the range, then add fresh */
-	posix_lock_t **pp = &g_plocks;
-	while (*pp) {
-		posix_lock_t *l = *pp;
-		if (l->inode == inode && l->pid == pid && pl_overlap(l, start, end)) {
-			*pp = l->next; kfree(l);
-		} else pp = &l->next;
-	}
+	/* this pid's own records: one of the same type that touches the range joins
+	 * it, then the range is cut out of the rest and added as one record */
 	posix_lock_t *nl = kmalloc(sizeof(*nl));
 	if (!nl) { spin_unlock_irq(&plock_lock, f); return -ENOMEM; }
+	for (posix_lock_t *l = g_plocks; l; l = l->next) {
+		if (l->inode != inode || l->pid != pid || l->type != type || !pl_touch(l, start, end)) continue;
+		if (l->start < start) start = l->start;
+		if (l->end > end) end = l->end;
+	}
+	if (pl_cut(inode, pid, start, end)) { spin_unlock_irq(&plock_lock, f); kfree(nl); return -ENOMEM; }
 	nl->inode = inode; nl->pid = pid; nl->type = type;
 	nl->start = start; nl->end = end;
 	nl->next = g_plocks; g_plocks = nl;
@@ -2562,13 +2596,7 @@ int vfs_posix_setlk(void *inode, long pid, int type, int64_t start, int64_t end)
 void vfs_posix_unlock(void *inode, long pid, int64_t start, int64_t end)
 {
 	uint64_t f = spin_lock_irq(&plock_lock);
-	posix_lock_t **pp = &g_plocks;
-	while (*pp) {
-		posix_lock_t *l = *pp;
-		if (l->inode == inode && l->pid == pid && pl_overlap(l, start, end)) {
-			*pp = l->next; kfree(l);
-		} else pp = &l->next;
-	}
+	pl_cut(inode, pid, start, end);
 	spin_unlock_irq(&plock_lock, f);
 }
 
@@ -2576,17 +2604,17 @@ void vfs_posix_unlock(void *inode, long pid, int64_t start, int64_t end)
  * holder's type/range/pid, or 0 if the range is free. */
 int vfs_posix_getlk(void *inode, long pid, int *type, int64_t *start, int64_t *end, int *holder_pid)
 {
+	/* the conflicting record that starts lowest, as Linux's sorted list gives */
 	uint64_t f = spin_lock_irq(&plock_lock);
+	posix_lock_t *c = NULL;
 	for (posix_lock_t *l = g_plocks; l; l = l->next) {
 		if (l->inode != inode || l->pid == pid) continue;
-		if (pl_overlap(l, *start, *end) && (*type == 1 || l->type == 1)) {
-			*type = l->type; *start = l->start; *end = l->end; *holder_pid = l->pid < 0 ? -1 : (int)l->pid;
-			spin_unlock_irq(&plock_lock, f);
-			return 1;
-		}
+		if (pl_overlap(l, *start, *end) && (*type == 1 || l->type == 1) && (!c || l->start < c->start))
+			c = l;
 	}
+	if (c) { *type = c->type; *start = c->start; *end = c->end; *holder_pid = c->pid < 0 ? -1 : (int)c->pid; }
 	spin_unlock_irq(&plock_lock, f);
-	return 0;
+	return c != NULL;
 }
 
 static void plock_drop(void *inode, long pid, int all)
