@@ -284,6 +284,7 @@ typedef struct {
 #define VMA_HUGE_1G 0x80 /* MAP_HUGETLB | MAP_HUGE_1GB — 1 GB blocks */
 #define VMA_LOCKED 0x100 /* mlock/MAP_LOCKED — prefaulted, exempt from future reclaim */
 #define VMA_NOWRITE 0x200 /* MAP_SHARED of a read-only fd: mprotect must not add write */
+#define VMA_NOEXEC  0x400 /* file from a noexec mount: mprotect must not add exec (Linux !VM_MAYEXEC) */
 
 typedef struct vma {
     uint64_t    vaddr;

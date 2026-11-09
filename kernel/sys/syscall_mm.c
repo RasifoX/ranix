@@ -299,6 +299,7 @@ typedef struct {
 	uint64_t    va, off;
 	size_t      len;
 	int         prot, flags, ro_shared;
+	int         noexec;     /* the file's mount is noexec: never PROT_EXEC */
 	uint32_t    vmflags;
 } mmap_file_t;
 
@@ -337,6 +338,7 @@ static long mmap_file_pages(const mmap_file_t *m)
 	uint32_t vf = VMA_USER | vma_prot(prot);
 	if (shared) vf |= VMA_SHARED;
 	if (m->ro_shared) vf |= VMA_NOWRITE;
+	if (m->noexec) vf |= VMA_NOEXEC;
 	vma_replace(p, va, len, vf);
 	return (long)va;
 }
@@ -373,6 +375,7 @@ static long mmap_file_fop(const mmap_file_t *m)
 	if ((cacheable || f->inode->fops->mmap_keep_pages) && (m->flags & MAP_SHARED))
 		vf |= VMA_SHARED;
 	if (m->ro_shared) vf |= VMA_NOWRITE;
+	if (m->noexec) vf |= VMA_NOEXEC;
 	vma_replace(p, va, len, vf);
 	return (long)va;
 }
@@ -407,6 +410,7 @@ static long mmap_file_copy(const mmap_file_t *m)
 	uint32_t vf = VMA_USER | vma_prot(m->prot);
 	if (m->flags & MAP_SHARED) vf |= VMA_SHARED;
 	if (m->ro_shared) vf |= VMA_NOWRITE;
+	if (m->noexec) vf |= VMA_NOEXEC;
 	vma_replace(p, va, len, vf);
 	if ((m->flags & MAP_SHARED) && !m->ro_shared && S_ISREG(f->inode->mode) && f->inode->fops->write &&
 	    filecopy_add(p->vm, va, len, f, m->off) != 0) {
@@ -424,7 +428,8 @@ static long mmap_file(process_t *p, uint64_t va, size_t len, int prot, int flags
 	if (!f) return -EBADF;
 	long r;
 
-	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { r = -EACCES; goto out; }
+	/* Linux do_mmap: EPERM here, and EACCES from a later mprotect (VMA_NOEXEC) */
+	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { r = -EPERM; goto out; }
 	/* a mapping reads the file; O_WRONLY may have been all the opener could get */
 	if (f->path[0] == '/' && (f->flags & 3) == O_WRONLY) { r = -EACCES; goto out; }
 
@@ -434,7 +439,8 @@ static long mmap_file(process_t *p, uint64_t va, size_t len, int prot, int flags
 	if (ro_shared && (prot & PROT_WRITE)) { r = -EACCES; goto out; }
 
 	mmap_file_t m = { .p = p, .f = f, .va = va, .off = off, .len = len, .prot = prot,
-	                  .flags = flags, .ro_shared = ro_shared, .vmflags = vmflags };
+	                  .flags = flags, .ro_shared = ro_shared, .vmflags = vmflags,
+	                  .noexec = (f->mnt_flags & MS_NOEXEC) != 0 };
 	const vfs_fops_t *ops = f->inode->fops;
 	if (ops && ops->mmap_page)
 		r = mmap_file_pages(&m);
@@ -550,9 +556,11 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	if (prot & PROT_WRITE) vmaflags |= VMA_WRITE;
 	if (prot & PROT_EXEC)  vmaflags |= VMA_EXEC;
 	uint64_t vf = spin_lock_irq(&p->vm->fault_lock);
-	if (prot & PROT_WRITE)
+	/* what the mapping was refused at mmap time it cannot gain here */
+	uint32_t never = ((prot & PROT_WRITE) ? VMA_NOWRITE : 0) | ((prot & PROT_EXEC) ? VMA_NOEXEC : 0);
+	if (never)
 		for (vma_t *v = p->vm->vmas; v; v = v->next)
-			if ((v->flags & VMA_NOWRITE) && v->vaddr < addr + len && v->vaddr + v->size > addr) {
+			if ((v->flags & never) && v->vaddr < addr + len && v->vaddr + v->size > addr) {
 				spin_unlock_irq(&p->vm->fault_lock, vf);
 				return -EACCES;
 			}
@@ -561,7 +569,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 		if (vend <= addr || vstart >= addr + len) continue; /* no overlap */
 		uint64_t lo = addr > vstart ? addr : vstart;
 		uint64_t hi = (addr + len) < vend ? (addr + len) : vend;
-		uint32_t newf = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON | VMA_NOWRITE));
+		uint32_t newf = vmaflags | (v->flags & (VMA_SHARED | VMA_ANON | VMA_NOWRITE | VMA_NOEXEC));
 		if (vstart == lo && vend == hi) {
 			v->flags = newf;                       /* whole VMA */
 		} else {
