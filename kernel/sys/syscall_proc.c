@@ -752,12 +752,13 @@ static long sys_clock_getres(int clkid, linux_timespec_t *res)
 	}
 	if (res) {
 		linux_timespec_t r;
-		/* coarse clocks tick at the timer; the rest are ~nanosecond (HPET/cntvct) */
-		if (clkid == CLOCK_REALTIME_COARSE || clkid == CLOCK_MONOTONIC_COARSE) {
-			r.tv_sec = 0; r.tv_nsec = 1000000000L / TIMER_HZ;
-		} else {
-			r.tv_sec = 0; r.tv_nsec = 1;
-		}
+		/* The resolution of a clock is what its timers can do, as Linux reports
+		 * it (hrtimer_resolution): sleeps and timeouts here run on the tick, so
+		 * a tick, like a Linux kernel without high resolution timers. Reading
+		 * the clock stays nanosecond-fine. CPU-time clocks: 1 ns. */
+		r.tv_sec = 0;
+		r.tv_nsec = (clkid == CLOCK_PROCESS_CPUTIME_ID || clkid == CLOCK_THREAD_CPUTIME_ID)
+		          ? 1 : 1000000000L / TIMER_HZ;
 		return copy_to_user(res, &r, sizeof(r)) ? -14 : 0;
 	}
 	return 0;
