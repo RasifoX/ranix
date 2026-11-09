@@ -773,6 +773,9 @@ check "c-compat"       "OK"  "$(timeout 5 /bin/test_compat 2>/dev/null | tail -1
 check "c-ptrace2"     "OK" "$(timeout 40 /bin/test_ptrace2 2>&1 | tail -1)"
 check "c-sarestart"   "OK" "$(timeout 20 /bin/test_sarestart 2>&1 | tail -1)"
 check "c-ifioctl"      "OK"  "$(timeout 5 /bin/test_ifioctl 2>/dev/null | tail -1)"
+# set*id rights and filesystem ids (W's audit, AC's fixes): failures print their lines
+CR=$(timeout 15 /bin/test_setxid_caps 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  setxid-caps: /'
+check "c-setxid-caps"  "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──

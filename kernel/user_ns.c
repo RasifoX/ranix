@@ -228,6 +228,19 @@ int may_create_ns(struct process *p, unsigned long flags)
 	       cap_has(t->cap_effective, CAP_SYS_ADMIN);
 }
 
+/* May p give itself the uid or gid id it does not already hold (set*id)? The
+ * right is CAP_SETUID / CAP_SETGID, never the numbers themselves (Linux
+ * ns_capable_setid). Ids arrive as kuids, so a capability gained inside a user
+ * namespace reaches only ids that namespace maps: otherwise setuid(0) there
+ * would make the machine's root. */
+int capable_setid(struct process *p, int cap, uint32_t id)
+{
+	process_t *t = (process_t *)p;
+	if (capable_task(p, cap)) return 1;
+	if (!t->user_ns || t->user_ns == &init_user_ns || !capable_own_ns(p, cap)) return 0;
+	return cap == CAP_SETGID ? kgid_has_mapping(t->user_ns, id) : kuid_has_mapping(t->user_ns, id);
+}
+
 int task_may_control(struct process *t, int cap)
 {
 	process_t *cur = task_current(), *tg = (process_t *)t;

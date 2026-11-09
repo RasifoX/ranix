@@ -520,11 +520,7 @@ static long sys_setreuid(uid_t ruid, uid_t euid)
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
 	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
-	/* unprivileged: new values must come from the current triplet */
-	if (p->euid != 0) {
-		if (new_r != p->uid && new_r != p->euid && new_r != p->suid) return -1;
-		if (new_e != p->uid && new_e != p->euid && new_e != p->suid) return -1;
-	}
+	if (!may_take_uid(p, new_r) || !may_take_uid(p, new_e)) return -EPERM;
 	p->uid  = new_r;
 	p->euid = new_e;
 	/* setreuid: if ruid set or euid != old euid, update suid to new euid */
@@ -540,10 +536,7 @@ static long sys_setregid(gid_t rgid, gid_t egid)
 	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
 	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
 	gid_t old_e = p->egid;
-	if (p->egid != 0) {
-		if (new_r != p->gid && new_r != p->egid && new_r != p->sgid) return -1;
-		if (new_e != p->gid && new_e != p->egid && new_e != p->sgid) return -1;
-	}
+	if (!may_take_gid(p, new_r) || !may_take_gid(p, new_e)) return -EPERM;
 	p->gid  = new_r;
 	p->egid = new_e;
 	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != old_e))
@@ -559,11 +552,8 @@ static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
 	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
 	uid_t new_s = (suid != (uid_t)-1) ? suid : p->suid;
-	if (p->euid != 0) {
-		if (new_r != p->uid && new_r != p->euid && new_r != p->suid) return -1;
-		if (new_e != p->uid && new_e != p->euid && new_e != p->suid) return -1;
-		if (new_s != p->uid && new_s != p->euid && new_s != p->suid) return -1;
-	}
+	if (!may_take_uid(p, new_r) || !may_take_uid(p, new_e) || !may_take_uid(p, new_s))
+		return -EPERM;
 	p->uid = new_r; p->euid = new_e; p->suid = new_s;
 	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
@@ -584,11 +574,8 @@ static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
 	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
 	gid_t new_s = (sgid != (gid_t)-1) ? sgid : p->sgid;
-	if (p->egid != 0) {
-		if (new_r != p->gid && new_r != p->egid && new_r != p->sgid) return -1;
-		if (new_e != p->gid && new_e != p->egid && new_e != p->sgid) return -1;
-		if (new_s != p->gid && new_s != p->egid && new_s != p->sgid) return -1;
-	}
+	if (!may_take_gid(p, new_r) || !may_take_gid(p, new_e) || !may_take_gid(p, new_s))
+		return -EPERM;
 	p->gid = new_r; p->egid = new_e; p->sgid = new_s;
 	return 0;
 }

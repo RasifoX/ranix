@@ -37,6 +37,8 @@
 struct process;
 int capable_task(struct process *p, int cap);
 int capable_own_ns(struct process *p, int cap);
+/* May p take uid/gid id it does not hold (cap = CAP_SETUID or CAP_SETGID)? */
+int capable_setid(struct process *p, int cap, uint32_t id);
 /* May p create the namespaces in flags (CLONE_NEW*)? */
 int may_create_ns(struct process *p, unsigned long flags);
 /* May the caller change t? Yes for itself, its own uid, or holding cap. */
