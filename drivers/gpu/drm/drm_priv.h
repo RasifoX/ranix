@@ -165,10 +165,23 @@ typedef struct {
 	int  (*debug)(char *o, int max);
 	int  (*selftest)(void);
 	const drm_driver_t *(*driver)(void);       /* GEM/execbuffer ioctls, or NULL */
+
+	/* Optional, for a back end that owns its scanout (virtio_gpu.c) and so
+	 * needs no firmware framebuffer. Coordinates are pixels, x2/y2 exclusive. */
+	int  (*modes)(uint32_t *wh, int max);      /* sizes it can show (w, h pairs), preferred first */
+	int  (*set_mode)(uint32_t w, uint32_t h, drm_fw_fb_t *fb);   /* 0: switched; fb is the new copy target */
+	void (*damage)(drm_gem_t *o, int x1, int y1, int x2, int y2);   /* o (NULL: the copy target) changed there */
+	int  (*cursor)(drm_gem_t *o, uint32_t w, uint32_t h, uint32_t pitch, int32_t x, int32_t y);
+	                                           /* 0: the hardware shows it (o NULL: hides it) */
+	void (*cursor_move)(int32_t x, int32_t y);
 } drm_display_t;
 const drm_display_t *drm_display(void);         /* NULL: firmware framebuffer only */
 const drm_display_t *intel_display_probe(const drm_fw_fb_t *fb, struct drm_mode_modeinfo *mode,
                                          uint64_t *frame_ns, int *can_flip);
+/* virtio-gpu (virtio/virtio_gpu.c): fills fb with its own copy target and mode
+ * with the preferred size; also points drm_pci_* at the device. */
+const drm_display_t *virtio_gpu_probe(drm_fw_fb_t *fb, struct drm_mode_modeinfo *mode,
+                                      uint64_t *frame_ns, int *can_flip);
 
 /* KMS (drm_kms.c) */
 int  drm_kms_init(void);
@@ -176,6 +189,7 @@ void drm_kms_file_close(drm_filep_t *fp);
 void drm_kms_gem_release(drm_gem_t *o);
 void drm_kms_tick(void);
 int  drm_kms_mode_size(uint32_t *w, uint32_t *h);
+int  drm_kms_modes(uint32_t *wh, int max);      /* the connector's sizes, preferred first */
 int  drm_kms_connector_status(void);
 uint32_t drm_kms_dpms(void);
 int  drm_kms_hwflip(int set);       /* set < 0: query */
