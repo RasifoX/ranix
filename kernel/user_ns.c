@@ -74,6 +74,27 @@ static uint32_t map_up(uid_extent_t *m, int n, uint32_t kid)      /* kuid -> ns-
 	return OVERFLOW_UID;
 }
 
+static int has_up(uid_extent_t *m, int n, uint32_t kid)
+{
+	for (int i = 0; i < n; i++)
+		if (kid >= m[i].lower_first && kid - m[i].lower_first < m[i].count)
+			return 1;
+	return 0;
+}
+
+/* Does this kuid/kgid have a name in ns? (Linux kuid_has_mapping.) The
+ * overflow id from from_kuid cannot answer it: 65534 may be mapped. */
+int kuid_has_mapping(user_namespace_t *ns, uint32_t kuid)
+{
+	if (!ns || ns == &init_user_ns) return 1;
+	return has_up(ns->uid_map, ns->n_uid, kuid);
+}
+int kgid_has_mapping(user_namespace_t *ns, uint32_t kgid)
+{
+	if (!ns || ns == &init_user_ns) return 1;
+	return has_up(ns->gid_map, ns->n_gid, kgid);
+}
+
 uint32_t from_kuid(user_namespace_t *ns, uint32_t kuid)
 {
 	if (!ns || ns == &init_user_ns) return kuid;
