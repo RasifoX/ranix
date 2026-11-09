@@ -426,6 +426,8 @@ static inline int fd_is_cloexec(fd_table_t *t, int fd)
 /* inotify VFS hook — set by inotify subsystem at first init */
 typedef void (*vfs_inotify_fn_t)(const char *path, uint32_t mask, const char *name);
 extern vfs_inotify_fn_t vfs_inotify_hook;
+extern volatile int vfs_inotify_users;   /* live inotify instances: 0 skips every event */
+extern uint32_t vfs_inotify_cookie;      /* the rename the next MOVED_FROM/MOVED_TO pair belongs to */
 
 static inline void fd_set_cloexec(fd_table_t *t, int fd, int v)
 {

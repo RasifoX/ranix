@@ -29,6 +29,17 @@ static vfs_dentry_t *follow_mounts(vfs_dentry_t *d);
 static vfs_mount_t *mount_on(mnt_namespace_t *ns, vfs_dentry_t *d);
 
 vfs_inotify_fn_t vfs_inotify_hook = NULL;
+volatile int vfs_inotify_users;
+uint32_t vfs_inotify_cookie;
+#define IN_ACCESS        0x00000001u
+#define IN_MODIFY        0x00000002u
+#define IN_ATTRIB        0x00000004u
+#define IN_CLOSE_WRITE   0x00000008u
+#define IN_CLOSE_NOWRITE 0x00000010u
+#define IN_OPEN          0x00000020u
+#define IN_MOVE_SELF     0x00000800u
+#define IN_DELETE_SELF   0x00000400u
+#define IN_ISDIR         0x40000000u
 
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static int dentry_count = 0;
@@ -1444,6 +1455,30 @@ static char *vfs_parent_alloc(const char *path, const char **name)
 	return dir;
 }
 
+/* inotify works by path: a watch on path hears its events unnamed, a watch on
+ * its directory hears them with the name (kernel/sys/syscall_event.c). */
+static void vfs_canon_path(const char *in, char *out, size_t outsz);
+static void vfs_notify(const char *path, uint32_t mask, int isdir)
+{
+	if (!vfs_inotify_hook || !vfs_inotify_users || !path || path[0] != '/') return;
+	if (isdir) mask |= IN_ISDIR;
+	char *canon = kmalloc(PATH_MAX);   /* "dir/." names dir, not "." in it */
+	if (!canon) return;
+	vfs_canon_path(path, canon, PATH_MAX);
+	vfs_inotify_hook(canon, mask, NULL);
+	const char *name;
+	char *dir = vfs_parent_alloc(canon, &name);
+	if (dir && *name) vfs_inotify_hook(dir, mask, name);
+	kfree(dir);
+	kfree(canon);
+}
+
+static void notify_file(vfs_file_t *f, uint32_t mask)
+{
+	if (vfs_inotify_users && f && f->inode && f->path[0] == '/')
+		vfs_notify(f->path, mask, S_ISDIR(f->inode->mode));
+}
+
 /* ── filesystem type registry ────────────────────────────── */
 
 typedef struct vfs_fstype {
@@ -2243,6 +2278,7 @@ void fput(vfs_file_t *f)
 	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) != 0) return;
 	vfs_flock_release(f);
 	vfs_posix_drop_ofd(f);
+	notify_file(f, (f->flags & 3) != 0 ? IN_CLOSE_WRITE : IN_CLOSE_NOWRITE);
 	if (f->inode && f->inode->fops && f->inode->fops->close)
 		f->inode->fops->close(f);
 	if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
@@ -2474,6 +2510,7 @@ again:;
 		return fd;
 	}
 	if (flags & O_CLOEXEC) BM_SET(fds->cloexec, fd);
+	notify_file(f, IN_OPEN);
 	return fd;
 }
 
@@ -2641,6 +2678,7 @@ void vfs_file_put(vfs_file_t *f)
 	if (atomic_sub_fetch32((volatile uint32_t *)&f->refcount, 1) == 0) {
 		vfs_flock_release(f);
 		vfs_posix_drop_ofd(f);
+		notify_file(f, (f->flags & 3) != 0 ? IN_CLOSE_WRITE : IN_CLOSE_NOWRITE);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
 		if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
@@ -2675,6 +2713,7 @@ ssize_t vfs_read(int fd, void *buf, size_t len)
 	else
 		r = (f->inode->fops && f->inode->fops->read)
 		  ? f->inode->fops->read(f, buf, len) : -22; /* EINVAL */
+	if (r > 0) notify_file(f, IN_ACCESS);
 	fput(f);
 	return r;
 }
@@ -2696,6 +2735,7 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 			f->pos = (off_t)f->inode->size;
 		r = f->inode->fops->write(f, buf, len);
 	}
+	if (r > 0) notify_file(f, IN_MODIFY);
 	fput(f);
 	return r;
 }
@@ -2752,6 +2792,8 @@ int vfs_mkdir(const char *path, mode_t mode)
 
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, dname);
 	if (in) vfs_dentry_create(parent, dname, in);
+	if (vfs_inotify_hook && vfs_inotify_users)
+		vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/ | IN_ISDIR, dname);
 	kfree(dir_path);
 	return 0;
 }
@@ -2846,9 +2888,19 @@ int vfs_unlink(const char *path)
 	if (dentry_child_pinned(parent, fname)) { kfree(dir_path); return -EBUSY; } /* EBUSY */
 	if (sticky_denied(parent->inode, fname)) { kfree(dir_path); return -1; } /* EPERM */
 
+	uint32_t isdir = 0;
+	if (vfs_inotify_hook && vfs_inotify_users && parent->inode->iops->lookup) {
+		vfs_inode_t *vi = parent->inode->iops->lookup(parent->inode, fname);
+		if (vi) { isdir = S_ISDIR(vi->mode) ? IN_ISDIR : 0; if (!vi->cached) vfs_inode_free(vi); }
+	}
 	int r = parent->inode->iops->unlink(parent->inode, fname);
 	if (r == -1) r = -2;   /* a filesystem's "no such name"; -1 above is EPERM */
-	if (r == 0 && vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000200 /*IN_DELETE*/, fname);
+	if (r == 0 && vfs_inotify_hook) {
+		/* a file's link count changed (IN_ATTRIB), its name went, then the file */
+		if (!isdir && vfs_inotify_users) vfs_inotify_hook(path, IN_ATTRIB, NULL);
+		vfs_inotify_hook(dir_path, 0x00000200 /*IN_DELETE*/ | isdir, fname);
+		if (vfs_inotify_users) vfs_inotify_hook(path, IN_DELETE_SELF, NULL);   /* and its watch goes */
+	}
 	if (r == 0) {
 		uint64_t lf = spin_lock_irq(&vfs_lock);
 		vfs_dentry_t **dp = &parent->child;
@@ -3072,9 +3124,13 @@ int vfs_rename(const char *old_path, const char *new_path)
 
 	ret = old_in->iops->rename(old_in, old_name, new_in, new_name);
 	if (ret == 0 && moving_dir) fs_rename_cwds(fs_root_of(task_current()), old_path, new_path);
-	if (ret == 0 && vfs_inotify_hook) {
-		vfs_inotify_hook(old_dir, 0x00000040 /*IN_MOVED_FROM*/, old_name);
-		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/,   new_name);
+	if (ret == 0 && vfs_inotify_hook && vfs_inotify_users) {
+		uint32_t isdir = moving_dir ? IN_ISDIR : 0;
+		vfs_inotify_cookie = __atomic_add_fetch(&vfs_inotify_cookie, 1, __ATOMIC_RELAXED) ?: 1;
+		vfs_inotify_hook(old_dir, 0x00000040 /*IN_MOVED_FROM*/ | isdir, old_name);
+		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/   | isdir, new_name);
+		/* MOVE_SELF's name is where it went: watches on and under it follow */
+		vfs_inotify_hook(old_path, IN_MOVE_SELF, new_path);
 	}
 	if (ret == 0) {
 		uint64_t f = spin_lock_irq(&vfs_lock);
@@ -3184,6 +3240,7 @@ int vfs_chmod(const char *path, mode_t mode)
 	if (vfs_dentry_readonly(d)) return -EROFS;
 	vfs_inode_t *in = d->inode;
 	int r = vfs_chmod_inode(in, mode);
+	if (!r) vfs_notify(path, IN_ATTRIB, S_ISDIR(in->mode));
 	if (!in->cached) vfs_inode_free(in);
 	return r;
 }
@@ -3217,6 +3274,7 @@ int vfs_chown(const char *path, uid_t uid, gid_t gid)
 	if (vfs_dentry_readonly(d)) return -EROFS;
 	vfs_inode_t *in = d->inode;
 	int r = vfs_chown_inode(in, uid, gid);
+	if (!r) vfs_notify(path, IN_ATTRIB, S_ISDIR(in->mode));
 	if (!in->cached) vfs_inode_free(in);
 	return r;
 }
