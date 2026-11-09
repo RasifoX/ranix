@@ -514,10 +514,20 @@ out:
 	return r;
 }
 
+/* the mmap flags Linux knows: SHARED/PRIVATE, FIXED, ANONYMOUS, 32BIT, GROWSDOWN,
+ * DENYWRITE, EXECUTABLE, LOCKED, NORESERVE, POPULATE, NONBLOCK, STACK, HUGETLB,
+ * SYNC, FIXED_NOREPLACE, UNINITIALIZED and the huge page size bits */
+#define MAP_KNOWN_FLAGS 0xFC1FF973u
+
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
 	if (len == 0 || (off & (PAGE_SIZE - 1)) || (int64_t)off < 0 || off + len < off) return -EINVAL;
 	if (!(flags & (MAP_SHARED | MAP_PRIVATE))) return -EINVAL;
+	/* MAP_SHARED_VALIDATE is MAP_SHARED that refuses a flag it does not know */
+	if ((flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)) {
+		if ((unsigned)flags & ~MAP_KNOWN_FLAGS) return -EOPNOTSUPP;
+		flags &= ~MAP_PRIVATE;
+	}
 	if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1))) return -EINVAL;
 	if (len >= USER_SPAN) return -ENOMEM;   /* more than all of user space; rounding must not wrap */
 	process_t *p = task_current();

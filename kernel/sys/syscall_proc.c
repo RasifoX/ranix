@@ -2205,9 +2205,13 @@ static long do_waitpid(pid_t pid, wait_snap_t *ws, int flags, void *rusage)
 }
 
 /* wait4: exits always count; WEXITED and WNOWAIT are waitid's (Linux EINVAL) */
+#define WAIT4_KNOWN (WNOHANG | WUNTRACED | 8 /* WCONTINUED */ | 0x20000000 /* __WNOTHREAD */ | \
+                     0x40000000 /* __WALL */ | 0x80000000u /* __WCLONE */)
 static long sys_waitpid(pid_t pid, int *ustatus, int flags, void *rusage)
 {
 	if (flags & (WEXITED | WNOWAIT)) return -EINVAL;
+	if ((unsigned)flags & ~(unsigned)WAIT4_KNOWN) return -EINVAL;
+	if (pid == (pid_t)0x80000000) return -ESRCH;   /* INT_MIN: no group -INT_MIN */
 	wait_snap_t ws = { 0 };
 	long r = do_waitpid(pid, &ws, flags | WEXITED, rusage);
 	if (r > 0 && ustatus && put_user(ws.status, ustatus) != 0) return -EFAULT;
