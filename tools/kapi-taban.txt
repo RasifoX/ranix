@@ -22,10 +22,6 @@ fn	kernel/fs/sysfs.c	sysfs_file_read	124
 fn	kernel/mm/vm.c	vm_handle_fault	147
 fn	kernel/net/tcp.c	tcp_input	214
 fn	kernel/sched.c	schedule	129
-fn	kernel/sys/syscall_net.c	do_recvfrom	166
-fn	kernel/sys/syscall_net.c	sock_sendto	174
-fn	kernel/sys/syscall_net.c	sys_connect	180
-fn	kernel/sys/syscall_net.c	sys_recvmsg	169
 fn	kernel/sys/syscall_ptrace.c	ptrace_req	157
 mode	kernel/fs/pty.c	"ptmx"
 mode	kernel/fs/pty.c	names[i]
