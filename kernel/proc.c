@@ -1551,48 +1551,62 @@ void proc_find_zombie(pid_t ppid, process_t **out_child, int *out_any_alive)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* event: 1 exit, 2/5 ptrace stop, 3 job stop, 4 continued (wait4 status words) */
+static void wait_snap(process_t *c, int event, wait_snap_t *s)
+{
+	if (!s) return;
+	if (event == 1)
+		s->status = c->killed_by_sig ? (c->exit_code & 0x7F) : (c->exit_code & 0xFF) << 8;
+	else if (event == 2 || event == 5)
+		s->status = ((c->ptrace_stop_sig ? c->ptrace_stop_sig : 5 /* SIGTRAP */) << 8) | 0x7f;
+	else if (event == 3)
+		s->status = (c->job_stop_sig << 8) | 0x7f;
+	else
+		s->status = 0xffff;
+	int v = task_pid_nr_ns(c, current_pid_ns());
+	s->nr  = v ? v : (int)c->pid;
+	s->uid = c->uid;
+	s->trapped = event == 2 || event == 5;
+}
+
 /* Like proc_find_zombie but, if no zombie is found and will_sleep is set,
  * atomically marks parent PROC_SLEEPING under sched_lock so that a
- * concurrent task_exit cannot sneak its wakeup between our check and sleep. */
-#define WUNTRACED  2
-#define WCONTINUED 8
-
-/* event: 0 none, 1 zombie (reaped), 3 stopped (WUNTRACED), 4 continued
- * (WCONTINUED). For a stop/continue *out_child is set and marked reported. */
+ * concurrent task_exit cannot sneak its wakeup between our check and sleep.
+ * event: 0 none, 1 zombie (reaped), 3 stopped (WUNTRACED), 4 continued
+ * (WCONTINUED), 5 ptrace stop. An exit counts only with WEXITED; with WNOWAIT
+ * nothing is marked reaped or reported, so the next wait sees it again. */
 void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
-                               process_t **out_child, int *out_any_alive, int *out_event)
+                               process_t **out_child, int *out_any_alive, int *out_event,
+                               wait_snap_t *snap)
 {
 	*out_child = NULL;
 	*out_any_alive = 0;
 	*out_event = 0;
+	int keep = (flags & WNOWAIT) != 0;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	int dead_pending = 0;
 	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
 		if (WAIT_MINE(c, ppid, parent)) {
-			if (c->tracer == (pid_t)parent->pid && c->ptrace_stop && !c->ptrace_stop_reported) {
-				c->ptrace_stop_reported = 1;
-				*out_child = c;
-				*out_event = 5;
-				break;
-			}
+			int ev = 0;
 			int held = (c->tracer && c->tracer != (pid_t)parent->pid) || group_running(c);
-			if (c->state == PROC_ZOMBIE && !c->reaped && !held) {
-				c->reaped = 1;
-				*out_child = c;
-				*out_event = 1;
-				break;
+			if (c->tracer == (pid_t)parent->pid && c->ptrace_stop && !c->ptrace_stop_reported) {
+				if (!keep) c->ptrace_stop_reported = 1;
+				ev = 5;
+			} else if (c->state == PROC_ZOMBIE && !c->reaped && !held && (flags & WEXITED)) {
+				if (!keep) c->reaped = 1;
+				ev = 1;
+			} else if ((flags & WUNTRACED) && c->job_stopped && !c->job_stop_reported) {
+				if (!keep) c->job_stop_reported = 1;
+				ev = 3;
+			} else if ((flags & WCONTINUED) && c->job_continued) {
+				if (!keep) c->job_continued = 0;
+				ev = 4;
 			}
-			if ((flags & WUNTRACED) && c->job_stopped && !c->job_stop_reported) {
-				c->job_stop_reported = 1;
+			if (ev) {
+				wait_snap(c, ev, snap);
 				*out_child = c;
-				*out_event = 3;
-				break;
-			}
-			if ((flags & WCONTINUED) && c->job_continued) {
-				c->job_continued = 0;
-				*out_child = c;
-				*out_event = 4;
+				*out_event = ev;
 				break;
 			}
 			if (c->state == PROC_DEAD)
@@ -1613,12 +1627,15 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, in
 	spin_unlock_irq(&sched_lock, f);
 }
 
-/* Atomically check child state: zombie=1, ptrace_stop=2, else sleep (0).
- * If sleeping and will_sleep is set, marks parent PROC_SLEEPING under the
- * same lock hold that checked the child — no wakeup can slip through. */
-/* zombie=1, ptrace=2, job-stopped(WUNTRACED)=3, continued(WCONTINUED)=4, sleep=0 */
-int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags)
+/* Atomically check child state; if there is nothing to report and will_sleep
+ * is set, marks parent PROC_SLEEPING under the same lock hold that checked the
+ * child — no wakeup can slip through.
+ * zombie=1, ptrace=2, job-stopped(WUNTRACED)=3, continued(WCONTINUED)=4,
+ * sleep=0, -1: a zombie but no WEXITED (nothing will ever come: ECHILD). */
+int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags,
+                        wait_snap_t *snap)
 {
+	int keep = (flags & WNOWAIT) != 0;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int zombie = (child->state == PROC_ZOMBIE) && !group_running(child) &&
 	             !(child->tracer && child->tracer != (pid_t)parent->pid);
@@ -1627,19 +1644,22 @@ int proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int
 	int jstop  = !zombie && !ptrace && (flags & WUNTRACED)
 	             && child->job_stopped && !child->job_stop_reported;
 	int jcont  = !zombie && !ptrace && !jstop && (flags & WCONTINUED) && child->job_continued;
-	if (ptrace) child->ptrace_stop_reported = 1;
-	if (jstop)  child->job_stop_reported = 1;
-	if (jcont)  child->job_continued = 0;
+	int ev = zombie ? 1 : (ptrace ? 2 : (jstop ? 3 : (jcont ? 4 : 0)));
+	if (zombie && !(flags & WEXITED)) ev = -1;
+	if (ptrace && !keep) child->ptrace_stop_reported = 1;
+	if (jstop && !keep)  child->job_stop_reported = 1;
+	if (jcont && !keep)  child->job_continued = 0;
+	if (ev > 0) wait_snap(child, ev, snap);
 	/* A child in PROC_DEAD has exited and already passed its wakeup in
 	 * task_exit; it only becomes PROC_ZOMBIE later in schedule(). Sleeping now
 	 * would miss that wakeup forever — yield and retry until it is ZOMBIE. */
-	if (!zombie && !ptrace && !jstop && !jcont && will_sleep && child->state != PROC_DEAD) {
+	if (!ev && will_sleep && child->state != PROC_DEAD) {
 		parent->state = PROC_SLEEPING;
 		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
 		parent->in_wait = 1;
 	}
 	spin_unlock_irq(&sched_lock, f);
-	return zombie ? 1 : (ptrace ? 2 : (jstop ? 3 : (jcont ? 4 : 0)));
+	return ev;
 }
 
 void proc_reap(process_t *child)
