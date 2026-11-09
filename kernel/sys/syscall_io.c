@@ -620,11 +620,50 @@ static long sys_read(int fd, void *buf, size_t len)
 	return vfs_read(fd, buf, len);
 }
 
+/* writev to a pipe of at most what the pipe takes atomically (PIPE_BUF_SIZE - 1,
+ * pipe_write's rule) is one write, as on Linux: gathered here and written once.
+ * Written iovec by iovec, a reader could take the first part and close the pipe
+ * before the rest came, and the writer died of SIGPIPE although its whole record
+ * was sent (musl's printf ends a line with a two-iovec writev). 1: handled. */
+static int writev_pipe_atomic(int fd, const iovec_t *iov, int cnt, long *ret)
+{
+	process_t *p = task_current();
+	vfs_file_t *f = fget(p->fds, fd);
+	if (!f) return 0;
+	int fifo = f->inode && S_ISFIFO(f->inode->mode);
+	fput(f);
+	if (!fifo || cnt < 2 || cnt > 8) return 0;   /* stdio uses 2 */
+
+	iovec_t v[8];
+	size_t total = 0;
+	for (int i = 0; i < cnt; i++) {
+		if (copy_from_user(&v[i], &iov[i], sizeof(v[i])) != 0) { *ret = -EFAULT; return 1; }
+		if (v[i].iov_len > PIPE_BUF_SIZE - 1 - total) return 0;   /* too big: not atomic */
+		total += v[i].iov_len;
+	}
+	if (total == 0) { *ret = 0; return 1; }
+	uint8_t *kbuf = kmalloc(total);
+	if (!kbuf) { *ret = -ENOMEM; return 1; }
+	size_t off = 0;
+	for (int i = 0; i < cnt; i++) {
+		if (v[i].iov_len && copy_from_user(kbuf + off, v[i].iov_base, v[i].iov_len) != 0) {
+			kfree(kbuf);
+			*ret = -EFAULT;
+			return 1;
+		}
+		off += v[i].iov_len;
+	}
+	*ret = vfs_write(fd, kbuf, total);
+	kfree(kbuf);
+	return 1;
+}
+
 static long sys_writev(int fd, const iovec_t *iov, int cnt)
 {
 	if (cnt < 0 || cnt > 1024) return -EINVAL;   /* IOV_MAX */
 
 	long total = 0;
+	if (writev_pipe_atomic(fd, iov, cnt, &total)) return total;
 	for (int i = 0; i < cnt; i++) {
 		iovec_t v;
 		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -EFAULT;
