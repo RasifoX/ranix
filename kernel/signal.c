@@ -987,9 +987,9 @@ static void signal_dispatch_one(arch_context_t *tf)
 
 	/* A traced task shows the tracer each signal first; stops have their own path */
 	if (p->tracer && sig != SIGKILL && !(sig == SIGSTOP || sig_default_stop(sig))) {
-		int s2 = ptrace_signal_stop(tf, sig, &si);
+		int s2 = ptrace_signal_stop(tf, sig, &si);   /* fills si for s2 */
 		if (!s2) return;              /* the tracer dropped it */
-		if (s2 != sig) { sig = s2; si.si_signo = s2; si.si_code = 0; }
+		sig = s2;
 	}
 
 	sigaction_t *sa = &p->sighand->actions[sig - 1];
