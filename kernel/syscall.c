@@ -344,6 +344,16 @@ static int seccomp_rank(uint32_t r)
 	}
 }
 
+/* The 32-bit word at byte offset k of the record, 0 past its end. Copied, not
+ * read through a uint32_t pointer: the record's fields are 64-bit, and a
+ * mismatched-type load lets the compiler drop the stores that filled them. */
+static int seccomp_load(const struct seccomp_data *d, uint32_t k, uint32_t *w)
+{
+	if ((size_t)k + 4 > sizeof(*d)) return 0;
+	__builtin_memcpy(w, (const uint8_t *)d + k, 4);
+	return 1;
+}
+
 /* pc and offsets are 64-bit so a huge k from the program cannot wrap back into it */
 static long seccomp_run_filter(const struct seccomp_filter *flt, const struct seccomp_data *d)
 {
@@ -352,13 +362,10 @@ static long seccomp_run_filter(const struct seccomp_filter *flt, const struct se
 	for (size_t pc = 0; pc < flt->len; pc++) {
 		const struct sock_filter *i = &f[pc];
 		switch (i->code) {
-		case 0x20: /* BPF_LD|BPF_W|BPF_ABS */
-			if ((size_t)i->k + 4 > sizeof(*d)) return 0;
-			A = *(const uint32_t *)((const uint8_t *)d + i->k); break;
+		case 0x20: if (!seccomp_load(d, i->k, &A)) return 0; break;  /* BPF_LD|BPF_W|BPF_ABS */
 		case 0x80: A = (uint32_t)sizeof(*d); break;           /* BPF_LD|BPF_W|BPF_LEN */
 		case 0x00: A = i->k; break;                           /* BPF_LD|BPF_IMM */
-		case 0x21: if ((size_t)i->k + 4 > sizeof(*d)) return 0; /* BPF_LDX|BPF_W|BPF_ABS */
-			X = *(const uint32_t *)((const uint8_t *)d + i->k); break;
+		case 0x21: if (!seccomp_load(d, i->k, &X)) return 0; break;  /* BPF_LDX|BPF_W|BPF_ABS */
 		case 0x05: pc += i->k; break;                         /* BPF_JMP|BPF_JA */
 		case 0x15: pc += (A == i->k) ? i->jt : i->jf; break;  /* JEQ|K */
 		case 0x25: pc += (A >  i->k) ? i->jt : i->jf; break;  /* JGT|K */
