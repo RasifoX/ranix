@@ -659,25 +659,38 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@cd $(BUILD_DIR)/initramfs && find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio 2>/dev/null
 	@echo "[OK] initramfs.cpio created"
 
+# Header dependencies of userspace programs (asess_test.h, rx_hmac.h, uapi headers):
+# each compile writes build/udeps/<name>.d, so a changed header rebuilds the tests
+# that include it instead of leaving a stale binary.
+UDEP = $(BUILD_DIR)/udeps
+UDEPFLAGS = -MMD -MP -MF $(UDEP)/$(notdir $@).d
+-include $(wildcard $(UDEP)/*.d)
+
 # One rule for every userspace program. -lpthread is a no-op on musl (pthread
 # lives in libc), so it is safe for the non-threaded ones too.
 userspace/%: userspace/%.c
-	$(MUSL_CC) -static -no-pie -O2 -o $@ $< -lpthread
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -static -no-pie -O2 -o $@ $< -lpthread
 
 # dynamically linked (PT_INTERP → /lib/ld-musl-*.so.1); exercises the in-kernel
 # dynamic-linker loading path. Explicit rule overrides the static one above.
 userspace/test_dynamic: userspace/test_dynamic.c
-	$(MUSL_CC) -O2 -o $@ $<
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -O2 -o $@ $<
 userspace/test_asess_dynprobe: userspace/test_asess_dynprobe.c
-	$(MUSL_CC) -O2 -o $@ $<
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -O2 -o $@ $<
 
 # extra shared library + a load-time and a runtime (dlopen) consumer
 userspace/libfoo.so: userspace/libfoo.c
-	$(MUSL_CC) -shared -fPIC -O2 -Wl,-soname,libfoo.so -o $@ $<
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -shared -fPIC -O2 -Wl,-soname,libfoo.so -o $@ $<
 userspace/test_sharedlib: userspace/test_sharedlib.c userspace/libfoo.so
-	$(MUSL_CC) -O2 -o $@ $< -Luserspace -lfoo
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -O2 -o $@ $< -Luserspace -lfoo
 userspace/test_dlopen: userspace/test_dlopen.c
-	$(MUSL_CC) -O2 -o $@ $<
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -O2 -o $@ $<
 
 # mbedTLS static libs (downloaded + cross-built once per arch, cached)
 $(MBEDTLS_A):
@@ -788,7 +801,8 @@ $(SSL_SERVER_BIN): $(MBEDTLS_A)
 
 # HTTPS client diagnostic — statically links mbedTLS
 userspace/test_tls: userspace/test_tls.c $(MBEDTLS_A)
-	$(MUSL_CC) -static -O2 -I$(MBEDTLS_DIR)/include -o $@ $< \
+	@mkdir -p $(UDEP)
+	$(MUSL_CC) $(UDEPFLAGS) -static -O2 -I$(MBEDTLS_DIR)/include -o $@ $< \
 	    $(MBEDTLS_DIR)/library/libmbedtls.a \
 	    $(MBEDTLS_DIR)/library/libmbedx509.a \
 	    $(MBEDTLS_DIR)/library/libmbedcrypto.a
