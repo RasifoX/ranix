@@ -16,6 +16,7 @@
 #include <kernel/proc.h>
 #include <kernel/time.h>
 #include <kernel/errno.h>
+#include <kernel/csprng.h>
 
 void task_wake(process_t *p);
 
@@ -186,6 +187,17 @@ static uint32_t seg_span(const tcp_seg_t *g)
 /* serial comparison: is a <= b in 32-bit sequence space (RFC 1982) */
 static int seq_le(uint32_t a, uint32_t b) { return (int32_t)(b - a) >= 0; }
 static int seq_lt(uint32_t a, uint32_t b) { return (int32_t)(b - a) > 0; }
+
+/* RFC 6528: an initial sequence number nobody off the path can guess, or a
+ * blind sender could inject into or reset the connection. All 32 bits come
+ * from the kernel CSPRNG; RFC 6528's 4 us clock term, which keeps one 4-tuple's
+ * ISNs rising, is left out. */
+static uint32_t tcp_isn(void)
+{
+    uint32_t v;
+    csprng_bytes(&v, sizeof(v));
+    return v;
+}
 
 /* Fold a round-trip sample (sent at sent_tick) into srtt/rttvar/rto (RFC 6298). */
 static void tcp_rtt_update(socket_t *s, uint64_t sent_tick)
@@ -983,7 +995,7 @@ static void tcp_no_socket(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key, tcp
         ns->remote_port = src_port;
         if (!v6 && (ls->domain == AF_INET6 || ls->v4mapped)) ns->v4mapped = 1;
         ns->rcv_nxt     = seq + 1;
-        ns->snd_nxt     = 0x12340000;
+        ns->snd_nxt     = tcp_isn();
         ns->snd_una     = ns->snd_nxt;
         ns->tcp_state   = TCP_SYN_RECV;
         ns->snd_wnd     = ntohs(th->window);   /* SYN window is unscaled */
@@ -1260,11 +1272,12 @@ int tcp_connect(socket_t *s)
 {
     s->dev = (s->domain == AF_INET6) ? net_route_dev6(&s->remote_ip6)
                                      : net_route_dev(s->remote_ip);
+    uint32_t isn = tcp_isn();   /* before tcp_lock: the generator takes its own */
     uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();
     if (s->domain == AF_INET6) s->local_ip6 = ipv6_src_for(s->dev, &s->remote_ip6);
     else if (!s->local_ip)     s->local_ip  = s->dev->ip;
-    s->snd_una   = 0xAB000000;
+    s->snd_una   = isn;
     s->snd_nxt   = s->snd_una + 1;   /* SYN consumes one seq — advance now so a
                                       * SYN-ACK racing in (fast net thread) matches */
     s->rcv_nxt   = 0;
