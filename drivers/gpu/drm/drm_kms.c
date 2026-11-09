@@ -1058,7 +1058,7 @@ int drm_ioctl_wait_vblank(drm_filep_t *fp, void *d)
 	                : (cur & ~0xFFFFFFFFULL) | w->request.sequence;
 	if ((type & _DRM_VBLANK_NEXTONMISS) && (int32_t)((uint32_t)cur - (uint32_t)target) >= 0) target = cur + 1;
 	if (type & _DRM_VBLANK_EVENT) {
-		mutex_lock(&drm_lock);
+		if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 		int e = queue_seq_event(fp, DRM_EVENT_VBLANK, target, w->request.signal);
 		mutex_unlock(&drm_lock);
 		if (e) return e;

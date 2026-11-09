@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 
 struct drm_version { int major, minor, patch; size_t name_len; char *name; size_t date_len; char *date; size_t desc_len; char *desc; };
 struct getparam { int32_t param; uint32_t pad; uint64_t value; };
@@ -95,13 +96,77 @@ static void wait_obj(int fd, uint32_t h)
 	CHECK(xioctl(fd, IOC_WAIT, &w) == 0, "GEM_WAIT");
 }
 
+/* 200 small batches, each waited for: the mean round trip in microseconds */
+static double round_trip(int fd, struct execbuf2 *eb, uint32_t *bm, uint32_t *tm, uint32_t T)
+{
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 0; i < 200 && !fails; i++) {
+		bm[3] = 0x1000 + i;
+		CHECK(xioctl(fd, IOC_EXECBUF, eb) == 0, "execbuf %d", i);
+		wait_obj(fd, T);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	CHECK(tm[0x40] == 0x1000 + 199, "last of 200: 0x%x", tm[0x40]);
+	return ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 1e3 / 200;
+}
+
+/* ranix_gt (root only): the interrupt line; 0 when not readable */
+static int gt_irq_state(int *on, unsigned long *count, unsigned *spin_us)
+{
+	char st[2048] = {0};
+	int f = open("/sys/class/drm/ranix_gt", O_RDONLY);
+	if (f < 0) return 0;
+	ssize_t k = read(f, st, sizeof st - 1); (void)k;
+	close(f);
+	const char *p = strstr(st, "irq: ");
+	if (!p) return 0;
+	unsigned vec = 0;
+	*on = !strncmp(p, "irq: on", 7);
+	const char *q = strstr(p, " vector ");
+	return q && sscanf(q, " vector %u count %lu empty %*u spin_us %u", &vec, count, spin_us) == 3;
+}
+
+/* With the engine's interrupt on, each request raises at least one interrupt and
+ * a waiter wakes well inside a tick (a lost interrupt would cost ~1000 us on the
+ * tick fallback). Reads ranix_gt only: changes no setting, so a kill is harmless. */
+static void irq_checks(int fd, struct execbuf2 *eb, uint32_t *bm, uint32_t *tm, uint32_t T)
+{
+	int on = 0; unsigned long c0 = 0, c1 = 0; unsigned spin = 0;
+	if (!gt_irq_state(&on, &c0, &spin)) return;          /* not root, or an older kernel */
+	if (!on) { fprintf(stderr, "engine interrupt not on: polled\n"); return; }
+	double us = round_trip(fd, eb, bm, tm, T);
+	gt_irq_state(&on, &c1, &spin);
+	fprintf(stderr, "interrupt: %lu for 200 requests, round trip %.1f us (waiter polls %u us)\n", c1 - c0, us, spin);
+	CHECK(c1 - c0 >= 200, "interrupts: %lu for 200 requests", c1 - c0);
+	CHECK(us < 600, "interrupt wake %.1f us", us);
+}
+
+/* ranix_gt changes engine settings: nobody but root may write it */
+static void gt_node_closed_to_users(void)
+{
+	if (geteuid() != 0 || access("/sys/class/drm/ranix_gt", F_OK)) return;
+	pid_t p = fork();
+	if (p == 0) {
+		if (setgid(65534) || setuid(65534)) _exit(2);
+		int f = open("/sys/class/drm/ranix_gt", O_WRONLY);
+		int wrote = f >= 0 && write(f, "irq off", 7) == 7;
+		_exit(f < 0 && !wrote ? 0 : 1);
+	}
+	int st = -1;
+	if (p > 0) waitpid(p, &st, 0);
+	CHECK(p > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "ranix_gt writable by uid 65534 (status %d)", st);
+}
+
 int main(void)
 {
+	gt_node_closed_to_users();
 	int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
 	char name[16] = {0};
 	struct drm_version v = { .name_len = sizeof(name) - 1, .name = name };
 	if (fd < 0 || xioctl(fd, IOC_VERSION, &v) || strcmp(name, "i915")) {
 		fprintf(stderr, "no i915 device: skipped\n");
+		if (fails) { printf("FAIL %d\n", fails); return 1; }
 		puts("OK");
 		return 0;
 	}
@@ -166,17 +231,9 @@ int main(void)
 	if (!e) { wait_obj(fd, T2); CHECK(t2m[2] == 0xBEEF, "reloc write 0x%x", t2m[2]); }
 
 	/* many requests back to back, then a syncobj signaled through the fence array */
-	struct timespec t0, t1;
-	clock_gettime(CLOCK_MONOTONIC, &t0);
-	for (int i = 0; i < 200 && !fails; i++) {
-		bm[3] = 0x1000 + i;
-		CHECK(xioctl(fd, IOC_EXECBUF, &eb) == 0, "execbuf %d", i);
-		wait_obj(fd, T);
-	}
-	clock_gettime(CLOCK_MONOTONIC, &t1);
-	CHECK(tm[0x40] == 0x1000 + 199, "last of 200: 0x%x", tm[0x40]);
-	double us = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 1e3 / 200;
+	double us = round_trip(fd, &eb, bm, tm, T);
 	fprintf(stderr, "execbuf+wait round trip %.1f us\n", us);
+	irq_checks(fd, &eb, bm, tm, T);
 	/* GGTT audit (root): our window holds only scratch or RAM pages, nothing refused */
 	{
 		int af = open("/sys/class/drm/ranix_gt", O_RDWR);

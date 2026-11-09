@@ -24,6 +24,13 @@ void irq_register(uint32_t irq, irq_handler_t handler) {
  * ticks included. Interrupt controllers that can mask a line override this. */
 __attribute__((weak)) void irqchip_mask_unhandled(uint32_t irq) { (void)irq; }
 
+/* architectures without MSI routing */
+__attribute__((weak)) int pci_msi_attach(uint8_t bus, uint8_t dev, uint8_t fn, irq_handler_t h)
+{
+    (void)bus; (void)dev; (void)fn; (void)h;
+    return -1;
+}
+
 void irq_handle(uint32_t irq) {
     if (irq < MAX_IRQS) {
         uint64_t cpu = arch_get_cpu_ctx()->cpu_id;

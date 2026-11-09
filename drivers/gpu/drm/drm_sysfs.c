@@ -359,7 +359,7 @@ static ssize_t file_write(vfs_file_t *f, const void *buf, size_t len)
 		char cmd[16];
 		size_t n = len < sizeof(cmd) ? len : sizeof(cmd);
 		if (copy_fop_from_user(cmd, buf, n) != 0) return -EFAULT_;
-		mutex_lock(&drm_lock);
+		if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 		int r = ranix_gt_command(cmd, n);
 		mutex_unlock(&drm_lock);
 		return r < 0 ? r : (ssize_t)len;
@@ -367,7 +367,7 @@ static ssize_t file_write(vfs_file_t *f, const void *buf, size_t len)
 	char c;
 	if (!len || copy_fop_from_user(&c, buf, 1) != 0) return -EFAULT_;
 	if (c != '0' && c != '1' && c != 't') return -EINVAL_;
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 	int r = c == 't' ? drm_kms_selftest() : drm_kms_hwflip(c == '1');
 	mutex_unlock(&drm_lock);
 	return r < 0 ? r : (ssize_t)len;

@@ -18,6 +18,10 @@
  * If a request makes no progress for 2 s the engine is reset, every waiting
  * request is ended, and the GT stays off until reboot; the display never
  * depends on it. RPS (GPU frequency) lives here too but is off until "rps on".
+ *
+ * Completion is noticed three ways: the engine's interrupt (an MSI, when the
+ * machine routes one), a waiter that polls for a short while, and the 1 ms tick,
+ * which stays as the fallback when there is no interrupt or one is lost.
  */
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/vm.h>
@@ -27,6 +31,8 @@
 #include <kernel/kprintf.h>
 #include <kernel/proc.h>
 #include <kernel/sync.h>
+#include <kernel/irq.h>
+#include <kernel/hal.h>
 #include <linux/types.h>
 #include <linux/bits.h>
 #include "i915_reg_defs.h"
@@ -54,6 +60,20 @@
 #define HWS_SEQNO           0x40          /* dword index we write the seqno to */
 #define HWS_CSB0            0x10
 #define HWS_CSB_WRITE       0x1f
+
+/* gen8+ interrupt registers (Kaby Lake PRM Vol 2c: MASTER_INT_CTL, GT_ISR/IMR/IIR/IER
+ * bank 0, which holds the render engine in bits 0-15) */
+#define GEN8_MASTER_IRQ          _MMIO(0x44200)
+#define GEN8_MASTER_IRQ_CONTROL  (1u << 31)
+#define GEN8_GT_RCS_IRQ          (1u << 0)
+#define GEN8_GT_IMR0             _MMIO(0x44304)
+#define GEN8_GT_IIR0             _MMIO(0x44308)
+#define GEN8_GT_IER0             _MMIO(0x4430c)
+#define GT_RENDER_USER_INTERRUPT    (1u << 0)
+#define GT_CONTEXT_SWITCH_INTERRUPT (1u << 8)
+#define GT_RCS_IRQS              (GT_RENDER_USER_INTERRUPT | GT_CONTEXT_SWITCH_INTERRUPT)
+#define IRQ_EMPTY_MAX            1000    /* this many in a row with no GT bit: a storm */
+#define POLL_SPIN_NS             200000  /* without the interrupt a waiter polls this long, then ticks */
 
 static volatile u8 *mmio;
 static int gt_state;          /* 0 untried, 1 works, -1 turned off after a failure */
@@ -293,7 +313,13 @@ static struct {
 	 * lost (seen on Casper after ~30 back-to-back requests) */
 	u32       csb_head;
 	int       hw_idle;
-} E;
+	/* interrupts: waiters sleep on wq; the MSI handler and the tick wake them */
+	wait_queue_t wq;
+	int       irq_vec;        /* <0: no MSI, completion is polled */
+	int       irq_on;         /* master interrupt enabled ("irq off" clears it) */
+	u32       irqs, irq_empty, irq_empty_run;
+	u32       spin_ns;        /* with the interrupt on: how long a waiter polls before sleeping */
+} E = { .irq_vec = -1, .spin_ns = 0 };
 
 #define CSB_ENTRIES          6               /* GEN8_CSB_ENTRIES */
 #define CTX_STATUS_IDLE_ACTIVE (1 << 0)
@@ -485,6 +511,8 @@ static void rps_boost(void)
 	spin_unlock_irq(&gt_lock, f);
 }
 
+static void irq_setup(void);
+
 int gt_start(void)
 {
 	mutex_lock(&gt_mutex);
@@ -504,13 +532,16 @@ int gt_start(void)
 	(void)rd(RING_HWS_PGA(RCS_BASE));
 	reset_csb();
 	rps_init();
+	wait_queue_init(&E.wq);
 	E.started = 1;
+	irq_setup();
 	gt_state = 1;
 	mutex_unlock(&gt_mutex);
 	E.kctx = gt_ctx_create(0);
 	if (!E.kctx) kprintf("i915: no kernel context: contexts will not be freed safely\n");
 	mutex_lock(&gt_mutex);
-	kprintf("i915: render engine started (execlists, HWSP %x)\n", E.hws.ggtt);
+	kprintf("i915: render engine started (execlists, HWSP %x, %s)\n", E.hws.ggtt,
+	        E.irq_on ? "MSI" : "polled");
 out:
 	mutex_unlock(&gt_mutex);
 	return e;
@@ -624,6 +655,66 @@ void gt_tick(void)
 	spin_unlock_irq(&gt_lock, f);
 }
 
+/* The GT's MSI (gen8 interrupt flow: master off, read and ack the bank, master
+ * on). The render engine's user interrupt follows each request's seqno write and
+ * its context-switch interrupt reports the engine going idle; both mean "look
+ * at the engine now". Runs with interrupts off. */
+static void gt_irq(void)
+{
+	if (!mmio) return;
+	wr(GEN8_MASTER_IRQ, 0);
+	u32 master = rd(GEN8_MASTER_IRQ), iir = 0;
+	if (master & GEN8_GT_RCS_IRQ) {
+		iir = rd(GEN8_GT_IIR0);
+		if (iir) wr(GEN8_GT_IIR0, iir);
+	}
+	uint64_t f = spin_lock_irq(&gt_lock);
+	E.irqs++;
+	if (iir & GT_RCS_IRQS) {
+		E.irq_empty_run = 0;
+		if (E.qn || E.inflight) advance_locked();
+	} else {
+		E.irq_empty++;
+		if (++E.irq_empty_run >= IRQ_EMPTY_MAX && E.irq_on) {
+			E.irq_on = 0;                 /* someone else's source keeps firing: poll */
+			kprintf("i915: %u interrupts with no engine bit (master %x), back to polling\n",
+			        E.irq_empty_run, master);
+		}
+	}
+	int on = E.irq_on;
+	spin_unlock_irq(&gt_lock, f);
+	wake_up(&E.wq);
+	if (on) wr(GEN8_MASTER_IRQ, GEN8_MASTER_IRQ_CONTROL);
+}
+
+/* unmask the render engine's two interrupts and route the GT's MSI to a vector */
+static void irq_setup(void)
+{
+	wr(RING_IMR(RCS_BASE), ~GT_RCS_IRQS);
+	wr(GEN8_GT_IMR0, ~GT_RCS_IRQS);
+	wr(GEN8_GT_IER0, GT_RCS_IRQS);
+	wr(GEN8_GT_IIR0, ~0u);                    /* the IIR holds one more event behind it */
+	wr(GEN8_GT_IIR0, ~0u);
+	(void)rd(GEN8_GT_IIR0);
+	if (E.irq_vec < 0) E.irq_vec = pci_msi_attach(drm_pci_bus, drm_pci_dev, drm_pci_fn, gt_irq);
+	if (E.irq_vec < 0) { kprintf("i915: no MSI vector: completion is polled\n"); return; }
+	E.irq_on = 1;
+	wr(GEN8_MASTER_IRQ, GEN8_MASTER_IRQ_CONTROL);
+	(void)rd(GEN8_MASTER_IRQ);
+}
+
+/* "irq on|off": A/B against polling without a reboot */
+static void irq_switch(int on)
+{
+	if (E.irq_vec < 0 || !E.started) return;
+	uint64_t f = spin_lock_irq(&gt_lock);
+	E.irq_on = on;
+	E.irq_empty_run = 0;
+	wr(GEN8_MASTER_IRQ, on ? GEN8_MASTER_IRQ_CONTROL : 0);
+	(void)rd(GEN8_MASTER_IRQ);
+	spin_unlock_irq(&gt_lock, f);
+}
+
 /* the engine hung: reset it, call every request done, stay off */
 static void wedge(void)
 {
@@ -647,6 +738,7 @@ static void wedge(void)
 		while (E.qn) { E.q[E.qh].c->queued--; E.qh = (E.qh + 1) % QMAX; E.qn--; }
 		E.inflight = 0;
 		spin_unlock_irq(&gt_lock, f);
+		wake_up(&E.wq);
 	}
 	mutex_unlock(&gt_mutex);
 }
@@ -696,7 +788,7 @@ int gt_submit(gt_ctx_t *c, u64 addr, u32 *seqno_out)
 		cs[n++] = MI_NOOP;
 	}
 
-	mutex_lock(&gt_mutex);
+	if (mutex_lock_killable(&gt_mutex)) return -EINTR_;
 	u32 seq = ++E.seqno;
 	/* gen8_emit_fini_breadcrumb_rcs(): flush caches, then the seqno into the HWSP */
 	emit_pipe_control(cs + n, PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH | PIPE_CONTROL_DEPTH_CACHE_FLUSH |
@@ -731,17 +823,16 @@ int gt_submit(gt_ctx_t *c, u64 addr, u32 *seqno_out)
 	spin_unlock_irq(&gt_lock, f);
 	/* the previous context reports ACTIVE_TO_IDLE a few microseconds after its last
 	 * seqno write; a client that saw that seqno and submits at once would otherwise
-	 * wait for the next tick. Watch the status buffer for up to 100 us. */
-	for (uint64_t until = drm_now_ns() + 100000; drm_now_ns() < until; ) {
+	 * wait for the next tick. Watch the status buffer for up to 100 us, unless
+	 * the context-switch interrupt will start it. */
+	for (uint64_t until = E.irq_on ? 0 : drm_now_ns() + 100000; drm_now_ns() < until; ) {
 		f = spin_lock_irq(&gt_lock);
 		int waiting = !E.inflight && E.qn && !E.wedged;
 		if (waiting) advance_locked();
 		int started = E.inflight || !E.qn;
 		spin_unlock_irq(&gt_lock, f);
 		if (!waiting || started) break;
-#if defined(__x86_64__)
-		__asm__ volatile("pause");
-#endif
+		cpu_relax();
 	}
 	mutex_unlock(&gt_mutex);
 	*seqno_out = seq;
@@ -754,9 +845,10 @@ int gt_wait_seqno(u32 seqno, int64_t timeout_ns)
 	if (!seqno || !E.started) return 0;
 	uint64_t end = timeout_ns < 0 ? ~0ULL : drm_now_ns() + (uint64_t)timeout_ns;
 	if (timeout_ns && !seq_passed(gt_seqno_done(), seqno)) rps_boost();
-	/* short requests finish in microseconds: poll for up to 200 us before sleeping
-	 * a whole tick, and start whatever is queued as soon as this one is seen done */
-	uint64_t spin_end = drm_now_ns() + 200000;
+	/* The sleep ends at the engine's interrupt or, as a fallback, the next tick.
+	 * With the interrupt a waiter need not poll (measured on Casper: the same round
+	 * trip as polling); without it, short requests are caught by polling a while. */
+	uint64_t spin_end = drm_now_ns() + (E.irq_on ? E.spin_ns : POLL_SPIN_NS);
 	for (;;) {
 		if (seq_passed(gt_seqno_done(), seqno)) {
 			uint64_t f = spin_lock_irq(&gt_lock);
@@ -767,15 +859,12 @@ int gt_wait_seqno(u32 seqno, int64_t timeout_ns)
 		if (E.wedged == 2) { wedge(); continue; }
 		uint64_t now = drm_now_ns();
 		if (now >= end) return -ETIME_;
-		if (now < spin_end) {
-#if defined(__x86_64__)
-			__asm__ volatile("pause");
-#elif defined(__aarch64__)
-			__asm__ volatile("yield");
-#endif
-			continue;
-		}
-		drm_sleep_ms(1);
+		if (now < spin_end) { cpu_relax(); continue; }
+		uint64_t f = spin_lock_irq(&gt_lock);
+		if (!seq_passed(gt_seqno_done(), seqno) && E.wedged != 2)
+			sleep_on_locked_until(&E.wq, &gt_lock, f, kernel_ticks + 1);
+		else
+			spin_unlock_irq(&gt_lock, f);
 		if (task_has_actionable_signal()) return -EINTR_;
 	}
 }
@@ -797,6 +886,15 @@ int ranix_gt_command(const char *cmd, size_t len)
 	if (len >= 6 && !memcmp(cmd, "rps on", 6)) {
 		R.off_by_user = 0;
 		if (E.started && R.rp0 && !R.on) { uint64_t f = spin_lock_irq(&gt_lock); rps_enable_hw(); spin_unlock_irq(&gt_lock, f); }
+		return 0;
+	}
+	if (len >= 6 && !memcmp(cmd, "irq on", 6))  { irq_switch(1); return E.irq_on ? 0 : -ENODEV_; }
+	if (len >= 7 && !memcmp(cmd, "irq off", 7)) { irq_switch(0); return 0; }
+	if (len >= 5 && !memcmp(cmd, "spin ", 5)) {           /* spin <us>: waiter's poll before sleeping, interrupt on */
+		u32 us = 0;
+		for (size_t i = 5; i < len && cmd[i] >= '0' && cmd[i] <= '9' && us < 100000; i++) us = us * 10 + (u32)(cmd[i] - '0');
+		if (us > 1000) return -EINVAL_;
+		E.spin_ns = us * 1000;
 		return 0;
 	}
 	if (len >= 8 && !memcmp(cmd, "rps max ", 8)) {        /* rps max <MHz>: a ceiling, RPn..RP0 */
@@ -825,6 +923,12 @@ int ranix_gt_status(char *o)
 		n = puthex(o, n, (u32)E.qn);
 		n = put(o, n, "resets ");
 		n = puthex(o, n, E.resets);
+		o[n++] = '\n';
+		n = put(o, n, E.irq_on ? "irq: on" : E.irq_vec < 0 ? "irq: none" : "irq: off");
+		n = put(o, n, " vector "); n = putdec_(o, n, (uint64_t)(E.irq_vec < 0 ? 0 : E.irq_vec));
+		n = put(o, n, " count "); n = putdec_(o, n, E.irqs);
+		n = put(o, n, " empty "); n = putdec_(o, n, E.irq_empty);
+		n = put(o, n, " spin_us "); n = putdec_(o, n, E.spin_ns / 1000);
 		o[n++] = '\n';
 		if (R.rp0) {
 			n = put(o, n, R.on ? "rps: on" : "rps: off");

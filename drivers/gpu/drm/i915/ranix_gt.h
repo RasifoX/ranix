@@ -3,7 +3,8 @@
 #define RANIX_GT_H
 #include <uapi/types.h>
 
-int ranix_gt_command(const char *cmd, size_t len);   /* "audit", "rps on|off", "rps max <MHz>" */
+int ranix_gt_command(const char *cmd, size_t len);   /* "audit", "rps on|off", "rps max <MHz>",
+                                                     * "irq on|off", "spin <us>" */
 int ranix_gt_status(char *o);
 int ranix_power_status(char *o);                     /* one line, < 1000 bytes */
 int gt_freq_mhz(uint32_t *act, uint32_t *req);       /* 0 while the engine is off */

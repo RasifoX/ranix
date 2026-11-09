@@ -557,6 +557,13 @@ void sleep_on(wait_queue_t *q)
 
 void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
 {
+	sleep_on_locked_until(q, lock, irq_flags, 0);
+}
+
+/* The same, but also woken by the deadline sweep at tick `deadline` (0: none):
+ * for waiters whose event may come without a wake_up (a device that is polled). */
+void sleep_on_locked_until(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags, uint64_t deadline)
+{
 	process_t *curr = task_current();
 	if (!curr || curr->pid == 0) {
 		spin_unlock_irq(lock, irq_flags);
@@ -573,10 +580,12 @@ void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
 	process_t *t = q->tasks; int found = 0;
 	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
 	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
+	if (deadline) { curr->wake_deadline = deadline; sched_note_wake_deadline(deadline); }
 	spin_unlock_irq(&q->lock, f);
 	spin_unlock_irq(lock, irq_flags);
 	arch_yield();
 
+	if (deadline) curr->wake_deadline = 0;
 	f = spin_lock_irq(&q->lock);
 	wq_unlink_locked(q, curr);
 	spin_unlock_irq(&q->lock, f);

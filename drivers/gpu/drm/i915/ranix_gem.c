@@ -112,6 +112,7 @@ static int ioc_gem_create_ext(drm_filep_t *fp, void *d)
 	for (uint64_t ext = c->extensions; ext; ) {
 		struct drm_i915_gem_create_ext_memory_regions mr;
 		if (++hops > MAX_EXT) return -E2BIG_;             /* a chain that loops back on itself */
+		if (kloop_should_stop()) return -EINTR_;
 		if (copy_from_user(&mr, (void *)(uintptr_t)ext, sizeof(mr))) return -EFAULT_;
 		if (mr.base.name != I915_GEM_CREATE_EXT_MEMORY_REGIONS) return -EINVAL_;
 		if (hops > 1) return -EINVAL_;                  /* each extension at most once, as i915 */
@@ -136,6 +137,7 @@ static int rw_obj(drm_filep_t *fp, uint32_t h, uint64_t off, uint64_t size, uint
 	if (!o) return -ENOENT_;
 	if (off > o->size || size > o->size - off) return -EINVAL_;
 	while (size) {
+		if (kloop_should_stop()) return -EINTR_;          /* up to the whole object, a page at a time */
 		uint64_t av;
 		void *p = drm_gem_vaddr(o, off, &av);
 		uint64_t n = av < size ? av : size;
@@ -153,7 +155,7 @@ static int rw_waited(drm_filep_t *fp, uint32_t h, uint64_t off, uint64_t size, u
 {
 	int e = wait_handle(fp, h, -1, NULL);
 	if (e && e != -EIO_) return e;
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 	e = rw_obj(fp, h, off, size, uptr, write);
 	mutex_unlock(&drm_lock);
 	return e;
@@ -188,7 +190,7 @@ static int ioc_mmap_offset(drm_filep_t *fp, void *d)
 /* lookup under drm_lock, wait without it */
 static int wait_handle(drm_filep_t *fp, uint32_t h, int64_t timeout, drm_gem_t **keep)
 {
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 	drm_gem_t *o = drm_gem_lookup(fp, h);
 	if (o) drm_gem_get(o);
 	mutex_unlock(&drm_lock);
@@ -415,6 +417,7 @@ static int ioc_ctx_create(drm_filep_t *fp, void *d)
 		for (uint64_t ext = a->extensions, hops = 0; ext && !e; ) {
 			struct drm_i915_gem_context_create_ext_setparam sp;
 			if (++hops > MAX_EXT) { e = -E2BIG_; break; }     /* a looping chain must not spin here */
+			if (kloop_should_stop()) { e = -EINTR_; break; }
 			if (copy_from_user(&sp, (void *)(uintptr_t)ext, sizeof(sp))) { e = -EFAULT_; break; }
 			if (sp.base.name != I915_CONTEXT_CREATE_EXT_SETPARAM) { e = -EINVAL_; break; }
 			if (sp.param.ctx_id) { e = -EINVAL_; break; }
@@ -544,6 +547,7 @@ static int ioc_query(drm_filep_t *fp, void *d)
 	struct drm_i915_query *q = d;
 	if (q->flags || q->num_items > 256) return -EINVAL_;
 	for (uint32_t i = 0; i < q->num_items; i++) {
+		if (kloop_should_stop()) return -EINTR_;
 		struct drm_i915_query_item it;
 		uint64_t up = q->items_ptr + i * sizeof(it);
 		if (copy_from_user(&it, (void *)(uintptr_t)up, sizeof(it))) return -EFAULT_;
@@ -658,7 +662,7 @@ static int do_relocs(drm_filep_t *fp, ifile_t *f, struct drm_i915_gem_exec_objec
 	drm_gem_t *o = objs[i];
 	if (x[i].relocation_count > o->size / 4) return -EINVAL_;   /* more entries than dwords to patch */
 	for (uint32_t r = 0; r < x[i].relocation_count; r++) {
-		if ((r & 1023) == 1023 && task_has_actionable_signal()) return -EINTR_;
+		if (kloop_should_stop()) return -EINTR_;
 		struct drm_i915_gem_relocation_entry re;
 		uint64_t up = x[i].relocs_ptr + r * sizeof(re);
 		if (copy_from_user(&re, (void *)(uintptr_t)up, sizeof(re))) return -EFAULT_;
@@ -694,7 +698,7 @@ static int ioc_execbuffer2(drm_filep_t *fp, void *d)
 	uint32_t ctx_id = (uint32_t)eb->rsvd1;
 	uctx_t *c;
 	int e;
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 	ifile_t *f = ifile(fp);
 	if (!f) { mutex_unlock(&drm_lock); return -ENOMEM_; }
 	if ((e = ctx_get(fp, ctx_id, &c))) { mutex_unlock(&drm_lock); return e; }
@@ -711,12 +715,13 @@ static int ioc_execbuffer2(drm_filep_t *fp, void *d)
 	if (!x || !objs) { kfree(x); kfree(objs); mutex_unlock(&drm_lock); return -ENOMEM_; }
 	e = copy_from_user(x, (void *)(uintptr_t)eb->buffers_ptr, n * sizeof(*x)) ? -EFAULT_ : 0;
 	for (uint32_t i = 0; !e && i < n; i++) {
+		if (kloop_should_stop()) { e = -EINTR_; break; }       /* n up to 4096, the scan below n^2/2 */
 		if (x[i].flags & ~(uint64_t)EXEC_OBJECT_KNOWN_FLAGS) { e = -EINVAL_; break; }
 		objs[i] = drm_gem_lookup(fp, x[i].handle);
 		if (!objs[i]) { e = -ENOENT_; break; }
 		for (uint32_t j = 0; j < i; j++) if (x[j].handle == x[i].handle) { e = -EINVAL_; break; }
 	}
-	for (uint32_t i = 0; !e && i < n; i++) e = bind(fp, f, x[i].handle, objs[i], &x[i]);
+	for (uint32_t i = 0; !e && i < n; i++) e = kloop_should_stop() ? -EINTR_ : bind(fp, f, x[i].handle, objs[i], &x[i]);
 	for (uint32_t i = 0; !e && i < n; i++) if (x[i].relocation_count) e = do_relocs(fp, f, x, objs, n, i, eb->flags);
 
 	/* fences in: sync_files and syncobjs here are always signaled, or absent */
@@ -730,6 +735,7 @@ static int ioc_execbuffer2(drm_filep_t *fp, void *d)
 			if (!fen) e = -ENOMEM_;
 			else if (copy_from_user(fen, (void *)(uintptr_t)eb->cliprects_ptr, nfen * sizeof(*fen))) e = -EFAULT_;
 			for (uint32_t i = 0; !e && i < nfen; i++) {
+				if (kloop_should_stop()) { e = -EINTR_; break; }
 				drm_syncobj_t *s = drm_syncobj_find(fp, fen[i].handle);
 				if (!s) e = -ENOENT_;
 				else if ((fen[i].flags & I915_EXEC_FENCE_WAIT) && !s->signaled) e = -EINVAL_;
