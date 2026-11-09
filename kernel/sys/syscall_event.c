@@ -412,6 +412,9 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
 #define IN_DELETE        0x00000200u
 #define IN_MOVED_FROM    0x00000040u
 #define IN_MOVED_TO      0x00000080u
+#define IN_DELETE_SELF   0x00000400u
+#define IN_MOVE_SELF     0x00000800u
+#define IN_IGNORED       0x00008000u
 #define IN_ALL_EVENTS    0x00000ffffu
 
 #define INOT_MAX         8    /* max inotify instances */
@@ -427,6 +430,7 @@ typedef struct {
 typedef struct {
     int        wd;
     uint32_t   mask;
+    uint32_t   cookie;     /* the rename a MOVED_FROM/MOVED_TO belongs to */
     char       name[256];
 } inot_evt_t;
 
@@ -444,61 +448,128 @@ typedef struct {
 static inotify_t inot_pool[INOT_MAX];
 static spinlock_t inot_pool_lock = SPINLOCK_INIT;
 
+/* caller holds inst->lock; a full queue drops the event */
+static void inot_queue(inotify_t *inst, int wd, uint32_t mask, uint32_t cookie, const char *name)
+{
+    int next = (inst->evt_tail + 1) % INOT_EVT_MAX;
+    if (next == inst->evt_head) return;
+    inot_evt_t *e = &inst->evts[inst->evt_tail];
+    e->wd = wd; e->mask = mask; e->cookie = cookie;
+    if (name) { strncpy(e->name, name, 255); e->name[255] = '\0'; }
+    else      e->name[0] = '\0';
+    inst->evt_tail = next;
+    wake_up(&inst->rd_wait);
+}
+
+/* An event on path, for watches on path itself (name NULL) or on the directory
+ * it is in (name set). Two are about the watch: DELETE_SELF ends it (IN_IGNORED
+ * follows), and MOVE_SELF, whose name is the new path, moves it and every
+ * watch below it there. */
+static void inotify_deliver_canon(const char *path, uint32_t mask, const char *name);
+
+/* watches hold canonical paths ("dir/./x" is "dir/x"), so events are made so too */
 static void inotify_deliver_event(const char *path, uint32_t mask, const char *name)
 {
+    size_t n = strlen(path);
+    char *p = n < PATH_MAX ? kmalloc(PATH_MAX) : NULL;
+    if (!p) return;
+    memcpy(p, path, n + 1);
+    path_normalize(p);
+    char *np = NULL;
+    if ((mask & IN_ALL_EVENTS) == IN_MOVE_SELF && name && (np = kmalloc(PATH_MAX))) {
+        strncpy(np, name, PATH_MAX - 1); np[PATH_MAX - 1] = '\0';
+        path_normalize(np);
+        name = np;
+    }
+    inotify_deliver_canon(p, mask, name);
+    kfree(np);
+    kfree(p);
+}
+
+static void inotify_deliver_canon(const char *path, uint32_t mask, const char *name)
+{
+    uint32_t ev = mask & IN_ALL_EVENTS;
+    uint32_t cookie = (ev & (IN_MOVED_FROM | IN_MOVED_TO)) ? vfs_inotify_cookie : 0;
+    size_t pl_len = strlen(path);
     uint64_t pl = spin_lock_irq(&inot_pool_lock);
     for (int i = 0; i < INOT_MAX; i++) {
         inotify_t *inst = &inot_pool[i];
         if (!inst->active) continue;
         uint64_t f = spin_lock_irq(&inst->lock);
         for (int w = 0; w < INOT_WATCH_MAX; w++) {
-            if (!inst->watches[w].wd) continue;
-            if (!(inst->watches[w].mask & mask)) continue;
-            if (strncmp(inst->watches[w].path, path, 255) != 0) continue;
-            int next = (inst->evt_tail + 1) % INOT_EVT_MAX;
-            if (next != inst->evt_head) { /* queue not full */
-                inst->evts[inst->evt_tail].wd   = inst->watches[w].wd;
-                inst->evts[inst->evt_tail].mask  = mask;
-                if (name) strncpy(inst->evts[inst->evt_tail].name, name, 255);
-                else      inst->evts[inst->evt_tail].name[0] = '\0';
-                inst->evt_tail = next;
-                wake_up(&inst->rd_wait);
+            inot_watch_t *wt = &inst->watches[w];
+            if (!wt->wd) continue;
+            if (ev == IN_MOVE_SELF) {
+                int self = strcmp(wt->path, path) == 0;
+                int below = !self && strncmp(wt->path, path, pl_len) == 0 && wt->path[pl_len] == '/';
+                if (self && (wt->mask & IN_MOVE_SELF)) inot_queue(inst, wt->wd, IN_MOVE_SELF, 0, NULL);
+                if ((self || below) && name) {
+                    char np[256];
+                    size_t nl = strlen(name), rest = strlen(wt->path + pl_len);
+                    if (nl + rest < sizeof(np)) {
+                        memcpy(np, name, nl);
+                        memcpy(np + nl, wt->path + pl_len, rest + 1);
+                        memcpy(wt->path, np, nl + rest + 1);
+                    }
+                }
+                continue;
             }
+            if (strncmp(wt->path, path, 255) != 0) continue;
+            if (ev == IN_DELETE_SELF) {
+                if (wt->mask & IN_DELETE_SELF) inot_queue(inst, wt->wd, IN_DELETE_SELF, 0, NULL);
+                inot_queue(inst, wt->wd, IN_IGNORED, 0, NULL);
+                wt->wd = 0;
+                continue;
+            }
+            if (!(wt->mask & ev)) continue;
+            inot_queue(inst, wt->wd, mask, cookie, name);
         }
         spin_unlock_irq(&inst->lock, f);
     }
     spin_unlock_irq(&inot_pool_lock, pl);
 }
 
+/* As many whole events as fit in len, as Linux returns them; EINVAL if not
+ * even the first does. */
 static ssize_t inotify_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
     inotify_t *inst = (inotify_t *)file->inode->priv;
     if (!inst) return -EBADF;
-
+    size_t cap = len < INOT_EVT_MAX * (16 + 256) ? len : INOT_EVT_MAX * (16 + 256);
+    uint8_t *kb = kmalloc(cap ? cap : 1);
+    if (!kb) return -ENOMEM;
     while (1) {
         uint64_t f = spin_lock_irq(&inst->lock);
-        if (inst->evt_head != inst->evt_tail) {
+        size_t out = 0;
+        while (inst->evt_head != inst->evt_tail) {
             inot_evt_t *e = &inst->evts[inst->evt_head];
-            /* format: struct inotify_event { int wd; u32 mask; u32 cookie; u32 len; char name[]; } */
+            /* struct inotify_event { int wd; u32 mask; u32 cookie; u32 len; char name[]; },
+             * the name NUL-padded to a multiple of 4 */
             uint32_t namelen = e->name[0] ? (uint32_t)(strlen(e->name) + 1) : 0;
-            /* align namelen to 4 */
-            uint32_t namelen_aligned = (namelen + 3) & ~3u;
-            size_t evsize = 16 + namelen_aligned; /* 4+4+4+4 + name */
-            if (len < evsize) { spin_unlock_irq(&inst->lock, f); return -EINVAL; }
-            /* staged: the copy out can fault, and this holds an IRQ-off spinlock */
-            uint8_t ev[16 + 256];
-            memset(ev, 0, sizeof(ev));
-            memcpy(ev,      &e->wd,   4);
-            memcpy(ev +  4, &e->mask, 4);
-            memcpy(ev + 12, &namelen_aligned, 4);
-            if (namelen) memcpy(ev + 16, e->name, namelen < 256 ? namelen : 255);
+            uint32_t padded = (namelen + 3) & ~3u;
+            size_t evsize = 16 + padded;
+            if (out + evsize > cap) break;   /* staged: the copy out can fault, this lock is IRQ-off */
+            uint8_t *ev = kb + out;
+            memset(ev, 0, evsize);
+            memcpy(ev,      &e->wd,     4);
+            memcpy(ev +  4, &e->mask,   4);
+            memcpy(ev +  8, &e->cookie, 4);
+            memcpy(ev + 12, &padded,    4);
+            if (namelen) memcpy(ev + 16, e->name, namelen);
             inst->evt_head = (inst->evt_head + 1) % INOT_EVT_MAX;
-            spin_unlock_irq(&inst->lock, f);
-            return copy_fop_to_user(buf, ev, evsize) ? -14 : (ssize_t)evsize;
+            out += evsize;
         }
-        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&inst->lock, f); return -EAGAIN; }
+        int pending = inst->evt_head != inst->evt_tail;
+        if (out) {
+            spin_unlock_irq(&inst->lock, f);
+            ssize_t r = copy_fop_to_user(buf, kb, out) ? -14 : (ssize_t)out;
+            kfree(kb);
+            return r;
+        }
+        if (pending) { spin_unlock_irq(&inst->lock, f); kfree(kb); return -EINVAL; }   /* first one too big */
+        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&inst->lock, f); kfree(kb); return -EAGAIN; }
         sleep_on_locked(&inst->rd_wait, &inst->lock, f);
-        if (task_has_actionable_signal()) return -EINTR;
+        if (task_has_actionable_signal()) { kfree(kb); return -EINTR; }
     }
 }
 
@@ -517,6 +588,7 @@ static int inotify_close_vfs(vfs_file_t *file)
     inotify_t *inst = (inotify_t *)file->inode->priv;
     if (inst) {
         uint64_t f = spin_lock_irq(&inot_pool_lock);
+        if (inst->active) __atomic_sub_fetch(&vfs_inotify_users, 1, __ATOMIC_RELAXED);
         inst->active = 0;
         spin_unlock_irq(&inot_pool_lock, f);
     }
@@ -543,6 +615,7 @@ static long sys_inotify_init1(int flags)
     if (inst) {
         memset(inst, 0, sizeof(*inst));
         inst->active  = 1;
+        __atomic_add_fetch(&vfs_inotify_users, 1, __ATOMIC_RELAXED);
         inst->wd_next = 1;
         inst->lock    = (spinlock_t)SPINLOCK_INIT;
     }
@@ -550,14 +623,14 @@ static long sys_inotify_init1(int flags)
     if (!inst) return -EMFILE;
 
     vfs_inode_t *in = kmalloc(sizeof(*in));
-    if (!in) { inst->active = 0; return -ENOMEM; }
+    if (!in) { inst->active = 0; __atomic_sub_fetch(&vfs_inotify_users, 1, __ATOMIC_RELAXED); return -ENOMEM; }
     memset(in, 0, sizeof(*in));
     in->fops     = &inotify_fops;
     in->priv     = inst;
     in->refcount = 1;
 
     vfs_file_t *f = kmalloc(sizeof(*f));
-    if (!f) { kfree(in); inst->active = 0; return -ENOMEM; }
+    if (!f) { kfree(in); inst->active = 0; __atomic_sub_fetch(&vfs_inotify_users, 1, __ATOMIC_RELAXED); return -ENOMEM; }
     memset(f, 0, sizeof(*f));
     f->inode    = in;
     f->refcount = 0;   /* fd_alloc takes the +1; close() frees */
@@ -565,7 +638,7 @@ static long sys_inotify_init1(int flags)
 
     process_t *p = task_current();
     int fd = fd_alloc(p->fds, f);
-    if (fd < 0) { kfree(f); kfree(in); inst->active = 0; return fd == -1 ? -12 : fd; }
+    if (fd < 0) { kfree(f); kfree(in); inst->active = 0; __atomic_sub_fetch(&vfs_inotify_users, 1, __ATOMIC_RELAXED); return fd == -1 ? -12 : fd; }
     if (flags & O_CLOEXEC) fd_set_cloexec(p->fds, fd, 1);
     return fd;
 }
@@ -583,6 +656,7 @@ static long sys_inotify_add_watch(int ifd, const char *upath, uint32_t mask)
     char kpath[PATH_MAX];
     int rp = resolve_path(kpath, AT_FDCWD, upath);
     if (rp) return rp;
+    path_normalize(kpath);   /* "." is the directory: events carry canonical paths */
     if (strlen(kpath) >= 256) return -ENAMETOOLONG;    /* inot_watch_t.path */
     long ar = access_check(kpath, 4, AT_EACCESS);     /* a watch reads the directory's names */
     if (ar) return ar;
