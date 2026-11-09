@@ -654,11 +654,20 @@ static long syscall_clone(const long *a)
  * flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls. */
 static long syscall_clone3(const long *a)
 {
-	struct { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls; } ca;
+	struct { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls,
+	         set_tid, set_tid_size; } ca;
 	memset(&ca, 0, sizeof(ca));
 	size_t csz = (size_t)a[1] < sizeof(ca) ? (size_t)a[1] : sizeof(ca);
 	if (copy_from_user(&ca, (void*)a[0], csz) != 0) return -EFAULT;
 	uint64_t flags = ca.flags;
+	/* set_tid (a chosen pid, for checkpoint/restore) takes CAP_SYS_ADMIN over
+	 * the pid namespace (EPERM, as Linux). Choosing pids is not implemented:
+	 * a privileged caller is told EINVAL rather than given another pid. */
+	if (ca.set_tid_size) {
+		if (ca.set_tid_size > 32 || !ca.set_tid) return -EINVAL;
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
+		return -EINVAL;
+	}
 	uint64_t newsp = ca.stack + ca.stack_size;   /* clone3 gives stack base+size */
 	if (!access_ok((void *)newsp, 0)) return -EINVAL;
 	if ((flags & CLONE_SETTLS) && !access_ok((void *)ca.tls, 0)) return -EPERM;
