@@ -521,7 +521,14 @@ out:
 
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
-	if (len == 0 || (off & (PAGE_SIZE - 1)) || (int64_t)off < 0 || off + len < off) return -EINVAL;
+	if ((off & (PAGE_SIZE - 1)) || (int64_t)off < 0) return -EINVAL;
+	/* Linux looks the file up before any other check (ksys_mmap_pgoff) */
+	if (!(flags & MAP_ANONYMOUS)) {
+		vfs_file_t *f = fget(task_current()->fds, fd);
+		if (!f) return -EBADF;
+		fput(f);
+	}
+	if (len == 0 || off + len < off) return -EINVAL;
 	if (!(flags & (MAP_SHARED | MAP_PRIVATE))) return -EINVAL;
 	/* MAP_SHARED_VALIDATE is MAP_SHARED that refuses a flag it does not know */
 	if ((flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)) {
