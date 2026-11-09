@@ -247,7 +247,6 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
                 skb_free(skb);
             }
             if (total > 0) {
-                extern void tcp_rx_consumed(socket_t *, uint32_t);
                 tcp_rx_consumed(s, (uint32_t)total);
                 return (ssize_t)total;
             }
@@ -782,7 +781,6 @@ static int ip_port_taken(socket_t *self, int domain, int type, uint16_t port)
     return taken;
 }
 
-extern uint16_t alloc_port(void);
 
 static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
 {
@@ -1135,7 +1133,6 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
              * milliseconds (on the wire, not just loopback), so spin net_poll
              * against a wall-clock deadline rather than a fixed iteration count —
              * a tight 64-spin finishes in microseconds, long before the NA. */
-            extern uint64_t mono_ns(void);
             uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
             rr = -113;   /* EHOSTUNREACH if the neighbour never answers */
             do {
@@ -1200,7 +1197,6 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         /* the first send to an unresolved next-hop triggers ARP and is dropped;
          * wait (time-based, not a microsecond-fast count) for the ARP reply so
          * the datagram actually goes out — a real round-trip takes real ms */
-        extern uint64_t mono_ns(void);
         uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
         int rc = -1;
         do {
@@ -1218,7 +1214,6 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
             /* time-based ARP resolve (first attempt sends the ARP request; a real
              * reply takes real ms — a 64-spin count finishes in microseconds and
              * gives a spurious ENOSYS before the next-hop is ever resolved) */
-            extern uint64_t mono_ns(void);
             uint64_t deadline = mono_ns() + 1000000000ULL;   /* ~1s, IRQ-independent */
             r = -113;   /* EHOSTUNREACH if the next hop never resolves */
             do {
@@ -1266,7 +1261,6 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
         return r;
     }
 
-    extern volatile uint64_t kernel_ticks;
     uint64_t rcv_deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
 
     /* SOCK_STREAM has no message boundaries: one recv drains as many queued
@@ -1321,7 +1315,6 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
                 skb_free(skb);
             }
             if (total > 0) {
-                extern void tcp_rx_consumed(socket_t *, uint32_t);
                 tcp_rx_consumed(s, (uint32_t)total);
                 return (long)total;
             }
@@ -1397,7 +1390,7 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
             } else {
                 skb_free(skb);
             }
-            if (s->type == SOCK_STREAM && n) { extern void tcp_rx_consumed(socket_t *, uint32_t); tcp_rx_consumed(s, (uint32_t)n); }
+            if (s->type == SOCK_STREAM && n) { tcp_rx_consumed(s, (uint32_t)n); }
             return (long)n;
         }
         /* a seqpacket pair whose peer is gone reads end of file, as on Linux.

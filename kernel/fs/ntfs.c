@@ -45,8 +45,8 @@ typedef struct {
 	ntfs_info_t    *info;       /* big, one per mount under lock */
 } ntfs_sb_t;
 
-extern vfs_iops_t ntfs_dir_iops, ntfs_file_iops, ntfs_link_iops, ntfs_id_iops;
-extern vfs_fops_t ntfs_fops;
+vfs_iops_t ntfs_dir_iops, ntfs_file_iops, ntfs_link_iops, ntfs_id_iops;   /* defined below */
+vfs_fops_t ntfs_fops;
 
 static int ntfs_dev_read(void *dev, uint64_t lba, void *buf, uint32_t n)
 {
@@ -427,6 +427,5 @@ fail:
 
 void ntfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("ntfs", ntfs_mount);
 }

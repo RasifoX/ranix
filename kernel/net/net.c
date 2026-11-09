@@ -10,6 +10,9 @@
 #include <kernel/sync.h>
 #include <kernel/nsproxy.h>
 #include <kernel/cgroup.h>
+#include <kernel/time.h>
+#include <kernel/cmdline.h>
+#include <kernel/vfs.h>
 
 /* ── SKB allocator (heap-based, no fixed pool) ───────────── */
 
@@ -299,7 +302,6 @@ static void net_link_thread(void);   /* carrier hotplug watcher, defined below *
 
 static void net_rx_thread(void)
 {
-    extern volatile uint64_t kernel_ticks;
     net_rx_task = task_current();
     for (;;) {
         net_poll();
@@ -410,8 +412,6 @@ void net_init(void)
     lo->net_ns  = &init_net_ns;
     net_register(lo);
 
-    extern int net_drop_n;
-    extern const char *cmdline_get(const char *, char *, size_t);
     char db[16];
     if (cmdline_get("netdrop", db, sizeof(db))) {
         int n = 0;
@@ -427,8 +427,6 @@ void net_init(void)
  * default so name resolution follows the network we actually joined. */
 static void write_resolv_conf(uint32_t dns)
 {
-    extern int vfs_unlink(const char *path);
-    extern int vfs_kernel_install(const char *path, const void *data, size_t len);
 
     char buf[40];
     int n = 0;
@@ -448,13 +446,10 @@ static void write_resolv_conf(uint32_t dns)
  * stateless autoconfig (RS → SLAAC). Reused by boot and the link watcher. */
 static void net_dhcp_one(netdev_t *d, int can_sleep)
 {
-    extern int dhcp_configure(netdev_t *dev, uint32_t *out_dns, int can_sleep);
-    extern volatile uint64_t kernel_ticks;
     if (!d || !d->poll || (d->ip >> 24) == 127) return;   /* skip loopback */
 
     uint32_t dns = 0;
     if (dhcp_configure(d, &dns, can_sleep) == 0) {
-        extern uint32_t dhcp_last_lease;
         /* Renew halfway: a router that reassigns an expired address cuts the
          * machine off while its own view of the network still looks fine. */
         uint32_t half = dhcp_last_lease ? dhcp_last_lease / 2 : 1800;
@@ -498,7 +493,6 @@ void net_dhcp_all(void)
  * polls), woken ~1 Hz by the deadline sweep. */
 static void net_link_thread(void)
 {
-    extern volatile uint64_t kernel_ticks;
     for (;;) {
         task_sleep_until(kernel_ticks + TIMER_HZ);   /* ~1s */
         for (int i = 0; i < ndevs; i++) {

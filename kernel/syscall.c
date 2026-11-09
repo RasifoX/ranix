@@ -34,6 +34,8 @@
 #include <kernel/io_uring.h>
 #include <kernel/asess.h>
 #include <kernel/config.h>
+#include <kernel/time.h>
+#include <kernel/fs/ramfs.h>
 
 /* mmap flags */
 #define MAP_SHARED    0x01
@@ -230,7 +232,6 @@ static uint64_t rng_state = 0xdeadbeefcafebabe;
 
 static uint64_t rng_next(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	rng_state += 0x9e3779b97f4a7c15ULL ^ kernel_ticks;
 	uint64_t z = rng_state;
 	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -504,7 +505,6 @@ void syscall_handle(arch_context_t *ctx)
 	/* Kernel-stack canary on trap entry too (not just on the way back out in
 	 * signal_dispatch): catch an overflow from the previous kernel path before
 	 * this syscall builds more frames on a already-clobbered stack. */
-	extern void kstack_check(void);
 	kstack_check();
 	{ process_t *cur = task_current(); if (cur) { cur->uctx = ctx; cur->in_syscall = 1; cur->last_syscall = (int)CTX_SYSCALL_N(ctx); } }   /* ptrace task_pt_regs: syscalls always enter from user */
 	long n    = (long)CTX_SYSCALL_N(ctx);

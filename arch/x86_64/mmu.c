@@ -4,16 +4,11 @@
 #include <kernel/lib/string.h>
 #include <asm/mmu.h>
 
-extern uint64_t pml4[];
-extern uint64_t pml5[];
-extern uint64_t pdpt_dm[];
-extern uint8_t  la57_enabled;
 
 void mmu_init(void)
 {
 	/* Read the boot LA57 flag while the identity map is still live, and cache
 	 * it in the high half for the fault-path code (see arch_vm_set_la57). */
-	extern void arch_vm_set_la57(int v);
 	int la57 = la57_enabled;
 	arch_vm_set_la57(la57);
 

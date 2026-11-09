@@ -14,6 +14,7 @@
 #if defined(__x86_64__)
 #include <kernel/pci.h>
 #include <asm/io.h>
+#include <kernel/init.h>
 #endif
 
 static int parse_ipv4(const char *s, unsigned *a, unsigned *b, unsigned *c, unsigned *d)

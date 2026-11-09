@@ -179,7 +179,6 @@ static void timerfd_unregister(timerfd_t *t)
 
 void timerfd_tick(void)
 {
-    extern volatile uint64_t kernel_ticks;
     uint64_t f = spin_lock_irq(&timerfd_lock);
     for (int i = 0; i < timerfd_cap; i++) {
         timerfd_t *t = timerfd_table[i];
@@ -312,7 +311,6 @@ static long sys_timerfd_settime(int fd, int flags,
         (uint64_t)kn.it_value.tv_nsec >= 1000000000UL ||
         (uint64_t)kn.it_interval.tv_nsec >= 1000000000UL) return -22;
 
-    extern volatile uint64_t kernel_ticks;
 
     uint64_t new_interval_ns = (uint64_t)kn.it_interval.tv_sec * 1000000000UL
                                + (uint64_t)kn.it_interval.tv_nsec;
@@ -355,7 +353,6 @@ static long sys_timerfd_gettime(int fd, linux_itimerspec_t *ucur)
 {
     timerfd_t *t = fd_to_timerfd(fd);
     if (!t) return -9;
-    extern volatile uint64_t kernel_ticks;
 
     linux_itimerspec_t ko = {{0,0},{0,0}};
     uint64_t lf = spin_lock_irq(&t->lock);
@@ -379,7 +376,6 @@ static long sys_memfd_create(const char *uname, unsigned int flags)
     if (strncpy_from_user(ign, uname, sizeof(ign)) < 0) return -14;
     /* Create an anonymous tmpfs file backed by ramfs */
     /* Use ramfs to allocate an inode; return an fd */
-    extern vfs_inode_t *ramfs_create_anon(void);
     vfs_inode_t *in = ramfs_create_anon();
     if (!in) return -12;
 
@@ -533,7 +529,6 @@ static vfs_fops_t inotify_fops = {
 static long sys_inotify_init1(int flags)
 {
     /* register the VFS hook on first call */
-    extern vfs_inotify_fn_t vfs_inotify_hook;
     if (!vfs_inotify_hook) vfs_inotify_hook = inotify_deliver_event;
 
     uint64_t pl = spin_lock_irq(&inot_pool_lock);
@@ -675,7 +670,6 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
      * while a fork/SCM_RIGHTS child still holds the inherited fd. */
     process_t  *p   = task_current();
 
-    extern spinlock_t sched_lock;
     while (1) {
         /* find+clear under sched_lock so the clear can't race (and lose) a bit a
          * concurrent poster / nested timer tick OR's into sig_pending. */

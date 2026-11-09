@@ -4,8 +4,8 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/extable.h>
 #include <asm/mmu.h>
+#include <kernel/mm/vm.h>
 
-extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 
 /* Byte copy whose load/store fault to the exit label via __ex_table, so an
  * unmapped/bad user address returns the not-copied count instead of panicking.

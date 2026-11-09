@@ -30,11 +30,10 @@
 #include <kernel/watchdog.h>
 #include <asm/io.h>
 #include "itco.h"
+#include <kernel/time.h>
+#include <asm/cpu.h>
+#include <kernel/tick.h>
 
-extern volatile uint64_t kernel_ticks;
-extern uint64_t hpet_now_ns(void);
-extern cpu_context_t *all_cpus[];
-extern void klog_pstore_beat(uint64_t ticks);
 
 #define WD_SECS_MIN        10
 #define WD_SECS_MAX        1227   /* 2 stages of 1023 ticks at 0.6 s */
@@ -252,7 +251,6 @@ static volatile uint64_t deadline_tick;
 
 static void deadline_check(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	if (!deadline_tick || kernel_ticks < deadline_tick) return;
 	deadline_tick = 0;
 	kprintf(KERN_WARN "wdog: deadline reached, resetting\n");
@@ -266,8 +264,6 @@ static int deadline_registered;
  * short deadline only catches boots that never get that far. */
 int wdog_deadline_set(unsigned secs)
 {
-	extern volatile uint64_t kernel_ticks;
-	extern void tick_register(void (*fn)(void));
 	if (secs > 7 * 24 * 3600) return -22;
 	if (!secs) { deadline_tick = 0; kprintf(KERN_INFO "wdog: deadline off\n"); return 0; }
 	deadline_tick = kernel_ticks + (uint64_t)secs * TIMER_HZ;
@@ -278,7 +274,6 @@ int wdog_deadline_set(unsigned secs)
 
 unsigned wdog_deadline_left(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	uint64_t t = deadline_tick, now = kernel_ticks;
 	if (!t) return 0;
 	if (t <= now) return 1;

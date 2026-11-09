@@ -3,6 +3,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/cmdline.h>
+#include <kernel/init.h>
 
 uint64_t boot_initrd_start = 0;
 uint64_t boot_initrd_size  = 0;

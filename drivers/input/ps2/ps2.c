@@ -8,7 +8,6 @@
 #include <kernel/board.h>
 #include <kernel/lib/string.h>
 
-extern volatile uint64_t kernel_ticks;
 #include <kernel/tty/tty_core.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/sync.h>
@@ -18,6 +17,8 @@ extern volatile uint64_t kernel_ticks;
 #include <kernel/kprintf.h>
 #include <kernel/capabilities.h>
 #include <kernel/lib/string.h>
+#include <kernel/time.h>
+#include <kernel/fb.h>
 
 #define PS2_DATA   0x60
 #define PS2_STATUS 0x64
@@ -81,7 +82,6 @@ static int tr_key(uint8_t key)
     return 0;
 }
 
-extern void backlight_unblank(void);
 
 /* The Windows key pressed and let go with nothing else in between: the desk takes it
  * to switch between Home and the desktop. As a key-up so Super+key stays free. */

@@ -420,7 +420,6 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 			if (wfd < 0 || ep->ev[i] == 0) { spin_unlock_irq(&ep->lock, f); continue; }
 			spin_unlock_irq(&ep->lock, f);
 			/* a poll fop may block or take other locks: not under ep->lock */
-			extern volatile uint64_t poll_gen;
 			uint64_t gen = poll_gen;
 			int bits = fd_poll_bits(wfd);
 			f = spin_lock_irq(&ep->lock);

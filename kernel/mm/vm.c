@@ -115,7 +115,6 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	process_t *p = task_current();
 	if (!p || !p->vm) { kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
 
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 
 	/* Threads share one address space, so two CPUs can fault the same PTE
 	 * at once. Without serialization both would run the COW copy-and-free
@@ -252,7 +251,6 @@ out:
 	spin_unlock_irq(&p->vm->fault_lock, lf);
 	if (cow_old) {
 		if (p->vm->refcount > 1) {
-			extern void arch_tlb_flush_range(vm_space_t *, uint64_t, uint64_t);
 			arch_tlb_flush_range(p->vm, vaddr, vaddr + PAGE_SIZE);
 		}
 		if (pmm_free((void *)cow_old)) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
@@ -267,8 +265,6 @@ out:
  * bytes copied. Device memory has no direct-map alias and stops the copy. */
 size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write)
 {
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
-	extern void arch_tlb_flush_range(vm_space_t *, uint64_t, uint64_t);
 	process_t *cur = task_current();
 	size_t done = 0;
 	while (done < n) {

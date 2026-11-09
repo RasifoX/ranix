@@ -10,6 +10,7 @@
 #include <kernel/hal.h>
 #include <kernel/bug.h>
 #include <asm/mmu.h>
+#include <asm/cpu.h>
 
 #define PT_ENTRIES  512
 #define PTE_P   (1UL << 0)
@@ -28,7 +29,6 @@
 #define PA_2M_MASK  0x000FFFFFFFE00000UL
 #define PA_1G_MASK  0x000FFFFFC0000000UL
 
-extern uint64_t pml4[];      /* kernel (boot) PML4 — phys when cast to uint64_t */
 
 /* 5-level paging flag, cached in the high half. The raw boot symbol (la57)
  * lives at a low VA reachable only through the identity map (pml4[0]), which user
@@ -123,7 +123,6 @@ void vm_destroy(vm_space_t *vs)
 	KASSERT(vs->magic == VM_SPACE_MAGIC);
 	if (atomic_sub_fetch32(&vs->refcount, 1) > 0) return;
 
-	extern void vma_free_space(vm_space_t *);
 	vma_free_space(vs);   /* last thread gone — the address space's regions die with it */
 
 	if (!vs->root) { vs->magic = 0; buddy_free(VIRT_TO_PHYS(vs), 0); return; }
@@ -406,7 +405,6 @@ uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end)
 {
 	(void)vs; (void)start; (void)end;
-	extern void arch_tlb_shootdown_all(void);
 	arch_tlb_shootdown_all();
 }
 

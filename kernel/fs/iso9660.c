@@ -181,7 +181,6 @@ int iso9660_mount(vfs_mount_t *mnt, void *data)
 
 void iso9660_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("iso9660", iso9660_mount);
 	vfs_register_fs("iso", iso9660_mount);
 }

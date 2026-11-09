@@ -12,6 +12,11 @@
 #include <kernel/board.h>
 #include <kernel/fs/gpt.h>
 #include <kernel/fs/mbr.h>
+#include <kernel/time.h>
+#include <kernel/input.h>
+#include <drivers/input/ps2.h>
+#include <kernel/tick.h>
+#include <kernel/init.h>
 
 /*
  * xHCI host controller + USB enumeration + bulk-only mass-storage. Polling, no
@@ -252,7 +257,6 @@ typedef struct usb_disk {
 static xhci_t     g_xhci;
 static usb_dev_t  g_devs[MAX_DEVS];
 static usb_disk_t g_disk[MAX_DISKS];
-extern volatile uint64_t kernel_ticks;
 static process_t *volatile usbd_task;
 static volatile int usbd_idle;
 
@@ -911,8 +915,6 @@ static void dev_release(usb_dev_t *d)
 
 /* ---- HID: keyboards and mice ---- */
 
-extern void input_usb_key(uint16_t code, int down);
-extern void input_usb_mouse(int dx, int dy, int wheel, int buttons);
 
 #define E0 0x100
 /* HID usage 0x04.. to scancode set 1, E0 for the extended ones */
@@ -1839,7 +1841,6 @@ void xhci_init(void)
 			port_bringup(x, i);
 
 	proc_create("usbd", usbd_thread);
-	extern void tick_register(void (*fn)(void));
 	tick_register(xhci_tick);
 }
 

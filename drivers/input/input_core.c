@@ -6,6 +6,7 @@
 #include <kernel/hal.h>
 #include <kernel/kout.h>
 #include <kernel/mm/heap.h>
+#include <kernel/time.h>
 
 int input_keymap = KEYMAP_US;
 
@@ -20,7 +21,6 @@ static int ev_head = 0;
 static int ev_tail = 0;
 static spinlock_t ev_lock = SPINLOCK_INIT;
 
-extern volatile uint64_t kernel_ticks;
 #include <kernel/board.h>   /* TIMER_HZ: never redefine it locally */
 
 /* ---- input source: hw (a device) or injected (written by software) ---- */

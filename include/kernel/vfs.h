@@ -4,6 +4,7 @@
 #include <uapi/types.h>
 #include <kernel/sync.h>
 #include <kernel/config.h>
+#include <kernel/time.h>   /* ranix_walltime for timestamps */
 
 /* ── mode bits ───────────────────────────────────────────── */
 #define S_IFREG  0x8000
@@ -378,7 +379,6 @@ int        vfs_symlink(const char *target, const char *linkpath);
 int        vfs_stat(const char *path, vfs_stat_t *out);
 int        vfs_lstat(const char *path, vfs_stat_t *out);
 uint32_t vfs_path_sdev(const char *path);   /* st_dev minor of the filesystem path is on */
-void       ranix_walltime(int64_t *sec, int64_t *nsec);
 int        vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out);
 int        vfs_rename(const char *old_path, const char *new_path);
 int        vfs_chmod(const char *path, mode_t mode);
@@ -448,5 +448,20 @@ ssize_t vfs_inode_getxattr(vfs_inode_t *in, const char *name, void *val, size_t 
 ssize_t vfs_inode_listxattr(vfs_inode_t *in, char *list, size_t size);
 int     vfs_inode_removexattr(vfs_inode_t *in, const char *name);
 void    vfs_inode_free_xattrs(vfs_inode_t *in);
+
+void vfs_register_fs(const char *name, int (*mount)(vfs_mount_t *, void *));
+int  vfs_file_is_socket(vfs_file_t *f);          /* sys/syscall_net.c */
+
+/* filesystems without a header of their own, registered by vfs_init() */
+void fat_register(void);
+void exfat_register(void);
+void ntfs_register(void);
+void iso9660_register(void);
+void sysfs_register(void);
+void hugetlbfs_register(void);
+
+/* sysfs subtrees that drivers provide */
+vfs_inode_t *drm_sysfs_root(const char *where);   /* drivers/gpu/drm/drm_sysfs.c */
+vfs_inode_t *thermal_sysfs_file(void);            /* drivers/thermal/thermal_guard.c */
 
 #endif

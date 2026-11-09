@@ -465,4 +465,30 @@ typedef process_t task_t;
 #define TASK_DEAD     PROC_DEAD
 #define TASK_SLEEPING PROC_SLEEPING
 
+/* scheduler internals other subsystems use (sched.c) */
+/* proctab[i] with no internal lock: the caller already holds sched_lock
+ * (task_get() locks internally and would self-deadlock under a sweep). */
+process_t *task_peek_locked(int index);
+int  sched_running_now(void);
+extern uint64_t load_avg[3];
+void kstack_check(void);
+void cond_resched(void);
+void sched_bsp_wake(void);                       /* from the BSP's idle loop */
+
+/* proc.c */
+int  oom_victim_pending(void);
+void vfork_release(process_t *p);
+void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
+                               process_t **out_child, int *out_any_alive, int *out_event);
+int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags);
+
+/* futexes (sys/syscall_proc.c) and POSIX timers (sys/syscall_timer.c) */
+void futex_wake_addr(uint32_t *uaddr);
+void futex_exit_robust(process_t *p);
+void ptimer_drop(pid_t tgid);
+
+/* coredump.c */
+extern char core_pattern[128];
+void coredump(process_t *p, int sig, arch_context_t *ctx);
+
 #endif

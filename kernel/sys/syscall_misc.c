@@ -2,6 +2,12 @@
 #include <kernel/capabilities.h>
 #include <kernel/block.h>
 #include <kernel/cpumask.h>
+#include <kernel/mm/vm.h>
+#include <kernel/proc.h>
+#include <kernel/claim.h>
+#include <kernel/kprintf.h>
+#include <kernel/smp.h>
+#include <kernel/csprng.h>
 
 /* ── statfs ──────────────────────────────────────────────── */
 
@@ -314,7 +320,6 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 	/* Without MREMAP_MAYMOVE the mapping stays where it is. musl walks down the
 	 * main stack this way, reading ENOMEM as "mapped" and EFAULT as "the end". */
 	if (!(flags & 1)) {
-		extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 		/* the probe below walks page by page and cannot be interrupted */
 		if (new_size - old_size > (1UL << 30)) return -12;
 		vma_t *v = p->vm->vmas;
@@ -363,7 +368,6 @@ static long sys_alarm(unsigned int seconds)
 	process_t *p = task_current();
 	/* read-and-replace under sched_lock so it can't race sched_tick's decrement
 	 * (a nested tick on aarch64, or a cross-CPU tick) and report/leave a torn value. */
-	extern spinlock_t sched_lock;
 	uint64_t sf = spin_lock_irq(&sched_lock);
 	unsigned int remaining = (unsigned int)(p->itimer_value / TIMER_HZ);
 	uint64_t nv = (uint64_t)seconds * TIMER_HZ;
@@ -1038,7 +1042,6 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 	if ((uint32_t)magic1 == 0xfee1dead &&
 	    ((uint32_t)cmd == 0x01234567u || (uint32_t)cmd == 0xCDEF0123u || (uint32_t)cmd == 0x4321FEDCu) &&
 	    current_pid_ns() == &init_pid_ns) {
-		extern int claim_reboot_check(process_t *caller);
 		process_t *me = task_current();
 		if (me->tgid != 1 && claim_reboot_check(me)) return -16;   /* EBUSY */
 	}
@@ -1084,7 +1087,6 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 
 static long sys_syslog(int type, char *buf, int len)
 {
-	extern int dmesg_restrict;
 	if (type < 0 || type > 10) return -22;
 	if (type >= 2 && type <= 4 && len < 0) return -22;
 	/* same gate as /dev/kmsg; everything but the size query touches the log */
@@ -1188,7 +1190,6 @@ static long sys_sched_yield(void) { yield(); return 0; }
 
 static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 {
-	extern int smp_ncpus;
 	if (len < 8) return -22;
 	if (!access_ok(mask, len)) return -14;
 
@@ -1233,7 +1234,6 @@ static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 {
 	if (len < 8) return -22;
 	if (!access_ok(mask, len)) return -14;
-	extern int smp_ncpus;
 	process_t *p = pid ? proc_get_user(pid) : task_current();
 	if (!p) return -3;
 	cpumask_t m;
@@ -1480,7 +1480,6 @@ static long sys_membarrier(int cmd, unsigned int flags)
 /* GRND_NONBLOCK=1 GRND_RANDOM=2 GRND_INSECURE=4 */
 static long sys_getrandom(void *buf, size_t len, unsigned int flags)
 {
-	extern void csprng_bytes(void *, size_t);
 	if (flags & ~0x7u) return -22;                  /* EINVAL: unknown flag */
 	if (!access_ok(buf, len)) return -14;
 	/* the DRBG is seeded at boot, so GRND_RANDOM never blocks here. */

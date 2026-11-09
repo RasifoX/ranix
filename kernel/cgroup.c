@@ -29,8 +29,8 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/nsproxy.h>
 
-extern unsigned long ns_inum_alloc(void);
 
 typedef struct cgroup {
 	char            name[64];
@@ -690,6 +690,5 @@ int cgroup_mount(vfs_mount_t *mnt, void *data)
 
 void cgroup_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("cgroup2", cgroup_mount);
 }

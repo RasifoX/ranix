@@ -3,6 +3,7 @@
 #include <kernel/lib/string.h>
 #include <asm/gdt.h>
 #include <kernel/proc.h>
+#include <asm/cpu.h>
 
 uint8_t avx_on;                     /* read by the entry stubs */
 
@@ -25,7 +26,6 @@ void arch_restore_tls(process_t *p)
 	                 "d"((uint32_t)(p->user_gs_base >> 32)));
 }
 
-extern void syscall_entry(void);
 
 static cpu_context_t early_cpu_ctx;
 static uint8_t early_irq_stack[4096] __attribute__((aligned(16)));

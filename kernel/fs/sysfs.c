@@ -25,7 +25,14 @@
 
 #include <kernel/nsproxy.h>
 #include <kernel/fs/devfs.h>
-extern int  smp_ncpus;
+#include <kernel/smp.h>
+#include <kernel/fb.h>
+#include <input/ps2/synaptics.h>
+#include <drivers/input/ps2.h>
+
+/* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
+#pragma weak ps2_aux_report
+#pragma weak syn_tap
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
        SF_BLK_SIZE, SF_BLK_STAT, SF_BLK_RO, SF_BLK_RO_DENIED, SF_BLK_ID, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
@@ -167,15 +174,13 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case SF_CGROUP_CTRL:  n = put_str(tmp, "cpu memory pids freezer\n"); break;
 	case SF_CGROUP_PROCS: n = put_str(tmp, "1\n"); break;
 	case SF_THP_ENABLED:  n = put_str(tmp, "always [madvise] never\n"); break;
-	case SF_TOUCHPAD: { extern int __attribute__((weak)) ps2_aux_report(char *, int); n = ps2_aux_report ? ps2_aux_report((char *)tmp, 128) : 0; break; }
+	case SF_TOUCHPAD: { n = ps2_aux_report ? ps2_aux_report((char *)tmp, 128) : 0; break; }
 	case SF_VOLUME: n = put_u64(tmp, (uint64_t)sound_volume()); tmp[n++] = '\n'; break;
 	case SF_CSTATE: {
-		extern int arch_idle_get(void);
 		n = put_u64(tmp, (uint64_t)arch_idle_get()); tmp[n++] = '\n';
 		break;
 	}
 	case SF_BACKLIGHT: {
-		extern int backlight_get(void);
 		int v = backlight_get();
 		if (v < 0) return -19;
 		n = put_u64(tmp, (uint64_t)v); tmp[n++] = '\n';
@@ -262,7 +267,6 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		return (ssize_t)len;
 	}
 	if (pr->type == SF_CSTATE) {
-		extern int arch_idle_set(int);
 		long v = 0;
 		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
 		for (size_t j = 0; j < n && kbuf[j] >= '0' && kbuf[j] <= '9'; j++) v = v * 10 + (kbuf[j] - '0');
@@ -270,7 +274,6 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		return e ? e : (ssize_t)len;
 	}
 	if (pr->type == SF_BACKLIGHT) {
-		extern int backlight_set(int);
 		long pct = 0;
 		if (!sysfs_may_turn(SF_BACKLIGHT)) return -1;
 		for (size_t j = 0; j < n && kbuf[j] >= '0' && kbuf[j] <= '9'; j++) pct = pct * 10 + (kbuf[j] - '0');
@@ -278,7 +281,6 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		return e ? e : (ssize_t)len;
 	}
 	if (pr->type == SF_TOUCHPAD) {           /* "tap 0" or "tap 1" */
-		extern int syn_tap __attribute__((weak));   /* no PS/2 on arm */
 		if (!sysfs_may_turn(SF_TOUCHPAD)) return -1;
 		if (n < 5 || memcmp(kbuf, "tap ", 4) != 0 || !&syn_tap) return -22;
 		syn_tap = kbuf[4] == '1';
@@ -323,7 +325,7 @@ static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "devices") == 0) return sysfs_dir(&sysfs_devices_iops, -1);
 	if (strcmp(name, "fs")      == 0) return sysfs_dir(&sysfs_fs_iops, -1);
 	if (strcmp(name, "bus")     == 0) return sysfs_dir(&sysfs_bus_iops, -1);
-	if (strcmp(name, "dev")     == 0) { extern vfs_inode_t *drm_sysfs_root(const char *); return drm_sysfs_root("dev"); }
+	if (strcmp(name, "dev")     == 0) return drm_sysfs_root("dev");
 	return NULL;
 }
 static int sysfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
@@ -349,7 +351,7 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "touchpad") == 0) return sysfs_file_rw(SF_TOUCHPAD, -1);
 	if (strcmp(name, "backlight") == 0) return sysfs_file_rw(SF_BACKLIGHT, -1);
 	if (strcmp(name, "cstate") == 0) return sysfs_file_rw(SF_CSTATE, -1);
-	if (strcmp(name, "ranix_thermal") == 0) { extern vfs_inode_t *thermal_sysfs_file(void); return thermal_sysfs_file(); }
+	if (strcmp(name, "ranix_thermal") == 0) return thermal_sysfs_file();
 	for (unsigned i = 0; i < 3; i++)
 		if (strcmp(kernel_files[i].name, name) == 0)
 			return sysfs_file(kernel_files[i].type, -1);
@@ -578,7 +580,7 @@ static vfs_inode_t *sysfs_class_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "net") == 0) return sysfs_dir(&sysfs_net_iops, -1);
-	if (strcmp(name, "drm") == 0) { extern vfs_inode_t *drm_sysfs_root(const char *); return drm_sysfs_root("class/drm"); }
+	if (strcmp(name, "drm") == 0) return drm_sysfs_root("class/drm");
 	return NULL;
 }
 static int sysfs_class_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
@@ -716,7 +718,6 @@ static vfs_iops_t sysfs_cpun_iops = { .lookup = sysfs_cpun_lookup, .readdir = sy
 static vfs_inode_t *sysfs_cpu_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
-	extern int smp_ncpus;
 	for (unsigned i = 0; i < 2; i++)
 		if (strcmp(cpu_files[i].name, name) == 0) return sysfs_file(cpu_files[i].type, -1);
 	if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && name[3] >= '0' && name[3] <= '9') {
@@ -732,7 +733,6 @@ static vfs_inode_t *sysfs_cpu_lookup(vfs_inode_t *dir, const char *name)
 static int sysfs_cpu_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	extern int smp_ncpus;
 	if (idx >= 2 + (uint32_t)smp_ncpus) return -1;
 	out->ino = sys_ino_alloc(); out->next_off = idx + 1;
 	if (idx >= 2) {
@@ -793,6 +793,5 @@ int sysfs_mount(vfs_mount_t *mnt, void *data)
 
 void sysfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("sysfs", sysfs_mount);
 }

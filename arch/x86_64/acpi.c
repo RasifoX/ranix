@@ -7,6 +7,8 @@
 #include <kernel/proc.h>
 #include <kernel/board.h>
 #include <kernel/hwdiag.h>
+#include <kernel/time.h>
+#include <asm/cpu.h>
 
 /* ── CMOS / RTC ("BIOS clock") → Unix epoch seconds ───────────── */
 static uint8_t cmos_read(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
@@ -420,7 +422,6 @@ void acpi_poweroff(void)
 
 static void acpi_button_thread(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	for (;;) {
 		task_sleep_until(kernel_ticks + TIMER_HZ / 4);
 		if (!(inw_port(pm1a_evt) & PM1_PWRBTN)) continue;

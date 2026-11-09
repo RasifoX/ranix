@@ -3,6 +3,7 @@
 #include <asm/idt.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
+#include <asm/cpu.h>
 
 #define PIC1_CMD   0x20
 #define PIC1_DATA  0x21
@@ -90,7 +91,6 @@ void irqchip_mask_unhandled(uint32_t irq)
 void irq_dispatch(uint32_t irq)
 {
 	if (irq >= VEC_MSI_FIRST) {               /* came through the LAPIC, not the PIC */
-		extern void lapic_eoi(void);
 		lapic_eoi();
 		irq_handle(irq);
 		return;

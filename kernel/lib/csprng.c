@@ -1,8 +1,8 @@
 #include <kernel/csprng.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/time.h>
 
-extern volatile uint64_t kernel_ticks;
 
 /* ── arch entropy source ─────────────────────────────────────
  * A free-running hardware counter (rdtsc / cntvct) gives per-call jitter; on

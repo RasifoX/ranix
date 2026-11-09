@@ -34,17 +34,13 @@
 #include <kernel/mm/heap.h>
 #include <kernel/fs/devfs.h>
 #include <uapi/rescue.h>
+#include <kernel/time.h>
+#include <kernel/tick.h>
+#include <kernel/watchdog.h>
+#include <kernel/hungtask.h>
+#include <kernel/claim.h>
+#include <kernel/init.h>
 
-extern volatile uint64_t kernel_ticks;
-extern spinlock_t sched_lock;
-extern process_t *task_peek_locked(int index);
-extern void tick_register(void (*fn)(void));
-extern void ranix_walltime(int64_t *sec, int64_t *nsec);
-extern int  wdog_deadline_set(unsigned secs);
-extern unsigned wdog_deadline_left(void);
-extern void kwatch_report(kout_t *o, int with_bt);
-extern volatile uint64_t kwatch_unkillable_count, kwatch_kstall_count;
-extern int  claim_report(kout_t *o, int json);   /* kernel/claim.c */
 
 
 /* ── keys and nonces ───────────────────────────────────────────────────────── */

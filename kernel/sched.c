@@ -26,9 +26,14 @@
 #include <kernel/smp.h>
 #include <kernel/cpumask.h>
 #include <asm/mmu.h>
+#include <kernel/hungtask.h>
+#include <kernel/net/tcp.h>
+#include <kernel/time.h>
+#include <kernel/ksyms.h>
+#include <kernel/csprng.h>
+#include <kernel/ptrace.h>
+#include <kernel/tty/tty_core.h>
 
-extern void futex_wake_addr(uint32_t *uaddr);
-extern void futex_exit_robust(process_t *p);
 
 static process_t **proctab;
 static int         proc_cap = 0;
@@ -229,8 +234,6 @@ void tick_register(tick_fn_t fn)
  * stuck IRQ-off section). Report which CPU, where, and on what. */
 static void sched_watchdog(void)
 {
-	extern int smp_ncpus;
-	extern cpu_context_t *all_cpus[];
 	static uint64_t last_seen[MAX_CPUS];
 	static unsigned frozen[MAX_CPUS];
 	static unsigned n;
@@ -278,11 +281,11 @@ void tick_notify(void)
 		for (int i = 0; i < tick_cb_cnt; i++)
 			if (tick_cbs[i] != sched_tick) tick_cbs[i]();
 		sched_watchdog();
-		{ extern void spin_report_bad_unlocks(void); spin_report_bad_unlocks(); }
+		spin_report_bad_unlocks();
 		/* khungtaskd: sweep every 512 ticks (~5s @100Hz). The timeout it checks
 		 * is much larger (20s), so a coarse sweep loses no responsiveness. */
 		static unsigned ht;
-		if ((++ht & 0x1FF) == 0) { extern void hung_task_check(void); hung_task_check(); }
+		if ((++ht & 0x1FF) == 0) hung_task_check();
 	}
 }
 
@@ -309,13 +312,12 @@ void sched_tick_local(void)
 		}
 	}
 	itimer_charge_cpu(current);
-	{ extern void kwatch_tick_local(process_t *cur, cpu_context_t *cc); kwatch_tick_local(current, cc); }
+	kwatch_tick_local(current, cc);
 	if (current->pid != 0) {
 		if (--current->ticks_remaining <= 0)
 			arch_get_cpu_ctx()->need_resched = 1;
 	} else {
 		/* Idle: anything queued anywhere is work this CPU could steal */
-		extern int smp_ncpus;
 		for (int i = 0; i < smp_ncpus; i++)
 			if (all_cpus[i] && all_cpus[i]->rq_head) {
 				arch_get_cpu_ctx()->need_resched = 1;
@@ -330,8 +332,6 @@ void sched_tick_local(void)
  * lock-free. */
 static void sched_watchdog_remote(void)
 {
-	extern int smp_ncpus;
-	extern cpu_context_t *all_cpus[];
 	static uint64_t last_seen[MAX_CPUS];
 	static unsigned frozen[MAX_CPUS];
 	static unsigned n, warm;
@@ -390,7 +390,6 @@ static int               sched_itimer_armed;
  * is the same one and still has a deadline that has come. Full: the old walk takes
  * over until the heap has drained. */
 #define DH_CAP 16384
-extern cpu_context_t *all_cpus[];
 static struct dh_ent { process_t *t; uint64_t d; int pid; } dh[DH_CAP];
 static int dh_n, dh_over;
 static spinlock_t dh_lock = SPINLOCK_INIT;
@@ -445,7 +444,6 @@ void sched_note_wake_deadline(uint64_t deadline)
 	if (b && b->tick_slow && deadline <= kernel_ticks + 2 * TICK_SLOW) {
 		b->need_resched = 1;
 		if (arch_get_cpu_ctx() != b) {
-			extern void smp_ipi_resched(int);
 			smp_ipi_resched(0);
 		}
 	}
@@ -546,8 +544,6 @@ static int cpu_rq_len(cpu_context_t *cpu)
  * without this, x86 piled every task onto the CPU that forked it). */
 static cpu_context_t *pick_cpu(process_t *p)
 {
-	extern int smp_ncpus;
-	extern cpu_context_t *all_cpus[];
 	cpu_context_t *best = NULL;
 	int best_len = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
@@ -570,7 +566,6 @@ static void runqueue_add(process_t *p)
 	cpu_rq_add(cpu, p);
 	cpu->need_resched = 1;
 	if (cpu != arch_get_cpu_ctx()) {
-		extern void smp_ipi_resched(int);
 		int cid = (int)cpu->cpu_id;
 		smp_ipi_resched(cid);
 		__asm__ volatile("" ::: "memory");
@@ -587,8 +582,6 @@ static process_t *runqueue_pop(void)
 
 	/* work stealing: steal the first affinity-allowed task off the busiest CPU.
 	 * A lone runnable task on a busy CPU must not starve this idle one. */
-	extern int smp_ncpus;
-	extern cpu_context_t *all_cpus[];
 	cpu_context_t *victim = NULL;
 	int max_len = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
@@ -688,10 +681,8 @@ void sched_init(void)
 
 	tick_register(sched_tick);
 
-	extern void tcp_tick(void);
 	tick_register(tcp_tick);
 
-	extern void timerfd_tick(void);
 	tick_register(timerfd_tick);
 }
 
@@ -724,7 +715,6 @@ static void itimer_charge_cpu(process_t *p)
 uint64_t load_avg[3];
 int sched_running_now(void)
 {
-	extern int smp_ncpus;
 	int n = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
@@ -751,7 +741,6 @@ static void load_sample(void)
  * fire). Anything that needs it sooner brings it back. */
 static int bsp_may_slow(void)
 {
-	extern int smp_ncpus;
 	if (dh_over || sched_itimer_armed || kernel_ticks % TICK_SLOW) return 0;
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
@@ -801,7 +790,7 @@ void sched_tick(void)
 
 	current->ticks++;
 	itimer_charge_cpu(current);
-	{ extern void kwatch_tick_local(process_t *cur, cpu_context_t *cc); kwatch_tick_local(current, arch_get_cpu_ctx()); }
+	kwatch_tick_local(current, arch_get_cpu_ctx());
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 
@@ -914,8 +903,6 @@ void schedule(void)
 	arch_get_cpu_ctx()->wd_where = "schedule";
 	{	/* switching away with a spinlock held: the lock goes to sleep with the task,
 		 * and is released later on whatever CPU it wakes up on. Name the lock. */
-		extern int spin_held_count(void);
-		extern void spin_dump_held(void);
 		static int told;
 		process_t *me = task_current();
 		if (me && me->pid && told < 2 && spin_held_count() > 0) {
@@ -926,7 +913,6 @@ void schedule(void)
 			uint64_t *fp = (uint64_t *)__builtin_frame_address(0);
 			for (int k = 0; k < 12 && fp && (uint64_t)fp >= 0xFFFF000000000000UL && !((uint64_t)fp & 7); k++) {
 				uint64_t ret = fp[1], off = 0;
-				extern const char *ksym_lookup(uint64_t, uint64_t *);
 				const char *sy = ksym_lookup(ret, &off);
 				kprintf(KERN_ERR "  %s+0x%lx\n", sy ? sy : "?", (unsigned long)off);
 				uint64_t *nx = (uint64_t *)fp[0];

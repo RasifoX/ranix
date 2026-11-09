@@ -7,6 +7,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/hwdiag.h>
 #include <asm/mmu.h>
+#include <kernel/init.h>
 
 /*
  * Minimal AHCI (SATA) block driver — polling, one SATA disk. Registers as a

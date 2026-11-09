@@ -152,4 +152,11 @@ uint16_t inet_cksum(const void *data, size_t len);
 /* Incrementally update checksum for 4-byte field swap */
 uint16_t inet_cksum_buf(uint16_t seed, const void *data, size_t len);
 
+void net_init(void);
+void net_dhcp_all(void);
+extern int net_drop_n;                           /* test hook: drop every n-th loopback frame */
+/* dhcp.c */
+int  dhcp_configure(netdev_t *dev, uint32_t *out_dns, int can_sleep);
+extern uint32_t dhcp_last_lease;
+
 #endif

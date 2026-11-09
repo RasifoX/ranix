@@ -1,5 +1,11 @@
 #include <kernel/board.h>
 #include <kernel/capabilities.h>
+#include <kernel/proc.h>
+#include <asm/cpu.h>
+#include <kernel/vdso.h>
+#include <kernel/time.h>
+#include <kernel/csprng.h>
+#include <kernel/ptrace.h>
 /* ── uname ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -227,7 +233,6 @@ typedef struct { int64_t tv_sec; int64_t tv_usec; } linux_timeval_t;
 #define FUTEX_CLOCK_REALTIME  256
 #define FUTEX_CMD_MASK        (~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
 
-extern spinlock_t sched_lock;
 
 /* ── futex: event-driven, per-address hash buckets (futex_q model) ──────
  * Waiters are stack-allocated nodes linked into a bucket keyed by
@@ -563,7 +568,6 @@ static void mono_time(int64_t *sec, int64_t *nsec)
 		return;
 	}
 #elif defined(__x86_64__)
-	extern uint64_t hpet_now_ns(void), tsc_now_ns(void);
 	uint64_t hns = tsc_now_ns();
 	if (!hns) hns = hpet_now_ns();
 	if (hns) {
@@ -595,7 +599,6 @@ uint64_t mono_ns(void)
  * clock_settime / NTP later). 0 offset until rtc_init → falls back to uptime. */
 static int64_t g_rt_off_sec  = 0;
 static int64_t g_rt_off_nsec = 0;
-extern void vdso_time_changed(void);   /* refresh the vDSO vvar after a clock step */
 static int vdso_advertise = 1;         /* AT_SYSINFO_EHDR on/off (see execve) */
 
 static void real_time(int64_t *sec, int64_t *nsec)
@@ -610,7 +613,6 @@ static void real_time(int64_t *sec, int64_t *nsec)
 /* read the hardware clock (CMOS / PL031) once at boot → real wall-clock epoch */
 void rtc_init(void)
 {
-	extern int64_t arch_rtc_read(void);
 	int64_t e = arch_rtc_read();
 	if (e > 1000000000LL) {           /* sane epoch (after 2001) */
 		int64_t ms, mn; mono_time(&ms, &mn);
@@ -727,7 +729,6 @@ static long sys_clock_settime(int clkid, const linux_timespec_t *tp)
 /* persist the current wall-clock to the hardware RTC (hwclock --systohc). */
 static void rtc_sync_to_hw(void)
 {
-	extern void arch_rtc_write(int64_t epoch_sec);
 	int64_t s, n; real_time(&s, &n);
 	arch_rtc_write(s);
 }
@@ -859,7 +860,6 @@ static long sys_setitimer(int which, const itimerval_t *new_v, itimerval_t *old_
                       (uint64_t)nval.it_interval.tv_usec * hz / 1000000;
         /* store both fields under sched_lock so a nested timer tick (aarch64) or
          * a cross-CPU sched_tick can't decrement against a half-updated pair. */
-        extern spinlock_t sched_lock;
         uint64_t sf = spin_lock_irq(&sched_lock);
         if (which == 0) sched_itimer_account(*value, nv);   /* ITIMER_REAL gate */
         *value    = nv;
@@ -1605,7 +1605,7 @@ static void exec_reset_signals(process_t *p)
 	p->sig_mask    = 0;
 	p->sig_pending = 0;
 	sigqueue_drop(p);
-	{ extern void ptimer_drop(pid_t tgid); ptimer_drop(p->tgid); }
+	ptimer_drop(p->tgid);
 }
 
 /* apply credentials: suid/sgid set to new euid/egid after exec */
@@ -1713,7 +1713,6 @@ static uint64_t exec_fill_stack(process_t *p, uint8_t *kbuf, uint64_t *uargv, ui
 	 * cryptographic, so draw from the CSPRNG rather than the ASLR PRNG. */
 	sp -= 16;
 	{
-		extern void csprng_bytes(void *, size_t);
 		csprng_bytes((void *)KB(sp), 16);
 	}
 	uint64_t at_random_addr = sp;
@@ -1780,8 +1779,8 @@ static void exec_switch_vm(process_t *p, vm_space_t *new_vm, const elf_info_t *e
 	p->vm->brk   = ei->load_end;
 	p->vm->mmap_next = en->mmap_base;
 	p->dumpable  = secure_exec ? 0 : 1;
-	{ extern void ptrace_exec_done(process_t *); ptrace_exec_done(p); }
-	{ extern void vfork_release(process_t *); vfork_release(p); }
+	ptrace_exec_done(p);
+	vfork_release(p);
 	arch_vm_switch((uint64_t)new_vm->root, new_vm->asid);
 	if (old_vm) vm_destroy(old_vm);
 
@@ -1867,7 +1866,6 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 		vm_destroy(new_vm); EXEC_STAGE_FREE(); return r;
 	}
 
-	extern void vdso_map(vm_space_t *);
 	vdso_map(new_vm);   /* REALTIME/gettimeofday fast path (AT_SYSINFO_EHDR below) */
 
 	exec_set_names(p, kpath, exe_real, &a);
@@ -2025,7 +2023,6 @@ static long sys_vfork(uint64_t newsp, uint64_t flags)
 	p->vfork_pending = 1;
 	long pid = (long)proc_fork(flags & CLONE_FS, newsp);   /* Chromium shares its root */
 	if (pid < 0) { p->vfork_pending = 0; return pid; }
-	extern spinlock_t sched_lock;
 	while (!task_has_actionable_signal()) {
 		/* checked under the lock task_wake takes, so the release cannot slip
 		 * between the test and the sleep; no deadline, no tick sweep */
@@ -2064,9 +2061,6 @@ static long sys_pipe2(int *pipefd, int flags)
 
 #define WNOHANG 1
 
-extern void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
-                                      process_t **out_child, int *out_any_alive, int *out_event);
-extern int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags);
 
 /* wait4 rusage: the reaped child's CPU time, including descendants it waited
  * for (Linux folds those into the child's own ru_*). Must run before proc_reap

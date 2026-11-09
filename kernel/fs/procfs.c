@@ -23,6 +23,9 @@
 #include <kernel/irq.h>
 #include <kernel/hwdiag.h>
 #include <kernel/ksyms.h>
+#include <kernel/time.h>
+#include <kernel/vdso.h>
+#include <kernel/watchdog.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -80,7 +83,6 @@ static int fill_version(char *buf, size_t sz)
 static int fill_cpuinfo(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
-	extern int smp_ncpus;
 	for (int i = 0; i < smp_ncpus; i++) {
 #if defined(__aarch64__)
 		pb_str(&b, "processor\t: "); pb_u64(&b, i); pb_char(&b, '\n');
@@ -153,10 +155,10 @@ static int fill_mounts(char *buf, size_t sz)
 }
 
 #include <kernel/board.h>
+#include <kernel/fs/procfs.h>
 
 static int fill_uptime(char *buf, size_t sz)
 {
-	extern volatile uint64_t kernel_ticks;
 	uint64_t secs = kernel_ticks / TIMER_HZ;
 	uint64_t centi = ((kernel_ticks % TIMER_HZ) * 100) / TIMER_HZ;
 	pb_t b = {buf, sz};
@@ -169,8 +171,6 @@ static int fill_uptime(char *buf, size_t sz)
 
 static int fill_stat(char *buf, size_t sz)
 {
-	extern volatile uint64_t kernel_ticks;
-	extern int smp_ncpus;
 	pb_t b = {buf, sz};
 	uint64_t tb = 0, ti = 0;
 	for (int i = 0; i < smp_ncpus; i++)
@@ -187,7 +187,6 @@ static int fill_stat(char *buf, size_t sz)
 	pb_str(&b, "ctxt 0\n");
 	pb_str(&b, "btime 0\n");          /* boot epoch — vmstat/uptime read these */
 	pb_str(&b, "processes "); pb_u64(&b, (uint64_t)task_count()); pb_char(&b, '\n');
-	extern int sched_running_now(void);
 	pb_str(&b, "procs_running "); pb_u64(&b, (uint64_t)sched_running_now()); pb_char(&b, '\n');
 	pb_str(&b, "procs_blocked 0\n");
 	return (int)(sz - b.rem);
@@ -196,8 +195,6 @@ static int fill_stat(char *buf, size_t sz)
 static int fill_loadavg(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
-	extern uint64_t load_avg[3];
-	extern int sched_running_now(void);
 	for (int i = 0; i < 3; i++) {
 		uint64_t v = load_avg[i] * 100 / 1024;
 		pb_u64(&b, v / 100);
@@ -226,7 +223,6 @@ static void pb_u64_right(pb_t *b, uint64_t v, int width)
 /* IRQ numbers are the arch's own (vectors on x86), labelled by handler symbol */
 static int fill_interrupts(char *buf, size_t sz)
 {
-	extern int smp_ncpus;
 	pb_t b = {buf, sz};
 	int cpus = smp_ncpus < 32 ? smp_ncpus : 32;
 	pb_str(&b, "    ");
@@ -658,7 +654,6 @@ static int fill_diskstats(char *buf, size_t sz)
 /* /proc/vmstat — a few real counters tools may read. */
 static int fill_vmstat(char *buf, size_t sz)
 {
-	extern uint64_t buddy_free_pages(void);
 	pb_t b = {buf, sz};
 	pb_str(&b, "nr_free_pages "); pb_u64(&b, buddy_free_pages()); pb_char(&b, '\n');
 	pb_str(&b, "nr_anon_pages 0\nnr_mapped 0\npgfault 0\npgmajfault 0\n");
@@ -720,9 +715,9 @@ static const struct {
 
 /* ── virtual file ops ────────────────────────────────────────── */
 
-/* drivers/watchdog/wdog_core.c, x86_64 only */
-extern unsigned wdog_deadline_left(void) __attribute__((weak));
-extern int wdog_deadline_set(unsigned secs) __attribute__((weak));
+/* drivers/watchdog/wdog_core.c is x86_64 only: weak, so NULL elsewhere */
+#pragma weak wdog_deadline_left
+#pragma weak wdog_deadline_set
 #define PROCFS_BUF_SIZE 4096
 
 static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
@@ -765,7 +760,6 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		if (p) {
 			if (pr->type == PROC_F_P_OOMADJ) v = p->oom_score_adj;
 			else {                              /* 0..2000: share of memory plus the adjustment */
-				extern uint64_t buddy_total_pages(void);
 				uint64_t tot = buddy_total_pages() * 4096UL;
 				v = tot ? (long)((uint64_t)proc_rss_bytes(p) * 1000 / tot) : 0;
 				v += p->oom_score_adj;
@@ -812,7 +806,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_DENTRY:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)vfs_dentry_count()); pb_str(&b,"\t0\t45\t0\t0\t0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_NFILE:        { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"4096\t0\t65536\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
-	case PROC_F_SYS_CORE_PATTERN: { extern char core_pattern[128]; pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_CORE_PATTERN: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -879,7 +873,6 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		return (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_CORE_PATTERN) {
-		extern char core_pattern[128];
 		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
 		if (len == 0 || len >= 128) return -22;
 		char tmp[128];
@@ -1842,7 +1835,7 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 		if (neg2) nsec = -nsec;
 		while (*s && *s != '\n') s++;
 
-		{ extern uint32_t vdso_timens_used; vdso_timens_used = 1; }
+		vdso_timens_used = 1;
 		if (first == 'm') { p->time_ns_new->mono_sec = sec; p->time_ns_new->mono_nsec = nsec; }
 		else if (first == 'b') { p->time_ns_new->boot_sec = sec; p->time_ns_new->boot_nsec = nsec; }
 	}
@@ -2522,8 +2515,6 @@ static int fill_net_if_inet6(char *buf, size_t sz)
  * (ss -x / netstat -x / lsof resolve AF_UNIX sockets from here). */
 static int fill_net_unix(char *buf, size_t sz)
 {
-	extern socket_t **gsock;
-	extern int        gsock_cap;
 	pb_t b = {buf, sz};
 	pb_str(&b, "Num       RefCount Protocol Flags    Type St Inode Path\n");
 	for (int i = 0; i < gsock_cap; i++) {
@@ -3139,6 +3130,5 @@ int procfs_mount(vfs_mount_t *mnt, void *data)
 
 void procfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("proc", procfs_mount);
 }

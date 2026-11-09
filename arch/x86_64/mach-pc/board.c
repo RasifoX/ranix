@@ -8,6 +8,9 @@
 #include <kernel/irq.h>
 #include <kernel/lib/string.h>
 #include <kernel/pstore.h>
+#include <kernel/init.h>
+#include <asm/cpu.h>
+#include <kernel/sound.h>
 
 static board_config_t config = {
 	.name     = "x86 PC",
@@ -18,7 +21,6 @@ static board_config_t config = {
 	.fb_height = 0,
 };
 
-extern uint64_t _dtb_ptr;
 void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out);
 
 void board_early_init(void)
@@ -27,9 +29,6 @@ void board_early_init(void)
 	multiboot2_parse(_dtb_ptr, &config.mem_size);
 }
 
-extern int mb2_get_fb(fb_info_t *out);
-extern void mb2_foreach_mem_region(void (*cb)(uint64_t, uint64_t, void *), void *ud);
-extern void mb2_get_reserved(uint64_t *base, uint32_t *size);
 
 int board_fb_alloc(fb_info_t *out)
 {
@@ -45,7 +44,7 @@ void board_irq_init(void)
 	pic8259_init();
 	irq_register(0x20, pit_handler);
 	pit_init(TIMER_HZ);
-	{ extern void lapic_bsp_tick_takeover(void); lapic_bsp_tick_takeover(); }
+	lapic_bsp_tick_takeover();
 	ps2_kbd_init();
 	uart16550_irq_init();
 }
@@ -56,7 +55,6 @@ void board_secondary_irq_init(void)
 	 * Secondary CPUs only need to load GDT/IDT (done in arch_secondary_init). */
 }
 
-extern void virtio_net_pci_init(void);
 
 #include <drivers/block/sdcard.h>
 
@@ -65,20 +63,13 @@ void board_drivers_register(void)
 	uart16550_register();
 	pit_register();
 	virtio_blk_init();
-	extern void ahci_init(void);
 	ahci_init();
-	extern void xhci_init(void);
 	xhci_init();
-	extern void acpi_button_start(void);
 	acpi_button_start();
-	extern void nvme_init(void);
 	nvme_init();
 	virtio_net_pci_init();
-	extern void rtl8168_init(void);
 	rtl8168_init();
-	extern void hda_init(void);
 	hda_init();
-	extern void rtw8723_init(void);
 	rtw8723_init();
 }
 
@@ -111,7 +102,6 @@ void board_poweroff(void)
 	pstore_end(PSTORE_STATE_POWEROFF, NULL);
 	/* QEMU isa-debug-exit (port 0x501, any value → QEMU exits with code 2*val+1) */
 	__asm__ volatile("outb %0, %1" :: "a"((uint8_t)0x00), "Nd"((uint16_t)0x501));
-	extern void acpi_poweroff(void);
 	acpi_poweroff();
 	/* QEMU ACPI shutdown PIIX4: PM1a_CNT at 0x604, SLP_EN|SLP_TYP_S5 */
 	__asm__ volatile("outw %0, %1" :: "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
@@ -164,7 +154,6 @@ static void reset_triple_fault(void)
  * register rebooted it. Interrupts off: this also runs from panic. */
 void board_reset(void)
 {
-	extern void acpi_reset(void);
 	char via[8];
 	const char *only = cmdline_get("ranix.resetvia", via, sizeof(via));
 

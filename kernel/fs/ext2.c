@@ -11,6 +11,9 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/cmdline.h>
 #include <asm/mmu.h>
+#include <kernel/time.h>
+#include <kernel/fs/devfs.h>
+#include <kernel/fs/ext2.h>
 
 /*
  * ext2 / ext4 VFS driver. ext2 reads and writes; on ext4 a file with extents is
@@ -831,7 +834,6 @@ static void flush_meta(ext2_fs_t *fs, bc_ent_t *l)
 				 * must hold exactly this commit, not the next one's half-done changes */
 				bc_ent_t *run[EXT2_RA_MAX > 1 ? EXT2_RA_MAX : 1];
 				uint32_t rmax = EXT2_RA_MAX > 1 && fs->ra_buf ? EXT2_RA_MAX : 1, c = 0;
-				extern volatile uint64_t kernel_ticks;
 				int crash = fscrash_tick && kernel_ticks >= fscrash_tick;
 				for (uint32_t i = 0; i < n; i++) {
 					bc_ent_t *e = fs->jm[i];
@@ -1095,7 +1097,6 @@ static vfs_iops_t ext2_iops, ext2_fifo_iops, ext2_dev_iops;
 static vfs_fops_t ext2_fops, ext2_fops_paged, ext2_dir_fops;
 static int  ext2_hold(ext2_fs_t *fs);
 static void ext2_drop(ext2_fs_t *fs, uint32_t *count);
-extern void fifo_init_inode(vfs_inode_t *in);
 
 /* Past the triple indirect tree an index would run off its page. */
 static inline uint64_t ino_max_blocks(const ext2_fs_t *fs)
@@ -1216,7 +1217,6 @@ static vfs_inode_t *ext2_vfs_inode(ext2_fs_t *fs, ext2_inode_priv_t *priv)
 	 * then the driver's (never freed here), and stat answers from the copy above. */
 	if (S_ISCHR(vi->mode) || S_ISBLK(vi->mode) || (vi->mode & 0170000) == 0140000) {
 		if ((vi->mode & 0170000) != 0140000) {
-			extern vfs_fops_t *devfs_fops_for_rdev(dev_t, void **);
 			void *dpriv = NULL;
 			vi->fops = devfs_fops_for_rdev(vi->rdev, &dpriv);
 			vi->priv = dpriv;
@@ -1422,7 +1422,6 @@ static void free_block(ext2_fs_t *fs, uint64_t blkno)
 	 * and a mapping that still has the page must not see the next file's data */
 	bc_forget(fs, blkno);
 	if (!(++fs->free_ops & 1023)) {
-		extern void cond_resched(void);
 		cond_resched();             /* a big file frees millions: let others run */
 	}
 	fs->free_blocks++;
@@ -2791,7 +2790,6 @@ uint64_t ext2_shrink(uint64_t want)
 
 static void ext2_flushd(void)
 {
-	extern volatile uint64_t kernel_ticks;
 	/* frequent enough that metadata stays well within a log */
 	for (uint32_t n = 1;; n++) {
 		task_sleep_until(kernel_ticks + TIMER_HZ);
@@ -3170,7 +3168,6 @@ static void ext2_log_start(ext2_fs_t *fs, vfs_mount_t *mnt, uint32_t compat, uin
 		}
 		char arg[16];
 		if (cmdline_get("ranix.fscrash", arg, sizeof(arg))) {
-			extern volatile uint64_t kernel_ticks;
 			uint64_t secs = 0;
 			for (char *c = arg; *c >= '0' && *c <= '9'; c++) secs = secs * 10 + (uint64_t)(*c - '0');
 			fscrash_tick = kernel_ticks + secs * TIMER_HZ;
@@ -3279,7 +3276,6 @@ int ext2_mount(vfs_mount_t *mnt, void *data)
 
 void ext2_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("ext2", ext2_mount);
 	vfs_register_fs("ext4", ext2_mount);   /* ext4 is ext2-compatible */
 }

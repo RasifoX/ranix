@@ -10,8 +10,8 @@
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
 #include <kernel/proc.h>
+#include <kernel/time.h>
 
-extern volatile uint64_t kernel_ticks;
 void task_wake(process_t *p);
 
 #define TCP_RTO_INIT    TIMER_HZ   /* 1s before the first RTT sample (RFC 6298 §2.1) */

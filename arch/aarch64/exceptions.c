@@ -3,8 +3,9 @@
     #include <kernel/proc.h>
     #include <kernel/hal.h>
     #include <kernel/extable.h>
+    #include <kernel/mm/vm.h>
+    #include <asm/cpu.h>
 
-    extern void exception_vectors(void);
 
     void exceptions_init(void)
     {
@@ -73,7 +74,7 @@
                     tf->regs[0], tf->regs[1], tf->regs[2], tf->regs[3]);
             kprintf(KERN_WARN "fault: x20=0x%lx x21=0x%lx fp=0x%lx lr=0x%lx sp=0x%lx\n",
                     tf->regs[20], tf->regs[21], tf->regs[29], tf->regs[30], tf->sp);
-            { extern uint64_t arch_vm_get_paddr(uint64_t *, uint64_t);
+            {
               uint64_t fpa = (p && p->vm) ? arch_vm_get_paddr(p->vm->root, far & ~0xFFFUL) : 0;
               int hasvma = 0;
               for (vma_t *v = (p && p->vm) ? p->vm->vmas : 0; v; v = v->next)

@@ -144,4 +144,8 @@ static inline void reg_write32(uint64_t addr, uint32_t val) {
 	*(volatile uint32_t *)addr = val;
 }
 
+/* idle depth: /sys knob (cpu.c) */
+int  arch_idle_get(void);
+int  arch_idle_set(int v);
+
 #endif

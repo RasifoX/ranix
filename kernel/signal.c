@@ -683,11 +683,9 @@ static void signal_dispatch_one(arch_context_t *tf)
 	if (!p) return;
 
 	/* Catch a kernel-stack overflow in the same trap that caused it. */
-	extern void kstack_check(void);
 	kstack_check();
 
 	/* (Re)arm single-step TF on this user return, independent of signals. */
-	extern void ptrace_apply_singlestep(arch_context_t *);
 	ptrace_apply_singlestep(tf);
 
 	if (p->group_exiting) task_exit();
@@ -732,7 +730,6 @@ static void signal_dispatch_one(arch_context_t *tf)
 
 	/* A traced task shows the tracer each signal first; stops have their own path */
 	if (p->tracer && sig != SIGKILL && !(sig == SIGSTOP || sig_default_stop(sig))) {
-		extern int ptrace_signal_stop(arch_context_t *, int, sigqueue_t *);
 		int s2 = ptrace_signal_stop(tf, sig, &si);
 		if (!s2) return;              /* the tracer dropped it */
 		if (s2 != sig) { sig = s2; si.si_signo = s2; si.si_code = 0; }
@@ -752,7 +749,6 @@ static void signal_dispatch_one(arch_context_t *tf)
 	 * never sees it — a permanent wedge. */
 	if (sig == SIGSTOP || (sig_default_stop(sig) && !handler)) {
 		if (p->tracer) {
-			extern void ptrace_group_stop(int sig);
 			ptrace_group_stop(sig);
 		} else {
 			job_stop_self(sig);
@@ -780,7 +776,6 @@ static void signal_dispatch_one(arch_context_t *tf)
 		if (sig_default_kill(sig)) {
 			p->exit_code      = sig;
 			p->killed_by_sig  = 1;
-			extern void coredump(process_t *, int, arch_context_t *);
 			coredump(p, sig, tf);
 			arch_get_cpu_ctx()->wd_where = "sig:kill";
 			task_exit();

@@ -9,8 +9,8 @@
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/board.h>
+#include <kernel/time.h>
 
-extern volatile uint64_t kernel_ticks;
 int net_drop_hit(void);
 
 #define IP_MTU       1500

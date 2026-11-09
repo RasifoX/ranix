@@ -22,4 +22,9 @@ static inline void panic_reset_finish(void) {}
 static inline int  panic_will_reset(void) { return 0; }
 #endif
 
+/* Deadline watchdog (drivers/watchdog/wdog_core.c, x86_64 only; callers on
+ * other architectures reach it through a weak reference). */
+unsigned wdog_deadline_left(void);
+int      wdog_deadline_set(unsigned secs);
+
 #endif

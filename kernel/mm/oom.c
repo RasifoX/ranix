@@ -12,6 +12,7 @@
 #include <kernel/config.h>
 #include <kernel/board.h>
 #include <kernel/hal.h>
+#include <kernel/time.h>
 
 int oom_kill_alloc_ex(int can_sleep)
 {
@@ -21,8 +22,6 @@ int oom_kill_alloc_ex(int can_sleep)
 	process_t *cur = task_current();
 	long charged = 0;
 	{
-		extern int oom_victim_pending(void);
-		extern volatile uint64_t kernel_ticks;
 		int pend = oom_victim_pending();
 		if (pend == 2) return OOM_KILLED_SELF;   /* this one dies on its way out */
 		if (pend == 1) {                         /* wait for the last kill to land */

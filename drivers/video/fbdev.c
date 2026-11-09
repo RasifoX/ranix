@@ -3,9 +3,10 @@
 #include <kernel/lib/string.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/fs/devfs.h>
+#include <kernel/hal.h>
+#include <asm/cpu.h>
+#include <kernel/init.h>
 
-extern fb_info_t global_fb;
-extern uint64_t  global_fb_phys;
 
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOGET_FSCREENINFO 0x4602
@@ -59,7 +60,6 @@ static uint64_t fbdev_mmap(vfs_file_t *file, off_t offset)
 	return global_fb_phys + offset;
 }
 
-extern int copy_to_user(void *dst, const void *src, size_t size);
 
 static int fbdev_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
@@ -88,7 +88,6 @@ static int fbdev_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 		return 0;
 	}
 	if (cmd == 0x80204612) {                   /* FBIOGET_VBLANK */
-		extern int igd_scanline(uint32_t *total);
 		uint32_t total = 0;
 		int line = igd_scanline(&total);
 		if (line < 0) return -25;
@@ -116,7 +115,7 @@ void fbdev_init(void)
 	if (global_fb_phys) {
 		devfs_register_device_gid("fb0", S_IFCHR | 0660, DEVFS_GID_VIDEO, 0x1d00, &fbdev_fops);
 #ifdef __x86_64__
-		{ extern void prof_init(void); prof_init(); }
+		prof_init();
 #endif
 	}
 }

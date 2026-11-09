@@ -12,6 +12,7 @@
 #include <kernel/sync.h>
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
+#include <kernel/fs/devfs.h>
 
 /*
  * tmpfs — in-memory filesystem with size accounting and mount options.
@@ -192,7 +193,6 @@ static int tmpfs_mknod_locked(vfs_inode_t *dir, const char *name, mode_t mode, d
 	if (type == S_IFIFO) {
 		fifo_init_inode(in);
 	} else if (type != 0140000) {   /* a socket node has no fops: open fails */
-		extern vfs_fops_t *devfs_fops_for_rdev(dev_t, void **);
 		void *dpriv = NULL;
 		in->rdev = dev;
 		in->fops = devfs_fops_for_rdev(dev, &dpriv);
@@ -564,6 +564,5 @@ int tmpfs_mount(vfs_mount_t *mnt, void *data)
 
 void tmpfs_register(void)
 {
-	extern void vfs_register_fs(const char *, int (*)(vfs_mount_t *, void *));
 	vfs_register_fs("tmpfs", tmpfs_mount);
 }

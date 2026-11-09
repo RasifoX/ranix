@@ -13,6 +13,7 @@
 #include <kernel/fdt.h>
 #include <kernel/board.h>
 #include <asm/mmu.h>
+#include <asm/cpu.h>
 
 int smp_ncpus = 1;
 cpu_context_t *all_cpus[MAX_CPUS];
@@ -71,13 +72,11 @@ void smp_init(void)
 	all_cpus[0]->online = 1;
 
 #ifdef __aarch64__
-	extern void mmu_clean_tables_poc(void);
 	mmu_clean_tables_poc();
 	fdt_info_t *fi = fdt_get_info();
 	int ncpus = (int)fi->num_cpus;
 #else
 	/* x86_64: the ACPI MADT lists one enabled Local APIC per CPU. */
-	extern int acpi_detect_cpus(void);
 	int ncpus = acpi_detect_cpus();
 	if (ncpus <= 0) ncpus = 1;
 #endif
@@ -116,8 +115,6 @@ void smp_init(void)
 		ap_boot_sync[i].sp_phys   = VIRT_TO_PHYS((uint64_t)(ap_kstacks[i] + KSTACK_SIZE));
 
 #ifdef __aarch64__
-		extern uint64_t kernel_l0[];
-		extern uint64_t kernel_l0_high[];
 		ap_boot_sync[i].ttbr0_phys = (uint64_t)kernel_l0;   /* 4-level: L0 roots */
 		ap_boot_sync[i].ttbr1_phys = (uint64_t)kernel_l0_high;
 #endif

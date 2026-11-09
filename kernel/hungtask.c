@@ -33,14 +33,8 @@
 #include <kernel/board.h>   /* TIMER_HZ */
 #include <kernel/bug.h>
 #include <kernel/lib/string.h>
-
-extern volatile uint64_t kernel_ticks;
-extern spinlock_t        sched_lock;
-extern int               task_count(void);
-/* proctab[i] with no internal lock — the caller must already hold sched_lock
- * (task_get() locks internally and would self-deadlock under our sweep). */
-extern process_t        *task_peek_locked(int index);
-
+#include <kernel/time.h>
+#include <kernel/smp.h>
 
 volatile uint64_t hung_task_count;
 static void kwatch_kill_sweep(uint64_t now);
@@ -147,8 +141,6 @@ static void hung_report(process_t *p, uint64_t stalled_ticks)
 	        (int)p->pid, p->name, state_name(p->state),
 	        stalled_ticks / TIMER_HZ, p->last_syscall);
 	if (p->state == PROC_READY) {     /* runnable and not run: is it on a queue at all? */
-		extern int smp_ncpus;
-		extern cpu_context_t *all_cpus[];
 		int where = -1;
 		for (int i = 0; i < smp_ncpus && where < 0; i++) {
 			int guard = 0;
@@ -160,7 +152,6 @@ static void hung_report(process_t *p, uint64_t stalled_ticks)
 		kprintf(KERN_WARN "hung: in_rq=%d on_cpu=%d queued_on=%d current_on=%d\n",
 		        (int)p->in_rq, (int)p->on_cpu, where, cur);
 		static uint64_t last_dump;
-		extern volatile uint64_t kernel_ticks;
 		if (kernel_ticks - last_dump > 5 * TIMER_HZ) {
 			last_dump = kernel_ticks;
 			for (int i = 0; i < smp_ncpus; i++) {
@@ -389,7 +380,6 @@ static void kwatch_kill_sweep(uint64_t now)
  * invariant (killed but alive, or in a long syscall), with backtraces. */
 void kwatch_report(kout_t *o, int with_bt)
 {
-	extern volatile uint64_t hung_task_count;
 	kout_s(o, "kwatch unkillable="); kout_u(o, kwatch_unkillable_count);
 	kout_s(o, " kstall="); kout_u(o, kwatch_kstall_count);
 	kout_s(o, " hung="); kout_u(o, hung_task_count); kout_c(o, '\n');

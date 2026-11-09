@@ -1,6 +1,5 @@
 /* ── path helper ─────────────────────────────────────────── */
 
-extern volatile uint64_t kernel_ticks;
 
 /* Copy a user path into a PATH_MAX kernel buffer. -EFAULT on a bad pointer,
  * -ENAMETOOLONG if it does not fit (no NUL within PATH_MAX). */

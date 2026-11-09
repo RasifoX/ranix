@@ -8,6 +8,10 @@
 #include <kernel/mm/vm.h>
 #include <kernel/proc.h>
 #include <kernel/extable.h>
+#include <kernel/ptrace.h>
+#include <kernel/syscall.h>
+#include <kernel/sync.h>
+#include <kernel/time.h>
 
 void exceptions_init(void)
 {
@@ -37,8 +41,6 @@ static uint64_t read_cr2(void)
 
 void exc_dispatch(arch_context_t *ctx)
 {
-	extern int  ptrace_trap(int si_code);
-	extern void ptrace_apply_singlestep(arch_context_t *);
 
 	if ((ctx->cs & 3) == 3) {
 		process_t *cur = task_current();
@@ -51,12 +53,9 @@ void exc_dispatch(arch_context_t *ctx)
 		int is_present = (ctx->error_code & (1 << 0)) != 0;
 		/* Handle both translation faults (not present) and permission faults (COW) */
 		if (!is_present || is_write) {
-			extern int slowsys_on; extern uint64_t slowsys_ns(void);
 			uint64_t ft0 = slowsys_on > 0 ? slowsys_ns() : 0;
 			{	/* the kernel touched user memory with a spinlock held: the fault
 				 * may sleep or shoot TLBs, which that lock forbids. Name the place. */
-				extern int spin_held_count(void);
-				extern void spin_dump_held(void);
 				static int told;
 				if (!(ctx->cs & 3) && spin_held_count() > 0 && told < 5) {
 					told++;
@@ -133,6 +132,7 @@ void exc_dispatch(arch_context_t *ctx)
 #include <kernel/fs/devfs.h>
 #include <kernel/proc.h>
 #include <kernel/vfs.h>
+#include <asm/cpu.h>
 #define PROF_N (1U << 16)
 typedef struct { uint64_t rip, caller; uint32_t pid; uint32_t cpu; } prof_t;
 static prof_t prof_buf[PROF_N];
@@ -145,7 +145,6 @@ static volatile int prof_on;
 static void softlockup_check(arch_context_t *ctx)
 {
 	static struct { process_t *p; uint64_t sw, since, told; } st[64];
-	extern volatile uint64_t kernel_ticks;
 	cpu_context_t *c = arch_get_cpu_ctx();
 	process_t *p = task_current();
 	int i = (int)c->cpu_id & 63;

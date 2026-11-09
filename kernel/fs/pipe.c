@@ -9,7 +9,6 @@
 #include <kernel/hal.h>
 #include <kernel/cgroup.h>
 
-extern int task_has_actionable_signal(void);
 
 typedef struct {
     uint8_t      *buffer;
