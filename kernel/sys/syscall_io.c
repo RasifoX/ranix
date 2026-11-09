@@ -126,6 +126,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			int bits = fd_poll_bits(kfds[i].fd);
 			if ((kfds[i].events & POLLIN)  && (bits & POLLIN))  kfds[i].revents |= POLLIN;
 			if ((kfds[i].events & POLLOUT) && (bits & POLLOUT)) kfds[i].revents |= POLLOUT;
+			if ((kfds[i].events & 0x2000) && (bits & 0x2000)) kfds[i].revents |= 0x2000; /* POLLRDHUP */
 			/* POLLHUP/POLLERR are reported regardless of the requested events
 			 * (Linux semantics): a poller waiting only for POLLIN must still
 			 * wake when the peer closes, or it blocks forever. */
@@ -470,6 +471,7 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 			uint32_t r = 0;
 			if ((ep->ev[i] & EPOLLIN)  && (bits & POLLIN))  r |= EPOLLIN;
 			if ((ep->ev[i] & EPOLLOUT) && (bits & POLLOUT)) r |= EPOLLOUT;
+			if ((ep->ev[i] & EPOLLRDHUP) && (bits & EPOLLRDHUP)) r |= EPOLLRDHUP;
 			if (bits & POLLHUP) r |= EPOLLHUP;   /* always reported (Linux) */
 			if (bits & POLLERR) r |= EPOLLERR;
 
