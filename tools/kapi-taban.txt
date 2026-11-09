@@ -16,7 +16,7 @@ ad	kernel/signal.c	1
 ad	kernel/sys/syscall_misc.c	1
 extern	kernel/mm/mmu.c	extern void enable_mmu(uint64_t table_addr);
 fn	arch/x86_64/vm.c	vm_copy	127
-fn	drivers/usb/xhci.c	enumerate	172
+fn	drivers/usb/usb_enum.c	enumerate	172
 fn	kernel/elf.c	elf_load_src	157
 fn	kernel/fdt.c	parse_info	129
 fn	kernel/fs/ext2.c	inode_alloc_block	140
