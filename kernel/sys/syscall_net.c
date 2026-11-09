@@ -831,13 +831,24 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
         int pr = unix_path_reachable(&su, 0);
         if (pr) return pr;
         if (unix_reg_find(s->net_ns, su.sun_path, pathlen)) return -EADDRINUSE;
+        /* The name is a file, as on Linux, and making it is the bind's
+         * permission check: no bind takes over an existing name (also not one
+         * a closed socket left: EADDRINUSE until it is unlinked) or puts one
+         * where the caller may not create a file (EACCES, ENOENT, EROFS). */
+        int made = su.sun_path[0] == '/';
+        if (made) {
+            int mr = vfs_mknod(su.sun_path, 0140000 /* S_IFSOCK */ | (0777 & ~fs_umask_of((struct process *)task_current())), 0);
+            if (mr == -EEXIST) return -EADDRINUSE;
+            if (mr) return mr;
+        }
         memcpy(s->unix_path, su.sun_path, (size_t)pathlen);
         s->unix_path_len = pathlen;
-        /* The name is visible in the file system, as programs check with
-         * stat() before they connect. A node left by a closed socket is reused. */
-        if (su.sun_path[0] == '/')
-            vfs_mknod(su.sun_path, 0140000 /* S_IFSOCK */ | (0777 & ~fs_umask_of((struct process *)task_current())), 0);
-        return unix_reg_add(s->unix_path, pathlen, s);
+        int r = unix_reg_add(s->unix_path, pathlen, s);
+        if (r) {
+            s->unix_path_len = 0;
+            if (made) vfs_unlink(su.sun_path);
+        }
+        return r;
     }
 
     if (s->local_port) return -EINVAL;   /* already bound */

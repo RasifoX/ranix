@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* AF_UNIX names are per network namespace: abstract and path binds neither reach
- * across nor collide, a namespace filling its table leaves the others alone, and a
- * socket keeps its namespace alive after the last process in it is gone. */
+/* AF_UNIX names are per network namespace: abstract and path binds do not reach
+ * across, abstract names do not collide, a namespace filling its table leaves the
+ * others alone, and a socket keeps its namespace alive after the last process in
+ * it is gone. A path name is also a file: another namespace that shares the file
+ * system cannot bind a name that exists (EADDRINUSE). */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <sched.h>
@@ -21,6 +23,7 @@
 
 #define ABS "@ranix-nsu"   /* '@' becomes the leading NUL */
 #define PATHNAME "/tmp/ranix-nsu.sock"
+#define PATHIN   "/tmp/ranix-nsu-in.sock"
 
 static socklen_t fill(struct sockaddr_un *a, const char *name)
 {
@@ -56,9 +59,10 @@ static int inside(void)
 	if (unshare(CLONE_NEWNET)) return 1;
 	if (dial(ABS) != ECONNREFUSED) return 2;
 	if (dial(PATHNAME) != ECONNREFUSED) return 3;
-	int a = listener(ABS), b = listener(PATHNAME);
+	if (listener(PATHNAME) >= 0 || errno != EADDRINUSE) return 6;
+	int a = listener(ABS), b = listener(PATHIN);
 	if (a < 0 || b < 0) return 4;
-	if (dial(ABS) || dial(PATHNAME)) return 5;
+	if (dial(ABS) || dial(PATHIN)) return 5;
 	return 0;
 }
 
@@ -112,6 +116,8 @@ static int wait_rc(pid_t c)
 int main(void)
 {
 	mkdir("/tmp", 0755);
+	unlink(PATHNAME);
+	unlink(PATHIN);
 	int a = listener(ABS), b = listener(PATHNAME);
 	if (a < 0 || b < 0) FAIL("listen");
 	if (dial(ABS) || dial(PATHNAME)) FAIL("host dial");
