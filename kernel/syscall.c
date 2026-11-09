@@ -949,8 +949,10 @@ static int syscall_time_net(long n, const long *a, long *ret)
 	case SYS_ARCH_MLOCKALL:    *ret = sys_mlockall((int)a[0]); break;
 	case SYS_ARCH_MUNLOCKALL:  *ret = sys_munlockall(); break;
 	case SYS_ARCH_SYNC:        *ret = sys_sync(); break;
-	case SYS_ARCH_MOUNT:       *ret = sys_mount((const char*)a[0], (const char*)a[1], (const char*)a[2], (unsigned long)a[3], (const void*)a[4]); break;
-	case SYS_ARCH_UMOUNT2:     *ret = sys_umount2((const char*)a[0], (int)a[1]); break;
+	case SYS_ARCH_MOUNT:       *ret = sys_mount((const char*)a[0], (const char*)a[1], (const char*)a[2], (unsigned long)a[3], (const void*)a[4]);
+	                           if (*ret == 0) vfs_mounts_changed(); break;
+	case SYS_ARCH_UMOUNT2:     *ret = sys_umount2((const char*)a[0], (int)a[1]);
+	                           if (*ret == 0) vfs_mounts_changed(); break;
 	case SYS_ARCH_SETHOSTNAME: *ret = sys_sethostname((const char*)a[0], (size_t)a[1]); break;
 	case SYS_ARCH_RT_SIGTIMEDWAIT: *ret = sys_rt_sigtimedwait((const uint64_t *)a[0], (void *)a[1], (const linux_timespec_t *)a[2], (size_t)a[3]); break;
 	case SYS_ARCH_TKILL:       *ret = sys_tkill((pid_t)a[0], (int)a[1]); break;
