@@ -98,7 +98,9 @@ endif
 INCLUDES = -Iinclude -Idrivers -I. -Iarch/$(ARCH)/include -I$(BUILD_DIR)
 
 ifeq ($(ARCH),aarch64)
-    ARCH_CFLAGS = -mgeneral-regs-only -mcmodel=large -march=armv8.1-a
+    # ARMv8.0: the Pi 4's Cortex-A72 has no LSE atomics. Compiler atomics become
+    # LL/SC loops inline (ldaxr/stlxr), like kernel/sync.c; no outline helpers.
+    ARCH_CFLAGS = -mgeneral-regs-only -mcmodel=large -march=armv8-a -mno-outline-atomics
     ifeq ($(BOARD),raspi4)
         MACH_DIR    = arch/aarch64/mach-bcm2711
         LINKER      = arch/aarch64/linker_raspi4.ld
