@@ -613,6 +613,7 @@ typedef struct {
 #define PROC_F_SYS_TAINTED        95
 #define PROC_F_SYS_IPC_FIRST      51   /* 51..56: shmmax shmmni shmall msgmax msgmnb msgmni */
 #define PROC_F_SYS_SEM            57
+#define PROC_F_SYS_PIPE_MAX       61
 #define PROC_F_SYSVIPC_SHM        58   /* 58..60: /proc/sysvipc/{shm,sem,msg} */
 #define PROC_F_SYSVIPC_MSG        60
 static const char *const ipc_limit_names[] = { "shmmax", "shmmni", "shmall", "msgmax", "msgmnb", "msgmni" };
@@ -886,6 +887,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_IPC_FIRST ... PROC_F_SYSVIPC_MSG:
 		n = fill_sysvipc_file(pr->type, tmp, PROCFS_BUF_SIZE); break;
+	case PROC_F_SYS_PIPE_MAX: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b, pipe_max_size); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_TAINTED: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, "0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -977,6 +979,19 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		if (!wdog_deadline_set) return -ENOSYS;   /* no deadline on this arch */
 		int r = wdog_deadline_set(v);
 		return r ? r : (ssize_t)len;
+	}
+	if (pr->type == PROC_F_SYS_PIPE_MAX) {
+		process_t *c = task_current();
+		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_RESOURCE)) return -EPERM;
+		char tmp[24];
+		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -EFAULT;
+		tmp[n] = '\0';
+		unsigned long v = 0;
+		for (char *q = tmp; *q >= '0' && *q <= '9'; q++) v = v * 10 + (unsigned long)(*q - '0');
+		if (v < PAGE_SIZE || v > (1UL << 31)) return -EINVAL;
+		pipe_max_size = v;
+		return (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_KPTR_RESTRICT || pr->type == PROC_F_SYS_DMESG_RESTRICT) {
 		process_t *c = task_current();
@@ -2729,11 +2744,12 @@ static procfs_sysfile_t sys_net_core_files[] = {
 #define SYS_NET_CORE_N 5
 
 static procfs_sysfile_t sys_fs_files[] = {
+	{ "pipe-max-size", PROC_F_SYS_PIPE_MAX },
 	{ "file-max",    PROC_F_SYS_FILE_MAX },
 	{ "file-nr",     PROC_F_SYS_NFILE    },
 	{ "dentry-state", PROC_F_SYS_DENTRY  },
 };
-#define SYS_FS_N 3
+#define SYS_FS_N 4
 
 /* forward declarations */
 static vfs_inode_t *procfs_sysdir_inode(void);
@@ -2748,6 +2764,7 @@ static vfs_inode_t *procfs_sysfile_inode(int type)
 	if (in && (type == PROC_F_SYS_HOSTNAME ||
 	           type == PROC_F_SYS_KPTR_RESTRICT ||
 	           type == PROC_F_SYS_DMESG_RESTRICT ||
+	           type == PROC_F_SYS_PIPE_MAX ||
 	           type == PROC_F_SYS_RANIX_DEADLINE))
 		in->mode = S_IFREG | 0644;
 	return in;

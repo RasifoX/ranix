@@ -471,6 +471,7 @@ check "c-notdirparent" "OK" "$(timeout 10 /bin/test_notdirparent 2>&1 | tail -1)
 check "c-plocksplit"  "OK"  "$(timeout 10 /bin/test_plocksplit 2>&1 | tail -1)"
 check "c-procmaps"    "OK"  "$(timeout 10 /bin/test_procmaps 2>&1 | tail -1)"
 check "c-sysvipc"     "OK"  "$(timeout 30 /bin/test_sysvipc 2>&1 | tail -1)"
+check "c-fcntlmisc"   "OK"  "$(timeout 30 /bin/test_fcntlmisc 2>&1 | tail -1)"
 check "c-bigmmap"    "OK"  "$(timeout 20 /bin/test_bigmmap 2>/dev/null)"
 check "c-mremap"     "OK"  "$(timeout 10 /bin/test_mremap 2>/dev/null | tail -1)"
 check "c-faultrace"  "OK"  "$(timeout 120 /bin/test_faultrace 2>/dev/null | tail -1)"

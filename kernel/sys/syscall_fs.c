@@ -492,7 +492,8 @@ static long sys_dup3(int oldfd, int newfd, int flags)
 #define F_SETFD    2
 #define F_GETFL    3
 #define F_SETFL    4
-#define SETFL_MASK (O_APPEND | O_NONBLOCK)
+#define O_ASYNC_FL 020000
+#define SETFL_MASK (O_APPEND | O_NONBLOCK | O_ASYNC_FL)
 #define F_DUPFD_CLOEXEC 1030
 #define F_GETLK    5
 #define F_SETLK    6
@@ -550,6 +551,88 @@ static long fcntl_lock(vfs_file_t *f, int cmd, uint64_t arg)
 	}
 }
 
+#define F_SETOWN     8
+#define F_GETOWN     9
+#define F_SETSIG     10
+#define F_GETSIG     11
+#define F_SETOWN_EX  15
+#define F_GETOWN_EX  16
+#define F_SETLEASE   1024
+#define F_GETLEASE   1025
+#define F_NOTIFY     1026
+#define F_SETPIPE_SZ 1031
+#define F_GETPIPE_SZ 1032
+#define F_ADD_SEALS  1033
+#define F_GET_SEALS  1034
+#define F_OWNER_TID  0
+#define F_OWNER_PID  1
+#define F_OWNER_PGRP 2
+
+struct f_owner_ex { int type; int pid; };
+
+/* Who an O_ASYNC file signals, and with what. Kept as global pids; read back as
+ * the caller's namespace numbers them. */
+static long fcntl_owner(int fd, int cmd, uint64_t arg)
+{
+	vfs_file_t *f = fd_get(task_current()->fds, fd);
+	if (!f) return -EBADF;
+	switch (cmd) {
+	case F_SETOWN: {
+		int v = (int)arg;
+		if (v == 0) { f->owner = 0; return 0; }
+		pid_t g = pid_from_user(v < 0 ? -v : v);
+		if (!g) return -ESRCH;
+		f->owner = v < 0 ? -g : g;
+		f->owner_type = v < 0 ? F_OWNER_PGRP : F_OWNER_PID;
+		return 0;
+	}
+	case F_GETOWN:
+		if (!f->owner) return 0;
+		return f->owner > 0 ? pid_to_user(f->owner) : -pid_to_user(-f->owner);
+	case F_SETSIG:
+		if ((int)arg < 0 || (int)arg > NSIG) return -EINVAL;
+		f->owner_sig = (int)arg;
+		return 0;
+	case F_GETSIG:
+		return f->owner_sig;
+	case F_SETOWN_EX: {
+		struct f_owner_ex ex;
+		if (copy_from_user(&ex, (const void *)arg, sizeof(ex)) != 0) return -EFAULT;
+		if (ex.type != F_OWNER_TID && ex.type != F_OWNER_PID && ex.type != F_OWNER_PGRP) return -EINVAL;
+		if (ex.pid == 0) { f->owner = 0; f->owner_type = ex.type; return 0; }
+		pid_t g = pid_from_user(ex.pid < 0 ? -ex.pid : ex.pid);
+		if (!g || ex.pid < 0) return -ESRCH;
+		f->owner = ex.type == F_OWNER_PGRP ? -g : g;
+		f->owner_type = ex.type;
+		return 0;
+	}
+	case F_GETOWN_EX: {
+		struct f_owner_ex ex = { f->owner ? f->owner_type : F_OWNER_PID, 0 };
+		if (f->owner) ex.pid = pid_to_user(f->owner > 0 ? f->owner : -f->owner);
+		return copy_to_user((void *)arg, &ex, sizeof(ex)) ? -EFAULT : 0;
+	}
+	}
+	return -EINVAL;
+}
+
+/* Leases are not kept: a lease that is never broken would promise what it
+ * cannot. One that could not be had anyway gets Linux's answer, EAGAIN (the
+ * file is open for writing, or open elsewhere for a write lease); the rest is
+ * EINVAL, as on a Linux with leases off. There is never one to report. */
+static long fcntl_lease(int fd, int cmd, uint64_t arg)
+{
+	vfs_file_t *f = fd_get(task_current()->fds, fd);
+	if (!f) return -EBADF;
+	if (cmd == F_GETLEASE) return 2;   /* F_UNLCK */
+	if (!f->inode || !S_ISREG(f->inode->mode)) return -EINVAL;
+	if (arg == 2) return 0;            /* F_UNLCK: there is none to drop */
+	if (arg != 0 && arg != 1) return -EINVAL;
+	int writable = (f->flags & 3) != 0;
+	if (arg == 0 && writable) return -EAGAIN;                    /* F_RDLCK */
+	if (arg == 1 && f->inode->open_refs > 1) return -EAGAIN;     /* F_WRLCK */
+	return -EINVAL;
+}
+
 static long sys_fcntl(int fd, int cmd, uint64_t arg)
 {
 	process_t  *p = task_current();
@@ -585,7 +668,9 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 		if (!f) return -EBADF;
 		/* the access mode is fixed at open: pipe_close keys off it to tell a
 		 * reader from a writer */
+		int was = f->flags;
 		f->flags = (f->flags & ~SETFL_MASK) | ((int)arg & SETFL_MASK);
+		if ((was ^ f->flags) & O_ASYNC_FL) pipe_fcntl_async(f);
 		return 0;
 	}
 	case F_GETLK:
@@ -600,12 +685,21 @@ static long sys_fcntl(int fd, int cmd, uint64_t arg)
 		fput(f);
 		return r;
 	}
-	/* Linux commands whose absence no caller can act on stay quiet no-ops. An
-	 * unknown one is EINVAL, and a bad fd is EBADF for every command. */
-	case 8: case 9: case 10: case 11:             /* F_SETOWN..F_GETSIG */
-	case 1024: case 1025: case 1026:              /* leases, F_NOTIFY */
-	case 1031: case 1032: case 1033: case 1034:   /* pipe size, seals */
-		return fd_get(p->fds, fd) ? 0 : -9;
+	case F_SETOWN: case F_GETOWN: case F_SETSIG: case F_GETSIG:
+	case F_SETOWN_EX: case F_GETOWN_EX:
+		return fcntl_owner(fd, cmd, arg);
+	case F_SETLEASE: case F_GETLEASE:
+		return fcntl_lease(fd, cmd, arg);
+	case F_GETPIPE_SZ: case F_SETPIPE_SZ: {
+		vfs_file_t *f = fget(p->fds, fd);
+		if (!f) return -EBADF;
+		long r = pipe_fcntl_size(f, cmd == F_SETPIPE_SZ, arg);
+		fput(f);
+		return r;
+	}
+	/* Not here, and saying so: a success that does nothing would let a caller
+	 * believe it is notified (F_NOTIFY, dnotify) or that a memfd is sealed. */
+	case F_NOTIFY: case F_ADD_SEALS: case F_GET_SEALS:
 	default: return fd_get(p->fds, fd) ? -22 : -9;
 	}
 }

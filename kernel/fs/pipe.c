@@ -13,10 +13,14 @@
 #include <kernel/hal.h>
 #include <kernel/cgroup.h>
 #include <kernel/errno.h>
+#include <kernel/capabilities.h>
 
 
 typedef struct {
     uint8_t      *buffer;
+    uint32_t      size;        /* bytes the buffer holds: a power-of-two run of pages */
+    int           order;       /* its buddy order */
+    uint32_t      count;       /* bytes in it now; head and tail alone cannot tell full from empty */
     uint32_t      head;
     uint32_t      tail;
     uint32_t      readers;
@@ -26,20 +30,23 @@ typedef struct {
     wait_queue_t  rd_wait;
     wait_queue_t  wr_wait;
     wait_queue_t  open_wait;   /* FIFO open rendezvous (wait for the other end) */
+    vfs_file_t   *async_rd;    /* the read end that asked for O_ASYNC, told when data comes */
 } pipe_t;
 
 static void *pipe_buffer_alloc(pipe_t *pipe)
 {
     if (cgroup_charge_file(&pipe->cg, 0, PIPE_BUF_SIZE) != 0) return NULL;
     void *p = buddy_alloc(0);
-    if (!p) cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+    if (!p) { cgroup_file_release(pipe->cg, PIPE_BUF_SIZE); return NULL; }
+    pipe->size  = PIPE_BUF_SIZE;
+    pipe->order = 0;
     return p;
 }
 
 static void pipe_buffer_undo(pipe_t *pipe)
 {
-    buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
-    cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+    buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), pipe->order);
+    cgroup_file_release(pipe->cg, pipe->size);
 }
 
 /* The ring is copied through a kernel buffer: user memory can fault, and a fault
@@ -59,7 +66,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
     while (read < len) {
         uint64_t f = spin_lock_irq(&pipe->lock);
 
-        uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
+        uint32_t avail = pipe->count;
         if (avail == 0) {
             if (read > 0 || pipe->writers == 0) {
                 spin_unlock_irq(&pipe->lock, f);
@@ -79,12 +86,14 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
             continue;
         }
 
-        int was_full = avail == PIPE_BUF_SIZE - 1;
+        int was_full = avail == pipe->size;
         uint32_t n = avail < (len - read) ? avail : (len - read);
+        if (n > PIPE_BUF_SIZE) n = PIPE_BUF_SIZE;   /* kbuf's size */
         for (uint32_t i = 0; i < n; i++) {
             kbuf[i] = pipe->buffer[pipe->tail];
-            pipe->tail = (pipe->tail + 1) % PIPE_BUF_SIZE;
+            pipe->tail = (pipe->tail + 1) % pipe->size;
         }
+        pipe->count -= n;
 
         wake_up(&pipe->wr_wait);
         spin_unlock_irq(&pipe->lock, f);
@@ -132,10 +141,10 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
                 goto out;
             }
 
-            uint32_t free = PIPE_BUF_SIZE - 1 - ((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
-            /* POSIX: a write that fits the pipe goes in whole or waits, so writers
+            uint32_t free = pipe->size - pipe->count;
+            /* POSIX: a write of up to PIPE_BUF goes in whole or waits, so writers
              * sharing a pipe never interleave inside one record */
-            uint32_t need = len <= PIPE_BUF_SIZE - 1 ? (uint32_t)(chunk - off) : 1;
+            uint32_t need = len <= PIPE_BUF_SIZE ? (uint32_t)(chunk - off) : 1;
             if (free < need) {
                 if (file->flags & O_NONBLOCK) {
                     spin_unlock_irq(&pipe->lock, f);
@@ -154,12 +163,15 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
             uint32_t n = free < (chunk - off) ? free : (uint32_t)(chunk - off);
             for (uint32_t i = 0; i < n; i++) {
                 pipe->buffer[pipe->head] = kbuf[off + i];
-                pipe->head = (pipe->head + 1) % PIPE_BUF_SIZE;
+                pipe->head = (pipe->head + 1) % pipe->size;
             }
+            pipe->count += n;
 
             wake_up(&pipe->rd_wait);
+            vfs_file_t *async_rd = pipe->async_rd;
             spin_unlock_irq(&pipe->lock, f);
             poll_notify_key(pipe);
+            vfs_file_sigio(async_rd);
             off += n;
             written += n;
         }
@@ -177,6 +189,7 @@ static int pipe_close(vfs_file_t *file)
 
     if ((file->flags & 3) == O_RDONLY) pipe->readers--;
     else                               pipe->writers--;
+    if (pipe->async_rd == file) pipe->async_rd = NULL;
 
     wake_up(&pipe->rd_wait);
     wake_up(&pipe->wr_wait);
@@ -184,8 +197,7 @@ static int pipe_close(vfs_file_t *file)
 
     if (pipe->readers == 0 && pipe->writers == 0) {
         spin_unlock_irq(&pipe->lock, f);
-        buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
-        cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+        pipe_buffer_undo(pipe);
         vfs_inode_t *inode = file->inode;
         kfree(pipe);
         kfree(inode);
@@ -200,8 +212,8 @@ static int pipe_poll(vfs_file_t *file)
 {
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
-    uint32_t avail = (pipe->head - pipe->tail) % PIPE_BUF_SIZE;
-    uint32_t free  = PIPE_BUF_SIZE - 1 - avail;
+    uint32_t avail = pipe->count;
+    uint32_t free  = pipe->size - avail;
     spin_unlock_irq(&pipe->lock, f);
     int acc = file->flags & 3;
     int r = 0;
@@ -223,7 +235,7 @@ static int pipe_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
     if (cmd != FIONREAD) return -ENOTTY;
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
-    int avail = (int)((pipe->head - pipe->tail) % PIPE_BUF_SIZE);
+    int avail = (int)pipe->count;
     spin_unlock_irq(&pipe->lock, f);
     return copy_to_user((void *)(uintptr_t)arg, &avail, sizeof(avail)) ? -14 : 0;
 }
@@ -295,6 +307,7 @@ static int fifo_close(vfs_file_t *file)
     uint64_t f = spin_lock_irq(&pipe->lock);
     int acc = file->flags & 3;
     if (acc != O_WRONLY && pipe->readers > 0) pipe->readers--;
+    if (pipe->async_rd == file) pipe->async_rd = NULL;
     if (acc != O_RDONLY && pipe->writers > 0) pipe->writers--;
     wake_up(&pipe->rd_wait);
     wake_up(&pipe->wr_wait);
@@ -325,8 +338,7 @@ void fifo_free_inode(vfs_inode_t *in)
     pipe_t *pipe = in->priv;
     in->priv = NULL;
     if (!pipe) return;
-    buddy_free(VIRT_TO_PHYS((uint64_t)pipe->buffer), 0);
-    cgroup_file_release(pipe->cg, PIPE_BUF_SIZE);
+    pipe_buffer_undo(pipe);
     kfree(pipe);
 }
 
@@ -383,4 +395,67 @@ int vfs_pipe(int pipefd[2])
     pipefd[1] = fd_alloc(p->fds, wf);
 
     return 0;
+}
+
+/* /proc/sys/fs/pipe-max-size: what F_SETPIPE_SZ grants without CAP_SYS_RESOURCE */
+unsigned long pipe_max_size = 1048576;
+
+/* F_GETPIPE_SZ and F_SETPIPE_SZ. A size becomes a power-of-two number of pages;
+ * the data in the pipe moves over, and must fit (EBUSY). -EBADF: not a pipe. */
+long pipe_fcntl_size(vfs_file_t *file, int set, unsigned long arg)
+{
+    if (!file->inode || (file->inode->fops != &pipe_fops && file->inode->fops != &fifo_fops) ||
+        !file->inode->priv)
+        return -EBADF;
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    if (!set) return pipe->size;
+    if (arg > (1UL << 31)) return -EINVAL;
+    uint32_t size = PAGE_SIZE;
+    int order = 0;
+    while (size < arg) { size <<= 1; order++; }
+    if (size == pipe->size) return size;
+    if (size > pipe_max_size && size > pipe->size && !capable_task(task_current(), CAP_SYS_RESOURCE))
+        return -EPERM;
+    if (order >= BUDDY_MAX_ORDER) return -ENOMEM;
+    void *cg = pipe->cg;
+    if (cgroup_charge_file(&cg, 0, size) != 0) return -ENOMEM;
+    void *phys = buddy_alloc(order);
+    if (!phys) { cgroup_file_release(cg, size); return -ENOMEM; }
+    uint8_t *nb = (uint8_t *)PHYS_TO_VIRT((uint64_t)phys);
+
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    if (pipe->count > size) {
+        spin_unlock_irq(&pipe->lock, f);
+        buddy_free((uint64_t)phys, order);
+        cgroup_file_release(cg, size);
+        return -EBUSY;
+    }
+    for (uint32_t i = 0; i < pipe->count; i++) nb[i] = pipe->buffer[(pipe->tail + i) % pipe->size];
+    uint8_t *old = pipe->buffer;
+    int old_order = pipe->order;
+    uint32_t old_size = pipe->size;
+    pipe->buffer = nb;
+    pipe->size   = size;
+    pipe->order  = order;
+    pipe->tail   = 0;
+    pipe->head   = pipe->count % size;
+    wake_up(&pipe->wr_wait);
+    spin_unlock_irq(&pipe->lock, f);
+    buddy_free(VIRT_TO_PHYS((uint64_t)old), old_order);
+    cgroup_file_release(cg, old_size);
+    poll_notify_key(pipe);
+    return size;
+}
+
+/* F_SETFL changed O_ASYNC on a pipe end: its read end is told of new data */
+void pipe_fcntl_async(vfs_file_t *file)
+{
+    if (!file->inode || (file->inode->fops != &pipe_fops && file->inode->fops != &fifo_fops) ||
+        !file->inode->priv || (file->flags & 3) == O_WRONLY)
+        return;
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    uint64_t f = spin_lock_irq(&pipe->lock);
+    if (file->flags & 020000 /* O_ASYNC */) pipe->async_rd = file;
+    else if (pipe->async_rd == file)        pipe->async_rd = NULL;
+    spin_unlock_irq(&pipe->lock, f);
 }

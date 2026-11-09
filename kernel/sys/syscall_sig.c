@@ -84,6 +84,20 @@ static long tkill_task(process_t *t, int sig)
 	return task_signal_info(t, sig, SI_TKILL, pid, uid, 0, 1);
 }
 
+/* O_ASYNC: the open file is ready, and its owner (F_SETOWN) hears so by the
+ * signal F_SETSIG chose, SIGIO by default. */
+void vfs_file_sigio(vfs_file_t *f)
+{
+	if (!f || !(f->flags & 020000 /* O_ASYNC */) || !f->owner) return;
+	int sig = f->owner_sig ? f->owner_sig : 29 /* SIGIO */;
+	if (f->owner > 0) {
+		process_t *p = proc_get(f->owner);
+		if (p) { task_signal(p, sig); proc_put(p); }
+	} else {
+		task_kill_many(task_current(), -f->owner, sig);
+	}
+}
+
 static long sys_kill(pid_t pid, int sig)
 {
 	if (sig < 0 || sig > NSIG) return -EINVAL;
