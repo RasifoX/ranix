@@ -243,6 +243,8 @@ check "c-asess-kmem" "OK"  "$(timeout 175 /bin/test_asess_kmem 2>/dev/null | gre
 check "c-bigfile"    "OK"   "$(timeout 160 /bin/test_bigfile 2>/dev/null | tail -1)"
 check "c-overlay"    "OK"   "$(timeout 10 /bin/test_overlay 2>/dev/null)"
 check "c-rename-volatile" "OK" "$(timeout 20 /bin/test_rename_volatile /tmp/rnv 2>&1 | tail -1)"
+RL=$(timeout 120 /bin/test_rename_vleak 2>&1); echo "$RL" | grep -v "^OK$" | sed 's/^/  rename-vleak: /'
+check "c-rename-vleak" "OK" "$(echo "$RL" | tail -1)"
 check "c-unlinkopen" "OK"   "$(timeout 10 /bin/test_unlinkopen 2>/dev/null)"
 check "c-openflags"  "OK"   "$(timeout 10 /bin/test_openflags 2>/dev/null)"
 check "c-rename2"    "OK"   "$(timeout 10 /bin/test_rename2 2>/dev/null)"
