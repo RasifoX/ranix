@@ -2053,7 +2053,8 @@ static long sys_vfork(uint64_t newsp, uint64_t flags)
 	 * Programs count on it, and a chain of vforks that did not wait multiplies. */
 	process_t *p = task_current();
 	p->vfork_pending = 1;
-	long pid = (long)proc_fork(flags & CLONE_FS, newsp);   /* Chromium shares its root */
+	/* Chromium shares its root; namespace flags make them as fork does */
+	long pid = (long)proc_fork(flags & (CLONE_FS | CLONE_NEW_ANY), newsp);
 	if (pid < 0) { p->vfork_pending = 0; return pid; }
 	while (!task_has_actionable_signal()) {
 		/* checked under the lock task_wake takes, so the release cannot slip

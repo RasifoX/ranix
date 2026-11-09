@@ -791,6 +791,8 @@ CR=$(timeout 15 /bin/test_dac_caps 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^
 check "c-dac-caps"     "OK"  "$(echo "$CR" | tail -1)"
 CR=$(timeout 15 /bin/test_unix_bind 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  unix-bind: /'
 check "c-unix-bind"    "OK"  "$(echo "$CR" | tail -1)"
+CR=$(timeout 10 /bin/test_clone_newns 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  clone-newns: /'
+check "c-clone-newns"  "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──

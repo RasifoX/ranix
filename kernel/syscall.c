@@ -619,6 +619,9 @@ static long syscall_clone(const long *a)
 	   ) return -EPERM;
 	if (flags & CLONE_VFORK)
 		return sys_vfork((uint64_t)a[1], flags);   /* a[1] = child stack, if any */
+	/* a task sharing the address space gets no namespaces of its own here:
+	 * refuse rather than make a child that silently keeps the parent's */
+	if ((flags & CLONE_VM) && (flags & CLONE_NEW_ANY)) return -EINVAL;
 	if (flags & CLONE_VM) {
 		/* Thread: share address space */
 		uint64_t newsp  = (uint64_t)a[1];
@@ -660,6 +663,7 @@ static long syscall_clone3(const long *a)
 		 * without it is a spawn, so give it a private (COW) space + that stack. */
 		return sys_vfork(newsp, flags);
 	}
+	if ((flags & CLONE_VM) && (flags & CLONE_NEW_ANY)) return -EINVAL;
 	if (flags & CLONE_VM) {
 		uint32_t *ptid = (flags & CLONE_PTID) ? (uint32_t*)ca.parent_tid : NULL;
 		uint64_t tls   = (flags & CLONE_SETTLS) ? ca.tls : 0;

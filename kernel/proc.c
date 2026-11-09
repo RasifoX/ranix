@@ -467,7 +467,13 @@ static int fork_namespaces(process_t *child, process_t *parent, uint64_t clone_f
 	child->time_ns = parent->time_ns_new
 	               ? time_ns_get(parent->time_ns_new)
 	               : time_ns_get(parent->time_ns);
-	child->mnt_ns  = mnt_ns_get(parent->mnt_ns);
+	/* CLONE_NEWNS: the child's own copy of the mount table, as unshare makes */
+	if (clone_flags & CLONE_NEWNS) {
+		child->mnt_ns = mnt_ns_clone(parent->mnt_ns);
+		if (!child->mnt_ns) return -1;
+	} else {
+		child->mnt_ns = mnt_ns_get(parent->mnt_ns);
+	}
 	if (clone_flags & CLONE_NEWUSER) {
 		child->user_ns = user_ns_create_child(parent->user_ns ? parent->user_ns : &init_user_ns, parent->euid);
 		if (!child->user_ns) return -1;
@@ -564,6 +570,8 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	if (parent->asess && (clone_flags & ASESS_CLONE_DENIED)) return -EPERM;
 	/* the low byte of clone flags is the exit signal, not CLONE_NEWTIME */
 	if (!enter && !may_create_ns(parent, clone_flags & ~0xffUL)) return -EPERM;
+	/* a shared root and cwd would reach across the new mount namespace (Linux EINVAL) */
+	if ((clone_flags & (CLONE_NEWNS | CLONE_FS)) == (CLONE_NEWNS | CLONE_FS)) return -EINVAL;
 	arch_save_tls(parent);
 
 	/* RLIMIT_NPROC: a non-root caller may not exceed its soft cap on live
