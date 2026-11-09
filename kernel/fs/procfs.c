@@ -1015,6 +1015,33 @@ static vfs_fops_t procfs_fops = {
 	.write = procfs_sysctl_write,
 };
 
+/* /proc/<pid>/mounts and mountinfo: readable always, and POLLPRI | POLLERR
+ * once the mount table changed since the open or the last poll (Linux
+ * mounts_poll). The open file keeps the change count it has seen. */
+static int procfs_mounts_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)in; (void)flags;
+	f->priv = (void *)(uintptr_t)vfs_mounts_event();
+	return 0;
+}
+
+static int procfs_mounts_poll(vfs_file_t *f)
+{
+	uint32_t now = vfs_mounts_event();
+	int r = 0x0001;   /* POLLIN */
+	if ((uint32_t)(uintptr_t)f->priv != now) {
+		f->priv = (void *)(uintptr_t)now;
+		r |= 0x0002 | 0x0008;   /* POLLPRI | POLLERR */
+	}
+	return r;
+}
+
+static vfs_fops_t procfs_mounts_fops = {
+	.open  = procfs_mounts_open,
+	.read  = procfs_file_read,
+	.poll  = procfs_mounts_poll,
+};
+
 static vfs_fops_t procfs_dir_fops = { 0 };
 
 /* ── inode allocation ────────────────────────────────────────── */
@@ -1093,7 +1120,7 @@ static vfs_inode_t *procfs_inode_file(int pid, int type)
 	in->mode    = S_IFREG | (type == PROC_F_P_OOMADJ ? 0644 : 0444);
 	in->nlink   = 1;
 	in->refcount= 1;
-	in->fops    = &procfs_fops;
+	in->fops    = (type == PROC_F_MOUNTS || type == PROC_F_P_MOUNTINFO) ? &procfs_mounts_fops : &procfs_fops;
 
 	procfs_inode_priv_t *pr = kmalloc(sizeof(*pr));
 	if (!pr) { kfree(in); return NULL; }

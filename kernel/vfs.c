@@ -2048,6 +2048,10 @@ int vfs_statfs_path(const char *path, vfs_statfs_t *out)
 	return vfs_statfs_inode(d->inode, out);
 }
 
+static volatile uint32_t mounts_event;
+void vfs_mounts_changed(void) { __atomic_add_fetch(&mounts_event, 1, __ATOMIC_RELAXED); poll_notify(); }
+uint32_t vfs_mounts_event(void) { return mounts_event; }
+
 int vfs_umount(const char *path)
 {
 	if (!path || path[0] != '/') return -EINVAL;

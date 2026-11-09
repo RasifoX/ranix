@@ -326,6 +326,10 @@ int              vfs_bind(mnt_namespace_t *ns, vfs_dentry_t *mp, vfs_dentry_t *d
                           const char *path, unsigned long flags);
 vfs_dentry_t    *vfs_follow_in(mnt_namespace_t *ns, vfs_dentry_t *d);
 int        vfs_umount(const char *path);
+/* the mount table changed (mount, umount): /proc/<pid>/mounts and mountinfo
+ * pollers see EPOLLPRI; vfs_mounts_event counts the changes */
+void       vfs_mounts_changed(void);
+uint32_t   vfs_mounts_event(void);
 void       vfs_inode_free(vfs_inode_t *in);    /* a lookup result no dentry took; no-op if cached */
 /* Something a path walk may still be reading. fn(d) runs once every syscall that
  * had walked a path when vfs_defer was called has finished, the caller's own
