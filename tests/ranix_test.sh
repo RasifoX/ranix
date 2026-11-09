@@ -408,6 +408,7 @@ check "c-usercred"    "OK"            "$(timeout 10 /bin/test_usercred 2>&1 | ta
 check "c-credctl"     "OK"            "$(timeout 15 /bin/test_credctl 2>&1 | tail -1)"
 check "c-nettcp"      "OK"            "$(timeout 10 /bin/test_nettcp 2>&1 | tail -1)"
 check "c-uidmap"      "OK"            "$(timeout 10 /bin/test_uidmap 2>&1 | tail -1)"
+check "c-usernssuid"  "OK"            "$(timeout 15 /bin/test_usernssuid 2>&1 | tail -1)"
 check "c-ofdlock"     "OK"            "$(timeout 8 /bin/test_ofdlock 2>&1 | tail -1)"
 check "c-ps2aux"      "OK"            "$(timeout 10 /bin/test_ps2aux 2>&1 | tail -1)"
 check "c-atflags"     "OK"            "$(timeout 8 /bin/test_atflags 2>/dev/null)"

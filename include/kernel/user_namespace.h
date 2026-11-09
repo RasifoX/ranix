@@ -45,6 +45,8 @@ uint32_t from_kuid(user_namespace_t *ns, uint32_t kuid);   /* kuid -> ns-local (
 uint32_t make_kuid(user_namespace_t *ns, uint32_t uid);    /* ns-local -> kuid ((uint32_t)-1 if unmapped) */
 uint32_t from_kgid(user_namespace_t *ns, uint32_t kgid);
 uint32_t make_kgid(user_namespace_t *ns, uint32_t gid);
+int kuid_has_mapping(user_namespace_t *ns, uint32_t kuid);
+int kgid_has_mapping(user_namespace_t *ns, uint32_t kgid);
 
 /* parse+install a uid_map/gid_map line ("inside outside count"); is_gid selects */
 int user_ns_set_map(user_namespace_t *ns, const char *buf, int is_gid);
