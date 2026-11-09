@@ -1559,7 +1559,8 @@ static void wait_snap(process_t *c, int event, wait_snap_t *s)
 {
 	if (!s) return;
 	if (event == 1)
-		s->status = c->killed_by_sig ? (c->exit_code & 0x7F) : (c->exit_code & 0xFF) << 8;
+		s->status = c->killed_by_sig ? (c->exit_code & 0xFF)   /* the signal, 0x80 for a core */
+		                             : (c->exit_code & 0xFF) << 8;
 	else if (event == 2 || event == 5)
 		s->status = ((c->ptrace_stop_sig ? c->ptrace_stop_sig : 5 /* SIGTRAP */) << 8) | 0x7f;
 	else if (event == 3)

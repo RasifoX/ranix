@@ -99,9 +99,12 @@ static int core_write(int fd, const void *kbuf, size_t len)
 	return 0;
 }
 
-void coredump(process_t *proc, int sig, arch_context_t *tf)
+/* 1 if a core file was written: the wait status then carries WCOREDUMP */
+int coredump(process_t *proc, int sig, arch_context_t *tf)
 {
-	if (!proc || !core_signal(sig) || core_pattern[0] == '\0') return;
+	if (!proc || !core_signal(sig) || core_pattern[0] == '\0') return 0;
+	/* Linux writes no ELF core under a page of RLIMIT_CORE */
+	if (proc->rlim_set && proc->rlim_cur[4 /* RLIMIT_CORE */] < 4096 /* a page */) return 0;
 
 	/* count + total of dumpable VMAs (capped) */
 	int nv = 0;
@@ -115,7 +118,7 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 	char path[256];
 	if (core_pattern[0] == '/') {
 		size_t n = strlen(core_pattern);
-		if (n >= sizeof(path)) return;
+		if (n >= sizeof(path)) return 0;
 		memcpy(path, core_pattern, n + 1);
 	} else {
 		fs_path_t *held = fs_cwd_get(proc->fs);
@@ -129,7 +132,7 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 	}
 
 	int fd = vfs_open(path, 0x41 /*O_CREAT|O_WRONLY*/ | 0x200 /*O_TRUNC*/, 0600);
-	if (fd < 0) return;
+	if (fd < 0) return 0;
 
 	int phnum = 1 + nv;  /* PT_NOTE + PT_LOADs */
 	uint64_t phoff = sizeof(Elf64_Ehdr);
@@ -214,4 +217,5 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 
 done:
 	vfs_close(fd);
+	return 1;
 }

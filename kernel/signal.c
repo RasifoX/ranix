@@ -846,9 +846,9 @@ static int sig_no_handler(arch_context_t *tf, process_t *p, int sig, void (*hand
 	/* SIG_DFL = 0 or NULL */
 	if (!handler) {
 		if (sig_default_kill(sig)) {
-			p->exit_code      = sig;
 			p->killed_by_sig  = 1;
-			coredump(p, sig, tf);
+			/* 0x80 in a signal death's status is WCOREDUMP */
+			p->exit_code      = sig | (coredump(p, sig, tf) ? 0x80 : 0);
 			arch_get_cpu_ctx()->wd_where = "sig:kill";
 			task_exit();
 		}
