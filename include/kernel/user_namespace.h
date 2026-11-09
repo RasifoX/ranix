@@ -35,6 +35,7 @@ typedef struct user_namespace {
 	uint32_t               owner_uid;   /* kuid of the creator */
 	uid_extent_t           uid_map[UIDMAP_MAX_EXTENTS]; int n_uid;
 	uid_extent_t           gid_map[UIDMAP_MAX_EXTENTS]; int n_gid;
+	int                    setgroups_denied;   /* /proc/<pid>/setgroups "deny": setgroups(2) is EPERM */
 } user_namespace_t;
 
 extern user_namespace_t init_user_ns;
@@ -57,6 +58,8 @@ int user_ns_set_map(user_namespace_t *ns, const char *buf, int is_gid);
 int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid);
 /* may this task write that map? (root anything; others one line, their own id) */
 int user_ns_map_permitted(struct process *writer, user_namespace_t *ns, const char *buf, int is_gid);
+/* /proc/<pid>/setgroups: "allow" or "deny" (Linux proc_setgroups_write); 0 or -errno */
+int user_ns_set_setgroups(struct process *writer, user_namespace_t *ns, const char *buf);
 
 struct vfs_file;
 user_namespace_t *nsfile_to_user(struct vfs_file *f);

@@ -1999,6 +1999,38 @@ static ssize_t procfs_uidmap_write(vfs_file_t *f, const void *buf, size_t len)
 
 static vfs_fops_t procfs_uidmap_fops = { .read = procfs_uidmap_read, .write = procfs_uidmap_write };
 
+/* /proc/<pid>/setgroups: "allow" or "deny" for the task's user namespace */
+static ssize_t procfs_setgroups_read(vfs_file_t *f, void *buf, size_t len)
+{
+	procfs_uidmap_priv_t *pr = f->inode->priv;
+	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
+	if (!p) return -ESRCH;
+	const char *t = p->user_ns && p->user_ns->setgroups_denied ? "deny\n" : "allow\n";
+	if (pr->pid) proc_put(p);
+	size_t n = strlen(t);
+	if (f->pos >= (off_t)n) return 0;
+	if (len > n - (size_t)f->pos) len = n - (size_t)f->pos;
+	if (copy_to_user(buf, t + f->pos, len) != 0) return -EFAULT;
+	f->pos += (off_t)len;
+	return (ssize_t)len;
+}
+
+static ssize_t procfs_setgroups_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	procfs_uidmap_priv_t *pr = f->inode->priv;
+	char kb[16];
+	if (len >= sizeof(kb)) return -EINVAL;
+	if (copy_from_user(kb, buf, len) != 0) return -EFAULT;
+	kb[len] = '\0';
+	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
+	if (!p) return -ESRCH;
+	int rc = user_ns_set_setgroups(task_current(), p->user_ns ? p->user_ns : &init_user_ns, kb);
+	if (pr->pid) proc_put(p);
+	return rc ? rc : (ssize_t)len;
+}
+
+static vfs_fops_t procfs_setgroups_fops = { .read = procfs_setgroups_read, .write = procfs_setgroups_write };
+
 static vfs_inode_t *procfs_uidmap_inode(int pid, int is_gid)
 {
 	vfs_inode_t *in = kmalloc(sizeof(*in));
@@ -2008,7 +2040,7 @@ static vfs_inode_t *procfs_uidmap_inode(int pid, int is_gid)
 	in->mode     = S_IFREG | 0644;
 	in->nlink    = 1;
 	in->refcount = 1;
-	in->fops     = &procfs_uidmap_fops;
+	in->fops     = is_gid == 2 ? &procfs_setgroups_fops : &procfs_uidmap_fops;   /* 2: setgroups */
 	/* the task's own, as on Linux: its user may open it to map itself */
 	process_t *t = pid ? proc_get((pid_t)pid) : task_current();
 	if (t) { in->uid = t->euid; in->gid = t->egid; if (pid) proc_put(t); }
@@ -2225,6 +2257,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_uidmap_inode(pid, 0);
 	if (strcmp(name, "gid_map") == 0)
 		return procfs_uidmap_inode(pid, 1);
+	if (strcmp(name, "setgroups") == 0)
+		return procfs_uidmap_inode(pid, 2);
 	if (strcmp(name, "cgroup") == 0)
 		return procfs_cgroup_inode(pid);
 	if (strcmp(name, "mem") == 0)
