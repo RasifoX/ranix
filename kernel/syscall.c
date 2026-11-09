@@ -746,7 +746,7 @@ static int syscall_files(long n, const long *a, long *ret)
 	case SYS_ARCH_CHOWN:   *ret = sys_chown((const char*)a[0], (uid_t)a[1], (gid_t)a[2]); break;
 	case SYS_ARCH_TRUNCATE: *ret = sys_truncate((const char*)a[0], (off_t)a[1]); break;
 	case SYS_ARCH_ARCH_PRCTL: *ret = sys_arch_prctl((int)a[0], (uint64_t)a[1]); break;
-	case SYS_ARCH_EPOLL_CREATE: *ret = sys_epoll_create1(0); break;
+	case SYS_ARCH_EPOLL_CREATE: *ret = (int)a[0] <= 0 ? -EINVAL : sys_epoll_create1(0); break;
 	case SYS_ARCH_EPOLL_WAIT:   *ret = sys_epoll_pwait((int)a[0], (linux_epoll_event_t*)a[1], (int)a[2], (int)a[3], NULL); break;
 #endif
 	default:
