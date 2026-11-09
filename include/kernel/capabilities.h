@@ -36,6 +36,7 @@
  * unshare(CLONE_NEWUSER) hands any uid a full set, valid for that namespace alone. */
 struct process;
 int capable_task(struct process *p, int cap);
+int capable_own_ns(struct process *p, int cap);
 /* May p create the namespaces in flags (CLONE_NEW*)? */
 int may_create_ns(struct process *p, unsigned long flags);
 /* May the caller change t? Yes for itself, its own uid, or holding cap. */

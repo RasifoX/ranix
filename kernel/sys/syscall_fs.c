@@ -623,15 +623,18 @@ static long sys_chdir(const char *path)
 static long sys_chroot(const char *path)
 {
 	process_t *p = task_current();
-	if (p->euid != 0) return -1;                /* EPERM (CAP_SYS_CHROOT) */
+	/* in the caller's own user namespace, as Linux: a rootless sandbox may
+	 * chroot (its paths stay under the old root; setuid there is inert) */
+	if (!capable_own_ns((struct process *)p, CAP_SYS_CHROOT)) return -1;   /* EPERM */
 	char kp[PATH_MAX];
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
 	if (r) return r;
 	vfs_dentry_t *d = vfs_dentry_resolve(kp);
 	if (!d || !d->inode) return -2;             /* ENOENT */
 	if (!S_ISDIR(d->inode->mode)) return -20;   /* ENOTDIR */
-	if (vfs_dentry_is_volatile(d)) return -22;  /* EINVAL: p->root outlives it */
-	vfs_dentry_keep(d);   /* p->root points at it: the dcache must not drop it */
+	/* a generated directory has no dentry to hold: an empty root stands in */
+	if (vfs_dentry_is_volatile(d)) d = vfs_empty_root();
+	else vfs_dentry_keep(d);   /* p->root points at it: the dcache must not drop it */
 	p->root = d;
 	/* cwd is now relative to the new root; reset to "/" so a path that pointed
 	 * outside the jail can't be reached (simple, escape-safe). */

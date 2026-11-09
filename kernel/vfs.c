@@ -592,6 +592,34 @@ vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inod
 	return d;
 }
 
+/* An empty directory nothing can be made in: the root a chroot into a generated
+ * directory (procfs) gets. Such a directory has no dentry of its own to hold,
+ * and its names belong to a task that may be gone; Linux leaves a dead, empty
+ * directory there once the task exits, and Chromium's sandbox chroots into
+ * /proc/self/fdinfo/ of a short-lived child for exactly that. One for all:
+ * it never changes, is in no list and is never evicted. */
+static int empty_create(vfs_inode_t *dir, const char *name, mode_t mode)
+{
+	(void)dir; (void)name; (void)mode;
+	return -13;
+}
+static int empty_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir; (void)idx; (void)out;
+	return -1;
+}
+static vfs_iops_t empty_root_iops = { .create = empty_create, .readdir = empty_readdir };
+static vfs_inode_t empty_root_inode = {
+	.ino = 1, .mode = S_IFDIR | 0555, .nlink = 2, .refcount = 1, .cached = 1,
+	.iops = &empty_root_iops,
+};
+static vfs_dentry_t empty_root = { .name = "/", .inode = &empty_root_inode, .keep = 1 };
+
+vfs_dentry_t *vfs_empty_root(void)
+{
+	return &empty_root;
+}
+
 void vfs_dentry_keep(vfs_dentry_t *d)
 {
 	uint64_t f = spin_lock_irq(&vfs_lock);

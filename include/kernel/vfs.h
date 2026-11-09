@@ -332,6 +332,7 @@ struct process;
 void       vfs_walk_anchor(struct process *p, const char *path);
 void       vfs_dentry_pin(vfs_dentry_t *d);
 void       vfs_dentry_keep(vfs_dentry_t *d);   /* d becomes a task's root: never evicted */
+vfs_dentry_t *vfs_empty_root(void);           /* an empty root nothing can be made in */
 void       vfs_dentry_unpin(vfs_dentry_t *d);
 void       vfs_dentry_free_tree(vfs_dentry_t *root, int free_inodes);
 /* Per-mount state for a filesystem that keeps none of its own: drops the tree on
