@@ -614,6 +614,7 @@ typedef struct {
 #define PROC_F_SYS_IPC_FIRST      51   /* 51..56: shmmax shmmni shmall msgmax msgmnb msgmni */
 #define PROC_F_SYS_SEM            57
 #define PROC_F_SYS_PIPE_MAX       61
+#define PROC_F_SYS_MMAP_MIN       62
 #define PROC_F_SYSVIPC_SHM        58   /* 58..60: /proc/sysvipc/{shm,sem,msg} */
 #define PROC_F_SYSVIPC_MSG        60
 static const char *const ipc_limit_names[] = { "shmmax", "shmmni", "shmall", "msgmax", "msgmnb", "msgmni" };
@@ -892,6 +893,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_MMAP_MIN:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,MMAP_MIN_ADDR); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -2731,8 +2733,9 @@ static procfs_sysfile_t sys_vm_files[] = {
 	{ "max_map_count",     PROC_F_SYS_MAX_MAP_COUNT },
 	{ "overcommit_memory", PROC_F_SYS_OVERCOMMIT    },
 	{ "swappiness",        PROC_F_SYS_SWAPPINESS    },
+	{ "mmap_min_addr",     PROC_F_SYS_MMAP_MIN      },   /* read-only */
 };
-#define SYS_VM_N 3
+#define SYS_VM_N 4
 
 static procfs_sysfile_t sys_net_core_files[] = {
 	{ "somaxconn",       PROC_F_SYS_SOMAXCONN    },

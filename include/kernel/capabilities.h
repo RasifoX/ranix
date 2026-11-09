@@ -21,6 +21,7 @@
 #define CAP_NET_BIND_SERVICE 10
 #define CAP_NET_RAW          13
 #define CAP_IPC_LOCK         14
+#define CAP_SYS_RAWIO        17
 #define CAP_SYSLOG           34
 #define CAP_NET_ADMIN        12
 #define CAP_SYS_ADMIN        21

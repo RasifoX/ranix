@@ -521,6 +521,9 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1))) return -EINVAL;
 	if (len >= USER_SPAN) return -ENOMEM;   /* more than all of user space; rounding must not wrap */
 	process_t *p = task_current();
+	if ((flags & (MAP_FIXED | 0x100000 /* MAP_FIXED_NOREPLACE */)) && addr < MMAP_MIN_ADDR &&
+	    !capable_task(p, CAP_SYS_RAWIO))
+		return -EPERM;
 
 	if (mmap_over_rlimit(p, len)) return -ENOMEM;
 	long ml = mmap_memlock_check(p, len, flags);

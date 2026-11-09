@@ -312,9 +312,10 @@ static long sys_pwrite64(int fd, const void *buf, size_t count, off_t offset)
 static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
                        int flags, uint64_t new_addr)
 {
-	(void)new_addr;
 	process_t *p = task_current();
 	if (new_size == 0 || (old_addr & (PAGE_SIZE - 1))) return -EINVAL;
+	/* MREMAP_FIXED below vm.mmap_min_addr, as mmap (moving there is not done yet) */
+	if ((flags & 2) && new_addr < MMAP_MIN_ADDR && !capable_task(p, CAP_SYS_RAWIO)) return -EPERM;
 	old_size = (old_size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 	new_size = (new_size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 	if (new_size == old_size) return (long)old_addr;
