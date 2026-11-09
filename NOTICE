@@ -1,0 +1,97 @@
+Ranix kernel
+Copyright (c) 2026 RasifoX
+Licensed under the EUPL
+
+The licensor is RasifoX. Ranix is RasifoX's personal project, developed under
+the Metastaz umbrella; Metastaz is not the licensor. Contributors keep the
+copyright in their own changes and license them under the same terms (see
+CONTRIBUTING.md). SPDX: EUPL-1.2. See LICENSE.
+
+LICENSE is the English text of the European Union Public Licence v1.2 as
+published by the European Commission:
+  https://joinup.ec.europa.eu/sites/default/files/custom-page/attachment/2020-03/EUPL-1.2%20EN.txt
+  (fetched 2026-11-09, sha256 6fc9e709ccbfe0d77fbffa2427a983282be2eb88e47b1cdb49f21a83b4d1e665)
+The same licence is published in all official EU languages at
+  https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12
+and in Commission Implementing Decision (EU) 2017/863.
+
+The names "Ranix" and "Baron", and the Baron drawings, are not licensed under
+the EUPL (EUPL Article 5, "Legal Protection"). See LICENSING.md.
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+
+The files below are not Ranix's own work, or contain parts that are not. They
+keep their own licences and notices; the EUPL does not replace them. Each
+licence listed here allows the code to be distributed together with EUPL code
+as long as its notice is kept.
+
+1. ACPICA (ACPI Component Architecture)
+   Path:      drivers/acpi/acpica/
+   Origin:    acpica-unix 20230628 (Ubuntu source package acpica-unix_20230628.orig.tar.gz,
+              sha256 02292a8ea5efdbde16b88b23f620ae4170c5ae0a41e69ab62de9e2ffeda3c21f),
+              imported unchanged. See drivers/acpi/acpica/NOTICE.
+   Copyright: Copyright (C) 2000 - 2023, Intel Corp.
+   Licence:   dual: a BSD-3-Clause-style licence, or GPL-2.0. Ranix uses the
+              BSD-style option. The full text is in the header of every file.
+              SPDX: BSD-3-Clause OR GPL-2.0-only (as tagged in Linux).
+   Note:      the BSD-style option asks that binary redistributions carry a
+              disclaimer substantially similar to its "NO WARRANTY" text. This
+              NOTICE and EUPL Article 7 do that.
+
+2. Intel i915 graphics driver, MIT-licensed parts
+   Path:      drivers/gpu/drm/i915/
+   Origin:    Linux 6.1.176 drivers/gpu/drm/i915 (Debian linux-source-6.1 6.1.176-1).
+              Only files whose SPDX identifier is MIT were used. See
+              drivers/gpu/drm/i915/NOTICE for what was copied unchanged and what
+              was changed.
+   Copyright: Copyright (c) Intel Corporation (years as in each file header),
+              and the Ranix contributors for the changes
+   Licence:   MIT (SPDX: MIT). Text in drivers/gpu/drm/i915/NOTICE and in the
+              file headers. The Ranix changes in this directory are also offered
+              under MIT, as their SPDX lines say.
+
+3. Spleen 8x16 bitmap font
+   Path:      kernel/tty/font_spleen.h
+   Origin:    https://github.com/fcambus/spleen, spleen-8x16.bdf; the 995 glyphs
+              used are identical to release 2.2.0.
+   Copyright: Copyright (c) 2018-2026, Frederic Cambus
+   Licence:   BSD-2-Clause. Full text in the file header.
+
+4. LinuxKPI compatibility headers
+   Path:      drivers/gpu/linuxkpi/include/linux/
+   Origin:    written for Ranix; they re-create the names of Linux kernel helper
+              macros (FIELD_PREP, BIT, ...) so the i915 code above compiles.
+   Licence:   BSD-2-Clause (SPDX line in each file).
+
+-------------------------------------------------------------------------------
+Interfaces and reference material (no code copied)
+-------------------------------------------------------------------------------
+
+Ranix implements the Linux system call ABI and several Linux device uAPIs
+(io_uring, DRM, i915, termios, signalfd, statx, ...). Numbers, constants and
+structure layouts are transcribed so that unmodified Linux programs run; the
+transcriptions are Ranix's own and are checked against the published headers.
+Some drivers were written with the help of public datasheets and of other
+operating systems' drivers, named in the file headers (for example
+drivers/net/rtl8168.c: FreeBSD and OpenBSD re(4), SerenityOS, Realtek
+datasheets).
+
+-------------------------------------------------------------------------------
+Removed before the first EUPL release
+-------------------------------------------------------------------------------
+
+- kernel/tty/font8x16.h: matched the Linux kernel's GPL-2.0 font_8x16.c. Unused;
+  deleted. Spleen (above) is the console font.
+- doomgeneric/: GPL-2.0-or-later (one file GPL-3.0-or-later). Not part of the
+  kernel; moved out of this tree.
+- drivers/net/bcmgenet.c (Raspberry Pi 4 Ethernet): its own header named GPL
+  drivers as its documentation, and a similarity scan found the structure of
+  U-Boot's GPL-2.0+ driver in it. Withdrawn pending a clean rewrite.
+- arch/aarch64/linker_raspi4.ld and vdso/vdso_layout.lds were rewritten from
+  scratch; the old raspi4 script carried lines from the MIT-licensed
+  raspi3-tutorial (Copyright bzt). Output is byte-identical.
+
+Older Ranix code published elsewhere (github.com/RasifoX/ranix, and the ranix.org
+text that called it "GPLv2") is not covered by this notice.
