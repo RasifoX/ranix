@@ -365,9 +365,11 @@ static int dma_alloc(dmamem_t *d, size_t bytes)
 {
     int order = 0;
     while ((4096UL << order) < bytes) order++;
-    void *held[8];
+    /* The buddy allocator has no low zone and on an 8 GiB machine hands out blocks
+     * above 4 GiB first; keep those aside (up to 64) until a low one comes. */
+    void *held[64];
     int nheld = 0, ok = 0;
-    for (int tries = 0; tries < 8; tries++) {
+    for (int tries = 0; tries < 64; tries++) {
         void *p = buddy_alloc(order);
         if (!p) break;
         if ((uint64_t)p + (4096UL << order) <= 0x100000000UL) {
@@ -644,19 +646,37 @@ static void rx_arm(uint32_t i)
     d[0] |= RXDW0_OWN;
 }
 
+/* Ring memory is allocated once (at probe) and never freed: the card may still
+ * hold any address it was ever given. Each piece is checked on its own. The first
+ * version tested only rx_desc, so after a partial failure the next RTW_RINGS
+ * "succeeded" with rx_buf and the TX buffers at physical 0, and the card wrote
+ * received frames over low memory: the resets of 2026-11-09/10. */
+static int rings_ready(void)
+{
+    if (!g.rx_desc.virt || !g.rx_buf.virt) return 0;
+    for (int q = 0; q < NQ; q++)
+        if (!g.tx[q].desc.virt || !g.tx[q].buf.virt) return 0;
+    return 1;
+}
+
 static int rings_alloc(void)
 {
-    if (g.rx_desc.virt) return 0;
-    if (dma_alloc(&g.rx_desc, RX_COUNT * RX_DESC_SZ) ||
-        dma_alloc(&g.rx_buf, (size_t)RX_COUNT * RX_BUF))
-        return -1;
+    int err = 0;
+    if (!g.rx_desc.virt && dma_alloc(&g.rx_desc, RX_COUNT * RX_DESC_SZ)) err = -1;
+    if (!g.rx_buf.virt  && dma_alloc(&g.rx_buf, (size_t)RX_COUNT * RX_BUF)) err = -1;
     for (int q = 0; q < NQ; q++) {
-        if (dma_alloc(&g.tx[q].desc, TX_COUNT * TX_DESC_SZ) ||
-            dma_alloc(&g.tx[q].buf, (size_t)TX_COUNT * TX_BUF))
-            return -1;
-        g.tx[q].lock = (spinlock_t)SPINLOCK_INIT;
+        if (!g.tx[q].desc.virt && dma_alloc(&g.tx[q].desc, TX_COUNT * TX_DESC_SZ)) err = -1;
+        if (!g.tx[q].buf.virt  && dma_alloc(&g.tx[q].buf, (size_t)TX_COUNT * TX_BUF)) err = -1;
     }
-    return 0;
+    return err || !rings_ready() ? -1 : 0;
+}
+
+/* DMA stop bits on, MAC TX/RX off (r88ee_power_off order). */
+static void dma_quiesce(void)
+{
+    if (!g.regs) return;
+    wr1(R_PCIE_CTRL_REG + 1, 0xff);
+    set1(R_CR, CR_MACRXEN | CR_MACTXEN, 0);
 }
 
 static void rings_reset(void)
@@ -679,12 +699,12 @@ static void rings_reset(void)
 
 static int rings_start(uint32_t base[3])
 {
+    g.rings_up = 0;
+    dma_quiesce();
     if (rings_alloc()) {
         kprintf(KERN_ERR "rtw8723: no DMA memory below 4 GiB for rings\n");
-        return -ENOMEM;
+        return -ENOMEM;     /* card stays stopped; descriptor registers untouched */
     }
-    g.rings_up = 0;
-    set1(R_CR, CR_MACRXEN | CR_MACTXEN, 0);
     uint32_t pcie_ctrl = rd4(R_PCIE_CTRL_REG);
     rings_reset();
     wr4(R_RX_DESA, (uint32_t)g.rx_desc.phys);
@@ -891,6 +911,7 @@ static int rtw_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         if (copy_from_user(fw, (void *)a.ptr, a.len)) { kfree(fw); return -EFAULT; }
         g.rings_up = 0;
         g.loaded = 0;
+        dma_quiesce();                              /* a reload must not leave DMA running */
         if (!g.rom_ok) efuse_read();                /* read at boot; retry only if that failed */
         int e = power_on();
         if (!e) e = fw_load(fw, a.len);
@@ -1117,6 +1138,10 @@ void rtw8723_init(void)
 
     g.rx_lock = (spinlock_t)SPINLOCK_INIT;
     g.txq_lock = (spinlock_t)SPINLOCK_INIT;
+    for (int q = 0; q < NQ; q++) g.tx[q].lock = (spinlock_t)SPINLOCK_INIT;
+    /* Early in boot memory below 4 GiB is plentiful; later it may not be. */
+    if (rings_alloc())
+        kprintf(KERN_WARN "rtw8723: ring memory not all allocated at probe, will retry at RTW_RINGS\n");
 
     efuse_read();
     const uint8_t *mac = g.rom + ROM_PCI_MAC;
