@@ -517,33 +517,44 @@ static long sys_getrusage(int who, void *usage)
 	return 0;
 }
 
+/* Linux setreuid: the real uid may become the real or effective uid, the
+ * effective uid any of the three; other ids take CAP_SETUID. The saved uid
+ * follows the new effective uid when the real uid is set, or when the effective
+ * uid is set to something other than the old REAL uid. So setreuid(-1, ruid) is
+ * a temporary drop that setreuid(-1, saved) undoes. */
 static long sys_setreuid(uid_t ruid, uid_t euid)
 {
 	process_t *p = task_current();
-	uid_t old_euid = p->euid;
+	uid_t old_r = p->uid, old_euid = p->euid;
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
 	uid_t new_e = (euid != (uid_t)-1) ? euid : p->euid;
-	if (!may_take_uid(p, new_r) || !may_take_uid(p, new_e)) return -EPERM;
+	if (ruid != (uid_t)-1 && ruid != p->uid && ruid != p->euid &&
+	    !capable_setid((struct process *)p, CAP_SETUID, ruid))
+		return -EPERM;
+	if (euid != (uid_t)-1 && !may_take_uid(p, euid)) return -EPERM;
 	p->uid  = new_r;
 	p->euid = new_e;
-	/* setreuid: if ruid set or euid != old euid, update suid to new euid */
-	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != old_euid))
+	if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != old_r))
 		p->suid = new_e;
 	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
 
+/* the same rules for gids (Linux setregid) */
 static long sys_setregid(gid_t rgid, gid_t egid)
 {
 	process_t *p = task_current();
+	gid_t old_r = p->gid;
 	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
 	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
-	gid_t old_e = p->egid;
-	if (!may_take_gid(p, new_r) || !may_take_gid(p, new_e)) return -EPERM;
+	if (rgid != (gid_t)-1 && rgid != p->gid && rgid != p->egid &&
+	    !capable_setid((struct process *)p, CAP_SETGID, rgid))
+		return -EPERM;
+	if (egid != (gid_t)-1 && !may_take_gid(p, egid)) return -EPERM;
 	p->gid  = new_r;
 	p->egid = new_e;
-	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != old_e))
+	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != old_r))
 		p->sgid = new_e;
 	return 0;
 }
