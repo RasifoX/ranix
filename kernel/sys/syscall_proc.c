@@ -2155,10 +2155,11 @@ static long do_waitpid(pid_t pid, wait_snap_t *ws, int flags, void *rusage)
 	if (pid <= 0) {
 		pid_t pgrp = pid == -1 ? -1 : pid == 0 ? p->pgrp : pid_from_user(-pid);
 		if (pgrp == 0 && pid < -1) return -ECHILD;   /* no such group in my pid namespace */
+		int intr = 0;
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0, event = 0;
-			proc_find_zombie_or_sleep(p->tgid, p, pgrp, !wnohang, flags, &child, &any_alive, &event, ws);
+			proc_find_zombie_or_sleep(p->tgid, p, pgrp, !wnohang && !intr, flags, &child, &any_alive, &event, ws);
 			if (child && event == 1 && !(flags & WNOWAIT)) {
 				fill_wait_rusage(rusage, child);
 				if (child->pid == child->tgid && child->ppid != p->tgid) {
@@ -2175,24 +2176,29 @@ static long do_waitpid(pid_t pid, wait_snap_t *ws, int flags, void *rusage)
 			if (child) return (long)ws->nr;
 			if (!any_alive) return -ECHILD;
 			if (wnohang)    return 0;
+			if (intr && any_alive != 2) return -EINTR;   /* 2: one is mid-exit, wait for it */
 			arch_yield();
 			p->in_wait = 0;
-			if (task_has_actionable_signal()) return -EINTR;
+			/* an exit and its SIGCHLD come together: look once more, and
+			 * be interrupted only if there is still nothing to report */
+			if (task_has_actionable_signal()) intr = 1;
 		}
 	}
 
 	process_t *child = pid > 0 ? proc_find_child(p->tgid, current_pid_ns(), (int)pid) : NULL;
 	if (!child) return -ECHILD;
 
+	int intr = 0;
 	while (1) {
-		int r = proc_check_or_sleep(child, p, !wnohang, flags, ws);
+		int r = proc_check_or_sleep(child, p, !wnohang && !intr, flags, ws);
 		if (r < 0) return -ECHILD;   /* exited, and the caller did not ask for exits */
 		if (r == 1) break;           /* zombie */
 		if (r) return (long)pid;     /* ptrace stop, job stop, continued */
 		if (wnohang) return 0;
+		if (intr && child->state != PROC_DEAD) return -EINTR;   /* mid-exit: wait for it */
 		arch_yield();
 		p->in_wait = 0;
-		if (task_has_actionable_signal()) return -EINTR;
+		if (task_has_actionable_signal()) intr = 1;   /* as above: look once more */
 	}
 
 	if (flags & WNOWAIT) return (long)pid;

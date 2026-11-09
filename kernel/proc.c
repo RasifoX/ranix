@@ -1647,6 +1647,7 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, pid_t pgrp, int wi
 	/* Don't sleep while a child is mid-exit (PROC_DEAD): its task_exit wakeup
 	 * has already fired, and it only turns ZOMBIE later in schedule(). Yield
 	 * and retry instead, or the wakeup is lost forever. */
+	if (!*out_child && dead_pending) *out_any_alive = 2;   /* a child is mid-exit: soon waitable */
 	if (!*out_child && *out_any_alive && will_sleep && !dead_pending) {
 		parent->state = PROC_SLEEPING;
 		parent->sleeping_on_queue = 1;  /* woken by task_exit, not the per-tick poll */
