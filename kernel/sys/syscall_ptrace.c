@@ -199,6 +199,26 @@ void ptrace_exec_done(process_t *p)
 	else task_signal(p, SIGTRAP_);
 }
 
+/* The siginfo to deliver after a signal-delivery-stop (Linux ptrace_signal):
+ * whatever the tracer left with PTRACE_SETSIGINFO; for a signal the tracer
+ * replaced with another, one from the tracer (SI_USER, its pid and uid). */
+static void ptrace_signal_info(process_t *p, int sig, sigqueue_t *si)
+{
+	if (!sig) return;
+	sigqueue_t *next = si->next;
+	*si = p->ptrace_si;
+	si->next = next;
+	if (sig == si->si_signo) return;
+	process_t *t = proc_get(p->tracer);
+	si->si_signo = sig;
+	si->si_errno = 0;
+	si->si_code  = 0;            /* SI_USER */
+	si->si_pid   = pid_to_user(p->tracer);
+	si->si_uid   = t ? t->uid : 0;
+	si->si_value = 0;
+	proc_put(t);
+}
+
 /* Every signal but SIGKILL stops a traced task before it takes effect. The tracer
  * sees it, then lets it through, replaces it or drops it. Returns what to deliver. */
 int ptrace_signal_stop(arch_context_t *tf, int sig, sigqueue_t *si)
@@ -218,6 +238,7 @@ int ptrace_signal_stop(arch_context_t *tf, int sig, sigqueue_t *si)
 	p->ptrace_stop_reported = 0;
 	p->ptrace_stop_sig      = 0;
 	p->ctx = tf;                 /* sleeping saved a deeper frame there */
+	ptrace_signal_info(p, p->ptrace_inject, si);
 	return p->ptrace_inject;
 }
 
@@ -338,6 +359,7 @@ static long ptrace_info_req(process_t *p, process_t *tracee, long request, uint6
 		int32_t info[32];
 		__builtin_memset(info, 0, sizeof(info));
 		info[0] = tracee->ptrace_si.si_signo;
+		info[1] = tracee->ptrace_si.si_errno;
 		info[2] = tracee->ptrace_si.si_code;
 		info[4] = (int32_t)tracee->ptrace_si.si_pid;
 		info[5] = (int32_t)tracee->ptrace_si.si_uid;
@@ -345,8 +367,20 @@ static long ptrace_info_req(process_t *p, process_t *tracee, long request, uint6
 		return copy_to_user((void *)data, info, sizeof(info)) ? -14 : 0;
 	}
 
-	case PTRACE_SETSIGINFO:
-		return tracee->tracer == (pid_t)p->pid ? 0 : -3;
+	case PTRACE_SETSIGINFO: {
+		/* what the tracee gets if continued with this signal (ptrace_signal_stop);
+		 * a sigqueue_t holds the first 32 bytes, the rest are zero on delivery */
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
+		int32_t info[32];
+		if (copy_from_user(info, (const void *)data, sizeof(info)) != 0) return -EFAULT;
+		tracee->ptrace_si.si_signo = info[0];
+		tracee->ptrace_si.si_errno = info[1];
+		tracee->ptrace_si.si_code  = info[2];
+		tracee->ptrace_si.si_pid   = (pid_t)info[4];
+		tracee->ptrace_si.si_uid   = (uid_t)info[5];
+		__builtin_memcpy(&tracee->ptrace_si.si_value, &info[6], 8);
+		return 0;
+	}
 
 	default:
 		return -ENOSYS;
@@ -426,7 +460,7 @@ static long ptrace_run_req(process_t *p, process_t *tracee, long request, uint64
 {
 	switch (request) {
 	case PTRACE_ATTACH:
-		if (tracee->tgid == p->tgid) return -1;   /* no thread can trace its own group */
+		if (tracee->tgid == p->tgid) return -EPERM;   /* no thread can trace its own group */
 		if (!ptrace_may_access(tracee))
 			return -EPERM;
 		if (tracee->tracer != 0)
@@ -440,6 +474,7 @@ static long ptrace_run_req(process_t *p, process_t *tracee, long request, uint64
 	case PTRACE_DETACH:
 		if (tracee->tracer != (pid_t)p->pid)
 			return -ESRCH;
+		if (data > NSIG) return -EIO;   /* it indexes the signal actions on delivery */
 		tracee->tracer              = 0;
 		tracee->ptrace_opts         = 0;
 		tracee->ptrace_options      = 0;
@@ -457,6 +492,7 @@ static long ptrace_run_req(process_t *p, process_t *tracee, long request, uint64
 	case PTRACE_SINGLESTEP:
 		if (tracee->tracer != (pid_t)p->pid)
 			return -ESRCH;
+		if (data > NSIG) return -EIO;   /* it indexes the signal actions on delivery */
 		tracee->ptrace_opts          = (request == PTRACE_SYSCALL) ? 1 : 0;
 		tracee->single_step          = (request == PTRACE_SINGLESTEP) ? 1 : 0;
 		tracee->ptrace_inject        = (int)data;
