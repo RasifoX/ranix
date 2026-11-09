@@ -49,6 +49,7 @@
 #define SIGTTIN        21
 #define SIGTTOU        22
 #define SIGHUP          1
+#define SIGSYS         31    /* seccomp */
 
 #define SI_USER        0     /* si_code: kill */
 #define SI_QUEUE       (-1)  /* sigqueue */

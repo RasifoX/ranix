@@ -168,7 +168,7 @@ static int bad_load(void)
 
 static int killed_or_refused(int st)
 {
-	return (WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL) || (WIFEXITED(st) && !WEXITSTATUS(st));
+	return (WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS) || (WIFEXITED(st) && !WEXITSTATUS(st));
 }
 
 int main(int argc, char **argv)
@@ -181,7 +181,8 @@ int main(int argc, char **argv)
 	int st = run(inherit);
 	if (!WIFEXITED(st) || WEXITSTATUS(st)) { printf("FAIL inherit %x\n", st); return 1; }
 	st = run(precedence);
-	if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGKILL) { printf("FAIL precedence %x\n", st); return 1; }
+	/* RET_KILL is KILL_THREAD; for a single thread Linux kills the process by SIGSYS */
+	if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGSYS) { printf("FAIL precedence %x\n", st); return 1; }
 	st = run(need_nnp);
 	if (!WIFEXITED(st) || WEXITSTATUS(st)) { printf("FAIL nnp %x\n", st); return 1; }
 	st = run(chain_limit);
