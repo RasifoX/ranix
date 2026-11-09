@@ -13,6 +13,7 @@
 #define PAGE_MASK   (~(PAGE_SIZE - 1))
 
 void mmu_init(void);
+void mmu_null_guard_selftest(void);   /* x86_64: does a kernel NULL dereference fault? (boot log) */
 void arch_map_high_memory(uint64_t max_phys);
 
 #endif

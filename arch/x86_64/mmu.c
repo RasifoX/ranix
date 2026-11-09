@@ -7,7 +7,56 @@
 #include <kernel/mm/vm.h>
 #include <kernel/lib/string.h>
 #include <asm/mmu.h>
+#include <kernel/extable.h>
 
+/* 1 if a kernel read of va faulted (recovered through the exception table) */
+static int kernel_read_faults(uint64_t va)
+{
+	int ok = 0;
+	uint64_t v = 0;
+	__asm__ volatile("1: movq (%2), %1\n"
+	                 "   movl $1, %0\n"
+	                 "2:\n"
+	                 _ASM_EXTABLE("1b", "2b")
+	                 : "+r"(ok), "+r"(v) : "r"(va) : "memory");
+	return !ok;
+}
+
+/* A NULL dereference in the kernel must fault, not reach physical page 0.
+ * Run once the IDT and the per-CPU task are up: the fault path needs both. */
+void mmu_null_guard_selftest(void)
+{
+	if (kernel_read_faults(0))
+		kprintf(KERN_INFO "mm: null page guard ok\n");
+	else
+		kprintf(KERN_ERR "mm: null page guard MISSING: kernel VA 0 is mapped\n");
+}
+
+/* The boot identity map (pml4[0] -> pdpt[0] -> pd, 2 MB pages) also covers
+ * VA 0, so a kernel NULL dereference read or wrote physical page 0 (the real-
+ * mode IVT) instead of faulting. Its first 2 MB move to 4 KB pages with page 0
+ * left out. pd is shared with the kernel-text mapping at -2 GB, whose first
+ * page is as unused. Done on the BSP before the APs start: none of them has
+ * the old entry cached, and the AP trampoline (0x7000) stays mapped. */
+#define NG_PA_MASK    0x000FFFFFFFFFF000UL
+#define NG_PA_2M_MASK 0x000FFFFFFFE00000UL
+#define NG_PTE_PS     (1UL << 7)
+static uint64_t null_guard_pt[512] __attribute__((aligned(4096)));
+
+static void null_guard_install(void)
+{
+	uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4[0] & NG_PA_MASK);
+	if (!(pml4[0] & 1) || !(pdpt[0] & 1)) return;
+	uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpt[0] & NG_PA_MASK);
+	if (!(pd[0] & 1) || !(pd[0] & NG_PTE_PS)) return;   /* not the boot 2 MB page */
+	uint64_t base = pd[0] & NG_PA_2M_MASK;
+	null_guard_pt[0] = 0;
+	for (int i = 1; i < 512; i++)
+		null_guard_pt[i] = (base + (uint64_t)i * PAGE_SIZE) | 0x3UL;   /* P + RW, as the 2 MB page */
+	pd[0] = VIRT_TO_PHYS((uint64_t)null_guard_pt) | 0x3UL;
+	__asm__ volatile("invlpg (%0)" :: "r"(0UL) : "memory");
+	__asm__ volatile("invlpg (%0)" :: "r"(0xFFFFFFFF80000000UL) : "memory");
+}
 
 void mmu_init(void)
 {
@@ -22,6 +71,7 @@ void mmu_init(void)
 	vm_set_kernel_pt(root);
 
 	kprintf(KERN_INFO "mm: paging %s\n", la57 ? "5-level (LA57, 128 PB VA)" : "4-level (256 TB VA)");
+	null_guard_install();
 }
 
 /* Direct map covers PML4[256] (boot pdpt_dm, first 512 GB). To map RAM past
