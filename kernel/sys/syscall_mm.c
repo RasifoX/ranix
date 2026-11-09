@@ -145,19 +145,80 @@ static uint32_t vma_prot(int prot)
 	return vf;
 }
 
+/* bytes the space maps (its VMAs), for RLIMIT_AS and mlockall */
+static uint64_t mapped_bytes(process_t *p)
+{
+	uint64_t used = 0;
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	return used;
+}
+
 /* RLIMIT_AS: would a mapping of len bytes push the address space over the
  * soft limit? (rlim_set==0 means uninitialized → unlimited.) */
 static int mmap_over_rlimit(process_t *p, size_t len)
 {
 	if (p->rlim_set && p->rlim_cur[RLIMIT_AS] != RLIM_INFINITY) {
-		uint64_t used = 0;
-		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
-		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
-		spin_unlock_irq(&p->vm->fault_lock, cf);
 		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
-		if (used + req > p->rlim_cur[RLIMIT_AS]) return 1;
+		if (mapped_bytes(p) + req > p->rlim_cur[RLIMIT_AS]) return 1;
 	}
 	return 0;
+}
+
+/* RLIMIT_MEMLOCK (Linux can_do_mlock, mlock_future_ok): locked memory cannot be
+ * reclaimed, so a task without CAP_IPC_LOCK may hold at most the limit locked,
+ * and nothing at all when the limit is 0. Locked memory is counted as the
+ * space's VMA_LOCKED bytes (Linux mm->locked_vm). Until a limit is set
+ * (rlim_set) it is unlimited, as before. */
+static uint64_t memlock_limit(process_t *p)
+{
+	if (!p->rlim_set || capable_task((struct process *)p, CAP_IPC_LOCK)) return RLIM_INFINITY;
+	return p->rlim_cur[RLIMIT_MEMLOCK];
+}
+
+/* locked bytes in the space; *inside: how many of them lie in [start, end) */
+static uint64_t locked_bytes(process_t *p, uint64_t start, uint64_t end, uint64_t *inside)
+{
+	uint64_t total = 0, in = 0;
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	for (vma_t *v = p->vm->vmas; v; v = v->next) {
+		if (!(v->flags & VMA_LOCKED)) continue;
+		total += v->size;
+		uint64_t lo = v->vaddr > start ? v->vaddr : start;
+		uint64_t hi = v->vaddr + v->size < end ? v->vaddr + v->size : end;
+		if (hi > lo) in += hi - lo;
+	}
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	if (inside) *inside = in;
+	return total;
+}
+
+/* Is every page of [start, end) in some VMA? mlock and munlock of a hole are ENOMEM. */
+static int range_mapped(process_t *p, uint64_t start, uint64_t end)
+{
+	uint64_t cur = start;
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	int moved = 1;
+	while (cur < end && moved) {
+		moved = 0;
+		for (vma_t *v = p->vm->vmas; v; v = v->next)
+			if (cur >= v->vaddr && cur < v->vaddr + v->size) { cur = v->vaddr + v->size; moved = 1; }
+	}
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	return cur >= end;
+}
+
+/* A new mapping that will be locked (MAP_LOCKED, or after mlockall(MCL_FUTURE)):
+ * EPERM for MAP_LOCKED at limit 0, EAGAIN past the limit, as Linux do_mmap. */
+static long mmap_memlock_check(process_t *p, size_t len, int flags)
+{
+	if (!(flags & MAP_LOCKED) && !p->mlock_future) return 0;
+	uint64_t lim = memlock_limit(p);
+	if (lim == RLIM_INFINITY) return 0;
+	if ((flags & MAP_LOCKED) && lim == 0) return -EPERM;
+	uint64_t req = (len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+	return locked_bytes(p, 0, 0, NULL) + req > lim ? -EAGAIN : 0;
 }
 
 /* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already
@@ -462,6 +523,8 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	process_t *p = task_current();
 
 	if (mmap_over_rlimit(p, len)) return -ENOMEM;
+	long ml = mmap_memlock_check(p, len, flags);
+	if (ml) return ml;
 
 	if ((flags & 0x100000) && addr) {   /* MAP_FIXED_NOREPLACE */
 		long e = mmap_noreplace_check(p, addr, len);
@@ -845,6 +908,21 @@ static void mm_set_locked(process_t *p, uint64_t addr, size_t len, int on)
 	spin_unlock_irq(&p->vm->fault_lock, cf);
 }
 
+/* Linux do_mlock: the range must be mapped, and the space's locked bytes after
+ * the call (what is already locked inside the range counts once) must fit
+ * RLIMIT_MEMLOCK. */
+static long mlock_check(process_t *p, uint64_t start, size_t len)
+{
+	uint64_t end = start + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
+	if (!range_mapped(p, start, end)) return -ENOMEM;
+	uint64_t lim = memlock_limit(p);
+	if (lim == RLIM_INFINITY) return 0;
+	if (lim == 0) return -EPERM;
+	uint64_t inside;
+	uint64_t total = locked_bytes(p, start, end, &inside);
+	return total - inside + (end - start) > lim ? -ENOMEM : 0;
+}
+
 static long sys_mlock(uint64_t addr, size_t len)
 {
 	if (len == 0) return 0;
@@ -852,6 +930,8 @@ static long sys_mlock(uint64_t addr, size_t len)
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	len = (addr - start) + len;
 	if (!access_ok((void *)start, len)) return -ENOMEM;   /* range outside user space */
+	long r = mlock_check(p, start, len);
+	if (r) return r;
 	mm_prefault(p, start, len);
 	mm_set_locked(p, start, len, 1);
 	return 0;
@@ -864,6 +944,8 @@ static long sys_munlock(uint64_t addr, size_t len)
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	len = (addr - start) + len;
 	if (!access_ok((void *)start, len)) return -ENOMEM;
+	if (!range_mapped(p, start, start + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))))
+		return -ENOMEM;
 	mm_set_locked(p, start, len, 0);
 	return 0;
 }
@@ -879,6 +961,8 @@ static long sys_mlock2(uint64_t addr, size_t len, int flags)
 		uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 		len = (addr - start) + len;
 		if (!access_ok((void *)start, len)) return -ENOMEM;
+		long r = mlock_check(p, start, len);
+		if (r) return r;
 		mm_set_locked(p, start, len, 1);
 		return 0;
 	}
@@ -897,6 +981,10 @@ static long sys_mlockall(int flags)
 	if (!(flags & (MCL_CURRENT | MCL_FUTURE)) || (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)))
 		return -EINVAL;
 	process_t *p = task_current();
+	/* Linux: EPERM at limit 0; MCL_CURRENT needs everything mapped to fit */
+	uint64_t lim = memlock_limit(p);
+	if (lim == 0) return -EPERM;
+	if ((flags & MCL_CURRENT) && lim != RLIM_INFINITY && mapped_bytes(p) > lim) return -ENOMEM;
 	p->mlock_future = (flags & MCL_FUTURE) ? 1 : 0;
 	if (flags & MCL_CURRENT) {
 		mm_set_locked(p, 0, USER_SPAN, 1);

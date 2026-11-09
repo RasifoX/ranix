@@ -12,6 +12,7 @@
 
 #define RLIMIT_NPROC   6
 #define RLIMIT_NOFILE  7
+#define RLIMIT_MEMLOCK 8
 #define RLIMIT_AS      9
 #define RLIM_NLIMITS   16
 #define RLIM_INFINITY  ((uint64_t)-1)
