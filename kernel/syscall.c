@@ -441,6 +441,17 @@ static uint32_t seccomp_run_chain(process_t *p, uint64_t ip, long nr,
 	return act;
 }
 
+/* SECCOMP_RET_KILL_*: end here with SIGSYS, before the call runs, with no
+ * handler and nothing after it, as Linux does. KILL_THREAD ends only this
+ * thread, the others run on; for the group's last thread it is KILL_PROCESS,
+ * the whole group killed by SIGSYS. Linux dumps core for that if allowed. */
+static void seccomp_kill(process_t *p, int thread_only)
+{
+	p->exit_code     = SIGSYS;
+	p->killed_by_sig = !thread_only || proc_thread_count(p->tgid) <= 1;
+	task_exit();
+}
+
 /* seccomp: filter the syscall before dispatch. STRICT allows only
  * read/write/exit/sigreturn; FILTER runs the installed BPF program. A session
  * is gated first, so no filter a task installs can change the gate's answer.
@@ -474,8 +485,11 @@ static int syscall_gate(process_t *sc, uint64_t ip, long n, const long *a, long 
 		case 0x7fc00000u:
 			*ret = -38;
 			return 1;
-		default:                     /* KILL_THREAD, KILL_PROCESS */
-			task_signal_group(sc, 9);
+		case 0x00000000u:            /* KILL_THREAD */
+			seccomp_kill(sc, 1);
+			return 1;
+		default:                     /* KILL_PROCESS, unknown */
+			seccomp_kill(sc, 0);
 			return 1;
 		}
 	}

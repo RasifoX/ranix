@@ -623,6 +623,8 @@ check "c-pidfd"      "OK"  "$(timeout 10 /bin/test_pidfd 2>/dev/null)"
 check "c-sched"      "OK"  "$(timeout 10 /bin/test_sched 2>/dev/null)"
 check "c-seccomp"    "OK"  "$(timeout 10 /bin/test_seccomp 2>/dev/null)"
 check "c-seccomp-trap" "OK" "$(timeout 15 /bin/test_seccomp_trap 2>&1 | tail -1)"
+SK=$(timeout 20 /bin/test_seccomp_kill 2>&1); echo "$SK" | grep -v "^OK$" | sed 's/^/  seccomp-kill: /'
+check "c-seccomp-kill" "OK" "$(echo "$SK" | tail -1)"
 check "c-seccomp-args" "OK" "$(timeout 15 /bin/test_seccomp_args 2>&1 | tail -1)"
 check "c-seccomp-tsync" "OK" "$(timeout 20 /bin/test_seccomp_tsync 2>&1 | tail -1)"
 check "c-seccomp-check" "OK" "$(timeout 30 /bin/test_seccomp_check 2>&1 | tail -1)"
