@@ -282,16 +282,45 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 /* R_OK=4 W_OK=2 X_OK=1 equal the FS_MAY_* bits. access() asks for the REAL
  * uid/gid, with capabilities only when the real uid is 0; AT_EACCESS asks for
  * the task as it is (fsuid/fsgid, effective capabilities), as Linux. */
-static long access_check(const char *kp, int mode, int use_eff)
+static long access_mode(const vfs_stat_t *vs, int mode, int flags)
+{
+	if (mode & ~7) return -EINVAL;
+	if (mode == 0) return 0;                        /* F_OK: exists */
+	fs_cred_t c;
+	if (flags & AT_EACCESS) fs_cred_task(task_current(), &c);
+	else fs_cred_access(task_current(), &c);
+	return fs_permission(&c, vs->mode, vs->uid, vs->gid, mode);
+}
+
+/* flags: AT_EACCESS, AT_SYMLINK_NOFOLLOW (ask about the link itself) */
+static long access_check(const char *kp, int mode, int flags)
 {
 	if (mode & ~7) return -EINVAL;
 	vfs_stat_t vs = {0};
-	if (vfs_stat(kp, &vs) != 0) return -ENOENT;
-	if (mode == 0) return 0;                        /* F_OK: exists */
-	fs_cred_t c;
-	if (use_eff) fs_cred_task(task_current(), &c);
-	else fs_cred_access(task_current(), &c);
-	return fs_permission(&c, vs.mode, vs.uid, vs.gid, mode);
+	int sr = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lstat(kp, &vs) : vfs_stat(kp, &vs);
+	if (sr != 0) return -ENOENT;
+	return access_mode(&vs, mode, flags);
+}
+
+/* faccessat2(fd, "", mode, AT_EMPTY_PATH): the open file itself (the cwd for AT_FDCWD) */
+static long access_fd(int fd, int mode, int flags)
+{
+	process_t *p = task_current();
+	vfs_stat_t vs = {0};
+	if (fd == AT_FDCWD) {
+		fs_path_t *cwd = fs_cwd_get(p->fs);
+		int r = vfs_stat(cwd->s, &vs);
+		fs_path_put(cwd);
+		if (r) return -ENOENT;
+	} else {
+		vfs_file_t *f = fget(p->fds, fd);
+		if (!f) return -EBADF;
+		vs.mode = f->inode->mode;
+		vs.uid  = f->inode->uid;
+		vs.gid  = f->inode->gid;
+		fput(f);
+	}
+	return access_mode(&vs, mode, flags);
 }
 
 static long sys_access(const char *path, int mode)
@@ -302,12 +331,17 @@ static long sys_access(const char *path, int mode)
 	return access_check(kp, mode, 0);
 }
 
+/* faccessat(2) has three arguments; the flags are faccessat2's (Linux 5.8) */
 static long sys_faccessat(int dirfd, const char *path, int mode, int flags)
 {
+	if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
 	char kp[PATH_MAX];
+	if (flags & AT_EMPTY_PATH) {
+		if (strncpy_from_user(kp, path, 2) >= 0 && kp[0] == '\0') return access_fd(dirfd, mode, flags);
+	}
 	int r = resolve_path(kp, dirfd, path);
 	if (r) return r;
-	return access_check(kp, mode, flags & 0x200 /*AT_EACCESS*/);
+	return access_check(kp, mode, flags);
 }
 
 static long sys_truncate(const char *path, off_t len)
@@ -620,7 +654,7 @@ static long sys_chdir(const char *path)
 	if (!S_ISDIR(st.mode)) return -ENOTDIR;
 	path_normalize(kp);
 	process_t *p = task_current();
-	if (access_check(kp, 1, 1)) return -EACCES;
+	if (access_check(kp, 1, AT_EACCESS)) return -EACCES;
 	return fs_set_cwd(p->fs, kp);
 }
 

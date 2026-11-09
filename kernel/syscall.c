@@ -723,8 +723,8 @@ static int syscall_files(long n, const long *a, long *ret)
 	case SYS_ARCH_READLINKAT: *ret = sys_readlinkat_vfs((int)a[0], (const char*)a[1], (char*)a[2], (size_t)a[3]); break;
 	case SYS_ARCH_SYMLINKAT: *ret = sys_symlinkat((const char*)a[0], (int)a[1], (const char*)a[2]); break;
 	case SYS_ARCH_LINKAT:   *ret = sys_linkat((int)a[0], (const char*)a[1], (int)a[2], (const char*)a[3], 0); break;
-	case SYS_ARCH_FACCESSAT:  *ret = sys_faccessat((int)a[0], (const char*)a[1], (int)a[2], (int)a[3]); break;
-	case SYS_ARCH_FACCESSAT2: *ret = sys_faccessat((int)a[0], (const char*)a[1], (int)a[2], 0); break;
+	case SYS_ARCH_FACCESSAT:  *ret = sys_faccessat((int)a[0], (const char*)a[1], (int)a[2], 0); break;   /* three arguments */
+	case SYS_ARCH_FACCESSAT2: *ret = sys_faccessat((int)a[0], (const char*)a[1], (int)a[2], (int)a[3]); break;
 	/* ── poll / select ───────────────────────────────────── */
 	case SYS_ARCH_PSELECT6: *ret = sys_pselect6((int)a[0], (uint64_t*)a[1], (uint64_t*)a[2], (uint64_t*)a[3], (linux_timespec_t*)a[4], (void*)a[5]); break;
 	case SYS_ARCH_PPOLL:    *ret = sys_ppoll((linux_pollfd_t*)a[0], (uint64_t)a[1], (linux_timespec_t*)a[2], (void*)a[3]); break;
