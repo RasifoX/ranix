@@ -117,3 +117,51 @@ fs_struct_t *fs_of_task(struct process *p)
 	spin_unlock_irq(&sched_lock, f);
 	return fs;
 }
+
+/* fs's cwd at or under old moves to the same place under new. A chdir in
+ * between wins: the swap happens only if the cwd is still the one looked at. */
+static void fs_rename_one(fs_struct_t *fs, const char *old, size_t on, const char *new)
+{
+	fs_path_t *c = fs_cwd_get(fs);
+	const char *s = c->s;
+	if (strncmp(s, old, on) != 0 || (s[on] != '\0' && s[on] != '/')) { fs_path_put(c); return; }
+	size_t nn = strlen(new), rest = strlen(s + on);
+	char *buf = nn + rest + 1 <= PATH_MAX ? kmalloc(nn + rest + 1) : NULL;
+	fs_path_t *nc = NULL;
+	if (buf) {
+		memcpy(buf, new, nn);
+		memcpy(buf + nn, s + on, rest + 1);
+		nc = path_new(buf, nn + rest);
+		kfree(buf);
+	}
+	if (nc) {
+		uint64_t f = spin_lock_irq(&fs->lock);
+		int swapped = fs->cwd == c;
+		if (swapped) fs->cwd = nc;
+		spin_unlock_irq(&fs->lock, f);
+		if (swapped) fs_path_put(c);   /* the fs's reference */
+		else         fs_path_put(nc);
+	}
+	fs_path_put(c);                    /* ours */
+}
+
+/* A task's cwd is kept as a path, so after directory old is renamed to new
+ * (both as tasks under root see them) a task at or under old is moved along,
+ * as it would be on Linux, where the cwd is the directory itself. Tasks with
+ * another root name these directories differently and are left alone. */
+void fs_rename_cwds(void *root, const char *old, const char *new)
+{
+	size_t on = strlen(old);
+	if (on <= 1) return;               /* "/" is never renamed */
+	int n = task_count();
+	for (int i = 0; i < n; i++) {
+		process_t *t = task_get(i);
+		process_t *p = t ? proc_get(t->pid) : NULL;
+		if (!p) continue;
+		fs_struct_t *fs = fs_of_task(p);
+		proc_put(p);
+		if (!fs) continue;
+		if (fs->root == root) fs_rename_one(fs, old, on, new);
+		fs_put(fs);
+	}
+}

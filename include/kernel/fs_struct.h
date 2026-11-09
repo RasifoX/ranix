@@ -45,6 +45,7 @@ void         fs_put(fs_struct_t *fs);
 fs_path_t   *fs_cwd_get(fs_struct_t *fs);    /* "/" if fs is NULL; release with fs_path_put */
 void         fs_path_put(fs_path_t *c);
 int          fs_set_cwd(fs_struct_t *fs, const char *path);   /* 0, -12, -36 */
+void         fs_rename_cwds(void *root, const char *old, const char *new);   /* after a directory rename */
 
 /* the calling task's (or any task's own) view, NULL-safe for kernel tasks */
 void        *fs_root_of(struct process *p);
