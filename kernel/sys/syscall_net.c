@@ -1384,13 +1384,37 @@ static void recv_stream_name(socket_t *s, skb_t *skb, void *uaddr, uint32_t *kle
     }
 }
 
+/* The bytes the caller's iovecs hold together. */
+static size_t iov_total(const k_iovec *iov, uint64_t niov)
+{
+    size_t t = 0;
+    for (uint64_t i = 0; i < niov; i++) t += (size_t)iov[i].len;
+    return t;
+}
+
+/* Copy n bytes into the caller's iovecs, starting off bytes into them as if
+ * they were one buffer: recvmsg fills every iovec in order, not just the first. */
+static int iov_put(const k_iovec *iov, uint64_t niov, size_t off, const void *src, size_t n)
+{
+    const uint8_t *p = src;
+    for (uint64_t i = 0; i < niov && n; i++) {
+        if (off >= iov[i].len) { off -= (size_t)iov[i].len; continue; }
+        size_t c = (size_t)iov[i].len - off;
+        if (c > n) c = n;
+        if (copy_to_user((char *)iov[i].base + off, p, c) != 0) return -EFAULT;
+        p += c; n -= c; off = 0;
+    }
+    return 0;
+}
+
 /* SOCK_STREAM has no message boundaries: one recv drains as many queued
- * bytes as fit in buf, coalescing across writes. Applies
+ * bytes as fit in the iovecs, coalescing across writes. Applies
  * to TCP and unix stream alike. DGRAM/RAW preserve per-datagram boundaries
  * (handled below). */
-static long recvfrom_stream(socket_t *s, void *buf, size_t len, int nonblock,
+static long recvfrom_stream(socket_t *s, const k_iovec *iov, uint64_t niov, int nonblock,
                             void *uaddr, uint32_t *klen, uint64_t rcv_deadline)
 {
+    size_t len = iov_total(iov, niov);
     while (1) {
         size_t total = 0;
         int got_addr = 0;
@@ -1403,7 +1427,7 @@ static long recvfrom_stream(socket_t *s, void *buf, size_t len, int nonblock,
             spin_unlock_irq(&s->recv_lock, f);
 
             size_t n = skb->len < (len - total) ? skb->len : (len - total);
-            if (n && copy_to_user((char *)buf + total, skb->data, n) != 0) {
+            if (n && iov_put(iov, niov, total, skb->data, n) != 0) {
                 skb_free(skb);
                 return total ? (long)total : -14;
             }
@@ -1482,9 +1506,10 @@ static void recv_dgram_name(socket_t *s, skb_t *skb, void *uaddr, uint32_t *klen
 
 /* Datagram and raw recv: one queued packet per call, its boundary kept.
  * Never a SOCK_STREAM socket: do_recvfrom sends those to recvfrom_stream. */
-static long recvfrom_dgram(socket_t *s, void *buf, size_t len, int nonblock,
+static long recvfrom_dgram(socket_t *s, const k_iovec *iov, uint64_t niov, int nonblock,
                            void *uaddr, uint32_t *klen, uint64_t rcv_deadline)
 {
+    size_t len = iov_total(iov, niov);
     while (1) {
         uint64_t f = spin_lock_irq(&s->recv_lock);
         skb_t *skb = s->recv_head;
@@ -1493,7 +1518,7 @@ static long recvfrom_dgram(socket_t *s, void *buf, size_t len, int nonblock,
             if (!s->recv_head) s->recv_tail = NULL;
             spin_unlock_irq(&s->recv_lock, f);
             size_t n = skb->len < len ? skb->len : len;
-            if (n && copy_to_user(buf, skb->data, n) != 0) {
+            if (n && iov_put(iov, niov, 0, skb->data, n) != 0) {
                 skb_free(skb);
                 return -EFAULT;
             }
@@ -1519,24 +1544,33 @@ static long recvfrom_dgram(socket_t *s, void *buf, size_t len, int nonblock,
     }
 }
 
-static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, uint32_t *klen)
+/* recv into iovecs the caller checked with access_ok; never netlink */
+static long do_recviov(int fd, const k_iovec *iov, uint64_t niov, int flags,
+                       void *uaddr, uint32_t *klen)
 {
     int nonblock = sock_nonblocking(fd, flags);
+    socket_t *s = fd_to_sock(fd);
+    if (!s) return sock_fd_err(fd);
+    uint64_t rcv_deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
+
+    if (s->type == SOCK_STREAM) {
+        return recvfrom_stream(s, iov, niov, nonblock, uaddr, klen, rcv_deadline);
+    }
+
+    return recvfrom_dgram(s, iov, niov, nonblock, uaddr, klen, rcv_deadline);
+}
+
+static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, uint32_t *klen)
+{
     socket_t *s = fd_to_sock(fd);
     if (!s) return sock_fd_err(fd);
     if (!access_ok(buf, len)) return -EFAULT;
 
     if (s->domain == AF_NETLINK) {
-        return recvfrom_netlink(s, buf, len, flags, nonblock, uaddr, klen);
+        return recvfrom_netlink(s, buf, len, flags, sock_nonblocking(fd, flags), uaddr, klen);
     }
-
-    uint64_t rcv_deadline = s->rcv_timeo ? kernel_ticks + s->rcv_timeo : 0;
-
-    if (s->type == SOCK_STREAM) {
-        return recvfrom_stream(s, buf, len, nonblock, uaddr, klen, rcv_deadline);
-    }
-
-    return recvfrom_dgram(s, buf, len, nonblock, uaddr, klen, rcv_deadline);
+    k_iovec v = { buf, len };
+    return do_recviov(fd, &v, 1, flags, uaddr, klen);
 }
 
 static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
@@ -1869,15 +1903,12 @@ static long sys_recvmsg(int fd, void *umsg, int flags)
         return recvmsg_unix(s, fd, flags, umsg, m, iov);
     }
 
-    /* non-unix: plain data path */
-    for (uint64_t i = 0; i < m.msg_iovlen; i++) {
-        if (iov[i].len == 0) continue;
-        uint32_t nl = m.msg_namelen;
-        long r = do_recvfrom(fd, iov[i].base, (size_t)iov[i].len, flags, m.msg_name, m.msg_name ? &nl : (uint32_t *)0);
-        if (r >= 0 && m.msg_name) copy_to_user((char *)umsg + 8, &nl, sizeof(nl));
-        return r;
-    }
-    return 0;
+    /* TCP and UDP: scattered over all the iovecs, checked above */
+    if (iov_total(iov, m.msg_iovlen) == 0) return 0;
+    uint32_t nl = m.msg_namelen;
+    long r = do_recviov(fd, iov, m.msg_iovlen, flags, m.msg_name, m.msg_name ? &nl : (uint32_t *)0);
+    if (r >= 0 && m.msg_name) copy_to_user((char *)umsg + 8, &nl, sizeof(nl));
+    return r;
 }
 
 static long sock_name6(const in6_addr_t *ip, uint16_t port, void *uaddr, uint32_t *ulen)
