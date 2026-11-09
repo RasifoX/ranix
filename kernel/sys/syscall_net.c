@@ -1480,7 +1480,8 @@ static void recv_dgram_name(socket_t *s, skb_t *skb, void *uaddr, uint32_t *klen
     }
 }
 
-/* Datagram and raw recv: one queued packet per call, its boundary kept. */
+/* Datagram and raw recv: one queued packet per call, its boundary kept.
+ * Never a SOCK_STREAM socket: do_recvfrom sends those to recvfrom_stream. */
 static long recvfrom_dgram(socket_t *s, void *buf, size_t len, int nonblock,
                            void *uaddr, uint32_t *klen, uint64_t rcv_deadline)
 {
@@ -1497,18 +1498,7 @@ static long recvfrom_dgram(socket_t *s, void *buf, size_t len, int nonblock,
                 return -EFAULT;
             }
             recv_dgram_name(s, skb, uaddr, klen);
-            /* stream: a short read consumes only n bytes; keep the rest queued */
-            if (s->type == SOCK_STREAM && n < skb->len) {
-                skb->data += n; skb->len -= (uint16_t)n;
-                uint64_t f2 = spin_lock_irq(&s->recv_lock);
-                skb->next = s->recv_head;
-                s->recv_head = skb;
-                if (!s->recv_tail) s->recv_tail = skb;
-                spin_unlock_irq(&s->recv_lock, f2);
-            } else {
-                skb_free(skb);
-            }
-            if (s->type == SOCK_STREAM && n) { tcp_rx_consumed(s, (uint32_t)n); }
+            skb_free(skb);   /* a datagram: what did not fit is dropped */
             return (long)n;
         }
         /* a seqpacket pair whose peer is gone reads end of file, as on Linux.
