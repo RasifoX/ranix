@@ -2347,6 +2347,7 @@ static long sys_readlinkat_vfs(int dirfd, const char *upath, char *ubuf, size_t 
 
     vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
     if (!parent || !parent->inode || !vfs_may_search(parent->inode)) { ret = -2; goto out; }
+    if (!S_ISDIR(parent->inode->mode)) { ret = -ENOTDIR; goto out; }
     /* a final component of "", ".", or ".." names a directory (the parent or an
      * ancestor, already shown to exist) — never a symlink → EINVAL, not ENOENT. */
     if (fname[0] == '\0' ||

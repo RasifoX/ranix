@@ -489,6 +489,14 @@ static void walk_fail(int err)
 	if (p && !p->walk_err) p->walk_err = err;
 }
 
+/* A name is made, found or removed only in a directory. A filesystem's
+ * directory ops read the inode's private data as an entry list, so on a
+ * regular file they would write into its data index. */
+static int not_dir(vfs_dentry_t *parent)
+{
+	return parent && parent->inode && !S_ISDIR(parent->inode->mode);
+}
+
 /* In a sticky directory a name goes only by its file's owner, the directory's,
  * or a holder of CAP_FOWNER over the file (Linux check_sticky). */
 static int sticky_denied(vfs_inode_t *dir, const char *name)
@@ -2344,6 +2352,7 @@ static int open_create(const char *path, uid_t uid, gid_t gid, mode_t umask, mod
 		else rp[0] = '\0';
 	}
 	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (not_dir(parent)) { kfree(dir_path); return -ENOTDIR; }
 	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE | MAY_EXEC, uid, gid);
@@ -2701,6 +2710,7 @@ int vfs_mkdir(const char *path, mode_t mode)
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }   /* mkdirp callers go by ENOENT */
+	if (not_dir(parent)) { kfree(dir_path); return -ENOTDIR; }
 	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 
 	process_t *p = task_current();
@@ -2730,6 +2740,7 @@ int vfs_mkfifo(const char *path, mode_t mode)
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (not_dir(parent)) { kfree(dir_path); return -ENOTDIR; }
 	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; } /* fs doesn't support mknod */
 	process_t *p = task_current();
@@ -2759,6 +2770,7 @@ int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (not_dir(parent)) { kfree(dir_path); return -ENOTDIR; }
 	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; }
 	process_t *p = task_current();
@@ -2795,6 +2807,7 @@ int vfs_unlink(const char *path)
 	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
+	if (not_dir(parent)) { kfree(dir_path); return -ENOTDIR; }
 	if (parent && parent->inode && vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink) {
 		kfree(dir_path); return -ENOENT;
@@ -2836,7 +2849,7 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	kfree(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) return -1;
+	if (!parent || !parent->inode || !parent->inode->iops || not_dir(parent)) return -1;
 
 	if (parent->inode->iops->create(parent->inode, fname, 0755) != 0) return -1;
 
@@ -2864,6 +2877,7 @@ int vfs_symlink(const char *target, const char *linkpath)
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	kfree(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
+	if (not_dir(parent)) return -ENOTDIR;
 	if (!parent->inode->iops->symlink) return -ENOSYS;
 	if (vfs_dentry_readonly(parent)) return -EROFS;
 	int pr = may_change(parent->inode);
@@ -2936,7 +2950,8 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 	uint32_t psdev = parent ? dentry_sdev(parent) : 0;
 	kfree(parent_path);
 	if (!parent) return -1;
-	if (!pin || !pin->iops || !pin->iops->lookup || !vfs_may_search(pin)) {
+	if (pin && !S_ISDIR(pin->mode)) walk_fail(ENOTDIR);
+	if (!pin || !S_ISDIR(pin->mode) || !pin->iops || !pin->iops->lookup || !vfs_may_search(pin)) {
 		if (pin && !pin->cached) vfs_inode_free(pin);
 		return -1;
 	}
@@ -2969,6 +2984,7 @@ int vfs_path_searchable(const char *path)
 	vfs_dentry_t *d = vfs_dentry_resolve(dir);
 	kfree(dir);
 	process_t *p = task_current();
+	if (not_dir(d)) return -ENOTDIR;
 	if (d ? (d->inode && !vfs_may_search(d->inode)) : p->walk_denied) return -ENOENT;
 	return 0;
 }
@@ -2991,6 +3007,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 
 	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
 	if (!old_parent || !old_parent->inode) { ret = -ENOENT; goto out; }
+	if (not_dir(old_parent)) { ret = -ENOTDIR; goto out; }
 	old_in = old_parent->inode;   /* the next resolve may reuse a volatile dentry */
 	int ro = vfs_dentry_readonly(old_parent);
 	vfs_dentry_t *old_mnt = dentry_mnt_root(old_parent);
@@ -2999,6 +3016,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 	int old_vol = vfs_dentry_is_volatile(old_parent);
 	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
 	if (!new_parent || !new_parent->inode) { ret = -ENOENT; goto out; }
+	if (not_dir(new_parent)) { ret = -ENOTDIR; goto out; }
 	new_in = new_parent->inode;
 	if (ro || vfs_dentry_readonly(new_parent)) { ret = -EROFS; goto out; }
 	if (old_mnt != dentry_mnt_root(new_parent)) { ret = -EXDEV; goto out; }
@@ -3189,6 +3207,7 @@ static vfs_inode_t *vfs_lresolve(const char *path, int *ro)
 	if (!parent_path) return NULL;
 	vfs_dentry_t *parent = vfs_dentry_resolve(parent_path);
 	kfree(parent_path);
+	if (not_dir(parent)) { walk_fail(ENOTDIR); return NULL; }
 	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->lookup ||
 	    !vfs_may_search(parent->inode))
 		return NULL;
@@ -3251,6 +3270,7 @@ int vfs_link(const char *oldpath, const char *newpath)
 	vfs_dentry_t *nd = vfs_dentry_resolve(new_dir);
 	kfree(new_dir);
 	if (!nd || !nd->inode) return -ENOENT;
+	if (not_dir(nd)) return -ENOTDIR;
 	if (!nd->inode->iops || !nd->inode->iops->link) return -1;
 	if (vfs_dentry_readonly(nd)) return -EROFS;
 	int pr = may_change(nd->inode);
