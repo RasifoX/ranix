@@ -219,6 +219,9 @@ typedef struct vfs_file {
     uint32_t     sdev;       /* st_dev of that filesystem, for fstat */
     struct vfs_dirpos *at;   /* an open directory: where it stands; see vfs_file_dirpath */
     const void  *opened_root; /* the root its path starts from; compared, never followed (walk_fdlink) */
+    int          owner;      /* F_SETOWN: a global pid (a tid for F_OWNER_TID), -pgrp, 0 none */
+    int          owner_type; /* F_OWNER_TID 0, F_OWNER_PID 1, F_OWNER_PGRP 2 */
+    int          owner_sig;  /* F_SETSIG: what O_ASYNC sends; 0 is SIGIO */
 } vfs_file_t;
 
 /* ── directory entry (path tree node) ───────────────────── */
@@ -433,6 +436,10 @@ static inline void fd_set_cloexec(fd_table_t *t, int fd, int v)
 
 /* pipe IPC */
 int vfs_pipe(int pipefd[2]);
+long pipe_fcntl_size(vfs_file_t *file, int set, unsigned long arg);   /* F_GETPIPE_SZ/F_SETPIPE_SZ */
+void pipe_fcntl_async(vfs_file_t *file);                            /* O_ASYNC changed on a pipe end */
+void vfs_file_sigio(vfs_file_t *file);                              /* tell an O_ASYNC file's owner */
+extern unsigned long pipe_max_size;                                 /* /proc/sys/fs/pipe-max-size */
 
 /* internal: dentry ops */
 /* The result of a path through no_cache directories is not in the dentry tree:
