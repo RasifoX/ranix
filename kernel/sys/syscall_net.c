@@ -2,6 +2,7 @@
 
 static void unix_reg_remove(socket_t *s); /* forward */
 
+#define MSG_TRUNC_   0x20   /* in: return a datagram's real length; out: it was cut short */
 #define MSG_DONTWAIT 0x40
 
 /* A nonblocking fd must not sleep in recv* any more than in read(). */
@@ -1505,8 +1506,11 @@ static void recv_dgram_name(socket_t *s, skb_t *skb, void *uaddr, uint32_t *klen
 }
 
 /* Datagram and raw recv: one queued packet per call, its boundary kept.
- * Never a SOCK_STREAM socket: do_recvfrom sends those to recvfrom_stream. */
+ * Never a SOCK_STREAM socket: do_recvfrom sends those to recvfrom_stream.
+ * A packet longer than the iovecs is cut: *mflags gets MSG_TRUNC, and with
+ * MSG_TRUNC in flags the call returns the packet's real length (Linux). */
 static long recvfrom_dgram(socket_t *s, const k_iovec *iov, uint64_t niov, int nonblock,
+                           int flags, int *mflags,
                            void *uaddr, uint32_t *klen, uint64_t rcv_deadline)
 {
     size_t len = iov_total(iov, niov);
@@ -1523,8 +1527,10 @@ static long recvfrom_dgram(socket_t *s, const k_iovec *iov, uint64_t niov, int n
                 return -EFAULT;
             }
             recv_dgram_name(s, skb, uaddr, klen);
+            size_t full = skb->len;
             skb_free(skb);   /* a datagram: what did not fit is dropped */
-            return (long)n;
+            if (full > n && mflags) *mflags |= MSG_TRUNC_;
+            return (long)((flags & MSG_TRUNC_) ? full : n);
         }
         /* a seqpacket pair whose peer is gone reads end of file, as on Linux.
          * Rust's Command::spawn waits on such a pair for exec to close it; without
@@ -1544,8 +1550,9 @@ static long recvfrom_dgram(socket_t *s, const k_iovec *iov, uint64_t niov, int n
     }
 }
 
-/* recv into iovecs the caller checked with access_ok; never netlink */
-static long do_recviov(int fd, const k_iovec *iov, uint64_t niov, int flags,
+/* recv into iovecs the caller checked with access_ok; never netlink.
+ * *mflags (may be NULL) collects the msg_flags recvmsg reports. */
+static long do_recviov(int fd, const k_iovec *iov, uint64_t niov, int flags, int *mflags,
                        void *uaddr, uint32_t *klen)
 {
     int nonblock = sock_nonblocking(fd, flags);
@@ -1557,7 +1564,7 @@ static long do_recviov(int fd, const k_iovec *iov, uint64_t niov, int flags,
         return recvfrom_stream(s, iov, niov, nonblock, uaddr, klen, rcv_deadline);
     }
 
-    return recvfrom_dgram(s, iov, niov, nonblock, uaddr, klen, rcv_deadline);
+    return recvfrom_dgram(s, iov, niov, nonblock, flags, mflags, uaddr, klen, rcv_deadline);
 }
 
 static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, uint32_t *klen)
@@ -1570,7 +1577,7 @@ static long do_recvfrom(int fd, void *buf, size_t len, int flags, void *uaddr, u
         return recvfrom_netlink(s, buf, len, flags, sock_nonblocking(fd, flags), uaddr, klen);
     }
     k_iovec v = { buf, len };
-    return do_recviov(fd, &v, 1, flags, uaddr, klen);
+    return do_recviov(fd, &v, 1, flags, NULL, uaddr, klen);
 }
 
 static long sys_recvfrom(int fd, void *buf, size_t len, int flags,
@@ -1784,7 +1791,7 @@ static void recvmsg_unix_cmsg(socket_t *s, void *umsg, k_msghdr m,
     }
     if (cused) copy_to_user((char *)umsg + 40, &cused, sizeof(cused));
     if (truncated || msg_trunc) {
-        int fl = (truncated ? MSG_CTRUNC_ : 0) | (msg_trunc ? 0x20 /* MSG_TRUNC */ : 0);
+        int fl = (truncated ? MSG_CTRUNC_ : 0) | (msg_trunc ? MSG_TRUNC_ : 0);
         copy_to_user((char *)umsg + 48, &fl, sizeof(fl));
     }
 }
@@ -1800,6 +1807,7 @@ static long recvmsg_unix(socket_t *s, int fd, int flags, void *umsg, k_msghdr m,
     void *cfiles[SKB_SCM_MAX]; int ncf = 0, truncated = 0, fault = 0;
     int have_cred = 0; int32_t cr_pid = 0; uint32_t cr_uid = 0, cr_gid = 0;
     int msg_trunc = 0;
+    size_t full = 0;   /* a cut datagram's real length */
 
     while (total < cap) {
         uint64_t f = spin_lock_irq(&s->recv_lock);
@@ -1851,6 +1859,7 @@ static long recvmsg_unix(socket_t *s, int fd, int flags, void *umsg, k_msghdr m,
         skb->scm_nfiles = 0;
         if (off < skb->len && s->type != SOCK_STREAM) {  /* a datagram: the rest is lost */
             msg_trunc = 1;
+            full = skb->len;
             skb_free(skb);
             break;
         }
@@ -1869,7 +1878,8 @@ static long recvmsg_unix(socket_t *s, int fd, int flags, void *umsg, k_msghdr m,
 
     recvmsg_unix_cmsg(s, umsg, m, have_cred, cr_pid, cr_uid, cr_gid,
                       cfiles, ncf, truncated, msg_trunc);
-    return (fault && !total) ? -14 : (long)total;
+    if (fault && !total) return -EFAULT;
+    return (long)((msg_trunc && (flags & MSG_TRUNC_)) ? full : total);
 }
 
 static long sys_recvmsg(int fd, void *umsg, int flags)
@@ -1897,17 +1907,19 @@ static long sys_recvmsg(int fd, void *umsg, int flags)
     if (s && s->domain == AF_NETLINK) {
         return recvmsg_netlink(s, fd, flags, umsg, m, iov);
     }
-    if (m.msg_iovlen == 0) return 0;
-
     if (s && s->domain == AF_UNIX) {
+        if (m.msg_iovlen == 0) return 0;
         return recvmsg_unix(s, fd, flags, umsg, m, iov);
     }
 
-    /* TCP and UDP: scattered over all the iovecs, checked above */
-    if (iov_total(iov, m.msg_iovlen) == 0) return 0;
+    /* TCP and UDP: scattered over all the iovecs, checked above. A datagram
+     * socket takes a packet even into no room at all, and says it was cut. */
+    if (iov_total(iov, m.msg_iovlen) == 0 && (!s || s->type == SOCK_STREAM)) return 0;
     uint32_t nl = m.msg_namelen;
-    long r = do_recviov(fd, iov, m.msg_iovlen, flags, m.msg_name, m.msg_name ? &nl : (uint32_t *)0);
+    int mflags = 0;
+    long r = do_recviov(fd, iov, m.msg_iovlen, flags, &mflags, m.msg_name, m.msg_name ? &nl : (uint32_t *)0);
     if (r >= 0 && m.msg_name) copy_to_user((char *)umsg + 8, &nl, sizeof(nl));
+    if (r >= 0 && mflags) copy_to_user((char *)umsg + 48, &mflags, sizeof(mflags));
     return r;
 }
 
