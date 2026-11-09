@@ -899,6 +899,67 @@ void sched_requeue_prev(void)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* Pop the next runnable task: skip dead ones and requeue frozen ones.
+ * NULL when nothing can run (the caller picks the idle task). */
+static inline process_t *sched_pick_next(cpu_context_t *cpu)
+{
+	process_t *next = runqueue_pop();
+	/* Never run a process that has already exited. A dying process can be
+	 * left in a runqueue (e.g. requeued READY in the return path, then it
+	 * takes a fatal signal and calls task_exit before being descheduled).
+	 * Running it would resume task_exit's arch_yield, making task_exit
+	 * "return" and the fatal signal re-fire — an unkillable livelock. */
+	while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
+		next->on_cpu = 0;
+		next = runqueue_pop();
+	}
+	/* cgroup.freeze: requeue a frozen process and try the next, bounded by the
+	 * runqueue length so an all-frozen runqueue falls through to idle. */
+	if (next && next->pid != 0) {
+		int budget = cpu_rq_len(cpu) + 1;
+		while (next && next->pid != 0 && cgroup_frozen(next->cgroup) && budget-- > 0) {
+			next->on_cpu = 0;
+			cpu_rq_add(cpu, next);
+			next = runqueue_pop();
+			while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
+				next->on_cpu = 0;
+				next = runqueue_pop();
+			}
+		}
+		if (next && next->pid != 0 && cgroup_frozen(next->cgroup)) {
+			next->on_cpu = 0;
+			cpu_rq_add(cpu, next);
+			next = NULL;
+		}
+	}
+	return next;
+}
+
+/*
+ * When switching away from a dead process: defer kstack freeing until
+ * after the stack switch (mov sp,x0), then mark it PROC_ZOMBIE so
+ * proc_reap knows schedule() has completed and process_t is safe to free.
+ * Wake the parent again — it may have found PROC_DEAD too early.
+ */
+static inline void sched_retire_dead(process_t *prev, cpu_context_t *cpu)
+{
+	if (prev->state == PROC_DEAD && prev->pid != 0 && prev->kstack) {
+		cpu->dying_kstack       = prev->kstack;
+		cpu->dying_kstack_order = kstack_order_val;
+		prev->kstack = NULL;
+		prev->state  = PROC_ZOMBIE;
+		if (prev->pid != prev->tgid && !prev->tracer) dead_threads++;
+		if ((prev->pid == prev->tgid || prev->tracer) && prev->ppid > 0 && (int)prev->ppid < proc_cnt) {
+			process_t *pp = proctab[prev->ppid];
+			if (pp && pp->state == PROC_SLEEPING) {
+				pp->state = PROC_READY;
+				if (!pp->on_cpu) runqueue_add(pp);
+			}
+			wake_group_waiters(prev->ppid);
+		}
+	}
+}
+
 void schedule(void)
 {
 	arch_get_cpu_ctx()->wd_where = "schedule";
@@ -943,35 +1004,7 @@ void schedule(void)
 		prev->state = PROC_READY;
 	}
 
-	process_t *next = runqueue_pop();
-	/* Never run a process that has already exited. A dying process can be
-	 * left in a runqueue (e.g. requeued READY in the return path, then it
-	 * takes a fatal signal and calls task_exit before being descheduled).
-	 * Running it would resume task_exit's arch_yield, making task_exit
-	 * "return" and the fatal signal re-fire — an unkillable livelock. */
-	while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
-		next->on_cpu = 0;
-		next = runqueue_pop();
-	}
-	/* cgroup.freeze: requeue a frozen process and try the next, bounded by the
-	 * runqueue length so an all-frozen runqueue falls through to idle. */
-	if (next && next->pid != 0) {
-		int budget = cpu_rq_len(cpu) + 1;
-		while (next && next->pid != 0 && cgroup_frozen(next->cgroup) && budget-- > 0) {
-			next->on_cpu = 0;
-			cpu_rq_add(cpu, next);
-			next = runqueue_pop();
-			while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
-				next->on_cpu = 0;
-				next = runqueue_pop();
-			}
-		}
-		if (next && next->pid != 0 && cgroup_frozen(next->cgroup)) {
-			next->on_cpu = 0;
-			cpu_rq_add(cpu, next);
-			next = NULL;
-		}
-	}
+	process_t *next = sched_pick_next(cpu);
 	if (!next) {
 		cpu_context_t *_cpu = arch_get_cpu_ctx();
 		next = _cpu->idle ? _cpu->idle : &idle_proc;
@@ -997,27 +1030,7 @@ void schedule(void)
 	    *(uint64_t *)next->kstack != KSTACK_CANARY)
 		kpanic("kstack overflow detected");
 
-	/*
-	 * When switching away from a dead process: defer kstack freeing until
-	 * after the stack switch (mov sp,x0), then mark it PROC_ZOMBIE so
-	 * proc_reap knows schedule() has completed and process_t is safe to free.
-	 * Wake the parent again — it may have found PROC_DEAD too early.
-	 */
-	if (prev->state == PROC_DEAD && prev->pid != 0 && prev->kstack) {
-		cpu->dying_kstack       = prev->kstack;
-		cpu->dying_kstack_order = kstack_order_val;
-		prev->kstack = NULL;
-		prev->state  = PROC_ZOMBIE;
-		if (prev->pid != prev->tgid && !prev->tracer) dead_threads++;
-		if ((prev->pid == prev->tgid || prev->tracer) && prev->ppid > 0 && (int)prev->ppid < proc_cnt) {
-			process_t *pp = proctab[prev->ppid];
-			if (pp && pp->state == PROC_SLEEPING) {
-				pp->state = PROC_READY;
-				if (!pp->on_cpu) runqueue_add(pp);
-			}
-			wake_group_waiters(prev->ppid);
-		}
-	}
+	sched_retire_dead(prev, cpu);
 
 	cpu->current = next;
 	next->hung_switches++;

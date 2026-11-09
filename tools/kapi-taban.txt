@@ -17,8 +17,6 @@ ad	kernel/sys/syscall_misc.c	1
 extern	kernel/mm/mmu.c	extern void enable_mmu(uint64_t table_addr);
 fn	arch/x86_64/vm.c	vm_copy	127
 fn	kernel/fs/sysfs.c	sysfs_file_read	124
-fn	kernel/mm/vm.c	vm_handle_fault	147
-fn	kernel/sched.c	schedule	129
 mode	kernel/fs/pty.c	"ptmx"
 mode	kernel/fs/pty.c	names[i]
 mode	kernel/tty/tty_core.c	"tty"

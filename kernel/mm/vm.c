@@ -109,6 +109,101 @@ _Static_assert(ARCH_USER_STACK_TOP < ARCH_USER_VA_END && HUGE1G_VA_BASE < ARCH_U
                "user layout must stay inside the user page-table slots");
 #endif
 
+	/* No mapping — a stack expansion, or a demand fault into an anonymous VMA
+	 * whose pages were dropped (MADV_DONTNEED/FREE) and never re-touched. Both
+	 * fault in a fresh zero page; the anon case maps with the VMA's recorded
+	 * permissions so a read-only region stays read-only. A VMA without VMA_READ
+	 * (PROT_NONE) is not a candidate — leave ret=-1 for SIGSEGV. */
+static inline int fault_not_present(process_t *p, uint64_t vaddr)
+{
+	int ret = -1;
+	uint32_t mf = 0;
+	if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
+		mf = VM_USER | VM_READ | VM_WRITE;
+	} else {
+		for (vma_t *v = p->vm->vmas; v; v = v->next) {
+			if (vaddr < v->vaddr || vaddr >= v->vaddr + v->size) continue;
+			if (!(v->flags & VMA_ANON) || !(v->flags & VMA_READ)) break;
+			mf = VM_USER | VM_READ;
+			if (v->flags & VMA_WRITE) mf |= VM_WRITE;
+			if (v->flags & VMA_EXEC)  mf |= VM_EXEC;
+			break;
+		}
+	}
+	if (mf) {
+		if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return ret; /* over memory.max */
+		void *pg = vm_alloc_page_oom();
+		if (pg) {
+			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+			if (vm_map(p->vm, vaddr, (uint64_t)pg, mf) == 0) {
+				ret = 0;
+			} else {
+				buddy_free((uint64_t)pg, 0);
+				cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+			}
+		} else {
+			cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+		}
+	}
+	return ret;
+}
+
+	/* 1 GB hugepage COW: copy the whole block (hugetlb pages are
+	 * never split). Shared or sole-owner blocks just go writable. */
+static inline int fault_huge_1g(process_t *p, vma_t *v, uint64_t vaddr, uint64_t paddr)
+{
+	int ret = -1;
+	if (!(v->flags & VMA_WRITE)) return ret;
+	uint64_t base = paddr & HUGE_1G_MASK;
+	uint64_t va1g = vaddr & HUGE_1G_MASK;
+	if (!(v->flags & VMA_SHARED) && huge1g_refcount(base) > 1) {
+		uint64_t nb = huge1g_alloc();
+		if (!nb) return ret;
+		memcpy((void *)PHYS_TO_VIRT(nb), (void *)PHYS_TO_VIRT(base), HUGE_1G_SIZE);
+		if (vm_map_huge_1g(p->vm, va1g, nb, VM_USER | VM_READ | VM_WRITE) == 0) {
+			huge1g_put(base);
+			ret = 0;
+		} else {
+			huge1g_put(nb);
+		}
+	} else {
+		ret = vm_map_huge_1g(p->vm, va1g, base, VM_USER | VM_READ | VM_WRITE);
+	}
+	return ret;
+}
+
+/* Write to a page shared after fork: copy it, map the copy writable, and hand
+ * back the old page (*cow_old) to free once fault_lock is dropped. */
+static inline int fault_cow_copy(process_t *p, uint64_t vaddr, uint64_t paddr, uint32_t cow_exec,
+                                 uint64_t *cow_old)
+{
+	int ret = -1;
+	if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return ret; /* over memory.max */
+	void *new_p = vm_pmm_page_oom();
+	if (!new_p) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return ret; }
+	memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
+#if defined(__aarch64__)
+	if (cow_exec) {
+		uintptr_t pp = (uintptr_t)PHYS_TO_VIRT(new_p);
+		for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
+			__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
+		__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+	}
+#endif
+	if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE | cow_exec) == 0) {
+		/* A multithreaded space shares this page table across CPUs: a sibling
+		 * thread may hold a stale writable TLB entry for the old page. Defer the
+		 * free and shoot the other CPUs down past fault_lock — a sibling spinning
+		 * for the lock IRQ-off must be able to ack the IPI. */
+		*cow_old = paddr;
+		ret = 0;
+	} else {
+		pmm_free(new_p);
+		cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+	}
+	return ret;
+}
+
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	vaddr &= PAGE_MASK;
@@ -127,40 +222,8 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	int ret = -1;
 	uint64_t cow_old = 0;   /* old COW page to free + shoot down after fault_lock */
 
-	/* No mapping — a stack expansion, or a demand fault into an anonymous VMA
-	 * whose pages were dropped (MADV_DONTNEED/FREE) and never re-touched. Both
-	 * fault in a fresh zero page; the anon case maps with the VMA's recorded
-	 * permissions so a read-only region stays read-only. A VMA without VMA_READ
-	 * (PROT_NONE) is not a candidate — leave ret=-1 for SIGSEGV. */
 	if (!paddr) {
-		uint32_t mf = 0;
-		if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
-			mf = VM_USER | VM_READ | VM_WRITE;
-		} else {
-			for (vma_t *v = p->vm->vmas; v; v = v->next) {
-				if (vaddr < v->vaddr || vaddr >= v->vaddr + v->size) continue;
-				if (!(v->flags & VMA_ANON) || !(v->flags & VMA_READ)) break;
-				mf = VM_USER | VM_READ;
-				if (v->flags & VMA_WRITE) mf |= VM_WRITE;
-				if (v->flags & VMA_EXEC)  mf |= VM_EXEC;
-				break;
-			}
-		}
-		if (mf) {
-			if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
-			void *pg = vm_alloc_page_oom();
-			if (pg) {
-				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-				if (vm_map(p->vm, vaddr, (uint64_t)pg, mf) == 0) {
-					ret = 0;
-				} else {
-					buddy_free((uint64_t)pg, 0);
-					cgroup_uncharge_mem(p->vm, PAGE_SIZE);
-				}
-			} else {
-				cgroup_uncharge_mem(p->vm, PAGE_SIZE);
-			}
-		}
+		ret = fault_not_present(p, vaddr);
 		goto out;
 	}
 
@@ -179,24 +242,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) {
 			if (v->flags & VMA_EXEC) cow_exec = VM_EXEC;
 			if (v->flags & VMA_HUGE_1G) {
-				/* 1 GB hugepage COW: copy the whole block (hugetlb pages are
-				 * never split). Shared or sole-owner blocks just go writable. */
-				if (!(v->flags & VMA_WRITE)) goto out;
-				uint64_t base = paddr & HUGE_1G_MASK;
-				uint64_t va1g = vaddr & HUGE_1G_MASK;
-				if (!(v->flags & VMA_SHARED) && huge1g_refcount(base) > 1) {
-					uint64_t nb = huge1g_alloc();
-					if (!nb) goto out;
-					memcpy((void *)PHYS_TO_VIRT(nb), (void *)PHYS_TO_VIRT(base), HUGE_1G_SIZE);
-					if (vm_map_huge_1g(p->vm, va1g, nb, VM_USER | VM_READ | VM_WRITE) == 0) {
-						huge1g_put(base);
-						ret = 0;
-					} else {
-						huge1g_put(nb);
-					}
-				} else {
-					ret = vm_map_huge_1g(p->vm, va1g, base, VM_USER | VM_READ | VM_WRITE);
-				}
+				ret = fault_huge_1g(p, v, vaddr, paddr);
 				goto out;
 			}
 			if (v->flags & VMA_SHARED) {
@@ -220,29 +266,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	}
 
 	if (pg->refcount > 1) {
-		if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) goto out; /* over memory.max */
-		void *new_p = vm_pmm_page_oom();
-		if (!new_p) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); goto out; }
-		memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
-#if defined(__aarch64__)
-		if (cow_exec) {
-			uintptr_t pp = (uintptr_t)PHYS_TO_VIRT(new_p);
-			for (uintptr_t l = pp; l < pp + PAGE_SIZE; l += 64)
-				__asm__ volatile("dc cvac, %0" :: "r"(l) : "memory");
-			__asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
-		}
-#endif
-		if (vm_map(p->vm, vaddr, (uint64_t)new_p, VM_USER | VM_READ | VM_WRITE | cow_exec) == 0) {
-			/* A multithreaded space shares this page table across CPUs: a sibling
-			 * thread may hold a stale writable TLB entry for the old page. Defer the
-			 * free and shoot the other CPUs down past fault_lock — a sibling spinning
-			 * for the lock IRQ-off must be able to ack the IPI. */
-			cow_old = paddr;
-			ret = 0;
-		} else {
-			pmm_free(new_p);
-			cgroup_uncharge_mem(p->vm, PAGE_SIZE);
-		}
+		ret = fault_cow_copy(p, vaddr, paddr, cow_exec, &cow_old);
 	} else {
 		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
 	}
