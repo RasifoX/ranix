@@ -208,11 +208,19 @@ static inline int fault_cow_copy(process_t *p, uint64_t vaddr, uint64_t paddr, u
 	return ret;
 }
 
+/* Set around a fault the kernel causes on purpose (the null page selftest):
+ * the error log is for faults nobody expected. */
+static int fault_quiet;
+void vm_fault_quiet(int on) { fault_quiet = on; }
+
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	vaddr &= PAGE_MASK;
 	process_t *p = task_current();
-	if (!p || !p->vm) { kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1); return -1; }
+	if (!p || !p->vm) {
+		if (!fault_quiet) kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1);
+		return -1;
+	}
 
 
 	/* Threads share one address space, so two CPUs can fault the same PTE
