@@ -1577,9 +1577,10 @@ static void wait_snap(process_t *c, int event, wait_snap_t *s)
  * atomically marks parent PROC_SLEEPING under sched_lock so that a
  * concurrent task_exit cannot sneak its wakeup between our check and sleep.
  * event: 0 none, 1 zombie (reaped), 3 stopped (WUNTRACED), 4 continued
- * (WCONTINUED), 5 ptrace stop. An exit counts only with WEXITED; with WNOWAIT
+ * (WCONTINUED), 5 ptrace stop. pgrp >= 0 looks only at children in that process
+ * group (waitpid 0 and -pgid). An exit counts only with WEXITED; with WNOWAIT
  * nothing is marked reaped or reported, so the next wait sees it again. */
-void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
+void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, pid_t pgrp, int will_sleep, int flags,
                                process_t **out_child, int *out_any_alive, int *out_event,
                                wait_snap_t *snap)
 {
@@ -1591,7 +1592,7 @@ void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, in
 	process_t *sentinel = proctab[0];
 	int dead_pending = 0;
 	for (process_t *c = sentinel->next; c && c != sentinel; c = c->next) {
-		if (WAIT_MINE(c, ppid, parent)) {
+		if (WAIT_MINE(c, ppid, parent) && (pgrp < 0 || c->pgrp == pgrp)) {
 			int ev = 0;
 			int held = (c->tracer && c->tracer != (pid_t)parent->pid) || group_running(c);
 			if (c->tracer == (pid_t)parent->pid && c->ptrace_stop && !c->ptrace_stop_reported) {

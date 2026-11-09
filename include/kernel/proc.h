@@ -526,7 +526,7 @@ typedef struct {
 	uid_t uid;      /* its real uid (waitid si_uid) */
 	int   trapped;  /* a ptrace stop (waitid CLD_TRAPPED), not a job-control one */
 } wait_snap_t;
-void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
+void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, pid_t pgrp, int will_sleep, int flags,
                                process_t **out_child, int *out_any_alive, int *out_event,
                                wait_snap_t *snap);
 int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags,

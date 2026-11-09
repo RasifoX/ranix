@@ -2151,11 +2151,14 @@ static long do_waitpid(pid_t pid, wait_snap_t *ws, int flags, void *rusage)
 	process_t *p = task_current();
 	int wnohang  = (flags & WNOHANG) != 0;
 
-	if (pid == -1) {
+	/* -1: any child; 0: any in my process group; < -1: any in group -pid */
+	if (pid <= 0) {
+		pid_t pgrp = pid == -1 ? -1 : pid == 0 ? p->pgrp : pid_from_user(-pid);
+		if (pgrp == 0 && pid < -1) return -ECHILD;   /* no such group in my pid namespace */
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0, event = 0;
-			proc_find_zombie_or_sleep(p->tgid, p, !wnohang, flags, &child, &any_alive, &event, ws);
+			proc_find_zombie_or_sleep(p->tgid, p, pgrp, !wnohang, flags, &child, &any_alive, &event, ws);
 			if (child && event == 1 && !(flags & WNOWAIT)) {
 				fill_wait_rusage(rusage, child);
 				if (child->pid == child->tgid && child->ppid != p->tgid) {
