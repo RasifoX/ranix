@@ -336,7 +336,9 @@ static void panic_fault_detail(uint64_t fa, uint64_t sp, int is_write,
  * identically on a monochrome framebuffer and a serial line. Rich enough that a
  * photo of the screen is sufficient to diagnose: symbolized fault site and call
  * trace (kallsyms), full register file, and the exact build identity. */
-void panic_report(const char *msg, arch_context_t *ctx)
+/* Claim the panic for this CPU. A second panic on the same CPU (a fault while
+ * painting) resets; another CPU halts quietly and lets the first one finish. */
+static void panic_enter(const char *msg)
 {
     static volatile uint32_t panic_owner = 0;   /* cpu id + 1 */
 
@@ -352,6 +354,128 @@ void panic_report(const char *msg, arch_context_t *ctx)
     kprintf_unlocked = 1;
     panic_reset_begin(msg);      /* before anything that can wedge or fault */
     suppress_ts = 1;
+}
+
+#if defined(__x86_64__)
+/* Page fault: what kind of access, at which address, from which mode. */
+static void panic_fault(arch_context_t *ctx, uint64_t cr2, uint64_t sp, int compact, int tiny)
+{
+    if (ctx && ctx->vector == 14) {
+        kprintf("  fault   %s %s at 0x%016lx in %s mode\n",
+                (ctx->error_code & 2)  ? "write" : (ctx->error_code & 16 ? "exec" : "read"),
+                (ctx->error_code & 1)  ? "(protection)" : "(not present)",
+                cr2, (ctx->error_code & 4) ? "user" : "kernel");
+        panic_fault_detail(cr2, sp, (ctx->error_code & 2) != 0,
+                           (ctx->error_code & 1) != 0, (ctx->error_code & 16) != 0,
+                           compact, tiny);
+    }
+}
+#else
+/* Synchronous abort: decode ESR into the kind of fault and the access. */
+static void panic_fault(arch_context_t *ctx, uint64_t esr, uint64_t far, uint64_t sp,
+                        int compact, int tiny)
+{
+    if (ctx) {
+        kprintf("  fault   ESR 0x%08lx  FAR 0x%016lx\n", esr, far);
+        uint32_t ec2 = (uint32_t)(esr >> 26) & 0x3F;
+        if (ec2 == 0x20 || ec2 == 0x21 || ec2 == 0x24 || ec2 == 0x25) {
+            uint32_t fsc = (uint32_t)esr & 0x3F;
+            int      lvl = fsc & 3, has_lvl = 0, is_perm = 0;
+            const char *kind;
+            if      (fsc <= 0x03)                 { kind = "address size fault"; has_lvl = 1; }
+            else if (fsc <= 0x07)                 { kind = "translation fault";  has_lvl = 1; }
+            else if (fsc >= 0x08 && fsc <= 0x0B)  { kind = "access flag fault";  has_lvl = 1; }
+            else if (fsc >= 0x0C && fsc <= 0x0F)  { kind = "permission fault";   has_lvl = 1; is_perm = 1; }
+            else if (fsc == 0x10)                   kind = "external abort";
+            else if (fsc == 0x21)                   kind = "alignment fault";
+            else                                    kind = "fault";
+            int is_fetch = (ec2 == 0x20 || ec2 == 0x21);
+            int is_write = !is_fetch && (esr & (1u << 6));
+            if (!tiny) {
+                kprintf("  decode  %s", kind);
+                if (has_lvl) kprintf(" L%d", lvl);
+                kprintf(" \xc2\xb7 %s\n", is_fetch ? "instruction fetch" : (is_write ? "write" : "read"));
+            }
+            panic_fault_detail(far, sp, is_write, is_perm, is_fetch, compact, tiny);
+        }
+    }
+}
+#endif
+
+/* The register file; a short screen (tiny) gets only the first line. */
+#if defined(__x86_64__)
+static void panic_registers(arch_context_t *ctx, int tiny, uint64_t cr2, uint64_t cr3)
+#else
+static void panic_registers(arch_context_t *ctx, int tiny)
+#endif
+{
+    if (ctx) {
+        kprintf("  registers\n");
+#if defined(__x86_64__)
+        kprintf("    RIP %016lx RSP %016lx RFL %08lx CS %lx ERR %lx\n", ctx->rip, ctx->rsp, ctx->rflags, ctx->cs, ctx->error_code);
+        if (!tiny) {
+            kprintf("    RAX %016lx RBX %016lx RCX %016lx RDX %016lx\n", ctx->rax, ctx->rbx, ctx->rcx, ctx->rdx);
+            kprintf("    RSI %016lx RDI %016lx RBP %016lx\n", ctx->rsi, ctx->rdi, ctx->rbp);
+            kprintf("    R8  %016lx R9  %016lx R10 %016lx R11 %016lx\n", ctx->r8, ctx->r9, ctx->r10, ctx->r11);
+            kprintf("    R12 %016lx R13 %016lx R14 %016lx R15 %016lx\n", ctx->r12, ctx->r13, ctx->r14, ctx->r15);
+            kprintf("    CR2 %016lx CR3 %016lx\n", cr2, cr3);
+        }
+#else
+        kprintf("    ELR %016lx SP %016lx PSTATE %08lx\n", ctx->elr, ctx->sp, ctx->spsr);
+        if (!tiny)
+            for (int i = 0; i < 31; i += 4) {
+                kprintf("    ");
+                for (int j = i; j < i + 4 && j < 31; j++)
+                    kprintf("X%02d %016lx ", j, ctx->regs[j]);
+                kprintf("\n");
+            }
+#endif
+    }
+}
+
+/* Code bytes and raw stack words, when the screen has room for them. */
+static void panic_code_and_stack(const char *sym, uint64_t pc, uint64_t sp, int compact)
+{
+    /* Instruction bytes at the fault site — only when pc is a known text symbol,
+     * so we never fetch from an unmapped page and double-fault. */
+    if (sym && !compact) {
+        kprintf("  code    ");
+        const unsigned char *ip = (const unsigned char *)pc;
+        for (int i = 0; i < 16; i++)
+            kprintf("%02x ", ip[i]);
+        kprintf("\n");
+    }
+
+    /* Raw stack words — a backstop when the frame-pointer unwind can't proceed. */
+    if (!compact && sp >= 0xFFFF000000000000UL && (sp & 7) == 0) {
+        const uint64_t *s = (const uint64_t *)sp;
+        kprintf("  stack   %016lx %016lx %016lx\n          %016lx %016lx %016lx\n",
+                s[0], s[1], s[2], s[3], s[4], s[5]);
+    }
+}
+
+/* Walk the frame pointers and print each return address as a symbol. */
+static void panic_call_trace(uint64_t pc, uint64_t fp)
+{
+    kprintf("  call trace\n");
+    panic_sym(pc);
+    for (int i = 0; i < 24 && fp >= 0xFFFF000000000000UL && (fp & 7) == 0; i++) {
+        uint64_t next = ((uint64_t *)fp)[0];
+        uint64_t ret  = ((uint64_t *)fp)[1];
+        if (!ret) break;
+        panic_sym(ret);
+        if (next <= fp) break;       /* frames must grow toward the stack base */
+        fp = next;
+    }
+}
+
+/* Branded panic screen — plain ASCII, no color and no timestamps, so it reads
+ * identically on a monochrome framebuffer and a serial line. Rich enough that a
+ * photo of the screen is sufficient to diagnose: symbolized fault site and call
+ * trace (kallsyms), full register file, and the exact build identity. */
+void panic_report(const char *msg, arch_context_t *ctx)
+{
+    panic_enter(msg);
 
     /* Fit the screen: clear it (start at the top, nothing scrolls off) and, if the
      * framebuffer console is short, drop the optional detail so the essentials —
@@ -401,40 +525,9 @@ void panic_report(const char *msg, arch_context_t *ctx)
 
     kprintf("  stop    %s\n", msg);
 #if defined(__x86_64__)
-    if (ctx && ctx->vector == 14) {
-        kprintf("  fault   %s %s at 0x%016lx in %s mode\n",
-                (ctx->error_code & 2)  ? "write" : (ctx->error_code & 16 ? "exec" : "read"),
-                (ctx->error_code & 1)  ? "(protection)" : "(not present)",
-                cr2, (ctx->error_code & 4) ? "user" : "kernel");
-        panic_fault_detail(cr2, sp, (ctx->error_code & 2) != 0,
-                           (ctx->error_code & 1) != 0, (ctx->error_code & 16) != 0,
-                           compact, tiny);
-    }
+    panic_fault(ctx, cr2, sp, compact, tiny);
 #else
-    if (ctx) {
-        kprintf("  fault   ESR 0x%08lx  FAR 0x%016lx\n", esr, far);
-        uint32_t ec2 = (uint32_t)(esr >> 26) & 0x3F;
-        if (ec2 == 0x20 || ec2 == 0x21 || ec2 == 0x24 || ec2 == 0x25) {
-            uint32_t fsc = (uint32_t)esr & 0x3F;
-            int      lvl = fsc & 3, has_lvl = 0, is_perm = 0;
-            const char *kind;
-            if      (fsc <= 0x03)                 { kind = "address size fault"; has_lvl = 1; }
-            else if (fsc <= 0x07)                 { kind = "translation fault";  has_lvl = 1; }
-            else if (fsc >= 0x08 && fsc <= 0x0B)  { kind = "access flag fault";  has_lvl = 1; }
-            else if (fsc >= 0x0C && fsc <= 0x0F)  { kind = "permission fault";   has_lvl = 1; is_perm = 1; }
-            else if (fsc == 0x10)                   kind = "external abort";
-            else if (fsc == 0x21)                   kind = "alignment fault";
-            else                                    kind = "fault";
-            int is_fetch = (ec2 == 0x20 || ec2 == 0x21);
-            int is_write = !is_fetch && (esr & (1u << 6));
-            if (!tiny) {
-                kprintf("  decode  %s", kind);
-                if (has_lvl) kprintf(" L%d", lvl);
-                kprintf(" \xc2\xb7 %s\n", is_fetch ? "instruction fetch" : (is_write ? "write" : "read"));
-            }
-            panic_fault_detail(far, sp, is_write, is_perm, is_fetch, compact, tiny);
-        }
-    }
+    panic_fault(ctx, esr, far, sp, compact, tiny);
 #endif
     uint64_t off = 0;
     const char *sym = ksym_lookup(pc, &off);
@@ -447,56 +540,15 @@ void panic_report(const char *msg, arch_context_t *ctx)
     kprintf("  build   ranix %s [%s] %s  %s\n", ranix_version, ranix_gitrev, ranix_arch, ranix_builddate);
     kprintf("  uptime  %lu.%03lus\n", up_s, up_ms);
 
-    if (ctx) {
-        kprintf("  registers\n");
 #if defined(__x86_64__)
-        kprintf("    RIP %016lx RSP %016lx RFL %08lx CS %lx ERR %lx\n", ctx->rip, ctx->rsp, ctx->rflags, ctx->cs, ctx->error_code);
-        if (!tiny) {
-            kprintf("    RAX %016lx RBX %016lx RCX %016lx RDX %016lx\n", ctx->rax, ctx->rbx, ctx->rcx, ctx->rdx);
-            kprintf("    RSI %016lx RDI %016lx RBP %016lx\n", ctx->rsi, ctx->rdi, ctx->rbp);
-            kprintf("    R8  %016lx R9  %016lx R10 %016lx R11 %016lx\n", ctx->r8, ctx->r9, ctx->r10, ctx->r11);
-            kprintf("    R12 %016lx R13 %016lx R14 %016lx R15 %016lx\n", ctx->r12, ctx->r13, ctx->r14, ctx->r15);
-            kprintf("    CR2 %016lx CR3 %016lx\n", cr2, cr3);
-        }
+    panic_registers(ctx, tiny, cr2, cr3);
 #else
-        kprintf("    ELR %016lx SP %016lx PSTATE %08lx\n", ctx->elr, ctx->sp, ctx->spsr);
-        if (!tiny)
-            for (int i = 0; i < 31; i += 4) {
-                kprintf("    ");
-                for (int j = i; j < i + 4 && j < 31; j++)
-                    kprintf("X%02d %016lx ", j, ctx->regs[j]);
-                kprintf("\n");
-            }
+    panic_registers(ctx, tiny);
 #endif
-    }
 
-    /* Instruction bytes at the fault site — only when pc is a known text symbol,
-     * so we never fetch from an unmapped page and double-fault. */
-    if (sym && !compact) {
-        kprintf("  code    ");
-        const unsigned char *ip = (const unsigned char *)pc;
-        for (int i = 0; i < 16; i++)
-            kprintf("%02x ", ip[i]);
-        kprintf("\n");
-    }
+    panic_code_and_stack(sym, pc, sp, compact);
 
-    /* Raw stack words — a backstop when the frame-pointer unwind can't proceed. */
-    if (!compact && sp >= 0xFFFF000000000000UL && (sp & 7) == 0) {
-        const uint64_t *s = (const uint64_t *)sp;
-        kprintf("  stack   %016lx %016lx %016lx\n          %016lx %016lx %016lx\n",
-                s[0], s[1], s[2], s[3], s[4], s[5]);
-    }
-
-    kprintf("  call trace\n");
-    panic_sym(pc);
-    for (int i = 0; i < 24 && fp >= 0xFFFF000000000000UL && (fp & 7) == 0; i++) {
-        uint64_t next = ((uint64_t *)fp)[0];
-        uint64_t ret  = ((uint64_t *)fp)[1];
-        if (!ret) break;
-        panic_sym(ret);
-        if (next <= fp) break;       /* frames must grow toward the stack base */
-        fp = next;
-    }
+    panic_call_trace(pc, fp);
 
     if (panic_will_reset())
         kprintf("\n  rebooting...   [ end of panic ]\n");
