@@ -642,7 +642,12 @@ static long syscall_clone(const long *a)
 		uint32_t *set_tid   = (flags & CLONE_CSETTID) ? ctid_arg : NULL;
 		return (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1), (flags & CLONE_FS) != 0);
 	}
-	return (long)proc_fork(flags, (uint64_t)a[1]);   /* its own stack, if it gave one */
+#if defined(__aarch64__)
+	uint32_t *ctid = (flags & CLONE_CSETTID) ? (uint32_t *)a[4] : NULL;
+#else
+	uint32_t *ctid = (flags & CLONE_CSETTID) ? (uint32_t *)a[3] : NULL;
+#endif
+	return (long)proc_fork_settid(flags, (uint64_t)a[1], ctid);   /* its own stack, if it gave one */
 }
 
 /* clone3(2), glibc 2.34+ thread creation. The struct clone_args prefix we use:
@@ -671,7 +676,8 @@ static long syscall_clone3(const long *a)
 		uint32_t *set_tid   = (flags & CLONE_CSETTID) ? (uint32_t*)ca.child_tid : NULL;
 		return (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1), (flags & CLONE_FS) != 0);
 	}
-	return (long)proc_fork(flags, ca.stack ? newsp : 0);
+	return (long)proc_fork_settid(flags, ca.stack ? newsp : 0,
+	                              (flags & CLONE_CSETTID) ? (uint32_t *)ca.child_tid : NULL);
 }
 
 

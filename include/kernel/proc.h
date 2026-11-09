@@ -449,6 +449,7 @@ void       proc_set_cmdline(process_t *p, const char *block, uint32_t len); /* r
 void       vma_add(process_t *p, uint64_t vaddr, uint64_t size, uint32_t flags);
 void       vma_clip(process_t *p, uint64_t va, uint64_t len);
 pid_t      proc_fork(uint64_t clone_flags, uint64_t newsp);
+pid_t      proc_fork_settid(uint64_t clone_flags, uint64_t newsp, uint32_t *ctid);   /* CLONE_CHILD_SETTID */
 pid_t      proc_fork_asess(struct asess *s);   /* fork with the child inside s; see asess_spawn */
 int        fs_shared_outside_group(process_t *p);   /* setuid exec must not raise ids */
 pid_t      proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid);
