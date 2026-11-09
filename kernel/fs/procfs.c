@@ -31,6 +31,7 @@
 #include <kernel/time.h>
 #include <kernel/vdso.h>
 #include <kernel/watchdog.h>
+#include <kernel/sysvipc.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -610,6 +611,11 @@ typedef struct {
 #define PROC_F_HWDIAG             93
 #define PROC_F_SYS_RANIX_DEADLINE 94
 #define PROC_F_SYS_TAINTED        95
+#define PROC_F_SYS_IPC_FIRST      51   /* 51..56: shmmax shmmni shmall msgmax msgmnb msgmni */
+#define PROC_F_SYS_SEM            57
+#define PROC_F_SYSVIPC_SHM        58   /* 58..60: /proc/sysvipc/{shm,sem,msg} */
+#define PROC_F_SYSVIPC_MSG        60
+static const char *const ipc_limit_names[] = { "shmmax", "shmmni", "shmall", "msgmax", "msgmnb", "msgmni" };
 
 /* kernel.kptr_restrict: 0 = show kernel pointers, 1 = hide from non-root, 2 =
  * hide from all. Default 1. No raw kernel pointer reaches /proc today, so this
@@ -732,6 +738,63 @@ static const struct {
 #pragma weak wdog_deadline_set
 #define PROCFS_BUF_SIZE 4096
 
+static void pb_i64(pb_t *b, int64_t v)
+{
+	if (v < 0) { pb_char(b, '-'); v = -v; }
+	pb_u64(b, (uint64_t)v);
+}
+
+/* /proc/sysvipc/{shm,sem,msg}: one line per object, the columns Linux prints */
+static int fill_sysvipc(char *buf, size_t sz, int kind)
+{
+	static const char *const head[] = {
+		"       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n",
+		"       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n",
+		"       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime\n",
+	};
+	pb_t b = {buf, sz};
+	pb_str(&b, head[kind]);
+	sysvipc_row_t r;
+	for (int i = 0; sysvipc_row(kind, i, &r) >= 0; i++) {
+		if (!sysvipc_row(kind, i, &r)) continue;
+		pb_i64(&b, r.key); pb_char(&b, ' '); pb_u64(&b, (uint64_t)r.id); pb_char(&b, ' ');
+		for (int sh = 6; sh >= 0; sh -= 3) pb_char(&b, (char)('0' + ((r.mode >> sh) & 7)));
+		pb_char(&b, ' ');
+		if (kind != SYSVIPC_SEM) { pb_u64(&b, r.a); pb_char(&b, ' '); }
+		if (kind == SYSVIPC_SHM) {
+			pb_i64(&b, r.pid1); pb_char(&b, ' '); pb_i64(&b, r.pid2); pb_char(&b, ' ');
+			pb_u64(&b, r.b); pb_char(&b, ' ');
+		} else if (kind == SYSVIPC_SEM) {
+			pb_u64(&b, r.a); pb_char(&b, ' ');
+		} else {
+			pb_u64(&b, r.b); pb_char(&b, ' ');
+			pb_i64(&b, r.pid1); pb_char(&b, ' '); pb_i64(&b, r.pid2); pb_char(&b, ' ');
+		}
+		pb_u64(&b, r.uid); pb_char(&b, ' '); pb_u64(&b, r.gid); pb_char(&b, ' ');
+		pb_u64(&b, r.cuid); pb_char(&b, ' '); pb_u64(&b, r.cgid); pb_char(&b, ' ');
+		pb_i64(&b, r.t1); pb_char(&b, ' '); pb_i64(&b, r.t2);
+		if (kind != SYSVIPC_SEM) { pb_char(&b, ' '); pb_i64(&b, r.t3); }
+		if (kind == SYSVIPC_SHM) { pb_char(&b, ' '); pb_u64(&b, r.a); pb_str(&b, " 0"); }
+		pb_char(&b, '\n');
+	}
+	return (int)(sz - b.rem);
+}
+
+/* The SysV IPC files: /proc/sys/kernel/{shmmax,...,msgmni,sem} and /proc/sysvipc/* */
+static int fill_sysvipc_file(int type, char *buf, size_t sz)
+{
+	if (type >= PROC_F_SYSVIPC_SHM) return fill_sysvipc(buf, sz, type - PROC_F_SYSVIPC_SHM);
+	pb_t b = {buf, sz};
+	if (type == PROC_F_SYS_SEM) {   /* semmsl semmns semopm semmni */
+		pb_u64(&b, sysvipc_limit("semmsl")); pb_char(&b, '\t'); pb_u64(&b, sysvipc_limit("semmns")); pb_char(&b, '\t');
+		pb_u64(&b, sysvipc_limit("semopm")); pb_char(&b, '\t'); pb_u64(&b, sysvipc_limit("semmni"));
+	} else {
+		pb_u64(&b, sysvipc_limit(ipc_limit_names[type - PROC_F_SYS_IPC_FIRST]));
+	}
+	pb_char(&b, '\n');
+	return (int)(sz - b.rem);
+}
+
 static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_inode_priv_t *pr = f->inode->priv;
@@ -821,6 +884,8 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_CORE_PATTERN: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_IPC_FIRST ... PROC_F_SYSVIPC_MSG:
+		n = fill_sysvipc_file(pr->type, tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_TAINTED: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, "0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -2636,8 +2701,15 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
 	{ "ranix_deadline", PROC_F_SYS_RANIX_DEADLINE },
 	{ "tainted",        PROC_F_SYS_TAINTED },   /* nothing taints this kernel: always 0 */
+	{ "shmmax",         PROC_F_SYS_IPC_FIRST + 0 },   /* SysV IPC limits, read-only */
+	{ "shmmni",         PROC_F_SYS_IPC_FIRST + 1 },
+	{ "shmall",         PROC_F_SYS_IPC_FIRST + 2 },
+	{ "msgmax",         PROC_F_SYS_IPC_FIRST + 3 },
+	{ "msgmnb",         PROC_F_SYS_IPC_FIRST + 4 },
+	{ "msgmni",         PROC_F_SYS_IPC_FIRST + 5 },
+	{ "sem",            PROC_F_SYS_SEM },
 };
-#define SYS_KERNEL_N 11
+#define SYS_KERNEL_N 18
 
 /* /proc/sys/vm — overcommit_memory lives here in Linux (not under kernel.*) */
 static procfs_sysfile_t sys_vm_files[] = {
@@ -2858,6 +2930,40 @@ static vfs_inode_t *procfs_sysvmdir_inode(void)
 	return &d;
 }
 
+/* /proc/sysvipc */
+static const char *const sysvipc_names[] = { "shm", "sem", "msg" };
+static vfs_inode_t *procfs_sysvipcdir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < 3; i++)
+		if (strcmp(sysvipc_names[i], name) == 0)
+			return procfs_sysfile_inode(PROC_F_SYSVIPC_SHM + i);
+	return NULL;
+}
+static int procfs_sysvipcdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 3) return -1;
+	out->ino = 0xa500 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	memcpy(out->name, sysvipc_names[idx], 4);
+	return 0;
+}
+static vfs_iops_t procfs_sysvipcdir_iops = {
+	.lookup  = procfs_sysvipcdir_lookup,
+	.readdir = procfs_sysvipcdir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_sysvipcdir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa500; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_sysvipcdir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
 /* /proc/sys root — contains kernel/, net/, fs/, vm/ */
 static vfs_inode_t *procfs_sysdir_lookup(vfs_inode_t *dir, const char *name)
 {
@@ -2959,6 +3065,8 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 	/* "sys" subdirectory */
 	if (strcmp(name, "sys") == 0)
 		return procfs_sysdir_inode();
+	if (strcmp(name, "sysvipc") == 0)
+		return procfs_sysvipcdir_inode();
 
 	if (strcmp(name, "asess") == 0)
 		return procfs_asessroot_inode();
@@ -3040,6 +3148,15 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	}
 	idx--;
 
+	if (idx == 0) {
+		out->ino      = 0xa500;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 5;
+		memcpy(out->name, "sysvipc", 8);
+		return 0;
+	}
+	idx--;
+
 	/* per-process dirs: the idx-th process visible in the caller's pid namespace,
 	 * named by its pid as seen in that namespace (vnr). */
 	pid_namespace_t *cur_ns = current_pid_ns();
@@ -3057,7 +3174,7 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 		{
 			out->ino      = 0x8000 + (uint64_t)vnr * 100 + 50;
 			out->mode     = S_IFDIR | 0555;
-			out->next_off = ROOT_FILES_N + 4 + (uint32_t)i + 1;
+			out->next_off = ROOT_FILES_N + 5 + (uint32_t)i + 1;
 			char tmp[16]; int ti = 0;
 			uint32_t v = (uint32_t)vnr;
 			if (v == 0) { tmp[ti++] = '0'; }
