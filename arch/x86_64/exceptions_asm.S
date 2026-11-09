@@ -206,6 +206,7 @@ irq_stub 24; irq_stub 25; irq_stub 26; irq_stub 27
 irq_stub 28; irq_stub 29; irq_stub 2a; irq_stub 2b
 irq_stub 2c; irq_stub 2d; irq_stub 2e; irq_stub 2f
 irq_stub 30   /* VEC_MSI_FIRST */
+irq_stub 31   /* VEC_MSI_LAST */
 
 .global irq_stub_syscall
 irq_stub_syscall:

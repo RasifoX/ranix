@@ -97,6 +97,8 @@ void sleep_on(wait_queue_t *q);
 /* sleep_on_locked: atomically add to wait queue and release *lock before sleeping.
  * Prevents the lost-wakeup race when the wake condition is checked under *lock. */
 void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags);
+/* ... and also wake at tick `deadline` (0: no deadline) */
+void sleep_on_locked_until(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags, uint64_t deadline);
 void wake_up(wait_queue_t *q);
 
 /* poll/select/epoll: poll_block() sleeps until poll_notify() or the deadline;

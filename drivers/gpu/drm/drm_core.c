@@ -386,7 +386,7 @@ static int drm_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 	fp->render   = (in->rdev & 0xff) >= DRM_MINOR_RENDER;
 	fp->ev_space = EVENT_SPACE;
 	wait_queue_init(&fp->wq);
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) { kfree(fp); return -EINTR_; }
 	if (!fp->render && !drm_master) drm_master = fp;   /* first opener of the card */
 	mutex_unlock(&drm_lock);
 	f->priv = fp;
@@ -668,7 +668,7 @@ static int ioc_prime_fd_to_handle(drm_filep_t *fp, void *d)
 	vfs_file_t *f = fget(task_current()->fds, a->fd);
 	if (!f) return -EBADF_;
 	int e = -EINVAL_;
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) { e = -EINTR_; goto out; }
 	if (f->inode && f->inode->fops == &dmabuf_fops && f->inode->priv) {
 		drm_gem_t *o = f->inode->priv;
 		uint32_t h = gem_handle_of(fp, o);
@@ -676,6 +676,7 @@ static int ioc_prime_fd_to_handle(drm_filep_t *fp, void *d)
 		if (!e) a->handle = h;
 	}
 	mutex_unlock(&drm_lock);
+out:
 	fput(f);
 	return e;
 }
@@ -811,7 +812,7 @@ static int ioc_syncobj_fd_to_handle(drm_filep_t *fp, void *d)
 	vfs_file_t *f = fget(task_current()->fds, a->fd);
 	if (!f) return -EINVAL_;
 	int e = -EINVAL_;
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) { e = -EINTR_; goto out; }
 	if (a->flags & DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE) {
 		drm_syncobj_t *s = syncobj_lookup(fp, a->handle);
 		if (s && f->inode->fops == &syncfile_fops) { s->signaled = 1; e = 0; }
@@ -820,6 +821,7 @@ static int ioc_syncobj_fd_to_handle(drm_filep_t *fp, void *d)
 		e = syncobj_handle_new(fp, f->inode->priv, &a->handle);
 	}
 	mutex_unlock(&drm_lock);
+out:
 	fput(f);
 	if (!e) wake_up(&syncobj_wq);
 	return e;
@@ -916,7 +918,7 @@ static int syncobj_wait_common(drm_filep_t *fp, uint64_t uh, uint64_t upts, uint
 	drm_syncobj_t **s = kmalloc(n * (sizeof(drm_syncobj_t *) + sizeof(uint64_t)));
 	if (!s) return -ENOMEM_;
 	uint64_t *pts = (uint64_t *)(s + n);
-	mutex_lock(&drm_lock);
+	if (mutex_lock_killable(&drm_lock)) { kfree(s); return -EINTR_; }
 	int e = syncobj_array(fp, uh, n, s);
 	for (uint32_t i = 0; !e && i < n; i++) {
 		pts[i] = 0;
@@ -1054,7 +1056,7 @@ static int drm_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 	if (dsc->flags & F_NOLOCK) {
 		r = dsc->fn(fp, kbuf);
 	} else {
-		mutex_lock(&drm_lock);
+		if (mutex_lock_killable(&drm_lock)) return -EINTR_;
 		if ((dsc->flags & F_MASTER) && drm_master != fp) {
 			/* nobody holds the card: whoever modesets now becomes master, as on Linux
 			 * when the previous master has closed */

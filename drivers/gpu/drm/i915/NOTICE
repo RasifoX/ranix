@@ -36,6 +36,12 @@ Derived (changed) code:
       bits), gen6_rps_set() (GEN9_FREQUENCY request), and the rps_timer()/rps_work()
       policy (95 %/85 % busy, doubling step, waitboost) reduced to one engine sampled
       on the timer tick; the RP1 boost target and 100 ms idle drop are Ranix's.
+    - the gen8 interrupt sequence (gen8_master_intr_disable(), read and write
+      back GT_IIR bank 0, gen8_master_intr_enable()) and the render engine's
+      interrupt bits (user interrupt and context switch, unmasked in RING_IMR,
+      GT_IMR and GT_IER) from i915_irq.c and gt/intel_gt_irq.c; register
+      offsets per the Kaby Lake PRM. The vector, the wait queue, the storm
+      guard and the polling fallback are Ranix's own.
     Everything else in ranix_gt.c (objects, GGTT binding, the request queue and
     its one-at-a-time ELSP policy, kernel-context parking, hang detection and the
     wedge path, the sysfs control) is Ranix's own; ranix_power.c and

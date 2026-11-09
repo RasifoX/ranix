@@ -90,7 +90,12 @@ Linux 6.1.176 i915 parts (MIT, listed in `i915/NOTICE`) over the LinuxKPI shim i
   on an idle engine (CSB ACTIVE_TO_IDLE). Contexts start restore-inhibited, are freed
   only after the engine parks on a kernel context. A request older than 2 s wedges
   the GT: engine reset (RESET_CTL + GDRST), everything completes with -EIO, the GT
-  stays off for the boot; the display never depends on it.
+  stays off for the boot; the display never depends on it. Completion: the render
+  engine's user and context-switch interrupts arrive as an MSI (a vector from
+  `pci_msi_attach`, 0x31 on Casper); waiters sleep on a wait
+  queue until the interrupt or, as the fallback, the next 1 ms tick (with the interrupt
+  they do not poll: on Casper the round trip is the same, 197 us). With no MSI,
+  or after 1000 interrupts in a row without an engine bit, completion is polled.
 - `ranix_vm.c`: one 48-bit 4-level PPGTT per open file.
 - `ranix_gem.c`: i915 uAPI — GETPARAM, QUERY (engines, memory regions, topology),
   GEM_CREATE(_EXT), PREAD/PWRITE, MMAP_OFFSET, SET_DOMAIN, BUSY, WAIT, SET/GET_CACHING,
@@ -104,7 +109,9 @@ Linux 6.1.176 i915 parts (MIT, listed in `i915/NOTICE`) over the LinuxKPI shim i
   gem_exec_basic passes (rcs0-smem), gem_basic 3/3.
 - `/sys/class/drm/ranix_gt` (root, 0600): read for engine state and the RPS line;
   write `audit` (read-only check of every GGTT entry), `rps on`, `rps off`,
-  `rps max <MHz>`. `/sys/class/drm/ranix_power` (root, 0400): power, temperature,
+  `rps max <MHz>`, `irq on|off` (A/B against polling), `spin <us>` (how long a
+  waiter polls before sleeping while the interrupt is on, 0-1000, default 0; polled
+  without it: 200 us). `/sys/class/drm/ranix_power` (root, 0400): power, temperature,
   GT frequency (ranix_power.c).
 - GPU address safety: unused GGTT/PPGTT entries point at a zeroed scratch page,
   and every mapped page must be RAM the page allocator manages.
