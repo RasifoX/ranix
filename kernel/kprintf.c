@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
 #include <kernel/cmdline.h>

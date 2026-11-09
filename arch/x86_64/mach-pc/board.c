@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <drivers/serial/uart16550/uart16550.h>
 #include <drivers/irqchip/pic8259/pic8259.h>
 #include <drivers/irqchip/pit/pit.h>

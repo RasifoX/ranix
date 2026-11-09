@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Load-time linked against libfoo.so: ld.so must map the extra DSO and bind
  * the call to foo() before main runs. */
 #include <stdio.h>

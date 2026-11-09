@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* epoll_pwait2 (441): timespec timeout, NULL waits, bad nsec is EINVAL, a sigmask
  * is accepted. libuv in Claude Code calls it first. First failure or OK. */
 #define _GNU_SOURCE

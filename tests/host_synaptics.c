@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Host test of the touchpad logic: cc -I. tests/host_synaptics.c drivers/input/ps2/synaptics.c */
 #include <stdio.h>
 #include <string.h>

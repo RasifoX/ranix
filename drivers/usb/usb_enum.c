@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Enumeration: a new device gets a slot, an address and a configuration, and
  * becomes a disk, a keyboard or mouse, or a hub. dev_release undoes it.
  *

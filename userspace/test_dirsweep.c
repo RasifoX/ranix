@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Directory sweep: readdir must enumerate entries with correct d_type for
  * regular files, subdirectories, and symlinks (find -type / ls -F / rm -r rely
  * on it), and include '.' and '..'. First failure or OK. */

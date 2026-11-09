@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A dynamically linked probe, for loading through ld.so by hand; see
  * test_asess_inherit. Prints its session id, and its answer to the gate. */
 #define _GNU_SOURCE

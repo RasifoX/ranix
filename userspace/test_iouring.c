@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* io_uring: set up a ring, mmap the SQ/CQ/SQE regions, submit a NOP and a READ
  * of a file, enter, and reap both completions with correct results. Exercises
  * the ring mmap mechanics and the synchronous submit/complete path on both

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Firewall rules are global, so reading or changing them takes CAP_NET_ADMIN in
  * the initial user namespace. Reading interface data stays open to everyone. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* IPv4-mapped IPv6 (::ffff:a.b.c.d) on AF_INET6 sockets: Java opens every
  * socket as IPv6, so Gradle's daemon (bound to 127.0.0.1) and its client met
  * only through mapped addresses and never connected. TCP both ways, a dual

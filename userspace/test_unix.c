@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>

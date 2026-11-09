@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Search permission: a directory without x for the caller stops every path that
  * goes through it, for every kind of syscall, with EACCES. Run as root, the test
  * builds the tree and drops to an ordinary user. */

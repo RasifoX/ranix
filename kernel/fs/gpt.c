@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/fs/gpt.h>
 #include <kernel/block.h>
 #include <kernel/mm/buddy.h>

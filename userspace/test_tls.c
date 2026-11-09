@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TLS over the real stack: open a TLS 1.2/1.3 connection to host:443, do the
  * handshake against the system CA bundle (/etc/ssl/certs/ca-certificates.crt)
  * with full certificate verification, send an HTTPS GET, print the status line

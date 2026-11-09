@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* exec with a large argv (well past the old 64-arg / 16 KB caps) and long
  * paths (past the old 256 limit, up to PATH_MAX). The child re-execs itself in
  * "count" mode, sums argv, and reports argc + checksum back via exit status so

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ext2/4 statfs: the on-disk superblock geometry is reported (block size,
  * total/free block and inode counts), not the ramfs nominal. Runs only where a
  * real disk is mounted at /mnt. First failure or OK. */

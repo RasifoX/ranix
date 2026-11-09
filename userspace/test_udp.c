@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* UDP over loopback: the parent binds and blocks in recvfrom while a forked
  * child sends a datagram to 127.0.0.1. Exercises UDP tx/rx through the kernel's
  * in-stack loopback. */

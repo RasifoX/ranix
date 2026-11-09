@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SIOCGIF* socket ioctls — the ifreq/ifconf path used by ifconfig/ip. */
 #define _GNU_SOURCE
 #include <stdio.h>

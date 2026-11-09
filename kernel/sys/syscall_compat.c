@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Thin entry points libc and programs expect, each over an existing primitive:
  * positioned vectored I/O, the older time-setting calls, fd forms of xattr calls.
  */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* setsockopt/getsockopt round-trips wired to real behavior:
  *  - SO_REUSEADDR / SO_RCVBUF / TCP_NODELAY get back what was set
  *  - SO_REUSEADDR lets a second socket bind a port already bound

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mount namespace: a child that unshares CLONE_NEWNS and mounts a private
  * tmpfs is invisible to the parent — the marker file it creates there does
  * not appear in the parent's mount namespace. */

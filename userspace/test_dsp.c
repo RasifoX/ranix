@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /dev/dsp plays at the sample rate: a second of samples takes about a second,
  * which only a running DMA stream can give. No sound device, nothing to test. */
 #define _GNU_SOURCE

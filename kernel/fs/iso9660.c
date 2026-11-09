@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * ISO 9660 (ECM-119) — the CD/DVD filesystem, read-only. Linux mounts this for
  * every optical medium and many install images; Ranix reads it so a data CD or
  * an ISO attached as a disk is browsable.

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* fcntl record locks are the process's, whichever thread took them: another
  * thread of the same process takes an overlapping lock freely, a thread that
  * exits leaves them in place, and another process still sees the conflict.

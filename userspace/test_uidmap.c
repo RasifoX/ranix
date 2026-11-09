@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A user may map its own id in a user namespace it made (rootless sandboxes:
  * Chromium, unshare -r), and nothing else: not root's id, not a range, not
  * another task's namespace from outside without the capability. Runs the user

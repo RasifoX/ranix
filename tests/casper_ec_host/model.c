@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* EC mailbox model for drivers/platform/casper_ec.c. QEMU has no such EC, so this
  * is the only way the driver's mailbox sequence runs before the real laptop.
  *

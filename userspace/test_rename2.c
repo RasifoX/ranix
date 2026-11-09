@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* renameat2(2) flags: RENAME_NOREPLACE refuses to clobber an existing dest;
  * RENAME_EXCHANGE swaps the two paths' contents. */
 #define _GNU_SOURCE

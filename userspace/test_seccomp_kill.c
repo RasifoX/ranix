@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SECCOMP_RET_KILL_THREAD and SECCOMP_RET_KILL_PROCESS, as on Linux:
  * - KILL_THREAD in one thread of two: that thread ends at the filtered call,
  *   the other runs on, and the process exits normally (status 7 here);

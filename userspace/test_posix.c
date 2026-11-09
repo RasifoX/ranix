@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Broad POSIX behaviour sweep: exercises a pile of small syscall semantics that
  * tools quietly depend on. Prints the first failure (so a regression is
  * pinpointed) or OK if every check holds. */

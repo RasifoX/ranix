@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ranix-sess: run a command inside a new agent session, and stage what it writes.
  *
  *   ranix-sess run -r ROOT [-u UID] [-g GID] [-l LABEL] [-t MAX_TASKS] [-m TMP_MIB]

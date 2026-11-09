@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* POSIX message-queue blocking round-trip: the parent blocks in mq_receive
  * (empty queue) until the child sends, exercising the kernel's event-driven
  * recv wait + the sender's wake. */

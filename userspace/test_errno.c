@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A failed syscall must say why. A bare -1 from the kernel reads as EPERM, which
  * npm and friends treat as fatal. First failure or OK. */
 #define _GNU_SOURCE

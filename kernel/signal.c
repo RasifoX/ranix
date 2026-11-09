@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── signal delivery ─────────────────────────────────────────────────────────
  * The kernel side of POSIX signals: posting a signal to a task (task_signal /
  * task_signal_pgrp), deciding whether a pending signal is actionable, and

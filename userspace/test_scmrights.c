@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SCM_RIGHTS: pass an open file descriptor over an AF_UNIX socketpair via
  * sendmsg/recvmsg ancillary data. The received fd is a new descriptor in this
  * process referring to the same open file — reading it yields the file's

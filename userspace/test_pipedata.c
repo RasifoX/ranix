@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Pipe data-integrity under the dpkg-deb pipeline shape: a producer child writes
  * a known pseudo-random stream through a pipe to a consumer (this process),
  * which verifies every byte. Large transfers (> pipe buffer) so writes block and

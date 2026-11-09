@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A relative PT_INTERP ("./ld.so") is found from the working directory, as
  * on Linux. VS Code's C/C++ language server ships its own musl that way and
  * failed with ENOEXEC ("cpptools: ELF: not found" from the shell fallback).

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* core dump: a process killed by SIGSEGV leaves an ELF ET_CORE file. We verify
  * the structure (ELF magic, e_type==ET_CORE, a PT_NOTE + PT_LOAD program
  * headers) and that real memory was dumped — a sentinel written into an mmap'd

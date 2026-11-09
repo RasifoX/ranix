@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* seccomp filters follow fork, threads and exec, stack instead of replacing each
  * other, need no_new_privs or CAP_SYS_ADMIN, and are freed with their last task. */
 #define _GNU_SOURCE

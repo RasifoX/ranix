@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Dynamically linked (PT_INTERP). Reaching main and printing through libc
  * means the kernel loaded ld-musl, which relocated this binary and the shared
  * libc and jumped here. */

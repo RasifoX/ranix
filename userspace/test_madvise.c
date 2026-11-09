@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * madvise + mlock behaviour check. mlock must prefault+pin; MADV_DONTNEED must
  * drop the pages so an anonymous re-read returns zero (a no-op stub would still
  * see the old pattern); MADV_WILLNEED must keep data intact and return 0.

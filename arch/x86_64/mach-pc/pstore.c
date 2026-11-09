@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Persistent kernel log in a fixed physical RAM region. Why RAM, why this
  * address, and how Linux reads it back: docs/watchdog_pstore.md.
  *

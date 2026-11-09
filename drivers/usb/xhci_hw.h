@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* xHCI registers, TRB types and the driver's limits (xHCI spec 1.2, ch. 5-6).
  * Included by drivers/usb/xhci.c only. */
 #ifndef DRIVERS_USB_XHCI_HW_H

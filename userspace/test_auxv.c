@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/auxv: the vector the image started with, as getauxval sees it.
  * gdb reads it to place a PIE and to find ld.so; without it breakpoints in
  * a PIE land at unrelocated addresses and no shared library is seen. */

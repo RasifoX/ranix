@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Mutate an NTFS volume in place on a throwaway disk, mount it, walk it, unmount, put
  * the bytes back, again and again. The kernel must survive every round.
  * usage: test_ntfsfuzz DEV MOUNTPOINT HOTLIST SEED ROUNDS

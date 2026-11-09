@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Process/wait/exec/pipe edge sweep: exit-status encoding, signal-death status,
  * execve exit codes, WNOHANG, parent/child pid relations, nonblocking pipe
  * EAGAIN, and pipe EOF. First failure or OK. */

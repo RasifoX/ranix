@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ITIMER_PROF / ITIMER_VIRTUAL: arming a CPU-time interval timer delivers
  * SIGPROF / SIGVTALRM as the process burns CPU (previously these were silently
  * accepted and never fired). Invalid which is EINVAL. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* recvmsg on TCP and UDP scatters the data over every iovec in order, as on
  * Linux (and as AF_UNIX already did), instead of filling only the first one:
  * - UDP: a 10-byte datagram into iovecs of 3, 0, 4 and 16 bytes reads 10, split

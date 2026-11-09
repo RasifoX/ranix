@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* End-to-end TCP stress: one side streams a generated pattern, the other side
  * checks it, both print SHA-256 and the MB/s seen.
  *   test_tcpsha loop MIB              both ends over 127.0.0.1

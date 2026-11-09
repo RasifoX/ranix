@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── sysfs (/sys) ─────────────────────────────────────────────────────────────
  * A small read-only pseudo-filesystem mirroring the Linux /sys layout that
  * tooling looks for, built like procfs (dir inodes carry lookup/readdir iops,

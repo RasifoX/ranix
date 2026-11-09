@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* setns(2) for IPC: pin the current IPC namespace, unshare into an empty one
  * (the queue name is free there), then rejoin and see the name is taken
  * again. */

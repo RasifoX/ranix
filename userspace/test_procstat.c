@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/stat: starttime (field 22) must be non-zero and rss (field 24)
  * must be > 0 — ps/top elapsed-time and memory columns depend on them. */
 #include <stdio.h>

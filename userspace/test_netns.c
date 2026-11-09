@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* network namespace: a child that unshares CLONE_NEWNET gets an isolated
  * network stack (its own loopback), so its /proc/self/ns/net identity differs
  * from the parent's. */

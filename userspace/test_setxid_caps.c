@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The right to set any uid or gid comes from CAP_SETUID / CAP_SETGID, not from
  * the numbers themselves:
  *  - a process with euid != 0 but egid == 0 has no CAP_SETGID, so it may only

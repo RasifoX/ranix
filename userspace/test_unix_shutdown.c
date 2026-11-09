@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* shutdown(2) on an AF_UNIX stream: half-close both ways. It used to run the TCP
  * close on a socket with no device, which took the kernel down. */
 #define _GNU_SOURCE

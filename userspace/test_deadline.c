@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/sys/kernel/ranix_deadline: the boot deadline as seconds left, 0 = off.
  * A healthy boot writes 0 to turn it off; writing N re-arms it N seconds ahead.
  * Checks: the test VM boots with no deadline (reads 0); arming reads back a value

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A protected block device takes no write by any route. usage: test_diskguard /dev/X
  * Prints one line per route; the caller also compares the image's hash from outside. */
 #include <errno.h>

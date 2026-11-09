@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* On a read-only mount, creating what already exists is EEXIST, not EROFS, while
  * creating something new is EROFS. BusyBox mkdir -p depends on the first. */
 #include <errno.h>

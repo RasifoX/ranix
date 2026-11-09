@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Ports: bring up what is plugged into a root or hub port, notice it leave, and
  * serve port-change events.
  *

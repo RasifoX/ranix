@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* RT signals queue (each instance delivered with its own si_value, lowest signo
  * first, FIFO within a signo) while a standard signal coalesces. */
 #define _GNU_SOURCE

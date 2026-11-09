@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* getrandom() statistical sanity (not a crypto proof, but catches the old
  * splitmix-from-ticks regression): two reads differ, bytes are roughly uniform,
  * and reads from /dev/urandom also vary. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* kptr_restrict / dmesg_restrict sysctls: defaults are 1, root may read
  * /dev/kmsg, a non-root reader is denied while dmesg_restrict=1 and allowed once
  * it is cleared, and the sysctls round-trip through write/read. */

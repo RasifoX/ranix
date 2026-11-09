@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* chroot needs CAP_SYS_CHROOT in the caller's own user namespace (Linux), so a
  * rootless sandbox (Chromium, unshare -r) may chroot, and nobody else may.
  *   1. nobody outside any namespace: EPERM

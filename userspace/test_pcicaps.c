@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* PCIe capability walk: each /sys/bus/pci/devices/<addr>/capabilities lists the
  * device's capability IDs (PM/MSI/MSI-X/PCIe/vendor) discovered by walking the
  * config-space cap chain. On a PCI platform at least one device (the AHCI or

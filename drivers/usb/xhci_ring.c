@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Rings, the event ring and controller commands: ring_push, evt_next (which hands
  * HID events to their handler on the way), the doorbells, cmd_exec, and the
  * device and input contexts.

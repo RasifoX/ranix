@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TCP congestion control over loopback: a forked sink reads a large stream while
  * the parent blasts it, then the parent reads its cwnd/ssthresh back via
  * getsockopt(TCP_INFO). Proves the window left the initial value (slow start ran)

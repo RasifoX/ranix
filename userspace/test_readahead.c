@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Sequential reads coalesce into far fewer device transfers than sectors moved,
  * proving the block-layer readahead prefetches contiguous runs. Reads the
  * seeded /mnt/seq.dat while watching the parent disk's /sys/block/<dev>/stat

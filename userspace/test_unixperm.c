@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* AF_UNIX path sockets: connect() needs write permission on the socket
  * file, and a relative name under a very long cwd must not overrun the
  * kernel's path buffer. */

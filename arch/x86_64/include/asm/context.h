@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef ASM_CONTEXT_H
 #define ASM_CONTEXT_H
 

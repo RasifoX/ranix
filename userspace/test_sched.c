@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SCHED_FIFO policy via raw syscalls (musl's sched_* wrappers can short-circuit
  * in libc; we want to exercise the kernel path). */
 #include <stdio.h>

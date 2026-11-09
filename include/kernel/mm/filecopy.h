@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Shared mappings of files that have no page cache to map.
  * A file whose filesystem cannot hand out its own pages (ext2 with blocks
  * smaller than a page, FAT, ...) is mapped from copies of its pages. For

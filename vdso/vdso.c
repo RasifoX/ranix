@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Ranix vDSO — user-space fast paths for clock_gettime/gettimeofday that read
  * the kernel's shared vvar page instead of trapping. Built as a freestanding
  * PIC shared object; the kernel maps it (plus the vvar one page below it) into

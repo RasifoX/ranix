@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* utimensat with AT_SYMLINK_NOFOLLOW acts on the link, which may dangle: tar and
  * dpkg restore a link's time before its target exists. */
 #define _GNU_SOURCE

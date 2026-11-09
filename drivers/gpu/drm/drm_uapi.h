@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * The DRM user ABI: ioctl numbers, structs and constants that libdrm, Mesa and
  * compositors compile against. Layouts match Linux include/uapi/drm/{drm,drm_mode}.h
  * byte for byte (they are the ABI); everything else in drivers/gpu/drm is Ranix's own.

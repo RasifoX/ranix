@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Ranix KMS: one CRTC, one encoder, one connector, a primary and a cursor plane,
  * all on the mode the firmware left running (no modeset: no PLLs, no link
  * training). Two ways to put a client framebuffer on the glass:

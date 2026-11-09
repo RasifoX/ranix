@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* timezone: musl honours a POSIX TZ string (no data files needed), a named
  * zone read from /usr/share/zoneinfo (tzdata), and the default /etc/localtime
  * when TZ is unset. Istanbul is UTC+3 year-round, so tm_gmtoff is 10800s. */

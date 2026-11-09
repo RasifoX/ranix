@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* seccomp actions as on Linux, the ones Chromium's sandbox is built on:
  * - RET_TRAP: the syscall does not run; SIGSYS arrives with si_code SYS_SECCOMP,
  *   si_errno the filter's data, si_syscall, si_arch and si_call_addr just past

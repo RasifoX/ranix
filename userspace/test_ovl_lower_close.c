@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* overlay closes what it opened on the lower layer:
  *   test_ovl_lower_close DEV OFFSET DIR
  * mounts an ext2 (DEV at OFFSET bytes) on DIR/lower, a tmpfs on DIR/up, and

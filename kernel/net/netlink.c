@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── AF_NETLINK / NETLINK_ROUTE ──────────────────────────────────────────────
  * A read-only rtnetlink view of one namespace's netdevs: enough for `ip a`,
  * `ip r`, `ip link` and getifaddrs(). A request is answered in full during the

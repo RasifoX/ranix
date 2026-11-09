@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * PID namespace core. See include/kernel/pid_namespace.h.
  *
  * Lock order: the process-creation paths hold sched_lock and then take

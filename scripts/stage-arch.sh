@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Stage Arch Linux's pacman + its runtime closure under a self-contained /opt/arch
 # prefix in the rootfs, so `pacman -U`/`-S` runs on-device, offline (x86_64 only).
 #

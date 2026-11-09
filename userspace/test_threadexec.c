@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* execve from a thread replaces the whole process: the other threads die and the
  * pid stays the process's. And a leader that exits with pthread_exit leaves the
  * process alive until its last thread ends, for the parent as well. */

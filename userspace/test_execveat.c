@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* execveat(2): run a program both by dirfd-relative path and by an open fd
  * (AT_EMPTY_PATH). Both must exec busybox 'true' and exit 0. */
 #include <stdio.h>

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef UAPI_RANIX_PRCTL_H
 #define UAPI_RANIX_PRCTL_H
 /* Ranix-only prctl options. 0x5258xxxx is the "RX" range; asess.h holds 0x52580001. */

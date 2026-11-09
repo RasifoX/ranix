@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* membarrier(2): QUERY returns a sane non-zero mask and an expedited command
  * completes (0, or a consistent ENOSYS) without corrupting or hanging. */
 #define _GNU_SOURCE

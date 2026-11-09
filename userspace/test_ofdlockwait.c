@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A thread blocked in F_OFD_SETLKW while a sibling closes that fd: the
  * lock it then takes must go away with the file, not outlive it. Lock
  * ranges that overflow off_t are EOVERFLOW. */

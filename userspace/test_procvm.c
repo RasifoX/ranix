@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/sys/vm/: max_map_count (JVM/ES/Redis) and overcommit_memory must be
  * readable and live under vm/, not kernel/. */
 #include <stdio.h>

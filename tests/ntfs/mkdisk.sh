@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Lay a Windows-shaped GPT disk around an NTFS volume image. usage: mkdisk.sh VOL.img DISK.img
 # EFI, MSR, Basic data (the volume), Recovery, as a factory Windows install has them.
 export PATH=/usr/sbin:/sbin:$PATH

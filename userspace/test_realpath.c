@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* path canonicalization + readlink-on-non-symlink semantics. musl's userspace
  * realpath(3) canonicalizes by readlink()ing each accumulated prefix and
  * expecting EINVAL on non-symlinks — directories, regular files, and the "."

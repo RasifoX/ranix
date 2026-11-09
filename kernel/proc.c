@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ── process lifecycle ────────────────────────────────────────────────────────
  * Creating processes (proc_create / proc_exec for kernel tasks, proc_fork /
  * proc_clone_thread for the clone family), tearing them down

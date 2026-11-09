@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Symlinks keep working once the dentry cache is full. Past its limit a name
  * looked up for the first time is not cached but held for the one walk, and a
  * relative symlink met that way must still be followed from its own directory.

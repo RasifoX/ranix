@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The syscall gate: default deny, argument checks at the right place, and no way
  * to change the answer from inside. */
 #define _GNU_SOURCE

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* TCP over IPv6 loopback (::1): a parent server (bind/listen/accept/echo) and a
  * forked client (connect/send/recv) exchange a message via ::1. Exercises the
  * full IPv6 TCP path — handshake, data, teardown — including the v6

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 echo NT-START
 cat /proc/partitions
 fjord disk list

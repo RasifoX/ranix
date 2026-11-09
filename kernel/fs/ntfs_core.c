@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * NTFS volume reader. Written from Microsoft's public documentation (MS-FSCC,
  * MS-XCA for LZNT1, the Windows reparse tag table) and independent format
  * descriptions. There is no code path here that writes: the only way to a device

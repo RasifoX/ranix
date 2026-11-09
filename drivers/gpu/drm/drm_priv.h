@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Ranix DRM: shared state of the core (drm_core.c), KMS (drm_kms.c) and the
  * /sys tree (drm_sysfs.c). One device: card0 (226:0) and renderD128 (226:128).
  */

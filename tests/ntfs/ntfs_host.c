@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Host harness for kernel/fs/ntfs_core.c.
  *   ntfs_host walk IMAGE [SECTOR]        every file: sha256, size, path
  *   ntfs_host fuzz IMAGE SEED N [SECTOR] N mutated images under ASan and UBSan

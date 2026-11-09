@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mount(2) with offset=BYTES reaches a filesystem further into a device. Bad
  * offsets are refused, and a write lands inside the slice. */
 #include <errno.h>

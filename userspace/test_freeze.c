@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroup freezer: a child parked in a frozen cgroup makes no progress (cannot
  * exit) until the cgroup is thawed. The child blocks on a pipe; the parent
  * freezes the cgroup, then unblocks it — a frozen child stays put, and only

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mmap anonymous RW + mprotect enforcement. A child maps a page RW, writes it,
  * drops it to read-only, then writes again — which must fault. The parent
  * confirms the child was killed by SIGSEGV (not that it ran past the write,

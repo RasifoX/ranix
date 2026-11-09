@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * ELF core dump. On a core-generating fatal signal the crashing process's
  * register state and memory are written to an ET_CORE file (core_pattern,
  * default "core" in the cwd) before task_exit. The layout is standard enough

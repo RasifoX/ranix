@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Raspberry Pi 4 (BCM2711) kernel image layout.
  *
  * The firmware loads kernel8.img at physical 0x80000 and jumps to it with the

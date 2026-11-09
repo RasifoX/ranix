@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """Hand-made bad volumes. Reads a clean NTFS image, writes one patch file per case: each is
 a list of (offset, bytes) against the image, so nothing but the test VM's disk changes.
 Usage: badimg.py IMAGE OUTDIR. Patch format: u64 off, u32 len, data, repeated."""

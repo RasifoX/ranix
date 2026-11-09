@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/<pid>/fdinfo: one file per open fd with its offset and open flags, in
  * the Linux format; the task's own, closed to other users. And a chroot into
  * /proc/self/fdinfo/ (Chromium's sandbox does it) gives an empty root nothing

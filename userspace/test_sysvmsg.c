@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SysV message queues: a child receives by message type out of FIFO order
  * (asks for type 2 before type 1), proving type-selective msgrcv and the
  * blocking send/receive wakeup path. */

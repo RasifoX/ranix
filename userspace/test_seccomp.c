@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* seccomp: STRICT mode kills a process that makes a forbidden syscall; FILTER
  * mode runs a BPF program (here: force getpid to fail with EPERM). Raw syscalls
  * are used so musl's wrappers/caching don't hide the kernel behaviour. */

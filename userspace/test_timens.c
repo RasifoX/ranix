@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* time namespace: after unshare(CLONE_NEWTIME) and writing a +100s monotonic
  * offset, a child created in the new namespace sees CLOCK_MONOTONIC advanced
  * by ~100s relative to the parent (which stays in the old namespace). */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SHA-256, written from FIPS 180-4 sections 4.1.2, 4.2.2, 5.1.1, 5.3.3 and 6.2. */
 #include <kernel/lib/sha256.h>
 #include <kernel/lib/crc32.h>

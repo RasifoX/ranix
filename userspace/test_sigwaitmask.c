@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pselect and ppoll wait under the mask they are given, and sigsuspend's handler
  * runs under its own: a signal blocked everywhere else gets in there, the handler
  * runs, the call says EINTR and the old mask is back. GNU make's job control is

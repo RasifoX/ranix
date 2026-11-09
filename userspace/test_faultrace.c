@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Two threads reading the same untouched page: one maps it, the other arrives to
  * find it present, which is not a fault to die of. */
 #define _GNU_SOURCE

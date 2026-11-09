@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Drive syscalls with bad user pointers: the kernel's __ex_table fixup must turn
  * a fault on the user access into -EFAULT instead of panicking. One pointer is an
  * unmapped-but-canonical user address (faults inside copy_*_user → fixup), one is

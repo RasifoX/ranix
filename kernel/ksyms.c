@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/ksyms.h>
 
 /* Table emitted by scripts/gen_ksyms.sh, sorted ascending by address. The weak

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* File-descriptor offset semantics: O_APPEND always writes at end, dup'd fds
  * share one offset, O_TRUNC clears on open, pwrite doesn't move the offset.
  * First failure or OK. */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* mmap sweep: anonymous RW, file-backed read, MAP_FIXED honoring, and
  * MAP_PRIVATE copy-on-write isolation across fork. First failure or OK. */
 #include <stdio.h>

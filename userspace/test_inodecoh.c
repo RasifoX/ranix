@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Inode coherency on a disk filesystem: a change to a file's or directory's
  * attributes must hold for every later lookup, whichever in-memory copy of the
  * inode the path walk finds. Found on Casper (2026-11-08): on ext2, chmod 700 of

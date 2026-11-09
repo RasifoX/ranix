@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pid namespace: a child created with CLONE_NEWPID is pid 1 (init) of the new
  * namespace, so getpid() returns 1 there while the parent still sees it by its
  * own (global) pid. */

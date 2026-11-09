@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pidfd_open + pidfd_send_signal: open a pidfd for a child and signal it through
  * the fd; the child must die from that signal. */
 #include <stdio.h>

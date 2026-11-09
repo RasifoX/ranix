@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* fchdir() into a directory reached by a long absolute path, then getcwd()
  * and a relative create must land in that directory, as chdir() does. */
 #define _GNU_SOURCE

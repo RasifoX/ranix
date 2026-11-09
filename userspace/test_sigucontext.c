@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SA_SIGINFO handlers get a real ucontext_t on x86_64.
  *
  * The kernel passed NULL as the third handler argument. JavaScriptCore (Bun,

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A compiler's use of a disk filesystem, in the directory given as argv[1]:
  * rename over a target, chmod and mtime that stick, hard and symbolic links,
  * unlink while open, truncate, holes, private and shared file mappings, and

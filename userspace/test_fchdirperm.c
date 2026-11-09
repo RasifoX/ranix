@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* fchdir() needs search permission on the directory, as chdir() does. */
 #define _GNU_SOURCE
 #include <errno.h>

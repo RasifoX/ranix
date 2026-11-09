@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* open-unlinked file semantics: a file's contents must survive unlink() while
  * an fd is still open. Reading, writing, and a dup'd fd all see the live data
  * until the last close. Exercised on tmpfs (/tmp) and ramfs (/run/shm). */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/mm/mmu.h>
 
 static uint64_t ram_limit   = 0x3C000000UL;  /* default, overridden by DTB */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Path resolution sweep: nested chdir + getcwd, '..' handling, relative opens,
  * and realpath canonicalization. Exercises the cwd/normalize machinery. */
 #include <stdio.h>

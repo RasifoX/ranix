@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroup.procs: the pid is read in the writer's pid namespace, an open fd is not
  * enough to move someone else's process, and 0 means the writer. */
 #define _GNU_SOURCE

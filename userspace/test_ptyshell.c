@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* interactive shell over a pts: open ptmx, get slave, fork a session leader that
  * makes the pts its controlling tty and execs an interactive -sh; the parent
  * drives the master, types a command, and checks the echoed/output bytes.

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* file timestamps: a freshly created file gets a non-zero mtime (not 1970);
  * utimensat sets exact atime/mtime; writing updates mtime; futimens (fd, NULL
  * path) works and UTIME_OMIT leaves a field alone. make/ls -l/tar depend on this. */

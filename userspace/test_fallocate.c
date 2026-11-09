@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* fallocate(2) actually grows the file and zero-fills; copy_file_range(2)
  * honors explicit off_in/off_out and advances them. */
 #define _GNU_SOURCE

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # switch_root / disk-root proof: init pivots from the ramfs initramfs into a
 # full rootfs on disk and runs it as the real /. Boot 1 writes a marker to /var
 # on the disk root (DISKROOT:FRESH); boot 2 reuses the same image and the marker

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* MAP_SHARED of a tmpfs file is truly shared: a store through the mapping is
  * visible via read() on a separate fd and to a second MAP_SHARED mapping, and
  * persists in the file. MAP_PRIVATE is the regression check — its stores stay

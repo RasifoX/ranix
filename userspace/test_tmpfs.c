@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* tmpfs: size= mount option, ENOSPC at the limit, and statfs free/used
  * accounting that tracks writes and frees. First failure or OK. */
 #define _GNU_SOURCE

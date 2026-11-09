@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* End-to-end DNS over the real NIC: resolve a hostname via getaddrinfo, which
  * reads /etc/resolv.conf and queries the nameserver over UDP:53. Proves unicast
  * TX/RX through the NIC plus ARP to the gateway. Ad-hoc (needs a NIC + a

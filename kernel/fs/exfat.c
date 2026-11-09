@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * exFAT, read-only. What most USB sticks and SD cards over 32 GB come formatted
  * with. Written from Microsoft's published exFAT specification.
  *

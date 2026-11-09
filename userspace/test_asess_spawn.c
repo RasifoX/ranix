@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* asess(SPAWN): the child is inside from its first instruction, with no enter
  * call, and the caller stays out. Refusals, fd sweep, /proc introspection, and
  * teardown when pid 1 of the session dies. */

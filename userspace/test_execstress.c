@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Repro tool for the residual flake (pipe-fork-rw ~2%, "echo hello | cat" rarely
  * empty): unlike test_pipestress, this adds the missing ingredient — exec. Each
  * round forks a child that execs /bin/echo with stdout on a pipe, and the parent

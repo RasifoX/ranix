@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Full login chain over a pts: a session leader makes the pts its controlling
  * tty and execs `login test`; the parent answers the password prompt against
  * /etc/shadow ($6$ SHA-512 crypt) and confirms the session shell runs as uid

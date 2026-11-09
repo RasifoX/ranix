@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # the disk part of tests/ranix_test.sh on its own, with every disk allowed
 echo NT-START
 c() { [ "$2" = "$3" ] && echo "PASS: $1" || echo "FAIL: $1 want [$2] got [$3]"; }

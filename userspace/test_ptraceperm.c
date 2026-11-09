@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ptrace_may_access gate: a uid-1000 caller is denied PTRACE_ATTACH to a
  * process it doesn't own (pid 1, root) and cannot read that process's
  * /proc/<pid>/mem|maps, but may inspect a same-uid child's /proc/<pid>/maps.

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* timerfd: arm a 100ms one-shot, read() blocks until it fires and returns an
  * expiration count of 1. Exercises the kernel's timerfd wait + tick expiry. */
 #include <stdio.h>

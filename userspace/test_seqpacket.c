@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* AF_UNIX SOCK_SEQPACKET keeps each message whole and apart: a 5000-byte
  * message with a descriptor arrives in one piece (Chromium's zygote fork
  * request is ~2 KB and was cut at 1536, so no renderer ever started), a

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <drivers/serial/pl011.h>
 #include <drivers/irqchip/irqchip.h>
 #include <kernel/board.h>

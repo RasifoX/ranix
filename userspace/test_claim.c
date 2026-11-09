@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Claims (kernel/claim.c, include/uapi/claim.h). Uses resource names under
  * "test." so it never collides with real claims, except the reboot gate, which
  * needs "reboot" itself and holds it for well under a second.

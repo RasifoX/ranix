@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Decompress a single zstd stream: zstdcat.py <in.zst> <out>. The host has
 # libzstd.so.1 (a glibc dependency) but no `zstd` CLI, and GNU tar's --zstd
 # shells out to that missing binary; so drive libzstd's streaming API via ctypes

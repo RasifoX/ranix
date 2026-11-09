@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* umount of a disk filesystem that is still in use. While a file or directory on
  * it is open, or a page of it is mapped, umount must say EBUSY and leave the
  * filesystem working; once the last user is gone umount goes through and the

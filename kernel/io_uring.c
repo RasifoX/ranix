@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* io_uring(7) — Linux 5.1+ async I/O submission/completion rings.
  *
  * SQ ring, CQ ring and the SQE array are kernel-allocated pages that userspace

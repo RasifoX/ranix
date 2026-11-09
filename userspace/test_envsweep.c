@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Environment + exec sweep: setenv/getenv, environ has PATH, argv passed to an
  * exec'd child, and a custom envp delivered across execve. First failure or OK. */
 #include <stdio.h>

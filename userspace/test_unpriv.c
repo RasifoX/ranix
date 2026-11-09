@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What an unprivileged task must not reach. Root sets the objects up, a child
  * drops to uid 1000 and tries. First failure or OK. */
 #define _GNU_SOURCE

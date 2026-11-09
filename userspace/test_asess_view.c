@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The filesystem view: the root directory reads, nothing writes, nothing above it
  * shows, whatever the route. Files in the view are owned by the session's uid and
  * mode 0666, so the read-only mount is the only thing refusing the writes. */

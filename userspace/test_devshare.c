@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A MAP_SHARED mapping of device memory survives fork().
  *
  * fork() used to write-protect it like private memory, and device memory has

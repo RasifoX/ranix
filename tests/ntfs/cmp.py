@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """Compare two listings, one of ref.py on ntfs-3g and one of Ranix: path, size and sha256.
 Long names may differ by the driver's shortened form, matched through a hash suffix.
 Usage: cmp.py REF OURS. Lines other than 'sha  size  path' in OURS are counted apart."""

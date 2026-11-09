@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* The siginfo of a standard signal names its sender, as on Linux:
  * - kill(self) to a handler: si_code SI_USER, si_pid getpid(), si_uid getuid();
  * - kill from a child, taken with sigwaitinfo: si_pid is the child;

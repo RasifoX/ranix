@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/<pid>/status carries NStgid and NSpid (Linux): the task's number in each
  * pid namespace from the reader's down to its own. A child that is pid 1 of a
  * new namespace shows "<outer> 1"; a task of the reader's namespace one number.

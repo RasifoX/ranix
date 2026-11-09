@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Emit a C symbol table (address -> name, sorted) plus build identity from a
 # linked kernel ELF, for in-kernel panic symbolization. Function addresses live
 # in .text, which precedes the .rodata this table lands in, so they stay valid

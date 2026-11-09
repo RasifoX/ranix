@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* stat() through /proc/self/fd/N reaches the open file even when it has no
  * path (a pipe, a socket): Chromium's sandbox walks /proc/self/fd with
  * fstatat() and CHECKs every entry ("Check failed: . : No such file"). */

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* no_new_privs across exec: a uid-1000 caller that sets PR_SET_NO_NEW_PRIVS
  * must NOT gain uid 0 when it execs the suid-root helper, and the flag must
  * survive fork+exec. Run via `su test -c /bin/test_nnp`. Prints OK on success. */

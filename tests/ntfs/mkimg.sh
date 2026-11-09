@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Build one NTFS image on Debian. usage: mkimg.sh OUT.img SIZE_MB PROFILE [mkntfs flags]
 # PROFILE small|big. Loop files only, under ~/ranix-nt/t, never a real disk.
 set -e

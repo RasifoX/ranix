@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* What a session holds in the kernel on its own account: pipe buffers, socket
  * buffers, SysV segments. Each counts against its budget or its limit, comes back
  * when released, and never costs data. */

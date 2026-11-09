@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* lstat()/stat() on the volatile (no_cache) procfs subdirectories
  * /proc/self/{ns,fd,task} must return a directory without wedging — these
  * dentries are resolved as function-scoped volatiles, so a stale re-lookup

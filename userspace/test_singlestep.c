@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ptrace single-step: a breakpoint (int3) stops the tracee; then each
  * PTRACE_SINGLESTEP traps after one instruction (SIGTRAP) with the PC advancing.
  * (aarch64 software-step is a separate mechanism — skipped here.) */

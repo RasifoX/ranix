@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A task's root, working directory and umask, shared between tasks made with
  * CLONE_FS and copied for the rest. See include/kernel/fs_struct.h. */
 #include <kernel/fs_struct.h>

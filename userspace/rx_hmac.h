@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SHA-256 / HMAC-SHA256 for the rescue channel's userspace side (test_rescue,
  * ranix-rescue). Single header, no libc crypto on the target. FIPS 180-4. */
 #ifndef RX_HMAC_H

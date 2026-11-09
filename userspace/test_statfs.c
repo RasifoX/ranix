@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* statfs(2): f_type reflects the filesystem the path is actually on (was a
  * hardcoded RAMFS magic regardless of path). */
 #define _GNU_SOURCE

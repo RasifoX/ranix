@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* user namespace: after unshare(CLONE_NEWUSER) the caller's id is unmapped
  * (reads as the overflow id) until a uid_map is written. Mapping ns-uid 100
  * to the caller's real uid (kuid 0) makes getuid() report 100 — the kuid

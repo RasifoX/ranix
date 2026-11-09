@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """Populate an ntfs-3g mount with a Windows-like tree. Usage: gen-tree.py MOUNT PROFILE
 Debian only: the images are made by mkntfs and ntfs-3g, the driver never sees them
 before they are complete. Deterministic: the same seed gives the same bytes."""

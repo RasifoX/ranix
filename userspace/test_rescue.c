@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Rescue channel (kernel/rescue.c, include/uapi/rescue.h) over loopback, with a
  * throw-away test key so the real one is never touched: HELLO gives a nonce; a
  * MACed command is answered with a MACed reply; a replay, a bad MAC and a nonce

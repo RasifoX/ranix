@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* /proc/self/cmdline must return the full NUL-separated argv, not the comm. */
 #include <stdio.h>
 #include <string.h>

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* extended attributes: set/get/list/remove on a regular file, plus the error
  * semantics tools rely on — ENODATA for missing, EEXIST under XATTR_CREATE,
  * EOPNOTSUPP for an unknown namespace, ERANGE for a too-small buffer. */

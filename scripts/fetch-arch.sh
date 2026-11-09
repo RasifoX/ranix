@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Fetch an Arch Linux package + its runtime closure as .pkg.tar.zst files into a
 # cache dir, for shipping into the initramfs (offline pacman on Ranix, x86_64).
 #

@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* A mounted NTFS volume refuses every way of changing anything, and its paths behave.
  * usage: test_ntfsro MOUNTPOINT  (the image holds a file "bootmgr" and dir "Users/rasi") */
 #include <dirent.h>

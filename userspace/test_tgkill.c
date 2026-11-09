@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Thread signals: a handler installed in one thread is shared by all (POSIX
  * process-wide dispositions), pthread_kill delivers to the right thread, a
  * sig-0 probe reports liveness, and tgkill validates the tgid — a tid not in

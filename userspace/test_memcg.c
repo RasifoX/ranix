@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* cgroup memory controller: a process in a cgroup with memory.max=1MB that
  * faults in 4MB is killed when the charge crosses the limit. */
 #define _GNU_SOURCE

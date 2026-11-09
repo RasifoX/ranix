@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* rename between two directories that are not in the dentry cache (procfs pid
  * directories, overlay subdirectories) looks at both, not twice at the second:
  * - rename("/proc/A/nosuch", "/proc/B/nosuch") for two live pids fails (Linux:

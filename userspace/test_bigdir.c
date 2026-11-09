@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Large-directory readdir: create many entries and confirm readdir enumerates
  * every one exactly once (catches getdents buffer-boundary / pagination bugs). */
 #include <stdio.h>

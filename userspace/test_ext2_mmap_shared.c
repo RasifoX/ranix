@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* test_ext2_mmap_shared DEV DIR OFFSET BSIZE
  * Stores through a MAP_SHARED mapping reach the file on an ext2 whose block is
  * smaller than a page, as on Linux. Mounts the ext2 at OFFSET bytes into DEV

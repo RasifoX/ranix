@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 """Read the Ranix persistent kernel log after a reboot. Needs root.
 
 Ranix mirrors its log into 1 MiB of RAM at physical 0x20000000 (see

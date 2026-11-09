@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Metadata changes take one path: chmod, chown, utimens and xattr behave as before
  * through it, follow the owner rule, respect a read-only mount through an fd, and
  * on overlay reach the upper layer instead of a throwaway view inode. */

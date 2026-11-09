@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* ".." stops at the process root however it is reached: absolute, relative,
  * through a symlink, or from a root that is itself a mount. */
 #define _GNU_SOURCE

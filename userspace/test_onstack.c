@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* SA_ONSTACK runs the handler on the alternate stack: a stack overflow handler, and
  * QEMU's coroutine setup, depend on it. Without the flag the handler stays put. */
 #define _GNU_SOURCE

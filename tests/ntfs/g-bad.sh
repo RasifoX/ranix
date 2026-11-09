@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 echo NT-START
 D=/dev/nvme0n1
 mkdir -p /mnt/b

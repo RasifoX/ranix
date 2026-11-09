@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Casper Nirvana embedded controller: tell it an OS is running, the way the
  * firmware's own AML does under Linux and Windows. Off unless asked for.
  *

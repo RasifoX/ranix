@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Panel brightness on Intel graphics from Sunrise Point on: the PWM that feeds the
  * backlight sits in the south display registers, BLC_PWM_PCH_CTL2 holding the period and
  * the duty. The firmware has already set it up, so only the duty is touched, and only if

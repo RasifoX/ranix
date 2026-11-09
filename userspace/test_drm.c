@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* DRM/KMS uAPI: /dev/dri/card0 and renderD128 as libdrm, Mesa's GBM and
  * compositors use them. Raw ioctls, no libdrm. Prints OK (or OK when the machine
  * has no DRM device). "-v SECONDS" also runs a visible page-flip animation and

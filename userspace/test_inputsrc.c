@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Input source marking (docs: arastirma/ajan-insan-ozellikleri.md, item 3).
  * Bytes software writes into /dev/input/rawkbd and /dev/input/mice come back
  * through the i8042 like a device's; the kernel must count them as source=injected,

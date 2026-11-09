@@ -1,4 +1,8 @@
 /*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
+/*
  * Ranix thermal guard: keep the package below its trip point without ACPI.
  *
  * Ranix does not run the ACPI thermal zones or the fan yet, so under load the

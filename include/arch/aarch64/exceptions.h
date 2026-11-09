@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #ifndef EXCEPTIONS_H
 #define EXCEPTIONS_H
 #include <uapi/types.h>

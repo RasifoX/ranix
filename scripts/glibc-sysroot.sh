@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # A glibc for build hosts without one (a musl system such as Ranix's own root).
 # The suite needs a stock loader, libc and GNU echo to test the glibc path, and
 # these come from Debian's packages instead of the host.

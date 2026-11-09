@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* MAP_HUGETLB: a 4 MB anonymous region backed by two 2 MB blocks. Writes a
  * pattern across both, forks, and has the child rewrite its copy — exercising
  * the copy-on-write split of a huge block — then confirms the parent's copy is

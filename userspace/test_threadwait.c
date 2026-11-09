@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Children belong to the thread group, not to the thread that forked them: any
  * thread may wait for them, and they outlive the thread. A thread's own exit is no
  * SIGCHLD, and its parent is the group's parent. */

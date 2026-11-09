@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* i915 uAPI on Ranix: GETPARAM, QUERY, GEM create/pwrite/pread/mmap_offset,
  * contexts with an engine map, EXECBUFFER2 (softpin and relocations) running
  * MI_STORE_DWORD on the render engine, GEM_WAIT/BUSY, fences. Raw ioctls, no

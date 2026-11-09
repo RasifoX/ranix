@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 #include <kernel/asess.h>
 #include <kernel/capabilities.h>
 #include <kernel/cgroup.h>

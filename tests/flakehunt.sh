@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2026 RasifoX
+# SPDX-License-Identifier: EUPL-1.2
 # Flake hunter — run the test suite N times and report any test that is not
 # 100% green across all runs. Intermittent (0 < fails < runs) = flake;
 # (fails == runs) = hard failure. This is the systematic replacement for

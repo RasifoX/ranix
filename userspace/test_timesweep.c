@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* Time/clock sweep: monotonic clock never goes backwards, nanosleep actually
  * delays, gettimeofday/time agree, getrandom fills the buffer. First failure or OK. */
 #include <stdio.h>

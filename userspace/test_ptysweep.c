@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pseudo-terminal sweep: open ptmx, find the pts number, open the slave, and
  * move data both ways (master<->slave). Exercises the Unix98 pty path that
  * ssh/tmux/script rely on. First failure or OK. */

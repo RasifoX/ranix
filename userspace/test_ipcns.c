@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* IPC namespace: a POSIX message-queue name created in one IPC namespace is
  * invisible in another. The child unshares CLONE_NEWIPC, so the queue the
  * parent created is absent there and O_CREAT|O_EXCL succeeds. */

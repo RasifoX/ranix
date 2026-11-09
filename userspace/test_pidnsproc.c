@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* pid-namespace procfs view: a process in a new CLONE_NEWPID namespace sees
  * only the tasks of that namespace under /proc, named by their namespace-local
  * pid. The first task is pid 1, and no host process leaks in — so /proc lists

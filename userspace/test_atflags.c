@@ -1,3 +1,7 @@
+/*
+ * SPDX-FileCopyrightText: 2026 RasifoX
+ * SPDX-License-Identifier: EUPL-1.2
+ */
 /* *at() flag/dirfd conformance: fchmodat2 AT_SYMLINK_NOFOLLOW on a link is
  * EOPNOTSUPP and leaves the target alone (a link has no mode, as on Linux), unlinkat AT_REMOVEDIR is rmdir (and rejects files / non-dirs), and a
  * relative path resolves against the dir fd, not the cwd. */
