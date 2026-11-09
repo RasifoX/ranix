@@ -38,7 +38,7 @@ static int sock_at_eof(const socket_t *s)
 {
     if (s->domain == AF_UNIX) return s->unix_peer == NULL || s->unix_rd_eof;
     return s->type == SOCK_STREAM &&
-           (s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
+           (s->rd_shut || s->tcp_state == TCP_CLOSE_WAIT || s->tcp_state == TCP_CLOSED ||
             s->tcp_state == TCP_LAST_ACK   || s->tcp_state == TCP_TIME_WAIT ||
             s->tcp_state == TCP_CLOSING);
 }
@@ -177,7 +177,11 @@ static int sock_poll_vfs(vfs_file_t *file)
         s->poll_out_blocked = 1;
         out = tcp_can_send(s) ? 0x0004 : 0;   /* an ACK may have just gone by */
     }
-    return ((has_data || sock_at_eof(s)) ? 0x0001 : 0) | out;
+    /* the read side is closed (own SHUT_RD, or the peer's FIN or SHUT_WR):
+     * POLLRDHUP, as Linux gives for a stream socket */
+    int eof = sock_at_eof(s);
+    int rdhup = eof && s->type == SOCK_STREAM ? 0x2000 : 0;
+    return ((has_data || eof) ? 0x0001 : 0) | out | rdhup;
 }
 
 /* All of it on a blocking socket, as much as fits otherwise. A buffer the size of
@@ -2378,6 +2382,11 @@ static long sys_shutdown(int fd, int how)
         }
         poll_notify();
     } else if (s && s->type == SOCK_STREAM) {
+        if (how != 1 /* SHUT_WR */) {   /* reads end: queued data stays, then EOF */
+            s->rd_shut = 1;
+            unix_wake_reader(s);
+            poll_notify();
+        }
         if (how != 0 /* SHUT_RD */) tcp_close(s);   /* a FIN says we stopped sending */
     }
     return 0;
