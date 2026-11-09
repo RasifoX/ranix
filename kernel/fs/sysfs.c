@@ -353,6 +353,7 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "backlight") == 0) return sysfs_file_rw(SF_BACKLIGHT, -1);
 	if (strcmp(name, "cstate") == 0) return sysfs_file_rw(SF_CSTATE, -1);
 	if (strcmp(name, "ranix_thermal") == 0) return thermal_sysfs_file();
+	if (strcmp(name, "ranix_ec") == 0) return casper_ec_sysfs_file();
 	for (unsigned i = 0; i < 3; i++)
 		if (strcmp(kernel_files[i].name, name) == 0)
 			return sysfs_file(kernel_files[i].type, -1);

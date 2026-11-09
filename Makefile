@@ -207,7 +207,7 @@ SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c))
     $(wildcard kernel/tty/*.c) \
     drivers/video/fbdev.c \
     drivers/video/backlight.c \
-    $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/thermal/*.c) \
+    $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/thermal/*.c drivers/platform/*.c) \
     drivers/input/input_core.c
 
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)

@@ -1,6 +1,7 @@
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
 #include <kernel/proc.h>
+#include <kernel/errno.h>
 
 static cpu_context_t early_cpu_ctx;
 
@@ -10,6 +11,9 @@ void arch_idle_deep(volatile int *flag, int deep) { (void)deep; arch_idle_halt(f
 void arch_tick_slow(int slow) { (void)slow; }
 int arch_idle_get(void) { return 0; }
 int arch_idle_set(int n) { (void)n; return -22; }
+int  arch_fw_lock(uint32_t timeout_ms) { (void)timeout_ms; return 0; }
+void arch_fw_unlock(void) { }
+int  arch_fw_oem(char oem[7], char table[9]) { oem[0] = table[0] = 0; return -ENODEV; }
 
 void arch_idle_halt(volatile int *flag)
 {
