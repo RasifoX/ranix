@@ -92,10 +92,10 @@ static int hub_attach(usb_dev_t *d, const uint8_t *c, uint32_t total)
 	return 0;
 }
 
-static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint32_t speed)
+/* A new device's place in the tree: root port, hub, route string, and the
+ * transaction translator a full or low speed device behind a high speed hub uses. */
+static void dev_setup(usb_dev_t *d, xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint32_t speed)
 {
-	usb_dev_t *d = dev_alloc();
-	if (!d) return 0;
 	memset(d, 0, sizeof(*d));
 	d->x = x;
 	d->used = 1;
@@ -111,19 +111,16 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 			d->tt_port = parent->speed == 3 ? (uint8_t)hub_port : parent->tt_port;
 		}
 	}
+}
 
+/* Give the slot its contexts and an address, and learn EP0's real packet size.
+ * 0 on success; on failure the caller releases the device. */
+static int dev_address(usb_dev_t *d, int port, uint32_t speed)
+{
+	xhci_t *x = d->x;
+	uint8_t slot = d->slot;
 	/* full speed may be 8 to 64: start from 8 and ask */
 	uint16_t mps0 = (speed >= 4) ? 512 : speed == 3 ? 64 : 8;
-
-	/* enable a slot */
-	uint8_t slot = 0;
-	if (cmd_exec(x, 0, TRB_TYPE(TRB_ENABLE_SLOT), &slot) != CC_SUCCESS || !slot ||
-	    slot > x->maxslots) {
-		kprintf(KERN_ERR "xhci: enable slot failed\n");
-		d->used = 0;
-		return -1;
-	}
-	d->slot = slot;
 
 	/* device context + input context */
 	d->dev_ctx = dma_page(&d->dev_ctx_phys);
@@ -171,6 +168,78 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 				goto fail;
 		}
 	}
+	return 0;
+fail:
+	return -1;
+}
+
+/* The device is a Bulk-Only disk (m): take its endpoints, configure it and
+ * attach the SCSI LUN. 0 on success; on failure the caller releases it. */
+static int disk_attach(usb_dev_t *d, const msc_desc_t *mp, uint8_t cfgval, uint8_t serial_idx)
+{
+	xhci_t *x = d->x;
+	uint8_t slot = d->slot;
+	const msc_desc_t m = *mp;
+	uint32_t *ic = ctx_ctrl(d), *sc = ctx_slot(d);
+	void *dp = buddy_alloc(DATA_ORDER);
+	if (!dp) goto fail;
+	d->data_phys = (uint64_t)dp;
+	d->data = (uint8_t *)PHYS_TO_VIRT(d->data_phys);
+	d->iface = m.iface;
+	d->addr_in = m.ep_in;
+	d->addr_out = m.ep_out;
+	d->mps_in = m.mps_in;
+	d->mps_out = m.mps_out;
+
+	string_serial(d, serial_idx);
+
+	/* SET_CONFIGURATION */
+	if (ctrl_xfer(d, 0x00, 9, cfgval, 0, 0, 0) != 0) {
+		kprintf(KERN_ERR "xhci: set config failed\n");
+		goto fail;
+	}
+
+	/* configure bulk endpoints via CONFIGURE_ENDPOINT */
+	memset(ic, 0, x->ctxsize);
+	int dci_in  = setup_bulk_ep(d, m.ep_in, m.mps_in, m.burst_in, &d->ep_in);
+	int dci_out = setup_bulk_ep(d, m.ep_out, m.mps_out, m.burst_out, &d->ep_out);
+	if (dci_in < 0 || dci_out < 0) goto fail;
+	int maxdci = dci_in > dci_out ? dci_in : dci_out;
+	ic[1] = (1u << 0) | (1u << dci_in) | (1u << dci_out);   /* A0 + the two EPs */
+	sc[0] = (sc[0] & ~(0x1Fu << 27)) | ((uint32_t)maxdci << 27);
+
+	if (cmd_exec(x, d->in_ctx_phys, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)slot << 24), 0)
+	    != CC_SUCCESS) {
+		kprintf(KERN_ERR "xhci: configure ep failed\n");
+		goto fail;
+	}
+	d->dci_in = dci_in;
+	d->dci_out = dci_out;
+
+	if (scsi_attach(d) != 0) goto fail;
+	d->is_disk = 1;
+	return 0;
+fail:
+	return -1;
+}
+
+static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint32_t speed)
+{
+	usb_dev_t *d = dev_alloc();
+	if (!d) return 0;
+	dev_setup(d, x, port, parent, hub_port, speed);
+
+	/* enable a slot */
+	uint8_t slot = 0;
+	if (cmd_exec(x, 0, TRB_TYPE(TRB_ENABLE_SLOT), &slot) != CC_SUCCESS || !slot ||
+	    slot > x->maxslots) {
+		kprintf(KERN_ERR "xhci: enable slot failed\n");
+		d->used = 0;
+		return -1;
+	}
+	d->slot = slot;
+
+	if (dev_address(d, port, speed) != 0) goto fail;
 
 	/* GET_DESCRIPTOR(device, 18) */
 	if (ctrl_xfer(d, 0x80, 6, 0x0100, 0, 18, 1) != 0) {
@@ -222,43 +291,7 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 		if (hid_attach(d, speed) <= 0) goto fail;
 		return 0;
 	}
-	void *dp = buddy_alloc(DATA_ORDER);
-	if (!dp) goto fail;
-	d->data_phys = (uint64_t)dp;
-	d->data = (uint8_t *)PHYS_TO_VIRT(d->data_phys);
-	d->iface = m.iface;
-	d->addr_in = m.ep_in;
-	d->addr_out = m.ep_out;
-	d->mps_in = m.mps_in;
-	d->mps_out = m.mps_out;
-
-	string_serial(d, serial_idx);
-
-	/* SET_CONFIGURATION */
-	if (ctrl_xfer(d, 0x00, 9, cfgval, 0, 0, 0) != 0) {
-		kprintf(KERN_ERR "xhci: set config failed\n");
-		goto fail;
-	}
-
-	/* configure bulk endpoints via CONFIGURE_ENDPOINT */
-	memset(ic, 0, x->ctxsize);
-	int dci_in  = setup_bulk_ep(d, m.ep_in, m.mps_in, m.burst_in, &d->ep_in);
-	int dci_out = setup_bulk_ep(d, m.ep_out, m.mps_out, m.burst_out, &d->ep_out);
-	if (dci_in < 0 || dci_out < 0) goto fail;
-	int maxdci = dci_in > dci_out ? dci_in : dci_out;
-	ic[1] = (1u << 0) | (1u << dci_in) | (1u << dci_out);   /* A0 + the two EPs */
-	sc[0] = (sc[0] & ~(0x1Fu << 27)) | ((uint32_t)maxdci << 27);
-
-	if (cmd_exec(x, d->in_ctx_phys, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)slot << 24), 0)
-	    != CC_SUCCESS) {
-		kprintf(KERN_ERR "xhci: configure ep failed\n");
-		goto fail;
-	}
-	d->dci_in = dci_in;
-	d->dci_out = dci_out;
-
-	if (scsi_attach(d) != 0) goto fail;
-	d->is_disk = 1;
+	if (disk_attach(d, &m, cfgval, serial_idx) != 0) goto fail;
 	return 0;
 
 fail:
