@@ -323,7 +323,7 @@ static long unix_send_wait(socket_t *s, const uint8_t *kb, size_t len, int nonbl
 }
 
 static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
-                        const void *uaddr, uint32_t addrlen);
+                        const void *uaddr, uint32_t addrlen, int fop);
 
 static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
 {
@@ -356,7 +356,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
         return tcp_stream_tx(s, buf, len, file->flags & O_NONBLOCK, 1);
     }
     if (s->type == SOCK_DGRAM && s->remote_port)   /* a connected UDP socket */
-        return sock_sendto(s, file->flags & O_NONBLOCK, buf, len, NULL, 0);
+        return sock_sendto(s, file->flags & O_NONBLOCK, buf, len, NULL, 0, 1);   /* splice/sendfile pass kernel memory */
     return -ENOSYS;
 }
 
@@ -1183,7 +1183,7 @@ static long sendto_udp6(socket_t *s, uint8_t *kb, size_t len, in6_addr_t dst6, u
 
 /* IPv6 raw (ping6): kernel fills in the ICMPv6 checksum, then ipv6_tx.
  * ka: kernel copy of the destination (at least SIN6_LEN_RFC2133), or NULL. */
-static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t *ka)
+static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t *ka, int fop)
 {
     in6_addr_t dst6;
     uint16_t   dst_port6;
@@ -1201,7 +1201,7 @@ static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t 
     if (len > 65487) len = 65487;
     uint8_t *kb = kmalloc(len);
     if (!kb) return -ENOMEM;
-    if (copy_from_user(kb, buf, len) != 0) { kfree(kb); return -EFAULT; }
+    if ((fop ? copy_fop_from_user(kb, buf, len) : copy_from_user(kb, buf, len)) != 0) { kfree(kb); return -EFAULT; }
     /* fail fast if the destination has no route, rather than spinning the
      * resolve loop and returning a misleading ENOSYS */
     if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -EHOSTUNREACH; }
@@ -1276,7 +1276,7 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
 
 /* IPv4 datagram or raw send (also an IPv6 socket that went v4-mapped).
  * ka: kernel copy of the destination, addrlen bytes of it, or NULL. */
-static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const uint8_t *ka, uint32_t addrlen)
+static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const uint8_t *ka, uint32_t addrlen, int fop)
 {
     uint32_t dst_ip; uint16_t dst_port;
     uint16_t dfam = 0;
@@ -1301,7 +1301,7 @@ static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const uint8_t 
     if (len > 65507) len = 65507;
     uint8_t *kbuf = kmalloc(len);
     if (!kbuf) return -ENOMEM;
-    if (copy_from_user(kbuf, buf, len) != 0) { kfree(kbuf); return -EFAULT; }
+    if ((fop ? copy_fop_from_user(kbuf, buf, len) : copy_from_user(kbuf, buf, len)) != 0) { kfree(kbuf); return -EFAULT; }
 
     long r = -38;
     if (s->type == SOCK_DGRAM && s->proto != 1 /* not an ICMP ping socket */) {
@@ -1314,7 +1314,7 @@ static long sendto_ipv4(socket_t *s, const void *buf, size_t len, const uint8_t 
 }
 
 static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
-                        const void *uaddr, uint32_t addrlen)
+                        const void *uaddr, uint32_t addrlen, int fop)
 {
     uint8_t ka[SOCK_ADDR_MAX];
     const uint8_t *kaddr = NULL;
@@ -1335,7 +1335,7 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         return sendto_unix(s, nonblock, buf, len);
     }
     if (s->type == SOCK_STREAM)   /* the connected remote; a dst in uaddr means nothing */
-        return tcp_stream_tx(s, buf, len, nonblock, 0);
+        return tcp_stream_tx(s, buf, len, nonblock, fop);
     if (!s->dev) return -EBADF;
 
     if (s->domain == AF_INET6 && kaddr && addrlen < SIN6_LEN_RFC2133) return -EINVAL;
@@ -1344,10 +1344,10 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         if (e) return e;
     }
     if (s->domain == AF_INET6) {
-        return sendto_ipv6(s, buf, len, kaddr);
+        return sendto_ipv6(s, buf, len, kaddr, fop);
     }
 
-    return sendto_ipv4(s, buf, len, kaddr, addrlen);
+    return sendto_ipv4(s, buf, len, kaddr, addrlen, fop);
 }
 
 static long sys_sendto(int fd, const void *buf, size_t len, int flags,
@@ -1357,7 +1357,7 @@ static long sys_sendto(int fd, const void *buf, size_t len, int flags,
     if (!s) return sock_fd_err(fd);
     /* the netlink path copies through the kernel-or-user fop helpers */
     if (!access_ok(buf, len)) return -EFAULT;
-    return sock_sendto(s, sock_nonblocking(fd, flags), buf, len, uaddr, addrlen);
+    return sock_sendto(s, sock_nonblocking(fd, flags), buf, len, uaddr, addrlen, 0);
 }
 
 /* klen: kernel copy of the caller's name length, NULL when no name is wanted */
