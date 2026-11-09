@@ -509,9 +509,25 @@ void sched_bsp_wake(void);                       /* from the BSP's idle loop */
 /* proc.c */
 int  oom_victim_pending(void);
 void vfork_release(process_t *p);
+/* wait4/waitid options (Linux values; WSTOPPED is WUNTRACED) */
+#define WNOHANG    1
+#define WUNTRACED  2
+#define WEXITED    4
+#define WCONTINUED 8
+#define WNOWAIT    0x01000000   /* report, but leave the child waitable */
+/* what a wait reports about one child, copied under the scheduler lock so a
+ * WNOWAIT waiter never reads a child another waiter has reaped */
+typedef struct {
+	int   status;   /* the wait4 status word */
+	int   nr;       /* its pid as the waiter's pid namespace numbers it */
+	uid_t uid;      /* its real uid (waitid si_uid) */
+	int   trapped;  /* a ptrace stop (waitid CLD_TRAPPED), not a job-control one */
+} wait_snap_t;
 void proc_find_zombie_or_sleep(pid_t ppid, process_t *parent, int will_sleep, int flags,
-                               process_t **out_child, int *out_any_alive, int *out_event);
-int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags);
+                               process_t **out_child, int *out_any_alive, int *out_event,
+                               wait_snap_t *snap);
+int  proc_check_or_sleep(process_t *child, process_t *parent, int will_sleep, int flags,
+                         wait_snap_t *snap);
 
 /* futexes (sys/syscall_proc.c) and POSIX timers (sys/syscall_timer.c) */
 void futex_wake_addr(uint32_t *uaddr);

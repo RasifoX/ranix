@@ -2092,7 +2092,6 @@ static long sys_pipe2(int *pipefd, int flags)
 	return 0;
 }
 
-#define WNOHANG 1
 
 
 /* wait4 rusage: the reaped child's CPU time, including descendants it waited
@@ -2111,8 +2110,10 @@ static void fill_wait_rusage(void *urusage, process_t *child)
 	copy_to_user(urusage, r, sizeof(r));
 }
 
-/* status is a kernel int; the syscall entries below copy it out. */
-static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
+/* One wait: ws gets the status word, pid number and uid of the child it
+ * reports (wait_snap_t). flags: WNOHANG, WUNTRACED, WCONTINUED, WEXITED (an
+ * exit counts only with it) and WNOWAIT (report, reap nothing). */
+static long do_waitpid(pid_t pid, wait_snap_t *ws, int flags, void *rusage)
 {
 	process_t *p = task_current();
 	int wnohang  = (flags & WNOHANG) != 0;
@@ -2121,38 +2122,21 @@ static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
 		while (1) {
 			process_t *child = NULL;
 			int any_alive = 0, event = 0;
-			proc_find_zombie_or_sleep(p->tgid, p, !wnohang, flags, &child, &any_alive, &event);
-			if (child && event == 1) {
-				int st = child->killed_by_sig
-				       ? (child->exit_code & 0x7F)
-				       : (child->exit_code & 0xFF) << 8;
-				int v = task_pid_nr_ns(child, current_pid_ns());
-				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
+			proc_find_zombie_or_sleep(p->tgid, p, !wnohang, flags, &child, &any_alive, &event, ws);
+			if (child && event == 1 && !(flags & WNOWAIT)) {
 				fill_wait_rusage(rusage, child);
 				if (child->pid == child->tgid && child->ppid != p->tgid) {
 					/* a tracee that is someone else's child: they reap it */
 					child->tracer = 0;
 					child->reaped = 0;
 					proc_wake_waiters(child->ppid);
-					*status = st;
-					return (long)result;
+					return (long)ws->nr;
 				}
 				proc_reap(child);
-				*status = st;
-				return (long)result;
+				return (long)ws->nr;
 			}
-			if (child && event == 5) {                   /* a tracee's ptrace stop */
-				int v = task_pid_nr_ns(child, current_pid_ns());
-				int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5;
-				*status = (ss << 8) | 0x7f;
-				return (long)(v ? v : (int)child->pid);
-			}
-			if (child && (event == 3 || event == 4)) {   /* stopped / continued */
-				int v = task_pid_nr_ns(child, current_pid_ns());
-				pid_t result = v ? (pid_t)v : (pid_t)child->pid;
-				*status = (event == 3) ? ((child->job_stop_sig << 8) | 0x7f) : 0xffff;
-				return (long)result;
-			}
+			/* a stop, a continue, a ptrace stop, or an exit left waitable */
+			if (child) return (long)ws->nr;
 			if (!any_alive) return -ECHILD;
 			if (wnohang)    return 0;
 			arch_yield();
@@ -2165,48 +2149,35 @@ static long do_waitpid(pid_t pid, int *status, int flags, void *rusage)
 	if (!child) return -ECHILD;
 
 	while (1) {
-		int r = proc_check_or_sleep(child, p, !wnohang, flags);
-		if (r == 1) break;  /* zombie */
-		if (r == 2) {       /* ptrace stop — ptrace_stop_reported already set */
-			int ss = child->ptrace_stop_sig ? child->ptrace_stop_sig : 5; /* SIGTRAP */
-			*status = (ss << 8) | 0x7f; /* WIFSTOPPED */
-			return (long)pid;
-		}
-		if (r == 3) {       /* job-control stop (WUNTRACED) */
-			*status = (child->job_stop_sig << 8) | 0x7f;
-			return (long)pid;
-		}
-		if (r == 4) {       /* continued (WCONTINUED) */
-			*status = 0xffff;
-			return (long)pid;
-		}
+		int r = proc_check_or_sleep(child, p, !wnohang, flags, ws);
+		if (r < 0) return -ECHILD;   /* exited, and the caller did not ask for exits */
+		if (r == 1) break;           /* zombie */
+		if (r) return (long)pid;     /* ptrace stop, job stop, continued */
 		if (wnohang) return 0;
 		arch_yield();
 		p->in_wait = 0;
 		if (task_has_actionable_signal()) return -EINTR;
 	}
 
-	int st = child->killed_by_sig
-	       ? (child->exit_code & 0x7F)
-	       : (child->exit_code & 0xFF) << 8;
+	if (flags & WNOWAIT) return (long)pid;
 	fill_wait_rusage(rusage, child);
 	if (child->pid == child->tgid && child->ppid != p->tgid) {
 		child->tracer = 0;
 		proc_wake_waiters(child->ppid);
-		*status = st;
 		return (long)pid;
 	}
 	child->reaped = 1;
 	proc_reap(child);
-	*status = st;
 	return (long)pid;
 }
 
+/* wait4: exits always count; WEXITED and WNOWAIT are waitid's (Linux EINVAL) */
 static long sys_waitpid(pid_t pid, int *ustatus, int flags, void *rusage)
 {
-	int st = 0;
-	long r = do_waitpid(pid, &st, flags, rusage);
-	if (r > 0 && ustatus && put_user(st, ustatus) != 0) return -EFAULT;
+	if (flags & (WEXITED | WNOWAIT)) return -EINVAL;
+	wait_snap_t ws = { 0 };
+	long r = do_waitpid(pid, &ws, flags | WEXITED, rusage);
+	if (r > 0 && ustatus && put_user(ws.status, ustatus) != 0) return -EFAULT;
 	return r;
 }
 

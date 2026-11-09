@@ -867,22 +867,52 @@ static long sys_clock_nanosleep(int clkid, int flags,
 	return sleep_for(&k, rem);
 }
 
+#define CLD_EXITED    1
+#define CLD_KILLED    2
+#define CLD_DUMPED    3
+#define CLD_TRAPPED   4
+#define CLD_STOPPED   5
+#define CLD_CONTINUED 6
+#define WAIT_LINUX_ONLY 0xe0000000   /* __WNOTHREAD, __WALL, __WCLONE: accepted, no effect */
+
+/* the wait4 status word as waitid's si_code and si_status */
+static void waitid_code(const wait_snap_t *ws, int *code, int *status)
+{
+	int st = ws->status;
+	if (st == 0xffff) { *code = CLD_CONTINUED; *status = SIGCONT; }
+	else if ((st & 0xff) == 0x7f) {
+		*status = (st >> 8) & 0xff;
+		*code = ws->trapped ? CLD_TRAPPED : CLD_STOPPED;
+	}
+	else if (st & 0x7f) { *code = (st & 0x80) ? CLD_DUMPED : CLD_KILLED; *status = st & 0x7f; }
+	else { *code = CLD_EXITED; *status = (st >> 8) & 0xff; }
+}
+
+/* waitid(2): Linux kernel_waitid. Options need at least one of WEXITED,
+ * WSTOPPED, WCONTINUED; WNOWAIT leaves the child waitable. The siginfo gets
+ * si_code CLD_*, si_pid, si_uid (the child's real uid) and si_status. */
 static long sys_waitid(int idtype, int id, void *infop, int options, void *rusage)
 {
 	if (idtype < 0 || idtype > 2) return -EINVAL;
+	if (options & ~(WNOHANG | WNOWAIT | WEXITED | WUNTRACED | WCONTINUED | WAIT_LINUX_ONLY))
+		return -EINVAL;
+	if (!(options & (WEXITED | WUNTRACED | WCONTINUED))) return -EINVAL;
 	pid_t wpid = (idtype == 0) ? -1 : (idtype == 1) ? (pid_t)id : -(pid_t)id;
-	int status = 0;
-	long r = do_waitpid(wpid, &status, options, rusage);
+	wait_snap_t ws = { 0 };
+	long r = do_waitpid(wpid, &ws, options & ~WAIT_LINUX_ONLY, rusage);
 	if (r < 0) return r;
 	if (infop) {
 		/* siginfo_t for SIGCHLD; si_pid stays 0 when WNOHANG found nothing */
 		int32_t si[8];
 		memset(si, 0, sizeof(si));
 		if (r) {
+			int code, status;
+			waitid_code(&ws, &code, &status);
 			si[0] = SIGCHLD;
+			si[2] = code;
 			si[4] = (int32_t)r;
-			si[2] = (status & 0x7f) ? 2 /* CLD_KILLED */ : 1 /* CLD_EXITED */;
-			si[6] = (status & 0x7f) ? (status & 0x7f) : ((status >> 8) & 0xff);
+			si[5] = (int32_t)from_kuid(current_user_ns(), ws.uid);
+			si[6] = status;
 		}
 		if (copy_to_user(infop, si, sizeof(si)) != 0) return -EFAULT;
 	}
