@@ -168,6 +168,8 @@ typedef struct socket {
     uint32_t  snd_timeo;        /* SO_SNDTIMEO in ticks, 0 = block forever */
     int       so_error;         /* pending error, read-and-cleared by SO_ERROR */
     uint8_t   so_passcred;      /* SO_PASSCRED as set; read back by getsockopt (crashpad checks it) */
+    uint8_t   so_oobinline, so_broadcast, so_dontroute;   /* set, read back, no effect here */
+    int       so_priority;
     /* An AF_INET6 socket speaking IPv4 to ::ffff:a.b.c.d (RFC 4291 mapped):
      * it runs as AF_INET, and names read back as mapped IPv6. Java opens every
      * socket as IPv6 (Gradle's daemon, the JDT language server). */

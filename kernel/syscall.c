@@ -861,7 +861,7 @@ static int syscall_process(arch_context_t *ctx, long n, const long *a, long *ret
 	case SYS_ARCH_PROCESS_VM_WRITEV:
 		*ret = sys_process_vm((pid_t)a[0], (const iovec_t*)a[1], (unsigned long)a[2],
 		                     (const iovec_t*)a[3], (unsigned long)a[4], (unsigned long)a[5], 1); break;
-	case SYS_ARCH_FADVISE64: *ret = 0; break;   /* hint only — safe to ignore */
+	case SYS_ARCH_FADVISE64: *ret = sys_fadvise64((int)a[0], (int64_t)a[1], (int64_t)a[2], (int)a[3]); break;
 	default:
 		return 0;
 	}

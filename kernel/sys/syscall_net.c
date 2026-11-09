@@ -2034,6 +2034,41 @@ static uint32_t tv_to_ticks(const struct k_timeval *tv)
 	                  (uint64_t)tv->tv_usec * TIMER_HZ / 1000000);
 }
 
+/* A TCP or UDP socket: the one whose levels are checked as Linux does. Raw,
+ * ICMP and packet sockets keep their own levels (SOL_RAW, ICMPV6, ...),
+ * accepted as before. */
+static int sockopt_strict(socket_t *s)
+{
+	if (s->domain != AF_INET && s->domain != AF_INET6) return 0;
+	return s->type == SOCK_STREAM || (s->type == SOCK_DGRAM && (s->proto == 0 || s->proto == 17));
+}
+
+/* Levels an inet socket answers to: SOL_SOCKET, IP (and IPv6 on an IPv6
+ * socket), and its own protocol, TCP for a stream, UDP for a datagram. */
+static int sockopt_level_ok(socket_t *s, int lv)
+{
+	if (lv == SO_SOL_SOCKET || lv == 0 /* IPPROTO_IP */) return 1;
+	if (lv == 41 /* IPPROTO_IPV6 */) return s->domain == AF_INET6;
+	if (lv == SO_IPPROTO_TCP) return s->type == SOCK_STREAM;
+	if (lv == 17 /* IPPROTO_UDP */) return s->type == SOCK_DGRAM;
+	return 0;
+}
+
+/* An option name that exists at its level: Linux's numbering, the ones the
+ * switch below keeps and those accepted with no effect. */
+static int sockopt_known(socket_t *s, int lv, int opt)
+{
+	(void)s;
+	switch (lv) {
+	case SO_SOL_SOCKET:  return opt >= 1 && opt <= 80;
+	case 0:              return opt >= 1 && opt <= 52;      /* IP_TOS .. IP_LOCAL_PORT_RANGE */
+	case 41:             return opt >= 1 && opt <= 80;      /* IPV6_* */
+	case SO_IPPROTO_TCP: return opt == SO_TCP_NODELAY || (opt >= 4 && opt <= 6);
+	case 17:             return opt == 1 || (opt >= 100 && opt <= 104);   /* UDP_CORK, UDP_ENCAP..UDP_GRO */
+	}
+	return 0;
+}
+
 static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t len)
 {
 	socket_t *s = fd_to_sock(fd);
@@ -2047,9 +2082,17 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		return nf_ctl_set(line, len);
 	}
 
+	/* the level is the protocol's to answer first: AF_UNIX knows only
+	 * SOL_SOCKET; inet knows its own and IP's, and nothing else (Linux) */
+	if (lv != SO_SOL_SOCKET && s->domain == AF_UNIX) return -EOPNOTSUPP;
+	if (lv != SO_SOL_SOCKET && sockopt_strict(s) && !sockopt_level_ok(s, lv)) return -ENOPROTOOPT;
+
+	/* an int option's value is an int: shorter is EINVAL, unreadable EFAULT */
 	int iv = 0;
-	if (val && len >= sizeof(int)) {
-		if (copy_from_user(&iv, val, sizeof(int)) != 0) return -EFAULT;
+	int timeval_opt = lv == SO_SOL_SOCKET && (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO);
+	if (!timeval_opt && sockopt_known(s, lv, opt)) {
+		if (len < sizeof(int)) return -EINVAL;
+		if (!val || copy_from_user(&iv, val, sizeof(int)) != 0) return -EFAULT;
 	}
 
 	if (lv == SO_SOL_SOCKET) {
@@ -2059,11 +2102,16 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		case SO_KEEPALIVE:  s->so_keepalive = iv ? 1 : 0; return 0;
 		case SO_RCVBUF:     s->so_rcvbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
 		case SO_SNDBUF:     s->so_sndbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
+		case 32: case 33:   /* SO_SNDBUFFORCE, SO_RCVBUFFORCE: past the limits, for the admin */
+			if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
+			if (opt == 32) s->so_sndbuf = (uint32_t)(iv < 0 ? 0 : iv);
+			else           s->so_rcvbuf = (uint32_t)(iv < 0 ? 0 : iv);
+			return 0;
 		case SO_RCVTIMEO:
 		case SO_SNDTIMEO: {
 			struct k_timeval tv = {0, 0};
-			if (val && len >= sizeof(tv) && copy_from_user(&tv, val, sizeof(tv)) != 0)
-				return -EFAULT;
+			if (len < sizeof(tv)) return -EINVAL;
+			if (!val || copy_from_user(&tv, val, sizeof(tv)) != 0) return -EFAULT;
 			uint32_t t = tv_to_ticks(&tv);
 			if (opt == SO_RCVTIMEO) s->rcv_timeo = t; else s->snd_timeo = t;
 			return 0;
@@ -2071,9 +2119,11 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		case SO_ERROR: case SO_TYPE: case SO_ACCEPTCONN:
 			return -ENOPROTOOPT;   /* read-only */
 		case SO_PASSCRED:   s->so_passcred = iv ? 1 : 0; return 0;
-		case SO_DONTROUTE: case SO_BROADCAST: case SO_LINGER:
-		case SO_PRIORITY:  case SO_BSDCOMPAT:
-		case SO_OOBINLINE:
+		case SO_OOBINLINE:  s->so_oobinline = iv ? 1 : 0; return 0;   /* kept, no effect here */
+		case SO_BROADCAST:  s->so_broadcast = iv ? 1 : 0; return 0;
+		case SO_DONTROUTE:  s->so_dontroute = iv ? 1 : 0; return 0;
+		case SO_PRIORITY:   s->so_priority = iv; return 0;
+		case SO_LINGER: case SO_BSDCOMPAT:
 			return 0;     /* known but no behavioral effect here */
 		default:
 			return -ENOPROTOOPT;
@@ -2090,9 +2140,9 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		s->v6only = iv ? 1 : 0;
 		return 0;
 	}
-	/* IPPROTO_IP / IPPROTO_IPV6 and the like: accept known multicast/ttl knobs
-	 * as no-ops, reject the genuinely unknown. */
-	return 0;
+	/* IP, IPv6 and UDP options in their ranges (ttl, multicast, pktinfo,
+	 * UDP_CORK..UDP_GRO): accepted with no effect; the rest is unknown */
+	return sockopt_known(s, lv, opt) || !sockopt_strict(s) ? 0 : -ENOPROTOOPT;
 }
 
 static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
@@ -2103,6 +2153,12 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 
 	uint32_t ulen;
 	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -EFAULT;
+	if ((int32_t)ulen < 0) return -EINVAL;
+	/* a level the socket's protocol does not know is EOPNOTSUPP here (it is
+	 * ENOPROTOOPT for setsockopt: Linux's own asymmetry) */
+	if (lv != SO_SOL_SOCKET && lv != SOL_RANIX_FILTER &&
+	    (s->domain == AF_UNIX || (sockopt_strict(s) && !sockopt_level_ok(s, lv))))
+		return -EOPNOTSUPP;
 
 	if (lv == SO_IPPROTO_TCP && opt == SO_TCP_INFO) {
 		if (s->type != SOCK_STREAM) return -ENOPROTOOPT;
@@ -2164,6 +2220,10 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		case SO_REUSEPORT:  out = s->so_reuseport; break;
 		case SO_KEEPALIVE:  out = s->so_keepalive; break;
 		case SO_PASSCRED:   out = s->so_passcred; break;
+		case SO_OOBINLINE:  out = s->so_oobinline; break;
+		case SO_BROADCAST:  out = s->so_broadcast; break;
+		case SO_DONTROUTE:  out = s->so_dontroute; break;
+		case SO_PRIORITY:   out = s->so_priority; break;
 		default:            return -ENOPROTOOPT;
 		}
 	} else if (lv == SO_IPPROTO_TCP) {

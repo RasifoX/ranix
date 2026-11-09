@@ -608,6 +608,9 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	child->sid       = parent->sid;
 	child->state     = PROC_READY;
 	copy_creds(child, parent);   /* pdeathsig is NOT inherited */
+	/* the child's slack, current and default, is the parent's current one */
+	child->timer_slack = child->timer_slack_default = parent->timer_slack ? parent->timer_slack
+	                                                : parent->timer_slack_default;
 	child->mlock_future = parent->mlock_future;
 	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
 	child->reaped    = 0;
