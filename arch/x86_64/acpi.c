@@ -9,6 +9,8 @@
 #include <kernel/hwdiag.h>
 #include <kernel/time.h>
 #include <asm/cpu.h>
+#include <kernel/hal.h>
+#include <kernel/errno.h>
 
 /* ── CMOS / RTC ("BIOS clock") → Unix epoch seconds ───────────── */
 static uint8_t cmos_read(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
@@ -464,6 +466,85 @@ void acpi_reset(void)
 		*(volatile uint8_t *)PHYS_TO_VIRT(fadt_reset_addr) = fadt_reset_val;
 }
 
+/* ── Firmware: the global lock and the DSDT's name ─────────────────────────
+ * AML fields declared "Lock" are shared with firmware (SMM): whoever touches them
+ * holds the global lock, a dword in the FACS (bit 1 owned, bit 0 pending). Ranix
+ * takes it only when it is free and never sets pending, so it needs no SCI. If
+ * firmware set pending while Ranix held the lock, GBL_RLS in PM1 control tells
+ * it the lock is free again (ACPI 6.4, 5.2.10.1). */
+#define FADT_FIRMWARE_CTRL   36
+#define FADT_PM1A_CNT        64
+#define FADT_X_FIRMWARE_CTRL 132
+#define FACS_GLOBAL_LOCK     16
+#define GL_PENDING           1u
+#define GL_OWNED             2u
+#define PM1_GBL_RLS          0x0004u
+#define PM1_SLP_EN           0x2000u
+
+static volatile uint32_t *fw_glock;
+static uint16_t fw_pm1a_cnt;
+static char fw_oem[7], fw_table[9];
+
+static void fw_init(struct rsdp *r)
+{
+	uint8_t *f = find_table(r, "FACP");
+	if (!f) return;
+	uint32_t len = ((struct sdt_header *)f)->length, fc32 = 0, pm1 = 0, dsdt = 0;
+	uint64_t fc = 0;
+	memcpy(&fc32, f + FADT_FIRMWARE_CTRL, 4);
+	memcpy(&pm1, f + FADT_PM1A_CNT, 4);
+	memcpy(&dsdt, f + 40, 4);
+	if (len >= FADT_X_FIRMWARE_CTRL + 8) memcpy(&fc, f + FADT_X_FIRMWARE_CTRL, 8);
+	if (!fc) fc = fc32;
+	if (fc && pm1 && pm1 <= 0xFFFF) {
+		uint8_t *facs = (uint8_t *)PHYS_TO_VIRT(fc);
+		uint32_t flen;
+		memcpy(&flen, facs + 4, 4);
+		if (!memcmp(facs, "FACS", 4) && flen >= FACS_GLOBAL_LOCK + 4) {
+			fw_glock = (volatile uint32_t *)(facs + FACS_GLOBAL_LOCK);
+			fw_pm1a_cnt = (uint16_t)pm1;
+		}
+	}
+	if (dsdt) {
+		struct sdt_header *h = (struct sdt_header *)PHYS_TO_VIRT((uint64_t)dsdt);
+		if (!memcmp(h->signature, "DSDT", 4)) {
+			memcpy(fw_oem, h->oemid, 6);
+			memcpy(fw_table, h->oem_table_id, 8);
+		}
+	}
+}
+
+int arch_fw_lock(uint32_t timeout_ms)
+{
+	if (!fw_glock) return 0;
+	uint64_t until = kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
+	for (;;) {
+		uint32_t old = *fw_glock;
+		if (!(old & GL_OWNED) &&
+		    __sync_bool_compare_and_swap(fw_glock, old, (old & ~GL_PENDING) | GL_OWNED))
+			return 0;
+		if (kernel_ticks >= until) return -EBUSY;
+		task_sleep_until(kernel_ticks + 1);
+	}
+}
+
+void arch_fw_unlock(void)
+{
+	if (!fw_glock) return;
+	uint32_t old;
+	do old = *fw_glock;
+	while (!__sync_bool_compare_and_swap(fw_glock, old, old & ~(GL_OWNED | GL_PENDING)));
+	if (old & GL_PENDING)
+		outw_port(fw_pm1a_cnt, (uint16_t)((inw_port(fw_pm1a_cnt) & ~PM1_SLP_EN) | PM1_GBL_RLS));
+}
+
+int arch_fw_oem(char oem[7], char table[9])
+{
+	memcpy(oem, fw_oem, 7);
+	memcpy(table, fw_table, 9);
+	return fw_oem[0] ? 0 : -ENODEV;
+}
+
 /* Returns the number of enabled CPUs from the ACPI MADT, 0 if no MADT. */
 int acpi_detect_cpus(void)
 {
@@ -475,6 +556,7 @@ int acpi_detect_cpus(void)
 	hpet_init_from(r);   /* independent of the MADT */
 	fadt_reset_init(r);
 	s5_init(r);
+	fw_init(r);
 
 	struct madt *m = find_table(r, "APIC");
 	if (!m) return 0;

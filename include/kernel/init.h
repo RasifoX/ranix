@@ -16,6 +16,7 @@ void initrd_init(void);
 void fbdev_init(void);                           /* /dev/fb0 */
 void drm_init(void);                             /* /dev/dri: KMS on the firmware's mode */
 void thermal_guard_init(void);                   /* package temperature limit */
+void casper_ec_init(void);                       /* Casper EC "OS present" flags, off by default */
 void rescue_init(void);                          /* udp rescue channel + /dev/rescue */
 void claim_init(void);                           /* /dev/claim: visible resource claims */
 void pty_init(void);

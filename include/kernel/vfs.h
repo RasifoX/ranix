@@ -463,5 +463,6 @@ void hugetlbfs_register(void);
 /* sysfs subtrees that drivers provide */
 vfs_inode_t *drm_sysfs_root(const char *where);   /* drivers/gpu/drm/drm_sysfs.c */
 vfs_inode_t *thermal_sysfs_file(void);            /* drivers/thermal/thermal_guard.c */
+vfs_inode_t *casper_ec_sysfs_file(void);          /* drivers/platform/casper_ec_node.c */
 
 #endif

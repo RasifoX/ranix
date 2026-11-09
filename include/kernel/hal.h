@@ -148,4 +148,13 @@ static inline void reg_write32(uint64_t addr, uint32_t val) {
 int  arch_idle_get(void);
 int  arch_idle_set(int v);
 
+/* Firmware the kernel shares hardware with, as the ACPI tables describe it (x86_64
+ * acpi.c; aarch64 has none). arch_fw_lock takes the global lock in the FACS, the
+ * one AML takes around every "Lock" field: 0 once held or when the platform has
+ * no such lock, -EBUSY when firmware kept it for timeout_ms. arch_fw_oem copies
+ * the DSDT's OEM ID and table ID (NUL-terminated); -ENODEV without one. */
+int  arch_fw_lock(uint32_t timeout_ms);
+void arch_fw_unlock(void);
+int  arch_fw_oem(char oem[7], char table[9]);
+
 #endif
