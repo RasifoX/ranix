@@ -1256,6 +1256,129 @@ static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 
 struct sock_filter { uint16_t code; uint8_t jt, jf; uint32_t k; };
 
+/* Classic BPF as seccomp takes it: exactly Linux's seccomp_check_filter list.
+ * seccomp_check (install) and seccomp_run_filter (kernel/syscall.c) both use
+ * these names, so the two lists cannot drift apart. */
+#define BPF_CLASS(c)    ((c) & 0x07)
+#define BPF_OP(c)       ((c) & 0xf0)
+#define BPF_X           0x08            /* ALU/JMP operand: X instead of k */
+#define BPF_CL_ALU      0x04
+#define BPF_CL_JMP      0x05
+#define BPF_LD_IMM      0x00
+#define BPF_LDX_IMM     0x01
+#define BPF_ST          0x02
+#define BPF_STX         0x03
+#define BPF_RET_K       0x06
+#define BPF_TAX         0x07
+#define BPF_RET_A       0x16
+#define BPF_LD_W_ABS    0x20
+#define BPF_LD_MEM      0x60
+#define BPF_LDX_MEM     0x61
+#define BPF_LD_W_LEN    0x80
+#define BPF_LDX_W_LEN   0x81
+#define BPF_TXA         0x87
+#define BPF_ADD 0x00
+#define BPF_SUB 0x10
+#define BPF_MUL 0x20
+#define BPF_DIV 0x30
+#define BPF_OR  0x40
+#define BPF_AND 0x50
+#define BPF_LSH 0x60
+#define BPF_RSH 0x70
+#define BPF_NEG 0x80
+#define BPF_XOR 0xa0
+#define BPF_JA   0x00
+#define BPF_JEQ  0x10
+#define BPF_JGT  0x20
+#define BPF_JGE  0x30
+#define BPF_JSET 0x40
+#define BPF_MEMWORDS    16              /* scratch cells M[0..15] */
+#define SECCOMP_DATA_SIZE 64            /* sizeof(struct seccomp_data) */
+
+/* An instruction seccomp allows at all (operands are checked by the caller). */
+static int seccomp_code_ok(uint16_t c)
+{
+	switch (BPF_CLASS(c)) {
+	case BPF_CL_ALU:
+		if (c == (BPF_CL_ALU | BPF_NEG)) return 1;
+		if (c & ~(0xf0 | BPF_X | 0x07)) return 0;
+		switch (BPF_OP(c)) {
+		case BPF_ADD: case BPF_SUB: case BPF_MUL: case BPF_DIV: case BPF_OR:
+		case BPF_AND: case BPF_LSH: case BPF_RSH: case BPF_XOR: return 1;
+		}
+		return 0;
+	case BPF_CL_JMP:
+		if (c == (BPF_CL_JMP | BPF_JA)) return 1;
+		if (c & ~(0xf0 | BPF_X | 0x07)) return 0;
+		switch (BPF_OP(c)) {
+		case BPF_JEQ: case BPF_JGT: case BPF_JGE: case BPF_JSET: return 1;
+		}
+		return 0;
+	}
+	switch (c) {
+	case BPF_LD_IMM: case BPF_LDX_IMM: case BPF_ST: case BPF_STX: case BPF_RET_K:
+	case BPF_RET_A: case BPF_TAX: case BPF_TXA: case BPF_LD_W_ABS: case BPF_LD_MEM:
+	case BPF_LDX_MEM: case BPF_LD_W_LEN: case BPF_LDX_W_LEN:
+		return 1;
+	}
+	return 0;
+}
+
+/* Linux check_load_and_stores: a scratch cell is read only after every path
+ * to the read has stored it. One bit per cell, carried forward; a jump target
+ * keeps only the cells valid on all edges into it. */
+static long seccomp_check_mem(const struct sock_filter *f, unsigned len)
+{
+	uint16_t *masks = kmalloc((size_t)len * sizeof(*masks));
+	if (!masks) return -ENOMEM;
+	memset(masks, 0xff, (size_t)len * sizeof(*masks));
+	uint16_t valid = 0;
+	long rc = 0;
+	for (unsigned pc = 0; pc < len; pc++) {
+		const struct sock_filter *i = &f[pc];
+		valid &= masks[pc];
+		if (i->code == BPF_ST || i->code == BPF_STX) {
+			valid |= (uint16_t)(1u << i->k);
+		} else if (i->code == BPF_LD_MEM || i->code == BPF_LDX_MEM) {
+			if (!(valid & (1u << i->k))) { rc = -EINVAL; goto out; }
+		} else if (i->code == (BPF_CL_JMP | BPF_JA)) {
+			masks[pc + 1 + i->k] &= valid;
+			valid = 0xffff;
+		} else if (BPF_CLASS(i->code) == BPF_CL_JMP) {
+			masks[pc + 1 + i->jt] &= valid;
+			masks[pc + 1 + i->jf] &= valid;
+			valid = 0xffff;
+		}
+	}
+out:
+	kfree(masks);
+	return rc;
+}
+
+/* Refuse at install what Linux refuses (bpf_check_classic, then
+ * seccomp_check_filter): EINVAL rather than a program that dies, loops or
+ * reads outside seccomp_data when a syscall runs it. */
+static long seccomp_check(const struct sock_filter *f, unsigned len)
+{
+	for (unsigned pc = 0; pc < len; pc++) {
+		const struct sock_filter *i = &f[pc];
+		uint16_t c = i->code;
+		if (!seccomp_code_ok(c)) return -EINVAL;
+		if (c == BPF_LD_W_ABS && (i->k >= SECCOMP_DATA_SIZE || (i->k & 3))) return -EINVAL;
+		if ((c == BPF_ST || c == BPF_STX || c == BPF_LD_MEM || c == BPF_LDX_MEM) &&
+		    i->k >= BPF_MEMWORDS) return -EINVAL;
+		if (c == (BPF_CL_ALU | BPF_DIV) && i->k == 0) return -EINVAL;
+		if ((c == (BPF_CL_ALU | BPF_LSH) || c == (BPF_CL_ALU | BPF_RSH)) && i->k >= 32) return -EINVAL;
+		if (c == (BPF_CL_JMP | BPF_JA)) {
+			if (i->k >= len - pc - 1) return -EINVAL;
+		} else if (BPF_CLASS(c) == BPF_CL_JMP) {
+			if (pc + i->jt + 1 >= len || pc + i->jf + 1 >= len) return -EINVAL;
+		}
+	}
+	if (f[len - 1].code != BPF_RET_K && f[len - 1].code != BPF_RET_A) return -EINVAL;
+	return seccomp_check_mem(f, len);
+}
+
 /* A chain, newest first. A node never changes once installed, so forks and
  * threads share it; each task holds one reference, to its newest node. */
 struct seccomp_filter {
@@ -1343,6 +1466,8 @@ static long seccomp_install(process_t *p, uint64_t fprog_uptr, unsigned flags)
 	struct seccomp_filter *flt = kmalloc(sizeof(*flt) + sz);
 	if (!flt) return -ENOMEM;
 	if (copy_from_user(flt->insns, (void *)(uintptr_t)fp.filter, sz) != 0) { kfree(flt); return -EFAULT; }
+	long bad = seccomp_check(flt->insns, fp.len);
+	if (bad) { kfree(flt); return bad; }
 	flt->refs     = 1;
 	flt->len      = fp.len;
 	flt->path_len = path_len;

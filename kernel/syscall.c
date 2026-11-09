@@ -317,6 +317,7 @@ static int syscall_restartable(long n)
  * Runs the installed classic-BPF programs over a seccomp_data record; the
  * action they return (SECCOMP_RET_*, with its data) is applied in syscall_gate. */
 struct seccomp_data { uint32_t nr; uint32_t arch; uint64_t instruction_pointer; uint64_t args[6]; };
+_Static_assert(sizeof(struct seccomp_data) == SECCOMP_DATA_SIZE, "seccomp_check bounds loads by this");
 
 #if defined(__aarch64__)
 #define SECCOMP_AUDIT_ARCH 0xc00000b7u   /* AUDIT_ARCH_AARCH64 */
@@ -356,27 +357,67 @@ static int seccomp_load(const struct seccomp_data *d, uint32_t k, uint32_t *w)
 	return 1;
 }
 
-/* pc and offsets are 64-bit so a huge k from the program cannot wrap back into it */
+/* A = A op s; 0 for a division by X == 0 (the program then kills, as on Linux) */
+static int seccomp_alu(uint16_t code, uint32_t *A, uint32_t s)
+{
+	switch (BPF_OP(code)) {
+	case BPF_ADD: *A += s; break;
+	case BPF_SUB: *A -= s; break;
+	case BPF_MUL: *A *= s; break;
+	case BPF_DIV: if (!s) return 0; *A /= s; break;
+	case BPF_OR:  *A |= s; break;
+	case BPF_AND: *A &= s; break;
+	case BPF_LSH: *A <<= (s & 31); break;
+	case BPF_RSH: *A >>= (s & 31); break;
+	case BPF_NEG: *A = -*A; break;
+	case BPF_XOR: *A ^= s; break;
+	default: return 0;
+	}
+	return 1;
+}
+
+/* Runs what seccomp_check let in (kernel/sys/syscall_misc.c). Jumps stay in
+ * the program and loads in seccomp_data by that check; the bounds are kept
+ * here too. pc and offsets are 64-bit so a huge k cannot wrap back into it. */
 static long seccomp_run_filter(const struct seccomp_filter *flt, const struct seccomp_data *d)
 {
 	const struct sock_filter *f = flt->insns;
-	uint32_t A = 0, X = 0;
+	uint32_t A = 0, X = 0, M[BPF_MEMWORDS] = { 0 };
 	for (size_t pc = 0; pc < flt->len; pc++) {
 		const struct sock_filter *i = &f[pc];
+		uint32_t s = (i->code & BPF_X) ? X : i->k;
+		if (BPF_CLASS(i->code) == BPF_CL_ALU) {
+			if (!seccomp_alu(i->code, &A, s)) return 0;
+			continue;
+		}
+		if (BPF_CLASS(i->code) == BPF_CL_JMP) {
+			int t;
+			switch (BPF_OP(i->code)) {
+			case BPF_JA:   pc += i->k; continue;
+			case BPF_JEQ:  t = A == s; break;
+			case BPF_JGT:  t = A > s; break;
+			case BPF_JGE:  t = A >= s; break;
+			case BPF_JSET: t = (A & s) != 0; break;
+			default:       return 0;
+			}
+			pc += t ? i->jt : i->jf;
+			continue;
+		}
 		switch (i->code) {
-		case 0x20: if (!seccomp_load(d, i->k, &A)) return 0; break;  /* BPF_LD|BPF_W|BPF_ABS */
-		case 0x80: A = (uint32_t)sizeof(*d); break;           /* BPF_LD|BPF_W|BPF_LEN */
-		case 0x00: A = i->k; break;                           /* BPF_LD|BPF_IMM */
-		case 0x21: if (!seccomp_load(d, i->k, &X)) return 0; break;  /* BPF_LDX|BPF_W|BPF_ABS */
-		case 0x05: pc += i->k; break;                         /* BPF_JMP|BPF_JA */
-		case 0x15: pc += (A == i->k) ? i->jt : i->jf; break;  /* JEQ|K */
-		case 0x25: pc += (A >  i->k) ? i->jt : i->jf; break;  /* JGT|K */
-		case 0x35: pc += (A >= i->k) ? i->jt : i->jf; break;  /* JGE|K */
-		case 0x45: pc += (A &  i->k) ? i->jt : i->jf; break;  /* JSET|K */
-		case 0x54: A &= i->k; break;                          /* ALU|AND|K */
-		case 0x06: return seccomp_action(i->k);               /* RET|K */
-		case 0x16: return seccomp_action(A);                  /* RET|A */
-		default:   return 0;                                  /* unknown → kill (safe) */
+		case BPF_LD_W_ABS:  if (!seccomp_load(d, i->k, &A)) return 0; break;
+		case BPF_LD_W_LEN:  A = (uint32_t)sizeof(*d); break;
+		case BPF_LDX_W_LEN: X = (uint32_t)sizeof(*d); break;
+		case BPF_LD_IMM:    A = i->k; break;
+		case BPF_LDX_IMM:   X = i->k; break;
+		case BPF_LD_MEM:    if (i->k >= BPF_MEMWORDS) return 0; A = M[i->k]; break;
+		case BPF_LDX_MEM:   if (i->k >= BPF_MEMWORDS) return 0; X = M[i->k]; break;
+		case BPF_ST:        if (i->k >= BPF_MEMWORDS) return 0; M[i->k] = A; break;
+		case BPF_STX:       if (i->k >= BPF_MEMWORDS) return 0; M[i->k] = X; break;
+		case BPF_TAX:       X = A; break;
+		case BPF_TXA:       A = X; break;
+		case BPF_RET_K:     return seccomp_action(i->k);
+		case BPF_RET_A:     return seccomp_action(A);
+		default:            return 0;   /* unknown → kill */
 		}
 	}
 	return 0;   /* fell off the end without RET → kill */
