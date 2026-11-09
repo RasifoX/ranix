@@ -1739,6 +1739,9 @@ static uint64_t ext2_mmap_page(vfs_file_t *f, off_t off, int shared_write)
 	uint64_t size = ino_size(in);
 
 	if (off < 0 || (off & (PAGE_SIZE - 1))) return 0;
+	/* a page is one block here: only ext2_fops_paged has this fop, and
+	 * ext2_fill_vnode gives it only when block_size == PAGE_SIZE */
+	if (fs->block_size != PAGE_SIZE) return 0;
 	uint64_t phys = 0;
 	uint32_t lbn = (uint32_t)((uint64_t)off / PAGE_SIZE);
 	int inside = (uint64_t)off < size, created = 0;

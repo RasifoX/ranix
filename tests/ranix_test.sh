@@ -558,6 +558,10 @@ check "dmesg-newest"      "1 1 1"              "$(dmesg -s 4096 | grep -c J-KMSG
 check "kmsg-reader"       "1"                  "$(timeout 10 cat /dev/kmsg 2>/dev/null | grep -c J-KMSG-MARK)"
 umount /mnt2 2>/dev/null
 check "c-mountoffset"     "OK"                 "$(timeout 10 /bin/test_mountoffset /dev/nvme0n1 /mnt3 8388608 ranix-offset-ok 2>&1 | tail -1)"
+EM=$(timeout 30 /bin/test_ext2_mmap_bs /dev/nvme0n1 /mnt5 10485760 2048 2>&1); echo "$EM" | grep -v "^OK" | sed 's/^/  ext2-mmap-2k: /'
+check "c-ext2-mmap-2k"    "OK"                 "$(echo "$EM" | tail -1)"
+EM=$(timeout 30 /bin/test_ext2_mmap_bs /dev/nvme0n1 /mnt5 11534336 1024 2>&1); echo "$EM" | grep -v "^OK" | sed 's/^/  ext2-mmap-1k: /'
+check "c-ext2-mmap-1k"    "OK"                 "$(echo "$EM" | tail -1)"
 fi
 check "sys-ostype"   "Ranix" "$(cat /sys/kernel/ostype 2>/dev/null)"
 check "sys-net-addr" "00:00:00:00:00:00" "$(cat /sys/class/net/lo/address 2>/dev/null)"
