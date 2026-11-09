@@ -50,6 +50,10 @@
 #define SIGTTOU        22
 #define SIGHUP          1
 
+#define SI_USER        0     /* si_code: kill */
+#define SI_QUEUE       (-1)  /* sigqueue */
+#define SI_TKILL       (-6)  /* tgkill, tkill */
+
 typedef struct {
 	void (*sa_handler)(int);
 	uint64_t sa_flags;
@@ -84,6 +88,16 @@ typedef struct sigqueue {
 } sigqueue_t;
 
 #define SIGQUEUE_MAX  256   /* per-process cap; overflow → -EAGAIN */
+
+/* Who sent a pending standard signal. Standard signals coalesce, so one record
+ * per signal is enough: the first sender wins until the signal is taken (Linux
+ * drops the siginfo of a second instance). Kernel-posted signals have none. */
+typedef struct sig_from {
+	int       si_code;
+	pid_t     si_pid;
+	uid_t     si_uid;
+	uint64_t  si_value;
+} sig_from_t;
 
 typedef struct {
 	void   *ss_sp;
@@ -147,6 +161,8 @@ typedef struct process {
 	struct sigqueue *sigq_head;           /* queued RT siginfo, FIFO per signo, lowest signo first */
 	struct sigqueue *sigq_tail;
 	int             sigq_count;
+	uint32_t        sig_from_valid;       /* bit sig-1: sig_from[sig-1] names the sender */
+	sig_from_t      sig_from[SIGRTMIN - 1];
 
 	/* ── interval timers ───────────────────────── */
 	uint64_t        itimer_value;     /* ITIMER_REAL: ticks until next SIGALRM (0 = off) */
@@ -377,12 +393,22 @@ int        signal_may_send(process_t *sender, process_t *t, int sig);
 int        task_in_group(process_t *p, gid_t g);   /* egid or a supplementary group */
 int        task_kill_many(process_t *sender, pid_t pgrp, int sig);
 void       task_kill_session(struct asess *s);
-/* sigqueue(2)/rt_sigqueueinfo: deliver an RT signal carrying si_value.
+/* The calling task as a signal to t names it: its thread group id in t's pid
+ * namespace (0 if not visible there) and its real uid in t's user namespace. */
+void       signal_sender(process_t *t, pid_t *pid, uid_t *uid);
+/* kill, tgkill, sigqueue: post sig with its siginfo. An RT signal queues it, a
+ * standard one keeps it unless the signal is already pending.
  * thread_directed != 0 targets the exact thread `p`; otherwise it is process-
  * directed (any eligible thread of p's group). Returns 0 or -EAGAIN on overflow. */
 int        task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
                             uid_t si_uid, uint64_t si_value, int thread_directed);
 void       sigqueue_drop(process_t *p);   /* free all queued siginfo (exec/exit) */
+/* A standard signal's pending bit was cleared without taking it: drop its sender
+ * too, or the next kernel-posted instance would report it. Under sched_lock. */
+static inline void sig_from_forget(process_t *t, uint64_t bits)
+{
+	t->sig_from_valid &= (uint32_t)~bits;
+}
 /* Job-control background-I/O check for a controlling tty. `tty`/`tty_fops`
  * identify the terminal; `pgrp` is its foreground group. Returns 0 to proceed,
  * 1 to retry (the caller stopped and was continued), or -EIO. `sig` is SIGTTIN

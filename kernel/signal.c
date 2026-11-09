@@ -69,6 +69,7 @@ void sigqueue_drop(process_t *p)
 	sigqueue_t *q = p->sigq_head;
 	p->sigq_head = p->sigq_tail = NULL;
 	p->sigq_count = 0;
+	p->sig_from_valid = 0;
 	spin_unlock_irq(&sched_lock, f);
 	while (q) { sigqueue_t *n = q->next; kfree(q); q = n; }
 }
@@ -83,13 +84,66 @@ static void sig_cont_stop_locked(process_t *t, int sig)
 {
 	if (sig == SIGCONT) {
 		t->sig_pending &= ~STOP_SIG_MASK;
+		sig_from_forget(t, STOP_SIG_MASK);
 		if (t->job_stopped) {
 			t->job_stopped = 0;
 			t->job_continued = 1;
 		}
 	} else if (sig_default_stop(sig)) {
 		t->sig_pending &= ~(1UL << (SIGCONT - 1));
+		sig_from_forget(t, 1UL << (SIGCONT - 1));
 	}
+}
+
+/* Note the sender of a standard signal about to be posted to t. A signal that
+ * is already pending keeps its first sender. Caller holds sched_lock. */
+static void sig_from_note_locked(process_t *t, int sig, int code, pid_t pid, uid_t uid, uint64_t value)
+{
+	uint64_t bit = 1UL << (sig - 1);
+	if (sig >= SIGRTMIN || (t->sig_pending & bit)) return;
+	t->sig_from[sig - 1] = (sig_from_t){ code, pid, uid, value };
+	t->sig_from_valid |= (uint32_t)bit;
+}
+
+/* Take the sender of standard signal sig off t into *si. 1 if there was one.
+ * Caller holds sched_lock and is clearing sig's pending bit. */
+static int sig_from_take_locked(process_t *t, int sig, sigqueue_t *si)
+{
+	uint32_t bit = 1U << (sig - 1);
+	if (sig >= SIGRTMIN || !(t->sig_from_valid & bit)) return 0;
+	t->sig_from_valid &= ~bit;
+	const sig_from_t *f = &t->sig_from[sig - 1];
+	si->si_signo = sig;
+	si->si_errno = 0;
+	si->si_code  = f->si_code;
+	si->si_pid   = f->si_pid;
+	si->si_uid   = f->si_uid;
+	si->si_value = f->si_value;
+	return 1;
+}
+
+/* The group leader of the caller, pinned; NULL when the caller leads. */
+static process_t *sig_sender_leader(process_t *cur)
+{
+	pid_t tgid = cur->tgid ? cur->tgid : (pid_t)cur->pid;
+	return tgid == (pid_t)cur->pid ? NULL : proc_get(tgid);
+}
+
+/* who (a group leader) as t's pid namespace numbers it, 0 if it cannot see it */
+static pid_t sig_sender_pid(process_t *who, process_t *t)
+{
+	pid_namespace_t *ns = t->pid_ns ? t->pid_ns : &init_pid_ns;
+	if (ns == &init_pid_ns || !who->pid_levels) return (pid_t)who->pid;
+	return (pid_t)task_pid_nr_ns(who, ns);
+}
+
+void signal_sender(process_t *t, pid_t *pid, uid_t *uid)
+{
+	process_t *cur = task_current();
+	process_t *leader = sig_sender_leader(cur);
+	*pid = sig_sender_pid(leader ? leader : cur, t);
+	*uid = (uid_t)from_kuid(t->user_ns, cur->uid);
+	proc_put(leader);
 }
 
 void task_signal(process_t *p, int sig)
@@ -130,7 +184,9 @@ int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
 	sigqueue_t *q = NULL;
 	if (is_rt) {
 		q = kmalloc(sizeof(*q));
-		if (!q) return -EAGAIN;
+		if (!q && si_code != SI_USER) return -EAGAIN;
+	}
+	if (q) {
 		q->next = NULL;
 		q->si_signo = sig;
 		q->si_errno = 0;
@@ -159,15 +215,19 @@ int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
 		if (!target) target = p;
 	}
 
-	if (is_rt) {
-		if (target->sigq_count >= SIGQUEUE_MAX) {
+	if (q && target->sigq_count >= SIGQUEUE_MAX) {
+		if (si_code != SI_USER) {
 			spin_unlock_irq(&sched_lock, f);
 			kfree(q);
 			return -EAGAIN;
 		}
-		sigq_append_locked(target, q);
+		kfree(q);   /* kill() still posts it, without its siginfo (Linux) */
+		q = NULL;
 	}
+	if (q) sigq_append_locked(target, q);
+	sig_from_note_locked(target, sig, si_code, si_pid, si_uid, si_value);
 	target->sig_pending |= (1UL << (sig - 1));
+	if (sig == SIGKILL && !target->kill_posted_at) target->kill_posted_at = kernel_ticks ? kernel_ticks : 1;
 	sig_cont_stop_locked(target, sig);
 	sig_wake_locked(target);
 	spin_unlock_irq(&sched_lock, f);
@@ -289,6 +349,8 @@ int task_kill_many(process_t *s, pid_t pgrp, int sig)
 {
 	pid_namespace_t *ns = current_pid_ns();
 	int seen = 0, sent = 0;
+	process_t *leader = sig_sender_leader(s);
+	process_t *who = leader ? leader : s;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *sentinel = proctab[0];
 	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
@@ -300,12 +362,15 @@ int task_kill_many(process_t *s, pid_t pgrp, int sig)
 		if (!signal_may_send(s, t, sig)) continue;
 		sent++;
 		if (sig) {
+			sig_from_note_locked(t, sig, SI_USER, sig_sender_pid(who, t),
+			                     (uid_t)from_kuid(t->user_ns, s->uid), 0);
 			t->sig_pending |= (1UL << (sig - 1));
 			sig_cont_stop_locked(t, sig);
 			sig_wake_locked(t);
 		}
 	}
 	spin_unlock_irq(&sched_lock, f);
+	proc_put(leader);
 	return sent ? 0 : seen ? -1 : -3;
 }
 
@@ -566,6 +631,7 @@ int task_dequeue_signal(process_t *p, uint64_t set, sigqueue_t *si, int *have)
 			*have = sigq_pop_locked(t, sig, si);
 			if (!sigq_has_locked(t, sig)) t->sig_pending &= ~(1UL << (sig - 1));
 		} else {
+			*have = sig_from_take_locked(t, sig, si);
 			t->sig_pending &= ~(1UL << (sig - 1));
 		}
 	}
@@ -718,6 +784,7 @@ static int sig_take_next(process_t *p, sigqueue_t *si)
 		if (!sigq_has_locked(p, sig))
 			p->sig_pending &= ~(1UL << (sig - 1));
 	} else {
+		have_si = sig_from_take_locked(p, sig, si);
 		p->sig_pending &= ~(1UL << (sig - 1));
 	}
 	spin_unlock_irq(&sched_lock, sigf);
@@ -725,12 +792,12 @@ static int sig_take_next(process_t *p, sigqueue_t *si)
 	if (!have_si) {
 		si->si_signo = sig;
 		si->si_errno = 0;
-		si->si_code  = 0;   /* SI_USER */
+		si->si_code  = 0;   /* sent by the kernel */
 		si->si_pid   = 0;
 		si->si_uid   = 0;
 		si->si_value = 0;
-		if (p->fault_sig == sig) fault_siginfo(p, si);
 	}
+	if (p->fault_sig == sig) fault_siginfo(p, si);
 	return sig;
 }
 
