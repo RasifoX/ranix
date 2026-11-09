@@ -539,6 +539,6 @@ void ptimer_drop(pid_t tgid);
 
 /* coredump.c */
 extern char core_pattern[128];
-void coredump(process_t *p, int sig, arch_context_t *ctx);
+int  coredump(process_t *p, int sig, arch_context_t *ctx);   /* 1: a core was written */
 
 #endif
