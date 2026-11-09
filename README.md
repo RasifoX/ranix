@@ -27,8 +27,9 @@ Quit QEMU with `Ctrl-A` then `X`.
 
 ## More
 
-Wiki: `<WIKI-LINK>` (Building, Running in QEMU, Installing on a PC,
-Kernel Swap, Troubleshooting, Hardware).
+- Documentation: https://ranix.org/docs/ (building, running in QEMU, hardware)
+- Releases and signed tarballs: https://ranix.org/releases/
+- Bugs and questions: https://github.com/RasifoX/ranix/issues
 
 ## License
 
