@@ -962,8 +962,8 @@ static int syscall_events_ipc(long n, const long *a, long *ret)
 	case SYS_ARCH_EVENTFD2:    *ret = sys_eventfd2((unsigned int)a[0], (int)a[1]); break;
 	case SYS_ARCH_PREADV:     *ret = sys_preadv((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3]); break;
 	case SYS_ARCH_PWRITEV:    *ret = sys_pwritev((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3]); break;
-	case SYS_ARCH_PREADV2:    *ret = sys_preadv2((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3]); break;
-	case SYS_ARCH_PWRITEV2:   *ret = sys_pwritev2((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3]); break;
+	case SYS_ARCH_PREADV2:    *ret = sys_preadv2((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3], (int)a[5]); break;
+	case SYS_ARCH_PWRITEV2:   *ret = sys_pwritev2((int)a[0], (const iovec_t *)a[1], (int)a[2], (off_t)a[3], (int)a[5]); break;
 	case SYS_ARCH_MINCORE:    *ret = sys_mincore((uint64_t)a[0], (size_t)a[1], (uint8_t *)a[2]); break;
 	case SYS_ARCH_READAHEAD:  *ret = sys_readahead((int)a[0], (off_t)a[1], (size_t)a[2]); break;
 	case SYS_ARCH_SYNCFS:     *ret = sys_syncfs((int)a[0]); break;
