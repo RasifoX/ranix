@@ -495,20 +495,20 @@ static pid_t fork_publish(process_t *child, process_t *parent, struct asess *ent
 	 * holds it too, so parent->cgroup cannot change between the two. */
 	if (asess_fork(child, parent, enter) != 0) {
 		spin_unlock_irq(&sched_lock, f);
-		return -11;
+		return -EAGAIN;
 	}
 	void *cg = enter ? asess_cgroup(enter) : parent->cgroup;
 	if (cgroup_can_fork(cg) != 0) {
 		asess_fork_cancel(child);
 		spin_unlock_irq(&sched_lock, f);
-		return -11;
+		return -EAGAIN;
 	}
 	int pid = alloc_pid();
 	if (pid < 0) {
 		asess_fork_cancel(child);
 		cgroup_cancel_fork(cg);
 		spin_unlock_irq(&sched_lock, f);
-		return -12;
+		return -ENOMEM;
 	}
 	cgroup_fork_attach(child, cg);
 	child->pid  = pid;
@@ -557,9 +557,9 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	long err = -12;   /* out of memory, not the EPERM a bare -1 would read as */
 	/* Checked here, not in the syscall gate: clone3 passes its flags in user
 	 * memory, which another thread can change after a gate has read them. */
-	if (parent->asess && (clone_flags & ASESS_CLONE_DENIED)) return -1; /* EPERM */
+	if (parent->asess && (clone_flags & ASESS_CLONE_DENIED)) return -EPERM;
 	/* the low byte of clone flags is the exit signal, not CLONE_NEWTIME */
-	if (!enter && !may_create_ns(parent, clone_flags & ~0xffUL)) return -1; /* EPERM */
+	if (!enter && !may_create_ns(parent, clone_flags & ~0xffUL)) return -EPERM;
 	arch_save_tls(parent);
 
 	/* RLIMIT_NPROC: a non-root caller may not exceed its soft cap on live
@@ -568,11 +568,11 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	if (parent->euid != 0 && parent->rlim_set) {
 		uint64_t cap = parent->rlim_cur[RLIMIT_NPROC];
 		if (cap != (uint64_t)-1 && (uint64_t)proc_count_uid(parent->uid) >= cap)
-			return -11;   /* EAGAIN */
+			return -EAGAIN;
 	}
 
 	void *pcb_phys = buddy_alloc(PCB_ORDER);
-	if (!pcb_phys) return -12;
+	if (!pcb_phys) return -ENOMEM;
 	process_t *child = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;
@@ -584,7 +584,7 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	int owns_pidns = 0;
 	if (clone_flags & CLONE_NEWPID) {
 		target_pidns = pid_ns_create_child(parent->pid_ns ? parent->pid_ns : &init_pid_ns);
-		if (!target_pidns) { buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -12; }
+		if (!target_pidns) { buddy_free(VIRT_TO_PHYS(child), PCB_ORDER); return -ENOMEM; }
 		owns_pidns = 1;
 	} else {
 		target_pidns = parent->pid_ns_new ? parent->pid_ns_new
@@ -730,19 +730,19 @@ static pid_t thread_publish(process_t *child, process_t *parent, int as_process,
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (asess_fork(child, parent, NULL) != 0) {
 		spin_unlock_irq(&sched_lock, f);
-		return -11;
+		return -EAGAIN;
 	}
 	if (cgroup_can_fork(parent->cgroup) != 0) {
 		asess_fork_cancel(child);
 		spin_unlock_irq(&sched_lock, f);
-		return -11;
+		return -EAGAIN;
 	}
 	int pid = alloc_pid();
 	if (pid < 0) {
 		asess_fork_cancel(child);
 		cgroup_cancel_fork(parent->cgroup);
 		spin_unlock_irq(&sched_lock, f);
-		return -12;
+		return -ENOMEM;
 	}
 	cgroup_fork_attach(child, parent->cgroup);
 	child->pid  = pid;
@@ -811,7 +811,7 @@ pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_
 	process_t *parent = task_current();
 	long err = -12;   /* out of memory, not the EPERM a bare -1 would read as */
 	void *pcb_phys = buddy_alloc(PCB_ORDER);
-	if (!pcb_phys) return -12;
+	if (!pcb_phys) return -ENOMEM;
 	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
 	memset(child, 0, sizeof(*child));
 	child->magic = PROC_MAGIC;

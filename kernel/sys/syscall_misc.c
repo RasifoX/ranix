@@ -8,6 +8,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/smp.h>
 #include <kernel/csprng.h>
+#include <kernel/errno.h>
 
 /* ── statfs ──────────────────────────────────────────────── */
 
@@ -71,28 +72,28 @@ static void apply_fs_statfs(kernel_statfs_t *st, const vfs_statfs_t *vs)
 
 static long sys_statfs(const char *path, kernel_statfs_t *buf)
 {
-	if (!access_ok(buf, sizeof(*buf))) return -14;
+	if (!access_ok(buf, sizeof(*buf))) return -EFAULT;
 	char kp[PATH_MAX];
 	const char *fs = "ramfs";
 	int r = resolve_path(kp, -100 /*AT_FDCWD*/, path);
 	if (r) return r;
 	vfs_stat_t ls;
-	if (vfs_stat(kp, &ls) != 0) return -2;
+	if (vfs_stat(kp, &ls) != 0) return -ENOENT;
 	fs = vfs_path_fstype(kp);
 	kernel_statfs_t st;
 	fill_statfs(&st, fs);
 	vfs_statfs_t vs;
 	if (vfs_statfs_path(kp, &vs) == 0) apply_fs_statfs(&st, &vs);
-	if (task_current()->walk_denied) return -2;
+	if (task_current()->walk_denied) return -ENOENT;
 	return copy_to_user(buf, &st, sizeof(st)) ? -14 : 0;
 }
 
 static long sys_fstatfs(int fd, kernel_statfs_t *buf)
 {
-	if (!access_ok(buf, sizeof(*buf))) return -14;
+	if (!access_ok(buf, sizeof(*buf))) return -EFAULT;
 	const char *fs = "ramfs";
 	vfs_file_t *f = fget(task_current()->fds, fd);
-	if (!f) return -9;
+	if (!f) return -EBADF;
 	if (f->path[0] == '/') fs = vfs_path_fstype(f->path);
 	kernel_statfs_t st;
 	fill_statfs(&st, fs);
@@ -108,16 +109,16 @@ static long sys_fstatfs(int fd, kernel_statfs_t *buf)
 
 static long sys_capget(void *hdrp, void *datap)
 {
-	if (!hdrp || !access_ok(hdrp, 8)) return -14;
+	if (!hdrp || !access_ok(hdrp, 8)) return -EFAULT;
 
 	uint32_t version;
-	if (copy_from_user(&version, hdrp, 4)) return -14;
+	if (copy_from_user(&version, hdrp, 4)) return -EFAULT;
 	/* always report v3 back */
 	version = _LINUX_CAPABILITY_VERSION_3;
-	if (copy_to_user(hdrp, &version, 4)) return -14;
+	if (copy_to_user(hdrp, &version, 4)) return -EFAULT;
 
 	if (!datap) return 0;
-	if (!access_ok(datap, 24)) return -14;
+	if (!access_ok(datap, 24)) return -EFAULT;
 
 	process_t *p = task_current();
 	/* v3 layout: two cap_user_data structs (caps 0-31, caps 32-63) */
@@ -134,21 +135,21 @@ static long sys_capget(void *hdrp, void *datap)
 
 static long sys_capset(void *hdrp, const void *datap)
 {
-	if (!hdrp || !access_ok(hdrp, 8)) return -14;
+	if (!hdrp || !access_ok(hdrp, 8)) return -EFAULT;
 	process_t *p = task_current();
 	/* only permitted to drop or set within permitted set; root can do anything */
-	if (!datap) return -14;
-	if (!access_ok(datap, 24)) return -14;
+	if (!datap) return -EFAULT;
+	if (!access_ok(datap, 24)) return -EFAULT;
 
 	uint32_t data[6];
-	if (copy_from_user(data, datap, 24)) return -14;
+	if (copy_from_user(data, datap, 24)) return -EFAULT;
 
 	uint64_t new_eff  = (uint64_t)data[0] | ((uint64_t)data[3] << 32);
 	uint64_t new_perm = (uint64_t)data[1] | ((uint64_t)data[4] << 32);
 	uint64_t new_inh  = (uint64_t)data[2] | ((uint64_t)data[5] << 32);
 
 	/* new_permitted must be subset of current permitted */
-	if ((new_perm & ~p->cap_permitted) != 0) return -1; /* EPERM */
+	if ((new_perm & ~p->cap_permitted) != 0) return -EPERM;
 	/* new_effective must be subset of new permitted */
 	if ((new_eff & ~new_perm) != 0) return -1;
 	/* inheritable: unprivileged can only inherit from current inheritable ∪ permitted */
@@ -190,22 +191,22 @@ static long xattr_set(const char *upath, const char *uname, const void *uval,
                       size_t size, int flags)
 {
 	char kpath[PATH_MAX], kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -EFAULT;
 	int ns = xattr_ns(kname);
-	if (!ns) return -95; /* EOPNOTSUPP */
+	if (!ns) return -EOPNOTSUPP;
 	process_t *cp = task_current();
-	if (ns == 2 && (!cp || cp->euid != 0)) return -1; /* EPERM */
-	if (size > XATTR_VALUE_MAX) return -7; /* E2BIG */
+	if (ns == 2 && (!cp || cp->euid != 0)) return -EPERM;
+	if (size > XATTR_VALUE_MAX) return -E2BIG;
 	int ro = 0;
 	vfs_inode_t *in = xattr_resolve(upath, kpath, &ro);
-	if (!in) return -2;
-	if (ro) return -30; /* EROFS */
-	if (ns == 1 && !S_ISREG(in->mode) && !S_ISDIR(in->mode)) return -95;
+	if (!in) return -ENOENT;
+	if (ro) return -EROFS;
+	if (ns == 1 && !S_ISREG(in->mode) && !S_ISDIR(in->mode)) return -EOPNOTSUPP;
 	void *kv = NULL;
 	if (size) {
 		kv = kmalloc(size);
-		if (!kv) return -12;
-		if (copy_from_user(kv, uval, size) != 0) { kfree(kv); return -14; }
+		if (!kv) return -ENOMEM;
+		if (copy_from_user(kv, uval, size) != 0) { kfree(kv); return -EFAULT; }
 	}
 	vfs_iattr_t a = { .valid = ATTR_XATTR_SET, .xname = kname, .xval = kv, .xlen = size, .xflags = flags };
 	int r = vfs_inode_setattr(in, &a);
@@ -218,7 +219,7 @@ static long xattr_get_inode(vfs_inode_t *in, const char *kname, void *uval, size
 	if (size == 0) return vfs_inode_getxattr(in, kname, NULL, 0);
 	if (size > XATTR_VALUE_MAX) size = XATTR_VALUE_MAX;
 	void *kv = kmalloc(size);
-	if (!kv) return -12;
+	if (!kv) return -ENOMEM;
 	ssize_t r = vfs_inode_getxattr(in, kname, kv, size);
 	if (r >= 0 && copy_to_user(uval, kv, (size_t)r) != 0) r = -14;
 	kfree(kv);
@@ -228,9 +229,9 @@ static long xattr_get_inode(vfs_inode_t *in, const char *kname, void *uval, size
 static long xattr_get(const char *upath, const char *uname, void *uval, size_t size)
 {
 	char kpath[PATH_MAX], kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+	if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -EFAULT;
 	vfs_inode_t *in = xattr_resolve(upath, kpath, NULL);
-	if (!in) return -2;
+	if (!in) return -ENOENT;
 	return xattr_get_inode(in, kname, uval, size);
 }
 
@@ -238,11 +239,11 @@ static long xattr_list(const char *upath, char *ulist, size_t size)
 {
 	char kpath[PATH_MAX];
 	vfs_inode_t *in = xattr_resolve(upath, kpath, NULL);
-	if (!in) return -2;
+	if (!in) return -ENOENT;
 	if (size == 0) return vfs_inode_listxattr(in, NULL, 0);
 	if (size > XATTR_VALUE_MAX) size = XATTR_VALUE_MAX;
 	char *kl = kmalloc(size);
-	if (!kl) return -12;
+	if (!kl) return -ENOMEM;
 	ssize_t r = vfs_inode_listxattr(in, kl, size);
 	if (r >= 0 && copy_to_user(ulist, kl, (size_t)r) != 0) r = -14;
 	kfree(kl);
@@ -259,11 +260,11 @@ static long sys_llistxattr(const char *p, char *l, size_t s) { return xattr_list
 static long sys_removexattr(const char *p, const char *n)
 {
 	char kpath[PATH_MAX], kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -EFAULT;
 	int ro = 0;
 	vfs_inode_t *in = xattr_resolve(p, kpath, &ro);
-	if (!in) return -2;
-	if (ro) return -30; /* EROFS */
+	if (!in) return -ENOENT;
+	if (ro) return -EROFS;
 	vfs_iattr_t a = { .valid = ATTR_XATTR_REMOVE, .xname = kname };
 	return vfs_inode_setattr(in, &a);
 }
@@ -272,9 +273,9 @@ static long sys_fgetxattr(int fd, const char *n, void *v, size_t s)
 {
 	process_t *cp = task_current();
 	vfs_file_t *f = (cp && cp->fds) ? fd_get(cp->fds, fd) : NULL;
-	if (!f || !f->inode) return -9; /* EBADF */
+	if (!f || !f->inode) return -EBADF;
 	char kname[XATTR_NAME_MAX_LEN + 1];
-	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -14;
+	if (strncpy_from_user(kname, n, sizeof(kname)) < 0) return -EFAULT;
 	return xattr_get_inode(f->inode, kname, v, s);
 }
 
@@ -282,8 +283,8 @@ static long sys_fgetxattr(int fd, const char *n, void *v, size_t s)
 
 static long sys_pread64(int fd, void *buf, size_t count, off_t offset)
 {
-	if (!access_ok(buf, count)) return -14;
-	if (offset < 0) return -22;
+	if (!access_ok(buf, count)) return -EFAULT;
+	if (offset < 0) return -EINVAL;
 	off_t saved = vfs_seek(fd, 0, 1);
 	if (saved < 0) return saved;
 	vfs_seek(fd, offset, 0);
@@ -294,8 +295,8 @@ static long sys_pread64(int fd, void *buf, size_t count, off_t offset)
 
 static long sys_pwrite64(int fd, const void *buf, size_t count, off_t offset)
 {
-	if (!access_ok(buf, count)) return -14;
-	if (offset < 0) return -22;
+	if (!access_ok(buf, count)) return -EFAULT;
+	if (offset < 0) return -EINVAL;
 	off_t saved = vfs_seek(fd, 0, 1);
 	if (saved < 0) return saved;
 	vfs_seek(fd, offset, 0);
@@ -309,7 +310,7 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 {
 	(void)new_addr;
 	process_t *p = task_current();
-	if (new_size == 0 || (old_addr & (PAGE_SIZE - 1))) return -22;
+	if (new_size == 0 || (old_addr & (PAGE_SIZE - 1))) return -EINVAL;
 	old_size = (old_size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 	new_size = (new_size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 	if (new_size == old_size) return (long)old_addr;
@@ -321,16 +322,16 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 	 * main stack this way, reading ENOMEM as "mapped" and EFAULT as "the end". */
 	if (!(flags & 1)) {
 		/* the probe below walks page by page and cannot be interrupted */
-		if (new_size - old_size > (1UL << 30)) return -12;
+		if (new_size - old_size > (1UL << 30)) return -ENOMEM;
 		vma_t *v = p->vm->vmas;
 		while (v && !(old_addr >= v->vaddr && old_addr < v->vaddr + v->size)) v = v->next;
-		if (!v && !arch_vm_get_paddr(p->vm->root, old_addr)) return -14; /* EFAULT */
+		if (!v && !arch_vm_get_paddr(p->vm->root, old_addr)) return -EFAULT;
 		for (uint64_t a = old_addr + old_size; a < old_addr + new_size; a += PAGE_SIZE) {
-			if (arch_vm_get_paddr(p->vm->root, a)) return -12;
+			if (arch_vm_get_paddr(p->vm->root, a)) return -ENOMEM;
 			for (vma_t *n = p->vm->vmas; n; n = n->next)
-				if (a >= n->vaddr && a < n->vaddr + n->size) return -12;
+				if (a >= n->vaddr && a < n->vaddr + n->size) return -ENOMEM;
 		}
-		if (!v || !(v->flags & VMA_ANON) || (v->flags & VMA_SHARED)) return -12;
+		if (!v || !(v->flags & VMA_ANON) || (v->flags & VMA_SHARED)) return -ENOMEM;
 		int prot = (v->flags & VMA_READ ? PROT_READ : 0) | (v->flags & VMA_WRITE ? PROT_WRITE : 0) |
 		           (v->flags & VMA_EXEC ? PROT_EXEC : 0);
 		long r = sys_mmap(old_addr + old_size, new_size - old_size, prot,
@@ -339,11 +340,11 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 	}
 	/* growing: allocate new, copy, unmap old */
 	long na = sys_mmap(0, new_size, 3 /*RW*/, 0x22 /*MAP_ANON|MAP_PRIVATE*/, -1, 0);
-	if (na < 0) return -12;
+	if (na < 0) return -ENOMEM;
 	/* Through a buffer with fault fixups: the destination is demand-zero, and a
 	 * fault refused by memory.max must not land in a bare kernel copy. */
 	char *b = kmalloc(PAGE_SIZE);
-	if (!b) { sys_munmap((uint64_t)na, new_size); return -12; }
+	if (!b) { sys_munmap((uint64_t)na, new_size); return -ENOMEM; }
 	long r = na;
 	for (size_t off = 0; off < old_size && r == na; off += PAGE_SIZE) {
 		size_t n = old_size - off < PAGE_SIZE ? old_size - off : PAGE_SIZE;
@@ -360,7 +361,7 @@ static long sys_pause(void)
 	process_t *p = task_current();
 	while (!(p->sig_pending & ~p->sig_mask))
 		task_sleep_if(!(p->sig_pending & ~p->sig_mask));
-	return -4; /* EINTR */
+	return -EINTR;
 }
 
 static long sys_alarm(unsigned int seconds)
@@ -383,14 +384,14 @@ static long sys_socketpair(int domain, int type, int protocol, int *sv)
     (void)protocol;
     int sflags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     type &= SOCK_TYPE_MASK;
-    if (domain != AF_UNIX) return -97;
+    if (domain != AF_UNIX) return -EAFNOSUPPORT;
     int seqpacket = type == 5;
     if (type == 5 /* SOCK_SEQPACKET */) type = SOCK_DGRAM;   /* a pair keeps its boundaries */
-    if (type != SOCK_STREAM && type != SOCK_DGRAM) return -22;
+    if (type != SOCK_STREAM && type != SOCK_DGRAM) return -EINVAL;
 
     socket_t *s0 = sock_alloc(AF_UNIX, type, 0);
     socket_t *s1 = sock_alloc(AF_UNIX, type, 0);
-    if (!s0 || !s1 || sock_own(s0) || sock_own(s1)) { sock_free(s0); sock_free(s1); return -12; }
+    if (!s0 || !s1 || sock_own(s0) || sock_own(s1)) { sock_free(s0); sock_free(s1); return -ENOMEM; }
 
     s0->unix_peer = s1;
     s1->unix_peer = s0;
@@ -418,7 +419,7 @@ static long sys_socketpair(int domain, int type, int protocol, int *sv)
     if (copy_to_user(sv, kbuf, sizeof(kbuf)) != 0) {
         vfs_close(fd0);
         vfs_close(fd1);
-        return -14;
+        return -EFAULT;
     }
     return 0;
 }
@@ -431,16 +432,16 @@ static long sys_flock(int fd, int operation)
 #define LOCK_UN 8
 	process_t *p = task_current();
 	vfs_file_t *f = (p && p->fds) ? fget(p->fds, fd) : NULL;  /* pin across the wait loop */
-	if (!f) return -9; /* EBADF */
+	if (!f) return -EBADF;
 	int cmd = operation & ~LOCK_NB;
 	if (cmd == LOCK_UN) { vfs_flock_release(f); fput(f); return 0; }
-	if (cmd != LOCK_SH && cmd != LOCK_EX) { fput(f); return -22; } /* EINVAL */
+	if (cmd != LOCK_SH && cmd != LOCK_EX) { fput(f); return -EINVAL; } /* EINVAL */
 	for (;;) {
 		int r = vfs_flock_try(f, cmd);
 		if (r == 0) { fput(f); return 0; }
-		if (operation & LOCK_NB) { fput(f); return -11; } /* EWOULDBLOCK */
+		if (operation & LOCK_NB) { fput(f); return -EAGAIN; } /* EWOULDBLOCK */
 		yield();                              /* block: retry when holder releases */
-		if (task_has_actionable_signal()) { fput(f); return -4; } /* EINTR */
+		if (task_has_actionable_signal()) { fput(f); return -EINTR; } /* EINTR */
 	}
 }
 
@@ -448,7 +449,7 @@ static long sys_fsync(int fd)
 {
 	process_t *p = task_current();
 	vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, fd) : NULL;
-	if (!f) return -9;
+	if (!f) return -EBADF;
 	int r = 0;
 #if IS_ENABLED(CONFIG_FS_EXT2)
 	r = ext2_sync_all();
@@ -470,13 +471,13 @@ static long sys_sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int
 static long sys_fchdir(int fd)
 {
 	process_t *p = task_current();
-	if (!p->fds) return -9;
+	if (!p->fds) return -EBADF;
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f) return -9;
-	if (!f->inode || (f->inode->mode & 0xF000) != 0x4000) return -20; /* ENOTDIR */
-	if (vfs_may_enter(f->inode)) return -13;   /* EACCES, as chdir() */
+	if (!f) return -EBADF;
+	if (!f->inode || (f->inode->mode & 0xF000) != 0x4000) return -ENOTDIR;
+	if (vfs_may_enter(f->inode)) return -EACCES;   /* as chdir() */
 	const char *fp = f->lpath ? f->lpath : f->path;   /* lpath: too long for path[] */
-	if (fp[0] != '/') return -20;
+	if (fp[0] != '/') return -ENOTDIR;
 	return fs_set_cwd(p->fs, fp);
 }
 
@@ -495,10 +496,10 @@ static long sys_lchown(const char *path, uid_t uid, gid_t gid)
 
 static long sys_getrusage(int who, void *usage)
 {
-	if (!usage) return -14;
+	if (!usage) return -EFAULT;
 	process_t *p = task_current();
 	uint64_t ut, st;
-	if (who != 0 && who != -1 && who != 1) return -22;
+	if (who != 0 && who != -1 && who != 1) return -EINVAL;
 	if (who == -1 /* RUSAGE_CHILDREN */) { ut = p->cutime_ticks; st = p->cstime_ticks; }
 	else                                  { ut = p->utime_ticks;  st = p->stime_ticks; }  /* SELF / THREAD */
 	int64_t r[18];   /* struct rusage = 18 longs (144 bytes) */
@@ -508,7 +509,7 @@ static long sys_getrusage(int who, void *usage)
 	r[1] = (int64_t)((ut % hz) * (1000000 / hz));    /* ru_utime.tv_usec */
 	r[2] = (int64_t)(st / hz);                       /* ru_stime.tv_sec  */
 	r[3] = (int64_t)((st % hz) * (1000000 / hz));    /* ru_stime.tv_usec */
-	if (copy_to_user(usage, r, sizeof(r)) != 0) return -14;
+	if (copy_to_user(usage, r, sizeof(r)) != 0) return -EFAULT;
 	return 0;
 }
 
@@ -571,9 +572,9 @@ static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 static long sys_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
 {
 	process_t *p = task_current();
-	if (copy_to_user(ruid, &p->uid,  sizeof(uid_t))) return -14;
-	if (copy_to_user(euid, &p->euid, sizeof(uid_t))) return -14;
-	if (copy_to_user(suid, &p->suid, sizeof(uid_t))) return -14;
+	if (copy_to_user(ruid, &p->uid,  sizeof(uid_t))) return -EFAULT;
+	if (copy_to_user(euid, &p->euid, sizeof(uid_t))) return -EFAULT;
+	if (copy_to_user(suid, &p->suid, sizeof(uid_t))) return -EFAULT;
 	return 0;
 }
 
@@ -595,9 +596,9 @@ static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 static long sys_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
 {
 	process_t *p = task_current();
-	if (copy_to_user(rgid, &p->gid,  sizeof(gid_t))) return -14;
-	if (copy_to_user(egid, &p->egid, sizeof(gid_t))) return -14;
-	if (copy_to_user(sgid, &p->sgid, sizeof(gid_t))) return -14;
+	if (copy_to_user(rgid, &p->gid,  sizeof(gid_t))) return -EFAULT;
+	if (copy_to_user(egid, &p->egid, sizeof(gid_t))) return -EFAULT;
+	if (copy_to_user(sgid, &p->sgid, sizeof(gid_t))) return -EFAULT;
 	return 0;
 }
 
@@ -649,15 +650,15 @@ static long sys_getcpu(unsigned int *cpu, unsigned int *node, void *tcache)
 	(void)tcache;
 	unsigned int c = (unsigned int)arch_get_cpu_ctx()->cpu_id;
 	unsigned int n = 0;
-	if (cpu  && copy_to_user(cpu,  &c, sizeof(c))) return -14;
-	if (node && copy_to_user(node, &n, sizeof(n))) return -14;
+	if (cpu  && copy_to_user(cpu,  &c, sizeof(c))) return -EFAULT;
+	if (node && copy_to_user(node, &n, sizeof(n))) return -EFAULT;
 	return 0;
 }
 
 static long sys_rt_sigpending(uint64_t *uset, size_t sigsetsize)
 {
 	(void)sigsetsize;
-	if (!access_ok(uset, sizeof(uint64_t))) return -14;
+	if (!access_ok(uset, sizeof(uint64_t))) return -EFAULT;
 	uint64_t pending = task_current()->sig_pending;
 	return copy_to_user(uset, &pending, sizeof(pending)) == 0 ? 0 : -14;
 }
@@ -666,14 +667,14 @@ static long sys_rt_sigsuspend(const uint64_t *unewmask, size_t sigsetsize)
 {
 	(void)sigsetsize;
 	uint64_t newmask;
-	if (copy_from_user(&newmask, unewmask, sizeof(newmask)) != 0) return -14;
+	if (copy_from_user(&newmask, unewmask, sizeof(newmask)) != 0) return -EFAULT;
 	process_t *p = task_current();
 	p->sig_saved_mask = p->sig_mask;
 	p->sig_mask = newmask & ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
 	p->sig_mask_saved = 1;   /* the handler must run under newmask */
 	while (!(p->sig_pending & ~p->sig_mask))
 		task_sleep_if(!(p->sig_pending & ~p->sig_mask));
-	return -4; /* EINTR */
+	return -EINTR;
 }
 
 /* kp is a resolved kernel-absolute path. dev = major:minor for char/block. */
@@ -689,7 +690,7 @@ static long do_mknod(const char *kp, mode_t mode, uint64_t dev)
 		vfs_close(fd);
 		return 0;
 	}
-	return -22; /* S_IFSOCK etc.: not supported */
+	return -EINVAL; /* S_IFSOCK etc.: not supported */
 }
 
 static long sys_mknod(const char *path, mode_t mode, uint64_t dev)
@@ -720,7 +721,7 @@ static long sys_sync(void)
 static long sys_mount(const char *source, const char *target, const char *fstype,
                       unsigned long flags, const void *data)
 {
-	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
+	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
 	char ktarget[PATH_MAX]; char kfstype[64];
 	int tr = resolve_path(ktarget, AT_FDCWD, target);
 	if (tr) return tr;
@@ -736,16 +737,16 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 		int sr = resolve_path(ksrc, AT_FDCWD, source);
 		if (sr) return sr;
 		vfs_dentry_t *src = vfs_dentry_resolve(ksrc);
-		if (!src || !src->inode || vfs_dentry_is_volatile(src)) return -2;
+		if (!src || !src->inode || vfs_dentry_is_volatile(src)) return -ENOENT;
 		vfs_dentry_t *mp = vfs_dentry_resolve(ktarget);
-		if (!mp || !mp->inode || vfs_dentry_is_volatile(mp)) return -2;
-		if (!S_ISDIR(src->inode->mode)) return -22;
-		if (!S_ISDIR(mp->inode->mode)) return -20;          /* ENOTDIR */
+		if (!mp || !mp->inode || vfs_dentry_is_volatile(mp)) return -ENOENT;
+		if (!S_ISDIR(src->inode->mode)) return -EINVAL;
+		if (!S_ISDIR(mp->inode->mode)) return -ENOTDIR;
 		unsigned long bf = flags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC);
 		return vfs_bind(current_mnt_ns(), mp, src, ktarget, bf);
 	}
 
-	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -14;
+	if (strncpy_from_user(kfstype, fstype, sizeof(kfstype)) < 0) return -EFAULT;
 	unsigned long mflags = flags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC);
 
 	/* sysfs/cgroup/devtmpfs etc. → accept silently */
@@ -766,13 +767,13 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 	    strcmp(fsname, "exfat") == 0 || strcmp(fsname, "iso9660") == 0 || strcmp(fsname, "iso") == 0 ||
 	    strcmp(fsname, "ntfs") == 0) {
 		char ksrc[256];
-		if (!source || strncpy_from_user(ksrc, source, sizeof(ksrc)) < 0) return -14;
+		if (!source || strncpy_from_user(ksrc, source, sizeof(ksrc)) < 0) return -EFAULT;
 		const char *name = ksrc;
 		for (const char *p = ksrc; *p; p++)
 			if (*p == '/') name = p + 1;
 		block_device_t *bd = block_device_find(name);
 		if (bd && bd->kernel_only) bd = NULL;
-		if (!bd) return -19;   /* ENODEV */
+		if (!bd) return -ENODEV;
 		/* -o offset=BYTES: a filesystem further into the device, as losetup -o
 		 * would give. A device of its own, so the bytes before it stay out of reach. */
 		char kopt[32];
@@ -782,9 +783,9 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 			uint64_t off = 0;
 			for (const char *p = kopt + 7; *p >= '0' && *p <= '9'; p++) off = off * 10 + (uint64_t)(*p - '0');
 			uint64_t lba = off / BLOCK_SIZE;
-			if (!off || (off % BLOCK_SIZE) || lba >= bd->size_blocks || slices >= 99) return -22;
+			if (!off || (off % BLOCK_SIZE) || lba >= bd->size_blocks || slices >= 99) return -EINVAL;
 			bd = block_partition_add(bd, lba, bd->size_blocks - lba, ++slices, NULL);
-			if (!bd) return -12;
+			if (!bd) return -ENOMEM;
 		}
 		return vfs_mount_flags(ktarget, fsname, bd, mflags) == 0 ? 0 : -22;
 	}
@@ -802,7 +803,7 @@ static long sys_mount(const char *source, const char *target, const char *fstype
 static long sys_umount2(const char *target, int flags)
 {
 	(void)flags;
-	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
+	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
 	char kpath[PATH_MAX];
 	int r = resolve_path(kpath, AT_FDCWD, target);
 	if (r) return r;
@@ -818,10 +819,10 @@ static long sys_sethostname(const char *name, size_t len)
 	process_t *cur = task_current();
 	if (!capable_task(cur, CAP_SYS_ADMIN) &&
 	    !(cap_has(cur->cap_effective, CAP_SYS_ADMIN) && cur->uts_ns && cur->uts_ns != &init_uts_ns))
-		return -1; /* EPERM */
-	if (len >= sizeof(ns->nodename)) return -22;
-	if (!access_ok(name, len)) return -14;
-	if (copy_from_user(ns->nodename, name, len) != 0) return -14;
+		return -EPERM;
+	if (len >= sizeof(ns->nodename)) return -EINVAL;
+	if (!access_ok(name, len)) return -EFAULT;
+	if (copy_from_user(ns->nodename, name, len) != 0) return -EFAULT;
 	ns->nodename[len] = '\0';
 	return 0;
 }
@@ -830,18 +831,18 @@ static long sys_time_syscall(long *tloc)
 {
 	int64_t s, n; ranix_walltime(&s, &n);   /* real wall-clock (RTC-based) */
 	long t = (long)s;
-	if (tloc && copy_to_user(tloc, &t, sizeof(t)) != 0) return -14;
+	if (tloc && copy_to_user(tloc, &t, sizeof(t)) != 0) return -EFAULT;
 	return t;
 }
 
 static long sys_clock_nanosleep(int clkid, int flags,
                                 linux_timespec_t *req, linux_timespec_t *rem)
 {
-	if (flags & ~1) return -22;
+	if (flags & ~1) return -EINVAL;
 	linux_timespec_t k, now;
-	if (!req) return -14;
-	if (copy_from_user(&k, req, sizeof(k)) != 0) return -14;
-	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -22;
+	if (!req) return -EFAULT;
+	if (copy_from_user(&k, req, sizeof(k)) != 0) return -EFAULT;
+	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
 	int nowr = 0;
 	if (clkid == CLOCK_REALTIME || clkid == CLOCK_TAI) real_time(&now.tv_sec, &now.tv_nsec);
 	else if (clkid == CLOCK_MONOTONIC || clkid == CLOCK_BOOTTIME) mono_time(&now.tv_sec, &now.tv_nsec);
@@ -859,7 +860,7 @@ static long sys_clock_nanosleep(int clkid, int flags,
 
 static long sys_waitid(int idtype, int id, void *infop, int options, void *rusage)
 {
-	if (idtype < 0 || idtype > 2) return -22;
+	if (idtype < 0 || idtype > 2) return -EINVAL;
 	pid_t wpid = (idtype == 0) ? -1 : (idtype == 1) ? (pid_t)id : -(pid_t)id;
 	int status = 0;
 	long r = do_waitpid(wpid, &status, options, rusage);
@@ -874,7 +875,7 @@ static long sys_waitid(int idtype, int id, void *infop, int options, void *rusag
 			si[2] = (status & 0x7f) ? 2 /* CLD_KILLED */ : 1 /* CLD_EXITED */;
 			si[6] = (status & 0x7f) ? (status & 0x7f) : ((status >> 8) & 0xff);
 		}
-		if (copy_to_user(infop, si, sizeof(si)) != 0) return -14;
+		if (copy_to_user(infop, si, sizeof(si)) != 0) return -EFAULT;
 	}
 	return 0;
 }
@@ -886,13 +887,13 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 	char buf[4096];
 	size_t done = 0;
 	off_t oin = 0, oout = 0;
-	if (off_in  && copy_from_user(&oin,  off_in,  sizeof(oin))  != 0) return -14;
-	if (off_out && copy_from_user(&oout, off_out, sizeof(oout)) != 0) return -14;
-	if (oin < 0 || oout < 0) return -22;
+	if (off_in  && copy_from_user(&oin,  off_in,  sizeof(oin))  != 0) return -EFAULT;
+	if (off_out && copy_from_user(&oout, off_out, sizeof(oout)) != 0) return -EFAULT;
+	if (oin < 0 || oout < 0) return -EINVAL;
 	/* an endless source and sink must stay killable */
 	if (len > 0x7ffff000UL) len = 0x7ffff000UL;
 	while (done < len) {
-		if (task_has_actionable_signal()) { if (done == 0) return -4; break; }
+		if (task_has_actionable_signal()) { if (done == 0) return -EINTR; break; }
 		size_t chunk = len - done;
 		if (chunk > sizeof(buf)) chunk = sizeof(buf);
 		if (off_in) vfs_seek(fd_in, oin, 0);
@@ -906,8 +907,8 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 		done += (size_t)w;
 		if (w < r) break;
 	}
-	if (off_in  && copy_to_user(off_in,  &oin,  sizeof(oin))  != 0) return -14;
-	if (off_out && copy_to_user(off_out, &oout, sizeof(oout)) != 0) return -14;
+	if (off_in  && copy_to_user(off_in,  &oin,  sizeof(oin))  != 0) return -EFAULT;
+	if (off_out && copy_to_user(off_out, &oout, sizeof(oout)) != 0) return -EFAULT;
 	return (long)done;
 }
 
@@ -916,24 +917,24 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 
 static long sys_fallocate(int fd, int mode, off_t offset, off_t len)
 {
-	if (offset < 0 || len <= 0) return -22;        /* EINVAL */
+	if (offset < 0 || len <= 0) return -EINVAL;
 	/* hole-punch / collapse / zero / insert: no block-level support */
-	if (mode & ~FALLOC_FL_KEEP_SIZE) return -95;   /* EOPNOTSUPP */
+	if (mode & ~FALLOC_FL_KEEP_SIZE) return -EOPNOTSUPP;
 
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f || !f->inode) return -9;                /* EBADF */
-	if ((f->flags & 3) == O_RDONLY) return -9;     /* EBADF: not open for writing */
+	if (!f || !f->inode) return -EBADF;
+	if ((f->flags & 3) == O_RDONLY) return -EBADF;   /* not open for writing */
 	vfs_inode_t *in = f->inode;
-	if (S_ISDIR(in->mode)) return -21;             /* EISDIR */
-	if (!S_ISREG(in->mode)) return -9;             /* ESPIPE-ish; Linux: EBADF/ENODEV */
-	if (!in->iops || !in->iops->truncate) return -95;
+	if (S_ISDIR(in->mode)) return -EISDIR;
+	if (!S_ISREG(in->mode)) return -EBADF;         /* ESPIPE-ish; Linux: EBADF/ENODEV */
+	if (!in->iops || !in->iops->truncate) return -EOPNOTSUPP;
 
 	/* KEEP_SIZE only reserves blocks (no ramfs concept) → honest success. */
 	if (mode & FALLOC_FL_KEEP_SIZE) return 0;
 
 	uint64_t need = (uint64_t)offset + (uint64_t)len;
-	if (need > 0x7fffffffffffffffUL) return -27;   /* EFBIG */
+	if (need > 0x7fffffffffffffffUL) return -EFBIG;
 	if (need <= in->size) return 0;                /* already covered */
 	return in->iops->truncate(in, (off_t)need);    /* grows + zero-fills */
 }
@@ -944,9 +945,9 @@ static long sys_fallocate(int fd, int mode, off_t offset, off_t len)
 
 static long sys_renameat2(int odfd, const char *op, int ndfd, const char *np, unsigned int flags)
 {
-	if (flags & ~(unsigned)(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT)) return -22;
-	if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE)) return -22;
-	if (flags & RENAME_WHITEOUT) return -95;   /* EOPNOTSUPP: no overlay whiteouts */
+	if (flags & ~(unsigned)(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT)) return -EINVAL;
+	if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE)) return -EINVAL;
+	if (flags & RENAME_WHITEOUT) return -EOPNOTSUPP;   /* no overlay whiteouts */
 	if (!flags) return sys_renameat(odfd, op, ndfd, np);
 
 	char *ko = kmalloc(PATH_MAX);
@@ -991,21 +992,21 @@ out:
 static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
                                 size_t len, unsigned int flags)
 {
-	if (flags) return -22;   /* EINVAL: no flags defined */
+	if (flags) return -EINVAL;   /* no flags defined */
 	char buf[4096];
 	/* When an offset pointer is given, read/write at that offset and advance the
 	 * caller's copy without disturbing the fd's own position; otherwise use the
 	 * fd position (and let vfs_read/write advance it). */
 	off_t in_off = 0, out_off = 0;
-	if (off_in  && copy_from_user(&in_off,  off_in,  sizeof(in_off))  != 0) return -14;
-	if (off_out && copy_from_user(&out_off, off_out, sizeof(out_off)) != 0) return -14;
-	if (in_off < 0 || out_off < 0) return -22;
+	if (off_in  && copy_from_user(&in_off,  off_in,  sizeof(in_off))  != 0) return -EFAULT;
+	if (off_out && copy_from_user(&out_off, off_out, sizeof(out_off)) != 0) return -EFAULT;
+	if (in_off < 0 || out_off < 0) return -EINVAL;
 
 	size_t done = 0;
 	/* an endless source and sink must stay killable */
 	if (len > 0x7ffff000UL) len = 0x7ffff000UL;
 	while (done < len) {
-		if (task_has_actionable_signal()) { if (done == 0) return -4; break; }
+		if (task_has_actionable_signal()) { if (done == 0) return -EINTR; break; }
 		size_t chunk = len - done; if (chunk > sizeof(buf)) chunk = sizeof(buf);
 		if (off_in) vfs_seek(fd_in, in_off, SEEK_SET);
 		long r = vfs_read(fd_in, buf, chunk);
@@ -1019,8 +1020,8 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
 		if (w < r) break;
 	}
 
-	if (off_in  && copy_to_user(off_in,  &in_off,  sizeof(in_off))  != 0) return -14;
-	if (off_out && copy_to_user(off_out, &out_off, sizeof(out_off)) != 0) return -14;
+	if (off_in  && copy_to_user(off_in,  &in_off,  sizeof(in_off))  != 0) return -EFAULT;
+	if (off_out && copy_to_user(off_out, &out_off, sizeof(out_off)) != 0) return -EFAULT;
 	return (long)done;
 }
 
@@ -1043,14 +1044,14 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 	    ((uint32_t)cmd == 0x01234567u || (uint32_t)cmd == 0xCDEF0123u || (uint32_t)cmd == 0x4321FEDCu) &&
 	    current_pid_ns() == &init_pid_ns) {
 		process_t *me = task_current();
-		if (me->tgid != 1 && claim_reboot_check(me)) return -16;   /* EBUSY */
+		if (me->tgid != 1 && claim_reboot_check(me)) return -EBUSY;
 	}
-	if (!capable_task(task_current(), CAP_SYS_BOOT)) return -1; /* EPERM */
-	if ((uint32_t)magic1 != 0xfee1dead) return -22;
+	if (!capable_task(task_current(), CAP_SYS_BOOT)) return -EPERM;
+	if ((uint32_t)magic1 != 0xfee1dead) return -EINVAL;
 	if ((uint32_t)magic2 != 0x28121969 &&
 	    (uint32_t)magic2 != 0x05121996 &&
 	    (uint32_t)magic2 != 0x16041998 &&
-	    (uint32_t)magic2 != 0x20112000) return -22;
+	    (uint32_t)magic2 != 0x20112000) return -EINVAL;
 	/* Inside a pid namespace reboot ends that namespace, not the machine: its init
 	 * is killed and the rest goes with it (Linux reboot_pid_ns). A container must
 	 * not be able to turn the host off. */
@@ -1059,7 +1060,7 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 		if (ns && ns != &init_pid_ns) {
 			if (cmd == 0 || (uint32_t)cmd == 0x89ABCDEFu) return 0;
 			if ((uint32_t)cmd != 0x01234567u && (uint32_t)cmd != 0xCDEF0123u &&
-			    (uint32_t)cmd != 0x4321FEDCu) return -22;
+			    (uint32_t)cmd != 0x4321FEDCu) return -EINVAL;
 			process_t *init = ns->reaper;
 			if (init) task_signal(init, 9);
 			return 0;
@@ -1072,7 +1073,7 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 	 * so it must not fall through to a reset. */
 	if (cmd == 0 || (uint32_t)cmd == 0x89ABCDEFu) return 0;
 	if ((uint32_t)cmd != 0x01234567u && (uint32_t)cmd != 0xCDEF0123u &&
-	    (uint32_t)cmd != 0x4321FEDCu) return -22;
+	    (uint32_t)cmd != 0x4321FEDCu) return -EINVAL;
 #if IS_ENABLED(CONFIG_FS_EXT2)
 	ext2_shutdown_all();   /* only now: the commands above leave the system running */
 #endif
@@ -1087,11 +1088,11 @@ static long sys_reboot(int magic1, int magic2, int cmd, void *arg)
 
 static long sys_syslog(int type, char *buf, int len)
 {
-	if (type < 0 || type > 10) return -22;
-	if (type >= 2 && type <= 4 && len < 0) return -22;
+	if (type < 0 || type > 10) return -EINVAL;
+	if (type >= 2 && type <= 4 && len < 0) return -EINVAL;
 	/* same gate as /dev/kmsg; everything but the size query touches the log */
 	if (type != 10 && dmesg_restrict && !capable_task(task_current(), CAP_SYSLOG))
-		return -1;   /* EPERM */
+		return -EPERM;
 	if ((type == 2 || type == 3 || type == 4) && buf && len > 0) {
 		/* as much of the newest log as asked for, up to the whole ring */
 		size_t cap = kprintf_log_len();
@@ -1099,7 +1100,7 @@ static long sys_syslog(int type, char *buf, int len)
 		int order = 0;
 		while ((4096UL << order) < cap) order++;
 		uint64_t phys = (uint64_t)buddy_alloc(order);
-		if (!phys) return -12;
+		if (!phys) return -ENOMEM;
 		char *tmp = (char *)PHYS_TO_VIRT(phys);
 		size_t n = kprintf_read_log(tmp, cap);
 		long r = copy_to_user(buf, tmp, n) == 0 ? (long)n : -14;
@@ -1119,8 +1120,8 @@ static long do_utimensat(int dirfd, const char *path, const void *times, int fla
 	if (!path) {                                   /* futimens: dirfd is the fd */
 		process_t *p = task_current();
 		vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
-		if (!f || !f->inode) return -9;            /* EBADF */
-		if (f->mnt_flags & MS_RDONLY) return -30; /* EROFS */
+		if (!f || !f->inode) return -EBADF;
+		if (f->mnt_flags & MS_RDONLY) return -EROFS;
 		in = f->inode;
 	} else if (nofollow) {                         /* the link itself; tar sets it dangling */
 		int r = resolve_path(lpath, dirfd, path);
@@ -1129,10 +1130,10 @@ static long do_utimensat(int dirfd, const char *path, const void *times, int fla
 		char kp[PATH_MAX];
 		int r = resolve_path(kp, dirfd, path);
 		if (r) return r;
-		if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -30; /* EROFS */
+		if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -EROFS;
 		vfs_dentry_t *d = vfs_dentry_resolve(kp);
-		if (!d || !d->inode) return -2;            /* ENOENT */
-		if (vfs_dentry_readonly(d)) return -30;    /* EROFS */
+		if (!d || !d->inode) return -ENOENT;
+		if (vfs_dentry_readonly(d)) return -EROFS;
 		in = d->inode;
 	}
 
@@ -1143,10 +1144,10 @@ static long do_utimensat(int dirfd, const char *path, const void *times, int fla
 	if (times) {
 		struct { int64_t sec, nsec; } ts[2];
 		if (kernel_times) memcpy(ts, times, sizeof(ts));
-		else if (copy_from_user(ts, times, sizeof(ts)) != 0) return -14;
+		else if (copy_from_user(ts, times, sizeof(ts)) != 0) return -EFAULT;
 		for (int i = 0; i < 2; i++)
 			if (ts[i].nsec != 0x3FFFFFFE && ts[i].nsec != 0x3FFFFFFF &&
-			    (ts[i].nsec < 0 || ts[i].nsec >= 1000000000L)) return -22;
+			    (ts[i].nsec < 0 || ts[i].nsec >= 1000000000L)) return -EINVAL;
 		if (ts[0].nsec == 0x3FFFFFFE) set_at = 0;          /* UTIME_OMIT */
 		else if (ts[0].nsec != 0x3FFFFFFF) { at_s = ts[0].sec; at_n = (uint32_t)ts[0].nsec; explicit_times = 1; }
 		if (ts[1].nsec == 0x3FFFFFFE) set_mt = 0;
@@ -1165,16 +1166,16 @@ static long sys_utimensat(int dirfd, const char *path, const void *times, int fl
 
 static long sys_prlimit64(pid_t pid, int resource, const void *new_limit, void *old_limit)
 {
-	if (resource < 0 || resource >= RLIM_NLIMITS) return -22;
-	if (old_limit && !access_ok(old_limit, 16)) return -14;
-	if (new_limit && !access_ok(new_limit, 16)) return -14;
+	if (resource < 0 || resource >= RLIM_NLIMITS) return -EINVAL;
+	if (old_limit && !access_ok(old_limit, 16)) return -EFAULT;
+	if (new_limit && !access_ok(new_limit, 16)) return -EFAULT;
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	if (pid && !task_may_control(p, CAP_SYS_RESOURCE)) { proc_put(p); return -1; } /* EPERM */
 	rlimit_seed(p);
 	if (old_limit) {
 		uint64_t cur[2] = { p->rlim_cur[resource], p->rlim_max[resource] };
-		if (copy_to_user(old_limit, cur, 16)) { if (pid) proc_put(p); return -14; }
+		if (copy_to_user(old_limit, cur, 16)) { if (pid) proc_put(p); return -EFAULT; }
 	}
 	long rc = 0;
 	if (new_limit) {
@@ -1190,22 +1191,22 @@ static long sys_sched_yield(void) { yield(); return 0; }
 
 static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 {
-	if (len < 8) return -22;
-	if (!access_ok(mask, len)) return -14;
+	if (len < 8) return -EINVAL;
+	if (!access_ok(mask, len)) return -EFAULT;
 
 	/* Pull the user cpu_set_t into a kernel cpumask, ignoring bits past NR_CPUS. */
 	cpumask_t req;
 	cpumask_clear(&req);
 	size_t n = len < sizeof(req) ? len : sizeof(req);
-	if (copy_from_user(&req, mask, n)) return -14;
+	if (copy_from_user(&req, mask, n)) return -EFAULT;
 
 	cpumask_t online;
 	cpumask_set_first_n(smp_ncpus, &online);
 	for (int i = 0; i < CPUMASK_LONGS; i++) req.bits[i] &= online.bits[i];
-	if (cpumask_empty(&req)) return -22;            /* selects no online CPU */
+	if (cpumask_empty(&req)) return -EINVAL;            /* selects no online CPU */
 
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	if (pid && !task_may_control(p, CAP_SYS_NICE)) { proc_put(p); return -1; } /* EPERM */
 
 	int all = cpumask_weight(&req) == smp_ncpus;
@@ -1214,7 +1215,7 @@ static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 	} else {
 		cpumask_t *aff = p->cpu_affinity;
 		if (!aff) aff = kmalloc(sizeof(*aff));
-		if (!aff) { if (pid) proc_put(p); return -12; }
+		if (!aff) { if (pid) proc_put(p); return -ENOMEM; }
 		*aff = req;
 		p->cpu_affinity = aff;
 	}
@@ -1232,10 +1233,10 @@ static long sys_sched_setaffinity(pid_t pid, size_t len, const void *mask)
 
 static long sys_sched_getaffinity(pid_t pid, size_t len, void *mask)
 {
-	if (len < 8) return -22;
-	if (!access_ok(mask, len)) return -14;
+	if (len < 8) return -EINVAL;
+	if (!access_ok(mask, len)) return -EFAULT;
 	process_t *p = pid ? proc_get_user(pid) : task_current();
-	if (!p) return -3;
+	if (!p) return -ESRCH;
 	cpumask_t m;
 	if (p->cpu_affinity) m = *p->cpu_affinity;
 	else cpumask_set_first_n(smp_ncpus, &m);
@@ -1285,7 +1286,7 @@ void seccomp_put(struct seccomp_filter *f)
 
 static long seccomp_set_strict(process_t *p)
 {
-	if (p->seccomp_mode == 2) return -22;
+	if (p->seccomp_mode == 2) return -EINVAL;
 	p->seccomp_mode = 1;
 	return 0;
 }
@@ -1331,17 +1332,17 @@ static int seccomp_tsync_one(process_t *t, void *caller)
 static long seccomp_install(process_t *p, uint64_t fprog_uptr, unsigned flags)
 {
 	struct { uint16_t len; uint64_t filter; } fp;
-	if (copy_from_user(&fp, (void *)(uintptr_t)fprog_uptr, sizeof(fp)) != 0) return -14;
-	if (fp.len == 0 || fp.len > 4096) return -22;
-	if (p->seccomp_mode == 1) return -22;
+	if (copy_from_user(&fp, (void *)(uintptr_t)fprog_uptr, sizeof(fp)) != 0) return -EFAULT;
+	if (fp.len == 0 || fp.len > 4096) return -EINVAL;
+	if (p->seccomp_mode == 1) return -EINVAL;
 	/* a filter could otherwise make a setuid program fail in ways it never handles */
-	if (!p->no_new_privs && !capable_task(p, CAP_SYS_ADMIN)) return -13;
+	if (!p->no_new_privs && !capable_task(p, CAP_SYS_ADMIN)) return -EACCES;
 	unsigned path_len = fp.len + 4 + (p->seccomp_filter ? p->seccomp_filter->path_len : 0);
-	if (path_len > SECCOMP_MAX_PATH) return -12;
+	if (path_len > SECCOMP_MAX_PATH) return -ENOMEM;
 	size_t sz = (size_t)fp.len * sizeof(struct sock_filter);
 	struct seccomp_filter *flt = kmalloc(sizeof(*flt) + sz);
-	if (!flt) return -12;
-	if (copy_from_user(flt->insns, (void *)(uintptr_t)fp.filter, sz) != 0) { kfree(flt); return -14; }
+	if (!flt) return -ENOMEM;
+	if (copy_from_user(flt->insns, (void *)(uintptr_t)fp.filter, sz) != 0) { kfree(flt); return -EFAULT; }
 	flt->refs     = 1;
 	flt->len      = fp.len;
 	flt->path_len = path_len;
@@ -1373,10 +1374,10 @@ static long sys_seccomp(unsigned int op, unsigned int flags, uint64_t args)
 	                       SECCOMP_FILTER_FLAG_TSYNC_ESRCH;
 	if (op == 0) return flags ? -22 : seccomp_set_strict(p);   /* SECCOMP_SET_MODE_STRICT */
 	if (op == 1) {                                              /* SECCOMP_SET_MODE_FILTER */
-		if (flags & ~known) return -22;   /* LOG, NEW_LISTENER: not here */
+		if (flags & ~known) return -EINVAL;   /* LOG, NEW_LISTENER: not here */
 		return seccomp_install(p, args, flags);
 	}
-	return -22;
+	return -EINVAL;
 }
 
 static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5)
@@ -1385,14 +1386,14 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 	process_t *p = task_current();
 	switch (option) {
 	case 0x52580010: /* PR_RANIX_UNAME_LINUX: arg2 1 = uname says Linux for this tree, 0 = Ranix */
-		if (arg2 > 1) return -22;
+		if (arg2 > 1) return -EINVAL;
 		p->uname_linux = (int)arg2;
 		return 0;
 	case 0x52580011: /* PR_RANIX_GET_UNAME_LINUX */
 		return p->uname_linux;
 	case PR_SET_NAME: {
 		char name[16];
-		if (strncpy_from_user(name, (const void *)(uintptr_t)arg2, 16) < 0) return -14;
+		if (strncpy_from_user(name, (const void *)(uintptr_t)arg2, 16) < 0) return -EFAULT;
 		name[15] = '\0';
 		int len = 0;
 		while (name[len] && len < PROC_NAME_MAX - 1) len++;
@@ -1408,7 +1409,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return copy_to_user((void *)(uintptr_t)arg2, name, 16) ? -14 : 0;
 	}
 	case PR_SET_DUMPABLE:
-		if (arg2 > 1) return -22;
+		if (arg2 > 1) return -EINVAL;
 		p->dumpable = (int)arg2;
 		return 0;
 	case PR_GET_DUMPABLE:
@@ -1416,24 +1417,24 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 	case PR_SET_SECCOMP:
 		if (arg2 == 1) return seccomp_set_strict(p);
 		if (arg2 == 2) return seccomp_install(p, arg3, 0);  /* FILTER, arg3=sock_fprog */
-		return -22;
+		return -EINVAL;
 	case PR_GET_SECCOMP:
 		return p->seccomp_mode;
 	case 65: /* PR_SET_MDWE: arg2 bit 0 = refuse W+X; one way, as on Linux */
-		if (arg2 & ~1UL) return -22;
-		if (p->mdwe && !(arg2 & 1)) return -1;   /* EPERM */
+		if (arg2 & ~1UL) return -EINVAL;
+		if (p->mdwe && !(arg2 & 1)) return -EPERM;
 		p->mdwe = arg2 & 1;
 		return 0;
 	case 66: /* PR_GET_MDWE */
 		return p->mdwe;
 	case 38: /* PR_SET_NO_NEW_PRIVS */
-		if (arg2 != 1 || arg3 || arg4 || arg5) return -22;
+		if (arg2 != 1 || arg3 || arg4 || arg5) return -EINVAL;
 		p->no_new_privs = 1;
 		return 0;
 	case 39: /* PR_GET_NO_NEW_PRIVS */
 		return p->no_new_privs;
 	case 1:  /* PR_SET_PDEATHSIG */
-		if (arg2 > 64) return -22;
+		if (arg2 > 64) return -EINVAL;
 		p->pdeathsig = (int)arg2;
 		return 0;
 	case 2:  /* PR_GET_PDEATHSIG */
@@ -1441,7 +1442,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 	case PR_RANIX_ASESS_ID:
 		return (long)asess_id_of(p);
 	default:
-		return -22; /* EINVAL: unhandled option (do not claim success) */
+		return -EINVAL;   /* unhandled option (do not claim success) */
 	}
 }
 
@@ -1457,7 +1458,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 #define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED  (1 << 4)
 static long sys_membarrier(int cmd, unsigned int flags)
 {
-	if (flags) return -22;
+	if (flags) return -EINVAL;
 	switch (cmd) {
 	case MEMBARRIER_CMD_QUERY:
 		return MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED |
@@ -1473,21 +1474,21 @@ static long sys_membarrier(int cmd, unsigned int flags)
 		smp_membarrier();
 		return 0;
 	default:
-		return -22;
+		return -EINVAL;
 	}
 }
 
 /* GRND_NONBLOCK=1 GRND_RANDOM=2 GRND_INSECURE=4 */
 static long sys_getrandom(void *buf, size_t len, unsigned int flags)
 {
-	if (flags & ~0x7u) return -22;                  /* EINVAL: unknown flag */
-	if (!access_ok(buf, len)) return -14;
+	if (flags & ~0x7u) return -EINVAL;   /* unknown flag */
+	if (!access_ok(buf, len)) return -EFAULT;
 	/* the DRBG is seeded at boot, so GRND_RANDOM never blocks here. */
 	for (size_t i = 0; i < len; ) {
 		uint8_t kb[256];
 		size_t chunk = len - i < sizeof(kb) ? len - i : sizeof(kb);
 		csprng_bytes(kb, chunk);
-		if (copy_to_user((uint8_t *)buf + i, kb, chunk) != 0) return -14;
+		if (copy_to_user((uint8_t *)buf + i, kb, chunk) != 0) return -EFAULT;
 		i += chunk;
 	}
 	return (long)len;
@@ -1527,7 +1528,7 @@ static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask,
 		if (strncpy_from_user(tmp, path, 2) >= 0 && tmp[0] == '\0') {
 			process_t *p = task_current();
 			vfs_file_t *f = (p && p->fds) ? fd_get(p->fds, dirfd) : NULL;
-			if (!f || !f->inode) return -9; /* EBADF */
+			if (!f || !f->inode) return -EBADF;
 			memset(&ks, 0, sizeof(ks));
 			ks.ino = f->inode->ino; ks.mode = f->inode->mode;
 			ks.uid = f->inode->uid; ks.gid = f->inode->gid;
@@ -1541,7 +1542,7 @@ static long sys_statx(int dirfd, const char *path, int flags, unsigned int mask,
 		int r = resolve_path(kp, dirfd, path);
 		if (r) return r;
 		int sr = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lstat(kp, &ks) : vfs_stat(kp, &ks);
-		if (sr < 0) return -2;
+		if (sr < 0) return -ENOENT;
 	}
 fill:;
 

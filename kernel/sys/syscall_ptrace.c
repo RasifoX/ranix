@@ -1,4 +1,5 @@
 #include <kernel/capabilities.h>
+#include <kernel/errno.h>
 #define PTRACE_TRACEME    0
 #define PTRACE_PEEKDATA   2
 #define PTRACE_POKEDATA   5
@@ -239,7 +240,7 @@ int ptrace_may_access(process_t *t)
 static int ptrace_get_regs(process_t *tracee, ptrace_regs_t *ur)
 {
 	arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
-	if (!c) return -5; /* EIO */
+	if (!c) return -EIO;
 	__builtin_memset(ur, 0, sizeof(*ur));
 #if defined(__x86_64__)
 	ur->r15 = c->r15; ur->r14 = c->r14; ur->r13 = c->r13; ur->r12 = c->r12;
@@ -265,7 +266,7 @@ static int ptrace_get_regs(process_t *tracee, ptrace_regs_t *ur)
 static int ptrace_set_regs(process_t *tracee, const ptrace_regs_t *ur)
 {
 	arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
-	if (!c) return -5;
+	if (!c) return -EIO;
 #if defined(__x86_64__)
 	c->r15 = ur->r15; c->r14 = ur->r14; c->r13 = ur->r13; c->r12 = ur->r12;
 	c->rbp = ur->rbp; c->rbx = ur->rbx;
@@ -292,17 +293,17 @@ static int ptrace_set_regs(process_t *tracee, const ptrace_regs_t *ur)
 static long ptrace_regset(process_t *tracee, uint64_t type, uint64_t uiov, int write)
 {
 	struct { void *base; uint64_t len; } iov;
-	if (copy_from_user(&iov, (void *)uiov, sizeof(iov)) != 0) return -14;
+	if (copy_from_user(&iov, (void *)uiov, sizeof(iov)) != 0) return -EFAULT;
 	if (type == NT_PRSTATUS) {
 		ptrace_regs_t ur;
 		uint64_t n = iov.len < sizeof(ur) ? iov.len : sizeof(ur);
 		int r = ptrace_get_regs(tracee, &ur);
 		if (r) return r;
 		if (write) {
-			if (copy_from_user(&ur, iov.base, n) != 0) return -14;
+			if (copy_from_user(&ur, iov.base, n) != 0) return -EFAULT;
 			return ptrace_set_regs(tracee, &ur);
 		}
-		if (copy_to_user(iov.base, &ur, n) != 0) return -14;
+		if (copy_to_user(iov.base, &ur, n) != 0) return -EFAULT;
 		iov.len = n;
 		return copy_to_user((void *)uiov, &iov, sizeof(iov)) ? -14 : 0;
 	}
@@ -311,28 +312,28 @@ static long ptrace_regset(process_t *tracee, uint64_t type, uint64_t uiov, int w
 		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
 		uint64_t n = iov.len < sizeof(c->fxsave) ? iov.len : sizeof(c->fxsave);
 		if (write) return copy_from_user(c->fxsave, iov.base, n) ? -14 : 0;
-		if (copy_to_user(iov.base, c->fxsave, n) != 0) return -14;
+		if (copy_to_user(iov.base, c->fxsave, n) != 0) return -EFAULT;
 		iov.len = n;
 		return copy_to_user((void *)uiov, &iov, sizeof(iov)) ? -14 : 0;
 	}
 #endif
-	return -22;
+	return -EINVAL;
 }
 
 static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t addr, uint64_t data)
 {
 	switch (request) {
 	case PTRACE_SETOPTIONS:
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		tracee->ptrace_options = (int)data;
 		return 0;
 
 	case PTRACE_GETEVENTMSG:
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		return copy_to_user((void *)data, &tracee->ptrace_msg, sizeof(uint64_t)) ? -14 : 0;
 
 	case PTRACE_GETSIGINFO: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		int32_t info[32];
 		__builtin_memset(info, 0, sizeof(info));
 		info[0] = tracee->ptrace_si.si_signo;
@@ -348,27 +349,27 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 
 	case PTRACE_GETREGSET:
 	case PTRACE_SETREGSET:
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		return ptrace_regset(tracee, addr, data, request == PTRACE_SETREGSET);
 
 #if defined(__x86_64__)
 	case PTRACE_GETFPREGS:
 	case PTRACE_SETFPREGS: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		arch_context_t *c = tracee->uctx ? tracee->uctx : tracee->ctx;
-		if (!c) return -5;
+		if (!c) return -EIO;
 		if (request == PTRACE_GETFPREGS)
 			return copy_to_user((void *)data, c->fxsave, sizeof(c->fxsave)) ? -14 : 0;
-		if (copy_from_user(c->fxsave, (void *)data, sizeof(c->fxsave)) != 0) return -14;
+		if (copy_from_user(c->fxsave, (void *)data, sizeof(c->fxsave)) != 0) return -EFAULT;
 		*(uint32_t *)&c->fxsave[24] &= 0xffff;   /* reserved MXCSR bits #GP in fxrstor */
 		return 0;
 	}
 
 	case PTRACE_PEEKUSER: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		ptrace_regs_t ur;
 		uint64_t val = 0;
-		if (addr & 7) return -5;
+		if (addr & 7) return -EIO;
 		if (addr < sizeof(ur)) {
 			int r = ptrace_get_regs(tracee, &ur);
 			if (r) return r;
@@ -378,9 +379,9 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	}
 
 	case PTRACE_POKEUSER: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		ptrace_regs_t ur;
-		if (addr & 7) return -5;
+		if (addr & 7) return -EIO;
 		if (addr >= sizeof(ur)) return 0;
 		int r = ptrace_get_regs(tracee, &ur);
 		if (r) return r;
@@ -392,9 +393,9 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	case PTRACE_ATTACH:
 		if (tracee->tgid == p->tgid) return -1;   /* no thread can trace its own group */
 		if (!ptrace_may_access(tracee))
-			return -1; /* EPERM */
+			return -EPERM;
 		if (tracee->tracer != 0)
-			return -1; /* EPERM */
+			return -EPERM;
 		tracee->tracer      = p->pid;
 		tracee->ptrace_opts = 0;
 		tracee->ptrace_options = 0;
@@ -403,7 +404,7 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 
 	case PTRACE_DETACH:
 		if (tracee->tracer != (pid_t)p->pid)
-			return -3;
+			return -ESRCH;
 		tracee->tracer              = 0;
 		tracee->ptrace_opts         = 0;
 		tracee->ptrace_options      = 0;
@@ -420,7 +421,7 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	case PTRACE_SYSCALL:
 	case PTRACE_SINGLESTEP:
 		if (tracee->tracer != (pid_t)p->pid)
-			return -3;
+			return -ESRCH;
 		tracee->ptrace_opts          = (request == PTRACE_SYSCALL) ? 1 : 0;
 		tracee->single_step          = (request == PTRACE_SINGLESTEP) ? 1 : 0;
 		tracee->ptrace_inject        = (int)data;
@@ -433,7 +434,7 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 		return 0;
 
 	case PTRACE_GETREGS: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;   /* only the tracer may peek */
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;   /* only the tracer may peek */
 		ptrace_regs_t ur;
 		int r = ptrace_get_regs(tracee, &ur);
 		if (r) return r;
@@ -441,22 +442,22 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 	}
 
 	case PTRACE_SETREGS: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		ptrace_regs_t ur;
 		if (copy_from_user(&ur, (const void *)data, sizeof(ur)) != 0)
-			return -14;
+			return -EFAULT;
 		return ptrace_set_regs(tracee, &ur);
 	}
 
 	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		vm_space_t *vm = proc_get_vm((pid_t)tracee->pid);   /* pinned */
-		if (!vm) return -3;
+		if (!vm) return -ESRCH;
 		uint64_t val = 0;
 		size_t got = vm_access_remote(vm, addr, &val, sizeof(val), 0);
 		vm_destroy(vm);
-		if (got != sizeof(val)) return -14;
+		if (got != sizeof(val)) return -EFAULT;
 		/* the raw syscall stores through data; libc wrappers pass a local and
 		 * return it, so a value left in the return register reads as garbage */
 		if (!data) return (long)val;
@@ -465,16 +466,16 @@ static long ptrace_req(process_t *p, process_t *tracee, long request, uint64_t a
 
 	case PTRACE_POKETEXT:
 	case PTRACE_POKEDATA: {
-		if (tracee->tracer != (pid_t)p->pid) return -3;
+		if (tracee->tracer != (pid_t)p->pid) return -ESRCH;
 		vm_space_t *vm = proc_get_vm((pid_t)tracee->pid);   /* pinned */
-		if (!vm) return -3;
+		if (!vm) return -ESRCH;
 		size_t put = vm_access_remote(vm, addr, &data, sizeof(data), 1);
 		vm_destroy(vm);
 		return put == sizeof(data) ? 0 : -14;
 	}
 
 	default:
-		return -38; /* ENOSYS */
+		return -ENOSYS;
 	}
 }
 
@@ -493,7 +494,7 @@ static long sys_ptrace(long request, pid_t pid, uint64_t addr, uint64_t data)
 
 	process_t *tracee = proc_get_user(pid);
 	if (!tracee)
-		return -3; /* ESRCH */
+		return -ESRCH;
 
 	long ret = ptrace_req(p, tracee, request, addr, data);
 	proc_put(tracee);

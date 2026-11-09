@@ -36,6 +36,7 @@
 #include <kernel/config.h>
 #include <kernel/time.h>
 #include <kernel/fs/ramfs.h>
+#include <kernel/errno.h>
 
 /* mmap flags */
 #define MAP_SHARED    0x01

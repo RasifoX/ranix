@@ -17,6 +17,7 @@
 #include <kernel/proc.h>
 #include <kernel/sync.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 /* wire format */
 typedef struct { uint32_t len; uint16_t type, flags; uint32_t seq, pid; } nl_hdr_t;
@@ -375,7 +376,7 @@ static int nl_get_link(nl_out_t *o, const uint8_t *body, size_t blen)
 {
     net_namespace_t *ns = o->s->net_ns;
     nl_link_t req;
-    if (blen < sizeof(req)) return -22;
+    if (blen < sizeof(req)) return -EINVAL;
     memcpy(&req, body, sizeof(req));
 
     uint16_t nlen = 0;
@@ -389,7 +390,7 @@ static int nl_get_link(nl_out_t *o, const uint8_t *body, size_t blen)
             return 0;
         }
     }
-    return -19; /* ENODEV */
+    return -ENODEV;
 }
 
 /* RTM_GETROUTE for one destination (`ip route get`): IPv4, same choice as
@@ -398,9 +399,9 @@ static int nl_get_route(nl_out_t *o, const uint8_t *body, size_t blen)
 {
     net_namespace_t *ns = o->s->net_ns;
     nl_route_t req;
-    if (blen < sizeof(req)) return -22;
+    if (blen < sizeof(req)) return -EINVAL;
     memcpy(&req, body, sizeof(req));
-    if (req.family != AF_INET) return -95; /* EOPNOTSUPP */
+    if (req.family != AF_INET) return -EOPNOTSUPP;
 
     uint32_t dst = 0;
     uint16_t dlen = 0;
@@ -431,7 +432,7 @@ static int nl_get_route(nl_out_t *o, const uint8_t *body, size_t blen)
         }
         if (!hit && d->gw) { hit = d; hit_i = i + 1; }
     }
-    if (!hit) return -101; /* ENETUNREACH */
+    if (!hit) return -ENETUNREACH;
     nl_route4(o, 0, m, hit_i, dst, hit->gw, hit->ip);
     return 0;
 }
@@ -517,7 +518,7 @@ long netlink_recv(socket_t *s, const k_iovec *iov, uint64_t niov, int flags,
     int peek = flags & MSG_PEEK_;
     /* a peeked skb stays queued for a sibling thread to free: copy it under the lock */
     uint8_t *peeked = peek ? kmalloc(SKB_DATA_MAX) : NULL;
-    if (peek && !peeked) return -12;
+    if (peek && !peeked) return -ENOMEM;
 
     skb_t *skb = NULL;
     const uint8_t *src;

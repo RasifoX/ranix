@@ -96,20 +96,20 @@ static long sys_timer_delete(int id);
 
 static long sys_timer_create(int clk, const void *usev, int *uid)
 {
-	if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC && clk != CLOCK_BOOTTIME) return -22;
+	if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC && clk != CLOCK_BOOTTIME) return -EINVAL;
 	struct { uint64_t value; int sig, notify, tid; } ev;
 	process_t *p = task_current();
 	if (usev) {
-		if (copy_from_user(&ev, usev, sizeof(ev)) != 0) return -14;
+		if (copy_from_user(&ev, usev, sizeof(ev)) != 0) return -EFAULT;
 		if (ev.notify != SIGEV_SIGNAL_ && ev.notify != SIGEV_NONE_ && ev.notify != SIGEV_THREAD_ID_)
-			return -22;
-		if (ev.notify != SIGEV_NONE_ && (ev.sig <= 0 || ev.sig > NSIG)) return -22;
+			return -EINVAL;
+		if (ev.notify != SIGEV_NONE_ && (ev.sig <= 0 || ev.sig > NSIG)) return -EINVAL;
 		if (ev.notify == SIGEV_THREAD_ID_) {
 			process_t *t = proc_get_user(ev.tid);
 			int ok = t && t->tgid == p->tgid;
 			pid_t global = t ? (pid_t)t->pid : 0;
 			proc_put(t);
-			if (!ok) return -22;
+			if (!ok) return -EINVAL;
 			ev.tid = global;
 		}
 	}
@@ -124,7 +124,7 @@ static long sys_timer_create(int clk, const void *usev, int *uid)
 	ptimer_t *t = NULL;
 	for (int i = 0; i < PTIMER_MAX && !t; i++)
 		if (!ptimers[i].used) t = &ptimers[i];
-	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -11; }
+	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -EAGAIN; }
 	memset(t, 0, sizeof(*t));
 	t->used = 1;
 	t->id = ptimer_next_id++;
@@ -137,7 +137,7 @@ static long sys_timer_create(int clk, const void *usev, int *uid)
 	t->tid = (usev && ev.notify == SIGEV_THREAD_ID_) ? ev.tid : 0;
 	int id = t->id;
 	spin_unlock_irq(&ptimer_lock, f);
-	if (copy_to_user(uid, &id, sizeof(id)) != 0) { sys_timer_delete(id); return -14; }
+	if (copy_to_user(uid, &id, sizeof(id)) != 0) { sys_timer_delete(id); return -EFAULT; }
 	return 0;
 }
 
@@ -153,14 +153,14 @@ static void ptimer_read(ptimer_t *t, uint64_t now, kits_t *o)
 static long sys_timer_settime(int id, int flags, const kits_t *unew, kits_t *uold)
 {
 	kits_t n, o;
-	if (copy_from_user(&n, unew, sizeof(n)) != 0) return -14;
+	if (copy_from_user(&n, unew, sizeof(n)) != 0) return -EFAULT;
 	if (n.value.sec < 0 || n.value.nsec < 0 || n.value.nsec >= (int64_t)NS ||
-	    n.interval.sec < 0 || n.interval.nsec < 0 || n.interval.nsec >= (int64_t)NS) return -22;
+	    n.interval.sec < 0 || n.interval.nsec < 0 || n.interval.nsec >= (int64_t)NS) return -EINVAL;
 	uint64_t now = ptimer_now();
 	uint64_t val = (uint64_t)n.value.sec * NS + (uint64_t)n.value.nsec;
 	uint64_t f = spin_lock_irq(&ptimer_lock);
 	ptimer_t *t = ptimer_find(id);
-	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -22; }
+	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -EINVAL; }
 	ptimer_read(t, now, &o);
 	if (val && (flags & 1 /* TIMER_ABSTIME */)) {
 		uint64_t base = now;
@@ -177,7 +177,7 @@ static long sys_timer_settime(int id, int flags, const kits_t *unew, kits_t *uol
 	spin_unlock_irq(&ptimer_lock, f);
 	process_t *w = proc_get(ptimer_pid);   /* idle, it sleeps for a second */
 	if (w) { task_wake(w); proc_put(w); }
-	if (uold && copy_to_user(uold, &o, sizeof(o)) != 0) return -14;
+	if (uold && copy_to_user(uold, &o, sizeof(o)) != 0) return -EFAULT;
 	return 0;
 }
 
@@ -187,7 +187,7 @@ static long sys_timer_gettime(int id, kits_t *ucur)
 	uint64_t now = ptimer_now();
 	uint64_t f = spin_lock_irq(&ptimer_lock);
 	ptimer_t *t = ptimer_find(id);
-	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -22; }
+	if (!t) { spin_unlock_irq(&ptimer_lock, f); return -EINVAL; }
 	ptimer_read(t, now, &o);
 	spin_unlock_irq(&ptimer_lock, f);
 	return copy_to_user(ucur, &o, sizeof(o)) == 0 ? 0 : -14;

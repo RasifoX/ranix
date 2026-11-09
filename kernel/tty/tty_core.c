@@ -9,6 +9,7 @@
 #include <kernel/input.h>
 #include <kernel/tick.h>
 #include <kernel/hal.h>
+#include <kernel/errno.h>
 
 /* c_lflag bits */
 #define ISIG    0x00000001
@@ -216,8 +217,8 @@ static ssize_t tty_read(vfs_file_t *f, void *buf, size_t len)
             continue;
         }
         if (copied > 0) break;
-        if (f->flags & O_NONBLOCK) return -11;
-        if (task_has_actionable_signal()) return -4;   /* EINTR, and SIGKILL's only way out */
+        if (f->flags & O_NONBLOCK) return -EAGAIN;
+        if (task_has_actionable_signal()) return -EINTR;   /* and SIGKILL's only way out */
         fb_tty_flush();
         poll_arm();
         poll_block((uint64_t)-1);
@@ -259,7 +260,7 @@ static ssize_t tty_write(vfs_file_t *f, const void *buf, size_t len)
         if (want > sizeof(kb) - carry_n) want = sizeof(kb) - carry_n;
         char *p = kb;
         for (size_t i = 0; i < carry_n; i++) p[i] = carry[i];
-        if (copy_fop_from_user(kb + carry_n, (const char *)buf + off, want)) return -14;
+        if (copy_fop_from_user(kb + carry_n, (const char *)buf + off, want)) return -EFAULT;
         size_t total = carry_n + want;
 
         for (size_t i = 0; i + 3 < total; i++) {
@@ -336,7 +337,7 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     }
     if (cmd == TCSETS || cmd == TCSETSW || cmd == TCSETSF) {
         uint8_t termios[36];
-        if (copy_from_user(termios, (const void *)(uintptr_t)arg, sizeof(termios))) return -14;
+        if (copy_from_user(termios, (const void *)(uintptr_t)arg, sizeof(termios))) return -EFAULT;
         uint64_t flags = spin_lock_irq(&t->lock);
         t->c_iflag = ((uint32_t *)termios)[0];
         t->c_oflag = ((uint32_t *)termios)[1];
@@ -357,7 +358,7 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     }
     if (cmd == TIOCSWINSZ) {
         uint16_t ws[4];
-        if (copy_from_user(ws, (const void *)(uintptr_t)arg, sizeof(ws))) return -14;
+        if (copy_from_user(ws, (const void *)(uintptr_t)arg, sizeof(ws))) return -EFAULT;
         uint64_t flags = spin_lock_irq(&t->lock);
         t->ws_row = ws[0]; t->ws_col = ws[1];
         pid_t pg = t->fg_pgrp;
@@ -371,7 +372,7 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     }
     if (cmd == TIOCSPGRP) {
         pid_t pgrp;
-        if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
+        if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -EFAULT;
         pid_t fg;
         long r = tty_check_fg(t, 0, pgrp, &fg);
         if (r == 0) t->fg_pgrp = fg;
@@ -390,7 +391,7 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         return 0;
     }
     if (cmd == KDSETMODE) {
-        if (arg != KD_TEXT && arg != KD_GRAPHICS) return -22;
+        if (arg != KD_TEXT && arg != KD_GRAPHICS) return -EINVAL;
         fb_tty_set_graphics(arg == KD_GRAPHICS);
         kd_owner = arg == KD_GRAPHICS ? task_current()->pid : 0;
         return 0;
@@ -399,7 +400,7 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         int mode = fb_tty_get_graphics() ? KD_GRAPHICS : KD_TEXT;
         return copy_to_user((void *)(uintptr_t)arg, &mode, sizeof(mode)) ? -14 : 0;
     }
-    return -25;
+    return -ENOTTY;
 }
 
 static vfs_fops_t tty_fops = {
@@ -423,21 +424,21 @@ static vfs_fops_t *ctty_fops(void **obj)
 static ssize_t ctty_read(vfs_file_t *f, void *buf, size_t len)
 {
     void *obj; vfs_fops_t *fo = ctty_fops(&obj);
-    if (!fo->read) return -22;
+    if (!fo->read) return -EINVAL;
     vfs_file_t tmp = *f; tmp.priv = obj;
     return fo->read(&tmp, buf, len);
 }
 static ssize_t ctty_write(vfs_file_t *f, const void *buf, size_t len)
 {
     void *obj; vfs_fops_t *fo = ctty_fops(&obj);
-    if (!fo->write) return -22;
+    if (!fo->write) return -EINVAL;
     vfs_file_t tmp = *f; tmp.priv = obj;
     return fo->write(&tmp, buf, len);
 }
 static int ctty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
     void *obj; vfs_fops_t *fo = ctty_fops(&obj);
-    if (!fo->ioctl) return -25;
+    if (!fo->ioctl) return -ENOTTY;
     vfs_file_t tmp = *f; tmp.priv = obj;
     return fo->ioctl(&tmp, cmd, arg);
 }
@@ -459,7 +460,7 @@ static int ctty_open(vfs_inode_t *in, vfs_file_t *f, int flags)
     (void)in; (void)f; (void)flags;
     process_t *cur = task_current();
     if (cur && !cur->ctty && cur->pid > 1 && cur->sid == (pid_t)cur->pid)
-        return -6; /* ENXIO */
+        return -ENXIO;
     return 0;
 }
 

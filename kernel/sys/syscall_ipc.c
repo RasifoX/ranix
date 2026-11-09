@@ -69,14 +69,14 @@ static long sys_shmget(key_t key, size_t size, int shmflg)
         if (id >= 0) {
             if ((shmflg & IPC_CREAT) && (shmflg & IPC_EXCL)) {
                 spin_unlock_irq(&shm_lock, f);
-                return -17; /* EEXIST */
+                return -EEXIST;
             }
             spin_unlock_irq(&shm_lock, f);
             return id;
         }
         if (!(shmflg & IPC_CREAT)) {
             spin_unlock_irq(&shm_lock, f);
-            return -2; /* ENOENT */
+            return -ENOENT;
         }
     }
 
@@ -84,18 +84,18 @@ static long sys_shmget(key_t key, size_t size, int shmflg)
     for (int i = 0; i < SHM_MAX; i++) {
         if (!shm_segs[i].valid) { slot = i; break; }
     }
-    if (slot < 0) { spin_unlock_irq(&shm_lock, f); return -28; /* ENOSPC */ }
+    if (slot < 0) { spin_unlock_irq(&shm_lock, f); return -ENOSPC; }
     if (current_ipc() != &init_ipc_ns) {
         int held = 0;
         for (int i = 0; i < SHM_MAX; i++)
             held += shm_segs[i].valid && shm_segs[i].ipc_ns == current_ipc();
-        if (held >= SHM_NS_MAX) { spin_unlock_irq(&shm_lock, f); return -28; }
+        if (held >= SHM_NS_MAX) { spin_unlock_irq(&shm_lock, f); return -ENOSPC; }
     }
     if (size == 0) size = PAGE_SIZE;
     /* one contiguous buddy block; rounding and the order loop below must not wrap */
     if (size > ((size_t)PAGE_SIZE << (BUDDY_MAX_ORDER - 1))) {
         spin_unlock_irq(&shm_lock, f);
-        return -22;
+        return -EINVAL;
     }
     size = (size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 
@@ -104,9 +104,9 @@ static long sys_shmget(key_t key, size_t size, int shmflg)
     while ((size_t)(1 << order) < pages) order++;
     void *cg = NULL;
     long block = PAGE_SIZE << order;
-    if (cgroup_charge_file(&cg, 0, block) != 0) { spin_unlock_irq(&shm_lock, f); return -12; }
+    if (cgroup_charge_file(&cg, 0, block) != 0) { spin_unlock_irq(&shm_lock, f); return -ENOMEM; }
     void *phys = buddy_alloc(order);
-    if (!phys) { cgroup_file_release(cg, block); spin_unlock_irq(&shm_lock, f); return -12; }
+    if (!phys) { cgroup_file_release(cg, block); spin_unlock_irq(&shm_lock, f); return -ENOMEM; }
     memset((void *)PHYS_TO_VIRT(phys), 0, (size_t)PAGE_SIZE << order);   /* the last owner's bytes */
 
     shm_segs[slot].uid    = task_current()->euid;
@@ -132,12 +132,12 @@ static long sys_shmat(int shmid, const void *shmaddr, int shmflg)
     if (shmid < 0 || shmid >= SHM_MAX || !shm_segs[shmid].valid ||
         shm_segs[shmid].ipc_ns != current_ipc()) {
         spin_unlock_irq(&shm_lock, f);
-        return -22;
+        return -EINVAL;
     }
     shm_seg_t *seg = &shm_segs[shmid];
     if (!ipc_may(seg->uid, seg->gid, seg->mode, rdonly ? 4 : 6)) {
         spin_unlock_irq(&shm_lock, f);
-        return -13;
+        return -EACCES;
     }
     size_t size = seg->size;
     void *kaddr = seg->kaddr;
@@ -145,7 +145,7 @@ static long sys_shmat(int shmid, const void *shmaddr, int shmflg)
     uint64_t va = (uint64_t)shmaddr;
     if ((va & (PAGE_SIZE - 1)) || (va && !access_ok((void *)va, size))) {
         spin_unlock_irq(&shm_lock, f);
-        return -22;
+        return -EINVAL;
     }
     seg->refs++;
     spin_unlock_irq(&shm_lock, f);
@@ -186,7 +186,7 @@ static long sys_shmdt(const void *shmaddr)
     for (vma_t *v = p->vm->vmas; v; v = v->next)
         if (v->vaddr == va && (v->flags & VMA_SHARED)) { size = v->size; break; }
     spin_unlock_irq(&p->vm->fault_lock, cf);
-    if (!size) return -22;
+    if (!size) return -EINVAL;
 
     /* the segment is the one whose pages sit there; another of the same size must
      * not lose a count */
@@ -225,10 +225,10 @@ typedef struct {
 
 static long sys_shmctl(int shmid, int cmd, void *buf)
 {
-    if (shmid < 0 || shmid >= SHM_MAX) return -22;
+    if (shmid < 0 || shmid >= SHM_MAX) return -EINVAL;
     uint64_t f = spin_lock_irq(&shm_lock);
     if (!shm_segs[shmid].valid || shm_segs[shmid].ipc_ns != current_ipc()) {
-        spin_unlock_irq(&shm_lock, f); return -22;
+        spin_unlock_irq(&shm_lock, f); return -EINVAL;
     }
 
     if (cmd == IPC_RMID) {
@@ -246,7 +246,7 @@ static long sys_shmctl(int shmid, int cmd, void *buf)
     }
     if (cmd == IPC_STAT && !ipc_may(shm_segs[shmid].uid, shm_segs[shmid].gid, shm_segs[shmid].mode, 4)) {
         spin_unlock_irq(&shm_lock, f);
-        return -13;
+        return -EACCES;
     }
     if (cmd == IPC_STAT && buf) {
         shmid_ds_t ds;
@@ -261,7 +261,7 @@ static long sys_shmctl(int shmid, int cmd, void *buf)
         return copy_to_user(buf, &ds, sizeof(ds)) ? -14 : 0;
     }
     spin_unlock_irq(&shm_lock, f);
-    return -22;
+    return -EINVAL;
 }
 
 /* ── SysV Semaphores ──────────────────────────────────────── */
@@ -296,25 +296,25 @@ static long sys_semget(key_t key, int nsems, int semflg)
             if (sem_arrs[i].valid && sem_arrs[i].key == key && sem_arrs[i].ipc_ns == cur) {
                 if ((semflg & IPC_CREAT) && (semflg & IPC_EXCL)) {
                     spin_unlock_irq(&sem_lock, f);
-                    return -17;
+                    return -EEXIST;
                 }
                 spin_unlock_irq(&sem_lock, f);
                 return i;
             }
         }
-        if (!(semflg & IPC_CREAT)) { spin_unlock_irq(&sem_lock, f); return -2; }
+        if (!(semflg & IPC_CREAT)) { spin_unlock_irq(&sem_lock, f); return -ENOENT; }
     }
     int slot = -1;
     for (int i = 0; i < SEM_MAX; i++) {
         if (!sem_arrs[i].valid) { slot = i; break; }
     }
-    if (slot < 0) { spin_unlock_irq(&sem_lock, f); return -28; }
-    if (nsems <= 0 || nsems > SEM_NSEMS_MAX) { spin_unlock_irq(&sem_lock, f); return -22; }
+    if (slot < 0) { spin_unlock_irq(&sem_lock, f); return -ENOSPC; }
+    if (nsems <= 0 || nsems > SEM_NSEMS_MAX) { spin_unlock_irq(&sem_lock, f); return -EINVAL; }
     if (current_ipc() != &init_ipc_ns) {
         int held = 0;
         for (int i = 0; i < SEM_MAX; i++)
             held += sem_arrs[i].valid && sem_arrs[i].ipc_ns == current_ipc();
-        if (held >= SEM_NS_MAX) { spin_unlock_irq(&sem_lock, f); return -28; }
+        if (held >= SEM_NS_MAX) { spin_unlock_irq(&sem_lock, f); return -ENOSPC; }
     }
     /* the wait queue survives reuse: a sleeper woken by IPC_RMID may still be
      * unlinking itself from it */
@@ -339,23 +339,23 @@ typedef struct { uint16_t sem_num; int16_t sem_op; int16_t sem_flg; } sembuf_t;
 
 static long sys_semop(int semid, const sembuf_t *usops, size_t nsops)
 {
-    if (semid < 0 || semid >= SEM_MAX) return -22;
-    if (nsops == 0 || nsops > SEM_NSEMS_MAX) return -22;
+    if (semid < 0 || semid >= SEM_MAX) return -EINVAL;
+    if (nsops == 0 || nsops > SEM_NSEMS_MAX) return -EINVAL;
 
     sembuf_t sops[SEM_NSEMS_MAX];
-    if (copy_from_user(sops, usops, nsops * sizeof(sembuf_t)) != 0) return -14;
+    if (copy_from_user(sops, usops, nsops * sizeof(sembuf_t)) != 0) return -EFAULT;
 
     for (size_t i = 0; i < nsops; i++)
-        if (sops[i].sem_num >= SEM_NSEMS_MAX) return -27;   /* EFBIG */
+        if (sops[i].sem_num >= SEM_NSEMS_MAX) return -EFBIG;
 
     while (1) {
         uint64_t f = spin_lock_irq(&sem_lock);
         if (!sem_arrs[semid].valid || sem_arrs[semid].ipc_ns != current_ipc()) {
-            spin_unlock_irq(&sem_lock, f); return -22;
+            spin_unlock_irq(&sem_lock, f); return -EINVAL;
         }
         sem_arr_t *arr = &sem_arrs[semid];
         if (!ipc_may(arr->uid, arr->gid, arr->mode, 6)) {
-            spin_unlock_irq(&sem_lock, f); return -13;
+            spin_unlock_irq(&sem_lock, f); return -EACCES;
         }
 
         /* Apply the ops in order to a copy: two ops on one semaphore see each
@@ -365,10 +365,10 @@ static long sys_semop(int semid, const sembuf_t *usops, size_t nsops)
         int blocked = -1;
         for (size_t i = 0; i < nsops; i++) {
             int n = sops[i].sem_num;
-            if (n >= arr->nsems) { spin_unlock_irq(&sem_lock, f); return -27; } /* EFBIG */
+            if (n >= arr->nsems) { spin_unlock_irq(&sem_lock, f); return -EFBIG; } /* EFBIG */
             int v = vals[n] + sops[i].sem_op;
             if (sops[i].sem_op == 0 ? vals[n] != 0 : v < 0) { blocked = (int)i; break; }
-            if (v > SEMVMX) { spin_unlock_irq(&sem_lock, f); return -34; }   /* ERANGE */
+            if (v > SEMVMX) { spin_unlock_irq(&sem_lock, f); return -ERANGE; }   /* ERANGE */
             vals[n] = v;
         }
         if (blocked < 0) {
@@ -379,11 +379,11 @@ static long sys_semop(int semid, const sembuf_t *usops, size_t nsops)
         }
         if (sops[blocked].sem_flg & IPC_NOWAIT) {
             spin_unlock_irq(&sem_lock, f);
-            return -11; /* EAGAIN */
+            return -EAGAIN;
         }
         /* queued before sem_lock drops, so a change after this wakes us */
         sleep_on_locked(&arr->wq, &sem_lock, f);
-        if (task_has_actionable_signal()) return -4; /* EINTR */
+        if (task_has_actionable_signal()) return -EINTR;
     }
 }
 
@@ -395,17 +395,17 @@ static long sys_semop(int semid, const sembuf_t *usops, size_t nsops)
 
 static long sys_semctl(int semid, int semnum, int cmd, uint64_t arg)
 {
-    if (semid < 0 || semid >= SEM_MAX) return -22;
+    if (semid < 0 || semid >= SEM_MAX) return -EINVAL;
     uint64_t f = spin_lock_irq(&sem_lock);
     if (!sem_arrs[semid].valid || sem_arrs[semid].ipc_ns != current_ipc()) {
-        spin_unlock_irq(&sem_lock, f); return -22;
+        spin_unlock_irq(&sem_lock, f); return -EINVAL;
     }
     sem_arr_t *arr = &sem_arrs[semid];
     long ret = 0;
     int need = (cmd == GETVAL || cmd == GETALL) ? 4 : ((cmd == SETVAL || cmd == SETALL) ? 2 : 0);
     if (need && !ipc_may(arr->uid, arr->gid, arr->mode, need)) {
         spin_unlock_irq(&sem_lock, f);
-        return -13;
+        return -EACCES;
     }
     switch (cmd) {
     case SETVAL:
@@ -431,9 +431,9 @@ static long sys_semctl(int semid, int semnum, int cmd, uint64_t arg)
         uint32_t seq = arr->seq;
         spin_unlock_irq(&sem_lock, f);
         if (copy_from_user(vals, (const void *)arg, (size_t)nsems * sizeof(uint16_t)) != 0)
-            return -14;
+            return -EFAULT;
         for (int i = 0; i < nsems; i++)
-            if (vals[i] > SEMVMX) return -34;               /* ERANGE */
+            if (vals[i] > SEMVMX) return -ERANGE;
         f = spin_lock_irq(&sem_lock);
         /* removed, or the slot went to another array, while we copied */
         if (!arr->valid || arr->seq != seq) { ret = -43; break; }   /* EIDRM */
@@ -503,15 +503,15 @@ static long sys_msgget(key_t key, int msgflg)
         int id = msgq_key_to_id(key);
         if (id >= 0) {
             if ((msgflg & IPC_CREAT) && (msgflg & IPC_EXCL)) {
-                spin_unlock_irq(&msgq_lock, f); return -17; /* EEXIST */
+                spin_unlock_irq(&msgq_lock, f); return -EEXIST;
             }
             spin_unlock_irq(&msgq_lock, f); return id;
         }
-        if (!(msgflg & IPC_CREAT)) { spin_unlock_irq(&msgq_lock, f); return -2; /* ENOENT */ }
+        if (!(msgflg & IPC_CREAT)) { spin_unlock_irq(&msgq_lock, f); return -ENOENT; }
     }
     int slot = -1;
     for (int i = 0; i < MSGQ_MAX; i++) if (!msg_queues[i].valid) { slot = i; break; }
-    if (slot < 0) { spin_unlock_irq(&msgq_lock, f); return -28; /* ENOSPC */ }
+    if (slot < 0) { spin_unlock_irq(&msgq_lock, f); return -ENOSPC; }
     msgq_t *q = &msg_queues[slot];
     q->key = key; q->valid = 1; q->count = 0; q->seq_next = 1;
     q->send_waiter = q->recv_waiter = NULL;
@@ -524,20 +524,20 @@ static long sys_msgget(key_t key, int msgflg)
 
 static long sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
 {
-    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -22;
+    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -EINVAL;
     long mtype;
-    if (copy_from_user(&mtype, msgp, sizeof(long)) != 0) return -14;
-    if (mtype < 1) return -22;
+    if (copy_from_user(&mtype, msgp, sizeof(long)) != 0) return -EFAULT;
+    if (mtype < 1) return -EINVAL;
     char tmp[MSGQ_MSGSZ];
-    if (msgsz && copy_from_user(tmp, (const char *)msgp + sizeof(long), msgsz) != 0) return -14;
+    if (msgsz && copy_from_user(tmp, (const char *)msgp + sizeof(long), msgsz) != 0) return -EFAULT;
 
     while (1) {
         uint64_t f = spin_lock_irq(&msgq_lock);
         if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
-            spin_unlock_irq(&msgq_lock, f); return -43; /* EIDRM */
+            spin_unlock_irq(&msgq_lock, f); return -EIDRM;
         }
         msgq_t *q = &msg_queues[msqid];
-        if (!ipc_may(q->uid, q->gid, q->mode, 2)) { spin_unlock_irq(&msgq_lock, f); return -13; }
+        if (!ipc_may(q->uid, q->gid, q->mode, 2)) { spin_unlock_irq(&msgq_lock, f); return -EACCES; }
         if (q->count < MSGQ_NMSG) {
             int slot = -1;
             for (int i = 0; i < MSGQ_NMSG; i++) if (!q->msgs[i].used) { slot = i; break; }
@@ -549,7 +549,7 @@ static long sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
             spin_unlock_irq(&msgq_lock, f);
             return 0;
         }
-        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -11; /* EAGAIN */ }
+        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -EAGAIN; }
         q->send_waiter = task_current();
         task_sleep_unlock(&msgq_lock, f);
         if (task_has_actionable_signal()) {
@@ -557,22 +557,22 @@ static long sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
             if (msg_queues[msqid].valid && msg_queues[msqid].send_waiter == task_current())
                 msg_queues[msqid].send_waiter = NULL;
             spin_unlock_irq(&msgq_lock, f);
-            return -4; /* EINTR */
+            return -EINTR;
         }
     }
 }
 
 static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg)
 {
-    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -22;
+    if (msqid < 0 || msqid >= MSGQ_MAX || msgsz > MSGQ_MSGSZ) return -EINVAL;
 
     while (1) {
         uint64_t f = spin_lock_irq(&msgq_lock);
         if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
-            spin_unlock_irq(&msgq_lock, f); return -43; /* EIDRM */
+            spin_unlock_irq(&msgq_lock, f); return -EIDRM;
         }
         msgq_t *q = &msg_queues[msqid];
-        if (!ipc_may(q->uid, q->gid, q->mode, 4)) { spin_unlock_irq(&msgq_lock, f); return -13; }
+        if (!ipc_may(q->uid, q->gid, q->mode, 4)) { spin_unlock_irq(&msgq_lock, f); return -EACCES; }
 
         int best = -1;
         for (int i = 0; i < MSGQ_NMSG; i++) {
@@ -593,7 +593,7 @@ static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msg
         if (best >= 0) {
             sysv_msg_t *m = &q->msgs[best];
             if (m->len > msgsz && !(msgflg & MSG_NOERROR)) {
-                spin_unlock_irq(&msgq_lock, f); return -7; /* E2BIG */
+                spin_unlock_irq(&msgq_lock, f); return -E2BIG;
             }
             size_t copy = m->len > msgsz ? msgsz : m->len;
             long mtype = m->mtype;
@@ -602,11 +602,11 @@ static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msg
             m->used = 0; q->count--;
             if (q->send_waiter) { task_wake_no_resched(q->send_waiter); q->send_waiter = NULL; }
             spin_unlock_irq(&msgq_lock, f);
-            if (copy_to_user(msgp, &mtype, sizeof(long)) != 0) return -14;
-            if (copy && copy_to_user((char *)msgp + sizeof(long), tmp, copy) != 0) return -14;
+            if (copy_to_user(msgp, &mtype, sizeof(long)) != 0) return -EFAULT;
+            if (copy && copy_to_user((char *)msgp + sizeof(long), tmp, copy) != 0) return -EFAULT;
             return (long)copy;
         }
-        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -42; /* ENOMSG */ }
+        if (msgflg & IPC_NOWAIT) { spin_unlock_irq(&msgq_lock, f); return -ENOMSG; }
         q->recv_waiter = task_current();
         task_sleep_unlock(&msgq_lock, f);
         if (task_has_actionable_signal()) {
@@ -614,7 +614,7 @@ static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msg
             if (msg_queues[msqid].valid && msg_queues[msqid].recv_waiter == task_current())
                 msg_queues[msqid].recv_waiter = NULL;
             spin_unlock_irq(&msgq_lock, f);
-            return -4; /* EINTR */
+            return -EINTR;
         }
     }
 }
@@ -622,10 +622,10 @@ static long sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msg
 static long sys_msgctl(int msqid, int cmd, void *buf)
 {
     (void)buf;
-    if (msqid < 0 || msqid >= MSGQ_MAX) return -22;
+    if (msqid < 0 || msqid >= MSGQ_MAX) return -EINVAL;
     uint64_t f = spin_lock_irq(&msgq_lock);
     if (!msg_queues[msqid].valid || msg_queues[msqid].ipc_ns != current_ipc()) {
-        spin_unlock_irq(&msgq_lock, f); return -22;
+        spin_unlock_irq(&msgq_lock, f); return -EINVAL;
     }
     msgq_t *q = &msg_queues[msqid];
     long ret = 0;
@@ -706,27 +706,27 @@ static ssize_t mqfd_read(vfs_file_t *file, void *buf, size_t len)
                 mq->send_waiter = NULL;
             }
             spin_unlock_irq(&mq_lock, f);
-            if (copy_fop_to_user(buf, tmp, copy) != 0) return -14;
+            if (copy_fop_to_user(buf, tmp, copy) != 0) return -EFAULT;
             return (ssize_t)copy;
         }
-        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -11; }
+        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -EAGAIN; }
         mq->recv_waiter = task_current();
         task_sleep_unlock(&mq_lock, f);
         if (task_has_actionable_signal()) {
             f = spin_lock_irq(&mq_lock);
             if (mq->recv_waiter == task_current()) mq->recv_waiter = NULL;
             spin_unlock_irq(&mq_lock, f);
-            return -4; /* EINTR */
+            return -EINTR;
         }
     }
 }
 
 static ssize_t mqfd_write(vfs_file_t *file, const void *buf, size_t len)
 {
-    if (len > MQ_MSGSIZE) return -90; /* EMSGSIZE */
+    if (len > MQ_MSGSIZE) return -EMSGSIZE;
     mq_t *mq = (mq_t *)file->inode->priv;
     char tmp[MQ_MSGSIZE];
-    if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
+    if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
     while (1) {
         uint64_t f = spin_lock_irq(&mq_lock);
         if (mq->count < MQ_MSG_MAX) {
@@ -742,14 +742,14 @@ static ssize_t mqfd_write(vfs_file_t *file, const void *buf, size_t len)
             spin_unlock_irq(&mq_lock, f);
             return (ssize_t)len;
         }
-        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -11; }
+        if (file->flags & O_NONBLOCK) { spin_unlock_irq(&mq_lock, f); return -EAGAIN; }
         mq->send_waiter = task_current();
         task_sleep_unlock(&mq_lock, f);
         if (task_has_actionable_signal()) {
             f = spin_lock_irq(&mq_lock);
             if (mq->send_waiter == task_current()) mq->send_waiter = NULL;
             spin_unlock_irq(&mq_lock, f);
-            return -4; /* EINTR */
+            return -EINTR;
         }
     }
 }
@@ -793,7 +793,7 @@ static long sys_mq_open(const char *uname, int oflag, mode_t mode, mq_attr_t *at
 {
     (void)attr;
     char kname[64];
-    if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+    if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -EFAULT;
 
     ipc_namespace_t *cur = current_ipc();
     uint64_t f = spin_lock_irq(&mq_lock);
@@ -803,24 +803,24 @@ static long sys_mq_open(const char *uname, int oflag, mode_t mode, mq_attr_t *at
             strcmp(mq_table[i].name, kname) == 0) {
             if ((oflag & O_CREAT) && (oflag & O_EXCL)) {
                 spin_unlock_irq(&mq_lock, f);
-                return -17;
+                return -EEXIST;
             }
             int acc = oflag & 3;
             if (!ipc_may(mq_table[i].uid, mq_table[i].gid, mq_table[i].mode,
                          acc == O_RDONLY ? 4 : (acc == O_WRONLY ? 2 : 6))) {
                 spin_unlock_irq(&mq_lock, f);
-                return -13;
+                return -EACCES;
             }
             slot = i;
             break;
         }
     }
     if (slot < 0) {
-        if (!(oflag & O_CREAT)) { spin_unlock_irq(&mq_lock, f); return -2; }
+        if (!(oflag & O_CREAT)) { spin_unlock_irq(&mq_lock, f); return -ENOENT; }
         for (int i = 0; i < MQ_MAX; i++) {
             if (!mq_table[i].valid) { slot = i; break; }
         }
-        if (slot < 0) { spin_unlock_irq(&mq_lock, f); return -28; }
+        if (slot < 0) { spin_unlock_irq(&mq_lock, f); return -ENOSPC; }
         __builtin_memset(&mq_table[slot], 0, sizeof(mq_table[slot]));
         strncpy(mq_table[slot].name, kname, 63);
         mq_table[slot].valid  = 1;
@@ -833,14 +833,14 @@ static long sys_mq_open(const char *uname, int oflag, mode_t mode, mq_attr_t *at
     spin_unlock_irq(&mq_lock, f);
 
     vfs_inode_t *in = kmalloc(sizeof(*in));
-    if (!in) { mq_drop_ref(&mq_table[slot]); return -12; }
+    if (!in) { mq_drop_ref(&mq_table[slot]); return -ENOMEM; }
     __builtin_memset(in, 0, sizeof(*in));
     in->fops     = &mq_fops;
     in->priv     = &mq_table[slot];
     in->refcount = 1;
 
     vfs_file_t *vf = kmalloc(sizeof(*vf));
-    if (!vf) { kfree(in); mq_drop_ref(&mq_table[slot]); return -12; }
+    if (!vf) { kfree(in); mq_drop_ref(&mq_table[slot]); return -ENOMEM; }
     __builtin_memset(vf, 0, sizeof(*vf));
     vf->inode    = in;
     vf->refcount = 0;   /* fd_alloc takes the +1; close() frees */
@@ -855,20 +855,20 @@ static long sys_mq_open(const char *uname, int oflag, mode_t mode, mq_attr_t *at
 static long sys_mq_unlink(const char *uname)
 {
     char kname[64];
-    if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -14;
+    if (strncpy_from_user(kname, uname, sizeof(kname)) < 0) return -EFAULT;
     ipc_namespace_t *cur = current_ipc();
     uint64_t f = spin_lock_irq(&mq_lock);
     for (int i = 0; i < MQ_MAX; i++) {
         if (mq_table[i].valid && mq_table[i].ipc_ns == cur &&
             strcmp(mq_table[i].name, kname) == 0) {
-            if (!ipc_owner(mq_table[i].uid)) { spin_unlock_irq(&mq_lock, f); return -13; }
+            if (!ipc_owner(mq_table[i].uid)) { spin_unlock_irq(&mq_lock, f); return -EACCES; }
             if (mq_table[i].refs == 0) mq_table[i].valid = 0;
             spin_unlock_irq(&mq_lock, f);
             return 0;
         }
     }
     spin_unlock_irq(&mq_lock, f);
-    return -2;
+    return -ENOENT;
 }
 
 static long sys_mq_timedsend(int mqdes, const char *umsg, size_t len,
@@ -876,11 +876,11 @@ static long sys_mq_timedsend(int mqdes, const char *umsg, size_t len,
 {
     (void)prio; (void)ts;
     /* the write path copies through the kernel-or-user fop helper */
-    if (!access_ok(umsg, len)) return -14;
+    if (!access_ok(umsg, len)) return -EFAULT;
     /* reuse write path */
     process_t *p = task_current();
     vfs_file_t *f = fget(p->fds, mqdes);   /* pin across the blocking send */
-    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -9; }
+    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -EBADF; }
     long r = mqfd_write(f, umsg, len);
     fput(f);
     return r < 0 ? r : 0;   /* the byte count is write(2)'s answer, not this one's */
@@ -891,10 +891,10 @@ static long sys_mq_timedreceive(int mqdes, char *umsg, size_t len,
 {
     (void)uprio; (void)ts;
     /* the read path copies through the kernel-or-user fop helper */
-    if (!access_ok(umsg, len)) return -14;
+    if (!access_ok(umsg, len)) return -EFAULT;
     process_t *p = task_current();
     vfs_file_t *f = fget(p->fds, mqdes);   /* pin across the blocking receive */
-    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -9; }
+    if (!f || !f->inode || f->inode->fops != &mq_fops) { if (f) fput(f); return -EBADF; }
     long r = mqfd_read(f, umsg, len);
     fput(f);
     return r;
@@ -904,18 +904,18 @@ static long sys_mq_getsetattr(int mqdes, const mq_attr_t *newattr, mq_attr_t *ol
 {
     process_t *p = task_current();
     vfs_file_t *f = fd_get(p->fds, mqdes);
-    if (!f || !f->inode || f->inode->fops != &mq_fops) return -9;
+    if (!f || !f->inode || f->inode->fops != &mq_fops) return -EBADF;
     mq_t *mq = (mq_t *)f->inode->priv;
     if (oldattr) {
         mq_attr_t a = { .mq_flags = f->flags & O_NONBLOCK,
                         .mq_maxmsg = MQ_MSG_MAX,
                         .mq_msgsize = MQ_MSGSIZE,
                         .mq_curmsgs = mq->count };
-        if (copy_to_user(oldattr, &a, sizeof(a)) != 0) return -14;
+        if (copy_to_user(oldattr, &a, sizeof(a)) != 0) return -EFAULT;
     }
     if (newattr) {
         mq_attr_t na;
-        if (copy_from_user(&na, newattr, sizeof(na)) != 0) return -14;
+        if (copy_from_user(&na, newattr, sizeof(na)) != 0) return -EFAULT;
         if (na.mq_flags & O_NONBLOCK) f->flags |= O_NONBLOCK;
         else                          f->flags &= ~O_NONBLOCK;
     }

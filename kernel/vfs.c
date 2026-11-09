@@ -16,6 +16,7 @@
 #include <kernel/fs/overlay.h>
 #include <kernel/fs/ext2.h>
 #include <kernel/cgroup.h>
+#include <kernel/errno.h>
 
 static vfs_dentry_t *root_dentry = NULL;
 static vfs_dentry_t *follow_mounts(vfs_dentry_t *d);
@@ -56,24 +57,24 @@ void vfs_inode_free_xattrs(vfs_inode_t *in)
 
 int vfs_inode_setxattr(vfs_inode_t *in, const char *name, const void *val, size_t len, int flags)
 {
-	if (!in || !name || !name[0]) return -22;
+	if (!in || !name || !name[0]) return -EINVAL;
 	uint64_t f = spin_lock_irq(&xattr_lock);
 	vfs_xattr_t *x = in->xattrs, *prev = NULL;
 	while (x) { if (strcmp(x->name, name) == 0) break; prev = x; x = x->next; }
 	(void)prev;
 	if (x) {
-		if (flags & XATTR_CREATE) { spin_unlock_irq(&xattr_lock, f); return -17; /* EEXIST */ }
+		if (flags & XATTR_CREATE) { spin_unlock_irq(&xattr_lock, f); return -EEXIST; }
 		void *nv = len ? kmalloc(len) : NULL;
-		if (len && !nv) { spin_unlock_irq(&xattr_lock, f); return -12; }
+		if (len && !nv) { spin_unlock_irq(&xattr_lock, f); return -ENOMEM; }
 		if (len) memcpy(nv, val, len);
 		if (x->value) kfree(x->value);
 		x->value = nv; x->len = len;
 		spin_unlock_irq(&xattr_lock, f);
 		return 0;
 	}
-	if (flags & XATTR_REPLACE) { spin_unlock_irq(&xattr_lock, f); return -61; /* ENODATA */ }
+	if (flags & XATTR_REPLACE) { spin_unlock_irq(&xattr_lock, f); return -ENODATA; }
 	vfs_xattr_t *nx = kmalloc(sizeof(*nx));
-	if (!nx) { spin_unlock_irq(&xattr_lock, f); return -12; }
+	if (!nx) { spin_unlock_irq(&xattr_lock, f); return -ENOMEM; }
 	size_t nlen = strlen(name);
 	nx->name = kmalloc(nlen + 1);
 	nx->value = len ? kmalloc(len) : NULL;
@@ -82,7 +83,7 @@ int vfs_inode_setxattr(vfs_inode_t *in, const char *name, const void *val, size_
 		if (nx->value) kfree(nx->value);
 		kfree(nx);
 		spin_unlock_irq(&xattr_lock, f);
-		return -12;
+		return -ENOMEM;
 	}
 	memcpy(nx->name, name, nlen + 1);
 	if (len) memcpy(nx->value, val, len);
@@ -95,29 +96,29 @@ int vfs_inode_setxattr(vfs_inode_t *in, const char *name, const void *val, size_
 
 ssize_t vfs_inode_getxattr(vfs_inode_t *in, const char *name, void *val, size_t size)
 {
-	if (!in || !name) return -22;
+	if (!in || !name) return -EINVAL;
 	uint64_t f = spin_lock_irq(&xattr_lock);
 	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) {
 		if (strcmp(x->name, name) != 0) continue;
 		ssize_t r = (ssize_t)x->len;
 		if (size == 0) { spin_unlock_irq(&xattr_lock, f); return r; }
-		if (size < x->len) { spin_unlock_irq(&xattr_lock, f); return -34; /* ERANGE */ }
+		if (size < x->len) { spin_unlock_irq(&xattr_lock, f); return -ERANGE; }
 		if (x->len) memcpy(val, x->value, x->len);
 		spin_unlock_irq(&xattr_lock, f);
 		return r;
 	}
 	spin_unlock_irq(&xattr_lock, f);
-	return -61; /* ENODATA */
+	return -ENODATA;
 }
 
 ssize_t vfs_inode_listxattr(vfs_inode_t *in, char *list, size_t size)
 {
-	if (!in) return -22;
+	if (!in) return -EINVAL;
 	uint64_t f = spin_lock_irq(&xattr_lock);
 	size_t total = 0;
 	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) total += strlen(x->name) + 1;
 	if (size == 0) { spin_unlock_irq(&xattr_lock, f); return (ssize_t)total; }
-	if (size < total) { spin_unlock_irq(&xattr_lock, f); return -34; /* ERANGE */ }
+	if (size < total) { spin_unlock_irq(&xattr_lock, f); return -ERANGE; }
 	size_t off = 0;
 	for (vfs_xattr_t *x = in->xattrs; x; x = x->next) {
 		size_t l = strlen(x->name) + 1;
@@ -130,7 +131,7 @@ ssize_t vfs_inode_listxattr(vfs_inode_t *in, char *list, size_t size)
 
 int vfs_inode_removexattr(vfs_inode_t *in, const char *name)
 {
-	if (!in || !name) return -22;
+	if (!in || !name) return -EINVAL;
 	uint64_t f = spin_lock_irq(&xattr_lock);
 	vfs_xattr_t *x = in->xattrs, *prev = NULL;
 	while (x) {
@@ -145,7 +146,7 @@ int vfs_inode_removexattr(vfs_inode_t *in, const char *name)
 		prev = x; x = x->next;
 	}
 	spin_unlock_irq(&xattr_lock, f);
-	return -61; /* ENODATA */
+	return -ENODATA;
 }
 
 /* Free an in-core inode no dentry, pipe or static table owns. A filesystem
@@ -320,8 +321,8 @@ void vfs_walk_anchor(process_t *p, const char *path)
 int vfs_walk_from(process_t *p, vfs_dentry_t *top)
 {
 	int kind = top ? 2 : 1;
-	if (top && p->walk_top && p->walk_top != top) return -18;
-	if ((p->walk_kinds | kind) == 3) return -18;
+	if (top && p->walk_top && p->walk_top != top) return -EXDEV;
+	if ((p->walk_kinds | kind) == 3) return -EXDEV;
 	p->walk_kinds |= kind;
 	if (top) p->walk_top = top;
 	return 0;
@@ -454,7 +455,7 @@ static int vfs_inode_drop_open(vfs_inode_t *in)
 
 static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 {
-	if (!inode) return -13;
+	if (!inode) return -EACCES;
 	if (uid == 0) return 0; /* root bypasses all permission checks */
 
 	mode_t m = inode->mode & 0777;
@@ -476,7 +477,7 @@ static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 	}
 
 	if (((m >> shift) & accmode) == (unsigned)accmode) return 0;
-	return -13;
+	return -EACCES;
 }
 
 /* May the current task look names up in dir? A task's first walks run before it
@@ -687,7 +688,7 @@ vfs_dentry_t *vfs_dentry_create(vfs_dentry_t *parent, const char *name, vfs_inod
 static int empty_create(vfs_inode_t *dir, const char *name, mode_t mode)
 {
 	(void)dir; (void)name; (void)mode;
-	return -13;
+	return -EACCES;
 }
 static int empty_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
@@ -1688,7 +1689,7 @@ int vfs_bind(mnt_namespace_t *ns, vfs_dentry_t *mp, vfs_dentry_t *dir, const cha
              unsigned long flags)
 {
 	vfs_mount_t *m = kmalloc(sizeof(*m));
-	if (!m) return -12;
+	if (!m) return -ENOMEM;
 	memset(m, 0, sizeof(*m));
 	memcpy(m->fstype_name, "bind", 5);
 	m->fstype = m->fstype_name;
@@ -1805,7 +1806,7 @@ static vfs_dentry_t *dirpos_mountpoint(struct vfs_dirpos *pos, int *n,
 static int path_prepend(char *out, int *at, const char *name)
 {
 	int len = (int)strlen(name);
-	if (*at - len - 1 < 0) return -36;
+	if (*at - len - 1 < 0) return -ENAMETOOLONG;
 	*at -= len;
 	memcpy(out + *at, name, (size_t)len);
 	out[--*at] = '/';
@@ -1819,7 +1820,7 @@ static int dirpos_by_path(vfs_file_t *f, vfs_dentry_t *root, char *out, vfs_dent
 {
 	vfs_dentry_t *s = f->at->start;
 	if (s == root || f->path[0] != '/') return 1;
-	if (s->retired) return -2;
+	if (s->retired) return -ENOENT;
 	memcpy(out, f->path, strlen(f->path) + 1);
 	*top = s;
 	return 0;
@@ -1968,7 +1969,7 @@ unsigned long vfs_path_mnt_flags(const char *path)
 
 int vfs_remount(const char *path, unsigned long flags)
 {
-	if (!path || path[0] != '/') return -22;
+	if (!path || path[0] != '/') return -EINVAL;
 	uint64_t f = spin_lock_irq(&vfs_lock);
 	vfs_mount_t *m = mount_for_path(path);
 	if (m) m->flags = (flags & ~MS_REMOUNT) | (m->ro_lock ? MS_RDONLY : 0);
@@ -1981,25 +1982,25 @@ int vfs_remount(const char *path, unsigned long flags)
  * caller falls back to nominal counts. */
 int vfs_statfs_inode(vfs_inode_t *in, vfs_statfs_t *out)
 {
-	if (!in || !in->iops || !in->iops->statfs) return -38; /* ENOSYS */
+	if (!in || !in->iops || !in->iops->statfs) return -ENOSYS;
 	return in->iops->statfs(in, out);
 }
 
 int vfs_statfs_path(const char *path, vfs_statfs_t *out)
 {
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
-	if (!d || !d->inode) return -2;
+	if (!d || !d->inode) return -ENOENT;
 	return vfs_statfs_inode(d->inode, out);
 }
 
 int vfs_umount(const char *path)
 {
-	if (!path || path[0] != '/') return -22;
+	if (!path || path[0] != '/') return -EINVAL;
 
 	/* resolve follows the mount, so this is the mounted root dentry */
 	vfs_dentry_t *root = vfs_dentry_resolve(path);
-	if (!root) return -2;
-	if (proc_root_under(root)) return -16; /* EBUSY: a chroot sits in this tree */
+	if (!root) return -ENOENT;
+	if (proc_root_under(root)) return -EBUSY;   /* a chroot sits in this tree */
 
 	mnt_namespace_t *mns = current_mnt_ns();
 	uint64_t f = spin_lock_irq(&vfs_lock);
@@ -2010,14 +2011,14 @@ int vfs_umount(const char *path)
 		prev = mnt;
 		mnt  = mnt->next;
 	}
-	if (!mnt) { spin_unlock_irq(&vfs_lock, f); return -22; }
+	if (!mnt) { spin_unlock_irq(&vfs_lock, f); return -EINVAL; }
 	/* a bind holds its own root pinned; that hold is not a user of the tree */
 	if (mnt->pin_root) root->pins--;
 	int busy = dentry_tree_pinned(root);
 	if (mnt->pin_root) root->pins++;
 	/* open files and mapped pages; the boot root's state outlives its entry */
 	if (!busy && mnt->busy && root != root_dentry) busy = mnt->busy(mnt->priv);
-	if (busy) { spin_unlock_irq(&vfs_lock, f); return -16; } /* EBUSY */
+	if (busy) { spin_unlock_irq(&vfs_lock, f); return -EBUSY; } /* EBUSY */
 
 	if (prev) prev->next = mnt->next;
 	else      mns->mounts = mnt->next;
@@ -2158,11 +2159,11 @@ void fd_table_keep_only(fd_table_t *t, const int *keep, int n)
 
 int fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start)
 {
-	if (start < 0) return -22;
+	if (start < 0) return -EINVAL;
 	uint64_t fl = spin_lock_irq(&t->lock);
 	for (;;) {
 		for (int i = start; i < t->cap; i++) {
-			if (i >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -24; } /* EMFILE */
+			if (i >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -EMFILE; } /* EMFILE */
 			if (!BM_TST(t->open_bm, i)) {
 				t->files[i] = f;
 				BM_SET(t->open_bm, i);
@@ -2171,8 +2172,8 @@ int fd_alloc_from(fd_table_t *t, vfs_file_t *f, int start)
 				return i;
 			}
 		}
-		if (t->cap >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -24; }
-		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -12; }
+		if (t->cap >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -EMFILE; }
+		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -ENOMEM; }
 	}
 }
 
@@ -2183,11 +2184,11 @@ int fd_alloc(fd_table_t *t, vfs_file_t *f)
 
 int fd_alloc_at(fd_table_t *t, vfs_file_t *f, int fd)
 {
-	if (fd < 0) return -9;
+	if (fd < 0) return -EBADF;
 	uint64_t fl = spin_lock_irq(&t->lock);
-	if (fd >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -24; } /* EMFILE */
+	if (fd >= t->rlim_nofile) { spin_unlock_irq(&t->lock, fl); return -EMFILE; } /* EMFILE */
 	while (fd >= t->cap)
-		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -12; }
+		if (fd_table_grow(t) != 0) { spin_unlock_irq(&t->lock, fl); return -ENOMEM; }
 	t->files[fd] = f;
 	BM_SET(t->open_bm, fd);
 	atomic_fetch_add32((volatile uint32_t *)&f->refcount, 1);
@@ -2301,7 +2302,7 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	if (mflags & MS_RDONLY) {
 		int acc = flags & 3;
 		if (acc == O_WRONLY || acc == O_RDWR ||
-		    (flags & (O_CREAT | O_TRUNC))) return -30; /* EROFS */
+		    (flags & (O_CREAT | O_TRUNC))) return -EROFS;
 	}
 
 	/* where the walk really went, for f->path: see resolve_walk_rp */
@@ -2320,7 +2321,7 @@ static int open_create(const char *path, uid_t uid, gid_t gid, mode_t umask, mod
 	/* find parent directory */
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = resolve_walk_rp(dir_path, NULL, rp);
 	/* the new name sits in the parent's real directory */
@@ -2330,15 +2331,15 @@ static int open_create(const char *path, uid_t uid, gid_t gid, mode_t umask, mod
 		if (pl + 1 + fl < PATH_MAX) { rp[pl] = '/'; memcpy(rp + pl + 1, fname, fl + 1); }
 		else rp[0] = '\0';
 	}
-	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
-	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 
 	int pr = vfs_check_perm(parent->inode, MAY_WRITE | MAY_EXEC, uid, gid);
 	if (pr) { kfree(dir_path); return pr; }
 
 	mode_t cmode = mode & ~umask;
 	/* /proc, /sys and friends have no create */
-	if (!parent->inode->iops->create) { kfree(dir_path); return -13; }
+	if (!parent->inode->iops->create) { kfree(dir_path); return -EACCES; }
 	int cr = parent->inode->iops->create(parent->inode, fname, cmode);
 	if (cr != 0) {
 		kfree(dir_path);
@@ -2348,7 +2349,7 @@ static int open_create(const char *path, uid_t uid, gid_t gid, mode_t umask, mod
 	}
 
 	vfs_inode_t *inode = parent->inode->iops->lookup(parent->inode, fname);
-	if (!inode) { kfree(dir_path); return -5; }
+	if (!inode) { kfree(dir_path); return -EIO; }
 	*inp = inode;
 	*dp = vfs_dentry_create(parent, fname, inode);
 	if (vfs_inotify_hook) vfs_inotify_hook(dir_path, 0x00000100 /*IN_CREATE*/, fname);
@@ -2386,24 +2387,24 @@ again:;
 	vfs_dentry_t *d = resolve_walk_ms(path, NULL, rp, &ms);
 
 	if (!d) {
-		if (!(flags & O_CREAT)) return -2; /* ENOENT */
+		if (!(flags & O_CREAT)) return -ENOENT;
 
 		int cr = open_create(path, uid, gid, umask, mode, rp, raced, &d, &inode);
 		if (cr == 1) { raced = 1; goto again; }
 		if (cr) return cr;
 	} else {
-		if ((flags & O_CREAT) && (flags & O_EXCL)) return -17; /* EEXIST */
+		if ((flags & O_CREAT) && (flags & O_EXCL)) return -EEXIST;
 		inode = d->inode;
-		if (!inode) return -2; /* negative dentry — no backing inode, ENOENT */
+		if (!inode) return -ENOENT; /* negative dentry — no backing inode, ENOENT */
 		if (flags & O_NOFOLLOW) {
 			/* note: vfs_lstat re-resolves and may mutate the dentry tree, so
 			 * cache inode above before calling it. */
 			vfs_stat_t ls = {0};
-			if (vfs_lstat(path, &ls) == 0 && S_ISLNK(ls.mode)) return -40; /* ELOOP */
+			if (vfs_lstat(path, &ls) == 0 && S_ISLNK(ls.mode)) return -ELOOP;
 		}
 		int acc = flags & 3; /* O_ACCMODE */
-		if ((acc != 0 || (flags & O_TRUNC)) && vfs_dentry_readonly(d)) return -30; /* EROFS */
-		if (S_ISDIR(inode->mode) && (acc == 1 || acc == 2)) return -21; /* EISDIR */
+		if ((acc != 0 || (flags & O_TRUNC)) && vfs_dentry_readonly(d)) return -EROFS;
+		if (S_ISDIR(inode->mode) && (acc == 1 || acc == 2)) return -EISDIR;
 		/* check read/write permission on existing file */
 		int accmode = 0;
 		if (acc == 0 || acc == 2) accmode |= MAY_READ;
@@ -2412,15 +2413,15 @@ again:;
 		if (pr) return pr;
 	}
 
-	if (!inode) return -5;
-	if (inode->iops == &snapshot_iops) return -6;   /* ENXIO: names no file to open */
+	if (!inode) return -EIO;
+	if (inode->iops == &snapshot_iops) return -ENXIO;   /* names no file to open */
 	if ((mflags & MS_NODEV) && (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)))
-		return -13; /* EACCES */
-	if ((flags & O_DIRECTORY) && !S_ISDIR(inode->mode)) return -20; /* ENOTDIR */
-	if (!inode->fops && !S_ISDIR(inode->mode)) return -6;   /* ENXIO */
+		return -EACCES;
+	if ((flags & O_DIRECTORY) && !S_ISDIR(inode->mode)) return -ENOTDIR;
+	if (!inode->fops && !S_ISDIR(inode->mode)) return -ENXIO;
 
 	vfs_file_t *f = kmalloc(sizeof(*f));
-	if (!f) return -12;
+	if (!f) return -ENOMEM;
 	memset(f, 0, sizeof(*f));
 	f->inode    = inode;
 	f->flags    = flags & ~O_CLOEXEC; /* cloexec is per-fd, stored in fd_table */
@@ -2473,13 +2474,13 @@ void vfs_flock_release(vfs_file_t *f)
 /* try to acquire LOCK_SH(1)/LOCK_EX(2); 0 = got it, -11 (EWOULDBLOCK) = conflict */
 int vfs_flock_try(vfs_file_t *f, int cmd)
 {
-	if (!f || !f->inode) return -9;
+	if (!f || !f->inode) return -EBADF;
 	vfs_inode_t *in = f->inode;
 	uint64_t fl = spin_lock_irq(&flock_lock);
 	int other_ex = in->flock_ex && in->flock_ex != f;
 	int other_sh = in->flock_sh - (f->flock_held == 1 ? 1 : 0);
 	int conflict = (cmd == 2) ? (other_ex || other_sh > 0) : other_ex;
-	if (conflict) { spin_unlock_irq(&flock_lock, fl); return -11; }
+	if (conflict) { spin_unlock_irq(&flock_lock, fl); return -EAGAIN; }
 	if (f->flock_held == 2) in->flock_ex = NULL;          /* drop prior hold */
 	else if (f->flock_held == 1) in->flock_sh--;
 	if (cmd == 2) { in->flock_ex = f; f->flock_held = 2; }
@@ -2517,7 +2518,7 @@ int vfs_posix_setlk(void *inode, long pid, int type, int64_t start, int64_t end)
 		if (l->inode != inode || l->pid == pid) continue;
 		if (pl_overlap(l, start, end) && (type == 1 || l->type == 1)) {
 			spin_unlock_irq(&plock_lock, f);
-			return -11; /* EAGAIN: conflicting lock held by another process */
+			return -EAGAIN;   /* conflicting lock held by another process */
 		}
 	}
 	/* drop this pid's existing records overlapping the range, then add fresh */
@@ -2529,7 +2530,7 @@ int vfs_posix_setlk(void *inode, long pid, int type, int64_t start, int64_t end)
 		} else pp = &l->next;
 	}
 	posix_lock_t *nl = kmalloc(sizeof(*nl));
-	if (!nl) { spin_unlock_irq(&plock_lock, f); return -12; }
+	if (!nl) { spin_unlock_irq(&plock_lock, f); return -ENOMEM; }
 	nl->inode = inode; nl->pid = pid; nl->type = type;
 	nl->start = start; nl->end = end;
 	nl->next = g_plocks; g_plocks = nl;
@@ -2613,7 +2614,7 @@ ssize_t vfs_read(int fd, void *buf, size_t len)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);   /* hold a ref so a sibling close can't free it mid-read */
-	if (!f) return -9; /* EBADF */
+	if (!f) return -EBADF;
 	ssize_t r;
 	mode_t m = f->inode->mode;
 	/* Only vfs_open files have these types, so their access mode is real. Without
@@ -2633,7 +2634,7 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);
-	if (!f) return -9; /* EBADF */
+	if (!f) return -EBADF;
 	ssize_t r;
 	mode_t m = f->inode->mode;
 	if ((S_ISREG(m) || S_ISBLK(m) || S_ISCHR(m)) && (f->flags & 3) == O_RDONLY) {
@@ -2654,11 +2655,11 @@ off_t vfs_seek(int fd, off_t off, int whence)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fd_get(p->fds, fd);
-	if (!f) return -9; /* EBADF */
+	if (!f) return -EBADF;
 
 	/* pipes and character devices are not seekable */
-	if (f->inode && (f->inode->mode & 0170000) == 0010000) return -29; /* ESPIPE: S_IFIFO */
-	if (f->inode && (f->inode->mode & 0170000) == 0020000) return -29; /* ESPIPE: S_IFCHR */
+	if (f->inode && (f->inode->mode & 0170000) == 0010000) return -ESPIPE;   /* S_IFIFO */
+	if (f->inode && (f->inode->mode & 0170000) == 0020000) return -ESPIPE;   /* S_IFCHR */
 
 	if (f->inode->fops && f->inode->fops->seek)
 		return f->inode->fops->seek(f, off, whence);
@@ -2668,9 +2669,9 @@ off_t vfs_seek(int fd, off_t off, int whence)
 	case SEEK_SET: newpos = off; break;
 	case SEEK_CUR: newpos = f->pos + off; break;
 	case SEEK_END: newpos = (off_t)f->inode->size + off; break;
-	default:       return -22;
+	default:       return -EINVAL;
 	}
-	if (newpos < 0) return -22;
+	if (newpos < 0) return -EINVAL;
 	f->pos = newpos;
 	return newpos;
 }
@@ -2679,16 +2680,16 @@ int vfs_mkdir(const char *path, mode_t mode)
 {
 	/* An existing target is EEXIST even on a read-only mount: mkdir -p walks every
 	 * parent, and a session's read-only root must not stop it at the first one. */
-	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
-	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_dentry_resolve(path)) return -EEXIST;
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -EROFS;
 
 	const char *dname;
 	char *dir_path = vfs_parent_alloc(path, &dname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }   /* mkdirp callers go by ENOENT */
-	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }   /* mkdirp callers go by ENOENT */
+	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 
 	process_t *p = task_current();
 	int pr = may_change(parent->inode);
@@ -2709,15 +2710,15 @@ int vfs_mkfifo(const char *path, mode_t mode)
 {
 	/* An existing target is EEXIST even on a read-only mount: mkdir -p walks every
 	 * parent, and a session's read-only root must not stop it at the first one. */
-	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
-	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_dentry_resolve(path)) return -EEXIST;
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -EROFS;
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
-	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; } /* fs doesn't support mknod */
 	process_t *p = task_current();
 	int pr = may_change(parent->inode);
@@ -2738,15 +2739,15 @@ int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 {
 	/* An existing target is EEXIST even on a read-only mount: mkdir -p walks every
 	 * parent, and a session's read-only root must not stop it at the first one. */
-	if (vfs_dentry_resolve(path)) return -17; /* EEXIST */
-	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_dentry_resolve(path)) return -EEXIST;
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -EROFS;
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -2; }
-	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+	if (!parent || !parent->inode || !parent->inode->iops) { kfree(dir_path); return -ENOENT; }
+	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; }
 	process_t *p = task_current();
 	/* EPERM: only root may create device nodes; anyone may leave a socket name */
@@ -2776,17 +2777,17 @@ int vfs_unlink(const char *path)
 {
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
-	if (parent && parent->inode && vfs_dentry_readonly(parent)) { kfree(dir_path); return -30; } /* EROFS */
+	if (parent && parent->inode && vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent || !parent->inode || !parent->inode->iops || !parent->inode->iops->unlink) {
-		kfree(dir_path); return -2;
+		kfree(dir_path); return -ENOENT;
 	}
 
 	int pr = may_change(parent->inode);
 	if (pr) { kfree(dir_path); return pr; }
-	if (dentry_child_pinned(parent, fname)) { kfree(dir_path); return -16; } /* EBUSY */
+	if (dentry_child_pinned(parent, fname)) { kfree(dir_path); return -EBUSY; } /* EBUSY */
 	if (sticky_denied(parent->inode, fname)) { kfree(dir_path); return -1; } /* EPERM */
 
 	int r = parent->inode->iops->unlink(parent->inode, fname);
@@ -2816,7 +2817,7 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 {
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(path, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	kfree(dir_path);
@@ -2840,21 +2841,21 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 
 int vfs_symlink(const char *target, const char *linkpath)
 {
-	if (vfs_path_mnt_flags(linkpath) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_path_mnt_flags(linkpath) & MS_RDONLY) return -EROFS;
 	const char *fname;
 	char *dir_path = vfs_parent_alloc(linkpath, &fname);
-	if (!dir_path) return -12;
+	if (!dir_path) return -ENOMEM;
 
 	vfs_dentry_t *parent = vfs_dentry_resolve(dir_path);
 	kfree(dir_path);
 	if (!parent || !parent->inode || !parent->inode->iops) return -1;
-	if (!parent->inode->iops->symlink) return -38;
-	if (vfs_dentry_readonly(parent)) return -30; /* EROFS */
+	if (!parent->inode->iops->symlink) return -ENOSYS;
+	if (vfs_dentry_readonly(parent)) return -EROFS;
 	int pr = may_change(parent->inode);
 	if (pr) return pr;
 
 	vfs_stat_t ls = {0};
-	if (vfs_lstat(linkpath, &ls) == 0) return -17;   /* filesystems report it as a bare -1 */
+	if (vfs_lstat(linkpath, &ls) == 0) return -EEXIST;   /* filesystems report it as a bare -1 */
 	int sr = parent->inode->iops->symlink(parent->inode, fname, target);
 	if (sr) return sr < -1 ? sr : -5;
 
@@ -2901,7 +2902,7 @@ int vfs_lstat(const char *path, vfs_stat_t *out)
 
 	const char *fname;
 	char *parent_path = vfs_parent_alloc(path, &fname);
-	if (!parent_path) return -12;
+	if (!parent_path) return -ENOMEM;
 
 	/* "." and ".." are not real directory entries (filesystems synthesize them
 	 * only in readdir); they are resolved by the path walker. They can never be
@@ -2949,11 +2950,11 @@ int vfs_path_searchable(const char *path)
 {
 	const char *name;
 	char *dir = vfs_parent_alloc(path, &name);
-	if (!dir) return -12;
+	if (!dir) return -ENOMEM;
 	vfs_dentry_t *d = vfs_dentry_resolve(dir);
 	kfree(dir);
 	process_t *p = task_current();
-	if (d ? (d->inode && !vfs_may_search(d->inode)) : p->walk_denied) return -2;
+	if (d ? (d->inode && !vfs_may_search(d->inode)) : p->walk_denied) return -ENOENT;
 	return 0;
 }
 
@@ -2962,17 +2963,17 @@ int vfs_rename(const char *old_path, const char *new_path)
 	const char *old_name, *new_name;
 	char *old_dir = vfs_parent_alloc(old_path, &old_name);
 	char *new_dir = vfs_parent_alloc(new_path, &new_name);
-	if (!old_dir || !new_dir) { kfree(old_dir); kfree(new_dir); return -12; }
+	if (!old_dir || !new_dir) { kfree(old_dir); kfree(new_dir); return -ENOMEM; }
 
 	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
-	if (!old_parent || !old_parent->inode) { kfree(old_dir); kfree(new_dir); return -2; }
+	if (!old_parent || !old_parent->inode) { kfree(old_dir); kfree(new_dir); return -ENOENT; }
 	vfs_inode_t *old_in = old_parent->inode;   /* the next resolve may reuse a volatile dentry */
 	int ro = vfs_dentry_readonly(old_parent);
 	vfs_dentry_t *old_mnt = dentry_mnt_root(old_parent);
 	vfs_dentry_t *new_parent = vfs_dentry_resolve(new_dir);
-	if (!new_parent || !new_parent->inode) { kfree(old_dir); kfree(new_dir); return -2; }
-	if (ro || vfs_dentry_readonly(new_parent)) { kfree(old_dir); kfree(new_dir); return -30; } /* EROFS */
-	if (old_mnt != dentry_mnt_root(new_parent)) { kfree(old_dir); kfree(new_dir); return -18; } /* EXDEV */
+	if (!new_parent || !new_parent->inode) { kfree(old_dir); kfree(new_dir); return -ENOENT; }
+	if (ro || vfs_dentry_readonly(new_parent)) { kfree(old_dir); kfree(new_dir); return -EROFS; } /* EROFS */
+	if (old_mnt != dentry_mnt_root(new_parent)) { kfree(old_dir); kfree(new_dir); return -EXDEV; } /* EXDEV */
 	int pr = may_change(old_in);
 	if (!pr) pr = may_change(new_parent->inode);
 	if (pr) { kfree(old_dir); kfree(new_dir); return pr; }
@@ -2982,16 +2983,16 @@ int vfs_rename(const char *old_path, const char *new_path)
 	/* a directory moved under itself would detach a cycle from the tree */
 	size_t ol = strlen(old_path);
 	if (strncmp(old_path, new_path, ol) == 0 && new_path[ol] == '/') {
-		kfree(old_dir); kfree(new_dir); return -22;
+		kfree(old_dir); kfree(new_dir); return -EINVAL;
 	}
-	if (dentry_child_pinned(new_parent, new_name)) { kfree(old_dir); kfree(new_dir); return -16; } /* EBUSY */
+	if (dentry_child_pinned(new_parent, new_name)) { kfree(old_dir); kfree(new_dir); return -EBUSY; } /* EBUSY */
 	if (old_in->iops && new_parent->inode->iops &&
 	    (sticky_denied(old_in, old_name) || sticky_denied(new_parent->inode, new_name))) {
-		kfree(old_dir); kfree(new_dir); return -1; /* EPERM */
+		kfree(old_dir); kfree(new_dir); return -EPERM;
 	}
 
 	if (!old_in->iops || !old_in->iops->rename) {
-		kfree(old_dir); kfree(new_dir); return -38;
+		kfree(old_dir); kfree(new_dir); return -ENOSYS;
 	}
 
 	int ret = old_in->iops->rename(old_in, old_name, new_parent->inode, new_name);
@@ -3077,8 +3078,8 @@ static int current_owns(vfs_inode_t *in)
 /* owner or root, as for chown */
 int vfs_chmod_inode(vfs_inode_t *in, mode_t mode)
 {
-	if (!in) return -2;
-	if (!current_owns(in)) return -1; /* EPERM */
+	if (!in) return -ENOENT;
+	if (!current_owns(in)) return -EPERM;
 	vfs_iattr_t a = { .valid = ATTR_MODE, .mode = mode };
 	iattr_stamp_ctime(&a);
 	return vfs_inode_setattr(in, &a);
@@ -3088,9 +3089,9 @@ int vfs_chmod_inode(vfs_inode_t *in, mode_t mode)
 int vfs_utimes_inode(vfs_inode_t *in, vfs_iattr_t *a, int explicit_times)
 {
 	if (!current_owns(in)) {
-		if (explicit_times) return -1; /* EPERM */
+		if (explicit_times) return -EPERM;
 		process_t *p = task_current();
-		if (vfs_check_perm(in, MAY_WRITE, p->euid, p->egid)) return -13; /* EACCES */
+		if (vfs_check_perm(in, MAY_WRITE, p->euid, p->egid)) return -EACCES;
 	}
 	iattr_stamp_ctime(a);
 	return vfs_inode_setattr(in, a);
@@ -3098,10 +3099,10 @@ int vfs_utimes_inode(vfs_inode_t *in, vfs_iattr_t *a, int explicit_times)
 
 int vfs_chmod(const char *path, mode_t mode)
 {
-	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -EROFS;
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
-	if (!d || !d->inode) return -2;
-	if (vfs_dentry_readonly(d)) return -30; /* EROFS */
+	if (!d || !d->inode) return -ENOENT;
+	if (vfs_dentry_readonly(d)) return -EROFS;
 	vfs_inode_t *in = d->inode;
 	int r = vfs_chmod_inode(in, mode);
 	if (!in->cached) vfs_inode_free(in);
@@ -3112,12 +3113,12 @@ int vfs_chmod(const char *path, mode_t mode)
  * Only root may change the uid; clears set-user/group-ID bits. */
 int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
 {
-	if (!in) return -2;
+	if (!in) return -ENOENT;
 	process_t *p = task_current();
 	uid_t euid = p ? p->euid : 0;
 	if (euid != 0) {
 		/* non-root: only the owner, only the group, only to a group they're in */
-		if (in->uid != euid) return -1;            /* EPERM */
+		if (in->uid != euid) return -EPERM;
 		if (uid != (uid_t)-1 && uid != in->uid) return -1;
 		if (gid != (gid_t)-1) {
 			int ok = (p && gid == p->egid);
@@ -3135,10 +3136,10 @@ int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
 
 int vfs_chown(const char *path, uid_t uid, gid_t gid)
 {
-	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_path_mnt_flags(path) & MS_RDONLY) return -EROFS;
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
-	if (!d || !d->inode) return -2;
-	if (vfs_dentry_readonly(d)) return -30; /* EROFS */
+	if (!d || !d->inode) return -ENOENT;
+	if (vfs_dentry_readonly(d)) return -EROFS;
 	vfs_inode_t *in = d->inode;
 	int r = vfs_chown_inode(in, uid, gid);
 	if (!in->cached) vfs_inode_free(in);
@@ -3182,8 +3183,8 @@ int vfs_lchown(const char *path, uid_t uid, gid_t gid)
 {
 	int ro = 0;
 	vfs_inode_t *in = vfs_lresolve(path, &ro);
-	if (ro) return -30; /* EROFS */
-	if (!in) return -2;
+	if (ro) return -EROFS;
+	if (!in) return -ENOENT;
 	int rc = vfs_chown_inode(in, uid, gid);
 	if (!in->cached) vfs_inode_free(in);
 	return rc;
@@ -3193,8 +3194,8 @@ int vfs_lutimes(const char *path, vfs_iattr_t *a, int explicit_times)
 {
 	int ro = 0;
 	vfs_inode_t *in = vfs_lresolve(path, &ro);
-	if (ro) return -30; /* EROFS */
-	if (!in) return -2;
+	if (ro) return -EROFS;
+	if (!in) return -ENOENT;
 	int rc = vfs_utimes_inode(in, a, explicit_times);
 	if (!in->cached) vfs_inode_free(in);
 	return rc;
@@ -3204,8 +3205,8 @@ int vfs_lchmod(const char *path, mode_t mode)
 {
 	int ro = 0;
 	vfs_inode_t *in = vfs_lresolve(path, &ro);
-	if (ro) return -30; /* EROFS */
-	if (!in) return -2;
+	if (ro) return -EROFS;
+	if (!in) return -ENOENT;
 	int r = S_ISLNK(in->mode) ? -95 : vfs_chmod_inode(in, mode);   /* EOPNOTSUPP: a link has no mode */
 	if (!in->cached) vfs_inode_free(in);
 	return r;
@@ -3213,28 +3214,28 @@ int vfs_lchmod(const char *path, mode_t mode)
 
 int vfs_link(const char *oldpath, const char *newpath)
 {
-	if (vfs_path_mnt_flags(newpath) & MS_RDONLY) return -30; /* EROFS */
+	if (vfs_path_mnt_flags(newpath) & MS_RDONLY) return -EROFS;
 	vfs_dentry_t *od = vfs_dentry_resolve(oldpath);
-	if (!od || !od->inode) return -2;
-	if (S_ISDIR(od->inode->mode)) return -21;
+	if (!od || !od->inode) return -ENOENT;
+	if (S_ISDIR(od->inode->mode)) return -EISDIR;
 	vfs_inode_t *old_in = od->inode;   /* the next resolve may reuse a volatile dentry */
-	if (old_in->iops == &snapshot_iops) return -18;   /* EXDEV: a copy, not the file */
+	if (old_in->iops == &snapshot_iops) return -EXDEV;   /* a copy, not the file */
 	vfs_dentry_t *old_mnt = dentry_mnt_root(od);
 
 	const char *new_name;
 	char *new_dir = vfs_parent_alloc(newpath, &new_name);
-	if (!new_dir) return -12;
+	if (!new_dir) return -ENOMEM;
 
 	vfs_dentry_t *nd = vfs_dentry_resolve(new_dir);
 	kfree(new_dir);
-	if (!nd || !nd->inode) return -2;
+	if (!nd || !nd->inode) return -ENOENT;
 	if (!nd->inode->iops || !nd->inode->iops->link) return -1;
-	if (vfs_dentry_readonly(nd)) return -30; /* EROFS */
+	if (vfs_dentry_readonly(nd)) return -EROFS;
 	int pr = may_change(nd->inode);
 	if (pr) return pr;
 	/* The new name's mount would decide the flags for the old inode: a link out
 	 * of a read-only tree would turn it writable. */
-	if (old_mnt != dentry_mnt_root(nd)) return -18; /* EXDEV */
+	if (old_mnt != dentry_mnt_root(nd)) return -EXDEV;
 
 	return nd->inode->iops->link(nd->inode, new_name, old_in);
 }

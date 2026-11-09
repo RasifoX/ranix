@@ -10,6 +10,7 @@
 #include <kernel/sync.h>
 #include <kernel/board.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 
 #define IP6_MTU  1500
@@ -275,7 +276,7 @@ static int ipv6_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
         uint32_t chunk = plen - off < maxdata ? plen - off : maxdata;
         int more = (off + chunk < plen);
         skb_t *skb = skb_alloc();
-        if (!skb) return -12;
+        if (!skb) return -ENOMEM;
         memcpy(skb->data, payload + off, chunk);
         skb->len = (uint16_t)chunk;
         ipv6_frag_hdr_t *fh = (ipv6_frag_hdr_t *)skb_push(skb, sizeof(*fh));

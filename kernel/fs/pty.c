@@ -7,6 +7,7 @@
 #include <kernel/hal.h>
 #include <kernel/fs/devfs.h>
 #include <kernel/init.h>
+#include <kernel/errno.h>
 
 /*
  * Unix98 pseudo-terminals. Opening /dev/ptmx allocates a master/slave pair and
@@ -327,7 +328,7 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 	}
 	case TCSETS: case TCSETSW: case TCSETSF: {
 		uint8_t t[36];
-		if (copy_from_user(t, (const void *)(uintptr_t)arg, 36)) return -14;
+		if (copy_from_user(t, (const void *)(uintptr_t)arg, 36)) return -EFAULT;
 		uint64_t f = spin_lock_irq(&p->lock);
 		termios_unpack(p, t);
 		spin_unlock_irq(&p->lock, f);
@@ -354,7 +355,7 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 	}
 	case TIOCSPGRP: {
 		pid_t pgrp;
-		if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -14;
+		if (copy_from_user(&pgrp, (const void *)(uintptr_t)arg, sizeof(pgrp))) return -EFAULT;
 		pid_t fg;
 		long r = tty_check_fg(p, 1, pgrp, &fg);
 		if (r == 0) p->fg_pgrp = fg;
@@ -374,7 +375,7 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 	case 0x5425: case 0x5427: case 0x5428:   /* TCSBRKP, TIOCSBRK, TIOCCBRK */
 		return 0;
 	}
-	return -25;   /* ENOTTY */
+	return -ENOTTY;
 }
 
 /* ── master (/dev/ptmx) ──────────────────────────────────────── */
@@ -408,7 +409,7 @@ static int ptmx_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 		}
 	}
 	spin_unlock_irq(&pool_lock, f);
-	return -24;   /* EMFILE: pty pool exhausted */
+	return -EMFILE;   /* pty pool exhausted */
 }
 
 /* The line discipline works under p->lock with interrupts off, where user memory
@@ -422,7 +423,7 @@ static ssize_t ldisc_from_user(pty_t *p, ssize_t (*ldisc)(pty_t *, const void *,
 	if (!len) return 0;
 	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
 	uint8_t *kb = kmalloc(n);
-	if (!kb) return -12;
+	if (!kb) return -ENOMEM;
 	ssize_t r = copy_fop_from_user(kb, buf, n) ? -14 : ldisc(p, kb, n);
 	kfree(kb);
 	return r;
@@ -431,7 +432,7 @@ static ssize_t ldisc_from_user(pty_t *p, ssize_t (*ldisc)(pty_t *, const void *,
 /* What is taken from the ring before a fault is lost, as for any read that faults. */
 static ssize_t copy_read_out(void *buf, const uint8_t *kb, ssize_t r)
 {
-	if (r > 0 && copy_fop_to_user(buf, kb, (size_t)r) != 0) return -14;
+	if (r > 0 && copy_fop_to_user(buf, kb, (size_t)r) != 0) return -EFAULT;
 	return r;
 }
 
@@ -440,7 +441,7 @@ static ssize_t master_read(vfs_file_t *file, void *buf, size_t len)
 	pty_t *p = file->priv;
 	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
 	uint8_t *kb = kmalloc(n ? n : 1);
-	if (!kb) return -12;
+	if (!kb) return -ENOMEM;
 	ssize_t r = copy_read_out(buf, kb, ring_read(p, p->s2m, &p->s2m_h, &p->s2m_t, &p->s2m_wait,
 	                                             &p->slave_open, kb, n, file->flags & O_NONBLOCK));
 	kfree(kb);
@@ -495,17 +496,17 @@ static int pts_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 {
 	(void)flags;
 	int idx = (int)(inode->rdev & 0xFF);
-	if (idx < 0 || idx >= PTY_MAX) return -6;   /* ENXIO */
+	if (idx < 0 || idx >= PTY_MAX) return -ENXIO;
 	pty_t *p = &ptys[idx];
 	/* Check in_use and mark the slave attached under pool_lock so a concurrent
 	 * master_close + ptmx_open can't free and reuse the slot underneath us. */
 	uint64_t pf = spin_lock_irq(&pool_lock);
-	if (!p->in_use) { spin_unlock_irq(&pool_lock, pf); return -6; }
+	if (!p->in_use) { spin_unlock_irq(&pool_lock, pf); return -ENXIO; }
 	/* Linux grantpt: the slave belongs to whoever opened the master. The node
 	 * itself is 0666 so a non-root terminal (the desktop as its user) gets here;
 	 * this is the gate, not the mode bits. */
 	process_t *me = task_current();
-	if (me && me->euid != 0 && me->euid != p->owner) { spin_unlock_irq(&pool_lock, pf); return -13; }
+	if (me && me->euid != 0 && me->euid != p->owner) { spin_unlock_irq(&pool_lock, pf); return -EACCES; }
 	uint64_t f = spin_lock_irq(&p->lock);
 	p->slave_open = 1;
 	spin_unlock_irq(&p->lock, f);
@@ -523,7 +524,7 @@ static ssize_t slave_read(vfs_file_t *file, void *buf, size_t len)
 	}
 	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
 	uint8_t *kb = kmalloc(n ? n : 1);
-	if (!kb) return -12;
+	if (!kb) return -ENOMEM;
 	ssize_t r = copy_read_out(buf, kb, slave_cooked_read(p, kb, n, file->flags & O_NONBLOCK));
 	kfree(kb);
 	return r;
@@ -541,7 +542,7 @@ static ssize_t slave_write(vfs_file_t *file, const void *buf, size_t len)
 	if (!len) return 0;
 	size_t n = len < PTY_BOUNCE ? len : PTY_BOUNCE;
 	uint8_t *kb = kmalloc(n);
-	if (!kb) return -12;
+	if (!kb) return -ENOMEM;
 	ssize_t r = copy_fop_from_user(kb, buf, n) ? -14 :
 	            ldisc_output(p, kb, n, file->flags & O_NONBLOCK);
 	kfree(kb);

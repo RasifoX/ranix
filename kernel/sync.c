@@ -8,6 +8,7 @@
 #include <kernel/smp.h>
 #include <kernel/time.h>
 #include <kernel/proc.h>
+#include <kernel/errno.h>
 
 /* v8.0-safe atomic RMW (cortex-a72 has no LSE, so we cannot let the compiler
  * emit ldadd/etc via __atomic — it would be an undefined instruction). x86
@@ -354,7 +355,6 @@ spin_deadlock(spinlock_t *l, uint32_t my, int self, void *pc,
 		kprintf(KERN_ERR "  ticket %u belongs to no queued cpu: lost by an unlock without a lock\n", head);
 	spin_print_bad(0);
 	kpanic("spinlock deadlock");
-	for (;;) cpu_relax();   /* kpanic halts; it is just not declared noreturn */
 }
 
 static void spin_lock_at(spinlock_t *l, void *pc)
@@ -495,7 +495,7 @@ int mutex_lock_killable(mutex_t *m)
 		process_t *o = m->owner;
 		spin_unlock_irq(&m->guard, f);
 		process_t *me = task_current();
-		if (me && me->pid && fatal_signal_pending(me)) return -4;   /* EINTR */
+		if (me && me->pid && fatal_signal_pending(me)) return -EINTR;
 		if (!since) since = kernel_ticks;
 		else if (!told && kernel_ticks - since > 5 * TIMER_HZ) {
 			told = 1;

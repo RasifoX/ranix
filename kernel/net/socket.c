@@ -6,6 +6,7 @@
 #include <kernel/proc.h>
 #include <kernel/cgroup.h>
 #include <kernel/net/tcp.h>
+#include <kernel/errno.h>
 
 /* ── global socket table (dynamic) ──────────────────────── */
 
@@ -155,12 +156,12 @@ static void unix_skb_cred(skb_t *skb)
 int unix_send(socket_t *s, const void *data, uint16_t len)
 {
     socket_t *peer = s->unix_peer;
-    if (!peer || s->unix_wr_shut) return -32; /* EPIPE */
+    if (!peer || s->unix_wr_shut) return -EPIPE;
     if (!len) return 0;
     /* a datagram (or seqpacket) is one message, whole: a stream is cut to skbs */
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
-    if (!skb) return -12;
+    if (!skb) return -ENOMEM;
     if (!whole && len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     memcpy(skb->data, data, len);
     skb->len = len;
@@ -168,7 +169,7 @@ int unix_send(socket_t *s, const void *data, uint16_t len)
     void *cg = cgroup_current();
     if (cgroup_charge_to(cg, SKB_TRUESIZE(skb), sock_stream_room(peer)) != 0) {
         skb_free(skb);
-        return -11;
+        return -EAGAIN;
     }
     skb->cg = cg;
     sock_queue_skb(peer, skb);
@@ -180,10 +181,10 @@ int unix_send(socket_t *s, const void *data, uint16_t len)
 int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int nfiles)
 {
     socket_t *peer = s->unix_peer;
-    if (!peer || s->unix_wr_shut) return -32; /* EPIPE */
+    if (!peer || s->unix_wr_shut) return -EPIPE;
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
-    if (!skb) return -12;  /* ENOMEM */
+    if (!skb) return -ENOMEM;
     if (!whole && len > SKB_DATA_MAX) len = SKB_DATA_MAX;
     if (len) memcpy(skb->data, data, len);
     skb->len = len;
@@ -192,7 +193,7 @@ int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int
     void *cg = cgroup_current();
     if (cgroup_charge_to(cg, SKB_TRUESIZE(skb), sock_stream_room(peer)) != 0) {
         skb_free(skb);
-        return -11;
+        return -EAGAIN;
     }
     skb->cg = cg;
     for (int i = 0; i < nfiles; i++) skb->scm_files[i] = files[i];

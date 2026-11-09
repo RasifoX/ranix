@@ -40,6 +40,7 @@
 #include <kernel/hungtask.h>
 #include <kernel/claim.h>
 #include <kernel/init.h>
+#include <kernel/errno.h>
 
 
 
@@ -296,7 +297,7 @@ static void cmd_ps(kout_t *o)
 		uint64_t pid = p->pid; int tgid = p->tgid, ppid = p->ppid, uid = (int)p->uid;
 		char st = st_letter(p->state); int ins = p->in_syscall, sc = p->last_syscall;
 		uint64_t cpu = p->ticks / TIMER_HZ;
-		int killed = (p->sig_pending & (1UL << 8)) != 0;
+		int killed = (p->sig_pending & (1UL << (SIGKILL - 1))) != 0;
 		char name[17]; int k = 0;
 		for (; k < 16 && p->name[k]; k++) name[k] = p->name[k];
 		name[k] = 0;
@@ -485,7 +486,7 @@ static ssize_t rdev_read(vfs_file_t *f, void *buf, size_t len)
 	if ((size_t)f->pos >= o.len) return 0;
 	size_t n = o.len - (size_t)f->pos;
 	if (n > len) n = len;
-	if (copy_fop_to_user(buf, b + f->pos, n)) return -14;
+	if (copy_fop_to_user(buf, b + f->pos, n)) return -EFAULT;
 	f->pos += (off_t)n;
 	return (ssize_t)n;
 }
@@ -496,8 +497,8 @@ static ssize_t rdev_write(vfs_file_t *f, const void *buf, size_t len)
 	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
 	char b[160];
 	size_t want = len;                 /* report the whole write, newline included */
-	if (len >= sizeof b) return -22;
-	if (copy_fop_from_user(b, buf, len)) return -14;
+	if (len >= sizeof b) return -EINVAL;
+	if (copy_fop_from_user(b, buf, len)) return -EFAULT;
 	b[len] = 0;
 	while (len && (b[len - 1] == '\n' || b[len - 1] == ' ')) b[--len] = 0;
 	uint8_t k[32];
@@ -508,7 +509,7 @@ static ssize_t rdev_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 	int test = strncmp(b, "testkey ", 8) == 0;
 	const char *h = test ? b + 8 : (strncmp(b, "key ", 4) == 0 ? b + 4 : 0);
-	if (!h || strlen(h) != 64 || hexdec(k, h, 32)) return -22;
+	if (!h || strlen(h) != 64 || hexdec(k, h, 32)) return -EINVAL;
 	uint64_t fl = spin_lock_irq(&rx_lock);
 	if (test) { memcpy(rx_tkey, k, 32); rx_tkey_until = kernel_ticks + 120 * TIMER_HZ; }
 	else      { memcpy(rx_key, k, 32); rx_key_set = 1; }
@@ -523,13 +524,13 @@ static int rdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
 	(void)f;
 	if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
-	if (arg < 1 || arg > 60) return -22;
+	if (arg < 1 || arg > 60) return -EINVAL;
 	uint64_t end = kernel_ticks + arg * TIMER_HZ;
 	switch (cmd) {
 	case RESCUE_IOC_TEST_LOOP:
 		/* the shape of a data-driven kernel loop done right */
 		for (volatile uint64_t i = 0; kernel_ticks < end; i++)
-			if ((i & 1023) == 0 && kloop_should_stop()) return -4;
+			if ((i & 1023) == 0 && kloop_should_stop()) return -EINTR;
 		return 0;
 	case RESCUE_IOC_TEST_HOLD: {
 		int r = mutex_lock_killable(&test_mtx);
@@ -550,7 +551,7 @@ static int rdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		while (kernel_ticks < end) cpu_relax();
 		return 0;
 	}
-	return -25;   /* ENOTTY */
+	return -ENOTTY;
 }
 
 static vfs_fops_t rescue_fops = { .read = rdev_read, .write = rdev_write, .ioctl = rdev_ioctl };

@@ -33,6 +33,7 @@
 #include <kernel/csprng.h>
 #include <kernel/ptrace.h>
 #include <kernel/tty/tty_core.h>
+#include <kernel/errno.h>
 
 
 static process_t **proctab;
@@ -1116,8 +1117,8 @@ void task_wake(process_t *p)
 	spin_unlock_irq(&sched_lock, f);
 }
 
-/* cgroup OOM killer: SIGKILL the largest-footprint task in over_cg's subtree.
- * Lives here for direct access to proctab / runqueue under one sched_lock. The
+/* cgroup OOM killer: SIGKILL the current task, the one whose charge just went
+ * past memory.max (over_cg is not used to pick a victim). Lives here for direct access to proctab / runqueue under one sched_lock. The
  * kill is lock-free (set SIGKILL in sig_pending, inline-wake if sleeping) rather
  * than via task_signal — that avoids the lock-ordering and cross-CPU IPI paths
  * that deadlocked when invoked from the memory-charge path. Caller must hold no

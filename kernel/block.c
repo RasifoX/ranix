@@ -9,13 +9,12 @@
 #include <kernel/kprintf.h>
 #include <kernel/capabilities.h>
 #include <kernel/proc.h>
+#include <kernel/errno.h>
 
 #define BLKDEV_INIT_CAP 8
 /* Largest single block_read/write from the device node. A polled driver keeps
  * IRQs off for the whole transfer, so this bounds that window. */
 #define BLKDEV_BULK_BYTES (128u * 1024)
-
-#define EROFS 30
 
 /* An out-of-range request never reaches a driver: a partition must not read or
  * write its neighbour because a filesystem believed a bad number. */
@@ -27,8 +26,8 @@ static int block_in_range(const block_device_t *dev, uint64_t lba, uint64_t coun
 
 int block_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 {
-    if (!dev || !dev->read) return -5;
-    if (!block_in_range(dev, lba, count)) return -5;
+    if (!dev || !dev->read) return -EIO;
+    if (!block_in_range(dev, lba, count)) return -EIO;
     mutex_lock(&dev->lock);
     int r = dev->read(dev, lba, buf, count);
     if (r == 0) { dev->nr_reads++; dev->nr_read_secs += count; }
@@ -39,7 +38,7 @@ int block_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 /* The driver call, for a request the protection check has passed. */
 static int block_write_through(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
 {
-    if (!block_in_range(dev, lba, count)) return -5;
+    if (!block_in_range(dev, lba, count)) return -EIO;
     mutex_lock(&dev->lock);
     int r = dev->drv_write(dev, lba, buf, count);
     if (r == 0) dev->dirty = 1;
@@ -51,7 +50,7 @@ static int block_write_through(block_device_t *dev, uint64_t lba, const void *bu
  * before any driver runs, so no command leaves for the drive. */
 int block_write(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
 {
-    if (!dev || !dev->drv_write) return -5;
+    if (!dev || !dev->drv_write) return -EIO;
     if (dev->ro) {
         if (!dev->ro_denied++)
             kprintf(KERN_WARN "block: %s is read-only, write at lba %lu refused\n",
@@ -83,7 +82,7 @@ static uint8_t *blkdev_bulk_alloc(uint64_t pos, size_t len)
 static ssize_t blkdev_read(vfs_file_t *f, void *buf, size_t len)
 {
     block_device_t *bd = f->inode ? f->inode->priv : NULL;
-    if (!bd || !bd->read) return -5;
+    if (!bd || !bd->read) return -EIO;
     uint64_t total = bd->size_blocks * BLOCK_SIZE;
     uint64_t pos = (uint64_t)f->pos;
     if (pos >= total) return 0;
@@ -122,14 +121,14 @@ static ssize_t blkdev_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t blkdev_write(vfs_file_t *f, const void *buf, size_t len)
 {
     block_device_t *bd = f->inode ? f->inode->priv : NULL;
-    if (!bd || !bd->write || !bd->read) return -5;
+    if (!bd || !bd->write || !bd->read) return -EIO;
     if (bd->ro) {
         bd->ro_denied++;
         return -EROFS;
     }
     uint64_t total = bd->size_blocks * BLOCK_SIZE;
     uint64_t pos = (uint64_t)f->pos;
-    if (pos >= total) return -28; /* ENOSPC */
+    if (pos >= total) return -ENOSPC;
     if (len > total - pos) len = (size_t)(total - pos);
 
     uint8_t        sect[BLOCK_SIZE];
@@ -178,7 +177,7 @@ static ssize_t blkdev_write(vfs_file_t *f, const void *buf, size_t len)
 static int blkdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
     block_device_t *bd = f->inode ? f->inode->priv : NULL;
-    if (!bd) return -5;
+    if (!bd) return -EIO;
     void *ua = (void *)(uintptr_t)arg;
     switch (cmd) {
     case BLKROGET: {
@@ -200,7 +199,7 @@ static int blkdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     case BLKROSET: {
         int v;
         if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
-        if (copy_from_user(&v, ua, sizeof(v))) return -14;
+        if (copy_from_user(&v, ua, sizeof(v))) return -EFAULT;
         if (!v) return bd->ro ? -1 : 0;        /* EPERM to clear, see above; already clear: nothing */
         /* Setting what is already set changes nothing. Tools write back the value
          * they read (stress-ng, blockdev --setro on a protected disk), and a whole
@@ -213,12 +212,12 @@ static int blkdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     case BLKRANIXALLOW: {
         char id[BLK_ID_MAX];
         if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1;
-        if (strncpy_from_user(id, ua, sizeof(id)) < 0) return -14;
+        if (strncpy_from_user(id, ua, sizeof(id)) < 0) return -EFAULT;
         id[sizeof(id) - 1] = '\0';
         return block_allow(bd, id);
     }
     }
-    return -25;                                /* ENOTTY */
+    return -ENOTTY;
 }
 
 /* An open node keeps its disk from being handed to other hardware. */
@@ -385,7 +384,7 @@ int block_allow(block_device_t *dev, const char *id)
         }
         p = e + 1;
     }
-    return -1;      /* EPERM: not this disk */
+    return -EPERM;   /* not this disk */
 }
 
 void block_protect(block_device_t *dev)
@@ -443,7 +442,7 @@ typedef struct {
 static int part_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 {
     part_priv_t *p = dev->priv;
-    if (lba >= dev->size_blocks || count > dev->size_blocks - lba) return -5;
+    if (lba >= dev->size_blocks || count > dev->size_blocks - lba) return -EIO;
     return block_read(p->parent, p->start + lba, buf, count);
 }
 
@@ -452,7 +451,7 @@ static int part_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t coun
 static int part_write(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
 {
     part_priv_t *p = dev->priv;
-    if (lba >= dev->size_blocks || count > dev->size_blocks - lba) return -5;   /* the neighbour may be another OS */
+    if (lba >= dev->size_blocks || count > dev->size_blocks - lba) return -EIO;   /* the neighbour may be another OS */
     return block_write_through(p->parent, p->start + lba, buf, count);
 }
 

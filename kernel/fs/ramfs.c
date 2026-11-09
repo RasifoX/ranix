@@ -12,6 +12,7 @@
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
 #include <kernel/fs/devfs.h>
+#include <kernel/errno.h>
 
 /*
  * ramfs — volatile in-memory filesystem.
@@ -93,7 +94,7 @@ static int ramfs_create_locked(vfs_inode_t *dir, const char *name, mode_t mode)
 
 	/* check for duplicate */
 	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 
 	vfs_inode_t *in = ramfs_inode_alloc(mode | S_IFREG);
 	if (!in) return -1;
@@ -124,7 +125,7 @@ static int ramfs_mknod_locked(vfs_inode_t *dir, const char *name, mode_t mode, d
 	if (type != S_IFIFO && type != S_IFCHR && type != S_IFBLK && type != 0140000 /* S_IFSOCK */)
 		return -1; /* unsupported node type */
 	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17; /* EEXIST */
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 	vfs_inode_t *in = ramfs_inode_alloc(mode);
 	if (!in) return -1;
 	in->iops = &ramfs_iops;
@@ -206,7 +207,7 @@ static int ramfs_unlink_locked(vfs_inode_t *dir, const char *name)
 		if (strcmp((*pp)->name, name) == 0) {
 			ramfs_entry_t *e = *pp;
 			vfs_inode_t *in = e->inode;
-			if (S_ISDIR(in->mode) && ((ramfs_dir_t *)in->priv)->count) return -39; /* ENOTEMPTY */
+			if (S_ISDIR(in->mode) && ((ramfs_dir_t *)in->priv)->count) return -ENOTEMPTY;
 			*pp = e->next;
 			rd->count--;
 			/* Removing a subdirectory drops the parent's '..' backlink; removing
@@ -254,15 +255,15 @@ static int ramfs_rename_locked(vfs_inode_t *old_dir, const char *old_name,
 {
 	ramfs_dir_t *od = old_dir->priv;
 	ramfs_dir_t *nd = new_dir->priv;
-	if (!od || !nd) return -2;
+	if (!od || !nd) return -ENOENT;
 
 	ramfs_entry_t **pp = &od->entries;
 	while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
-	if (!*pp) return -2;
+	if (!*pp) return -ENOENT;
 	ramfs_entry_t *e = *pp;
 
 	if (old_dir == new_dir) {
-		if (ramfs_unlink_locked(new_dir, new_name) == -39) return -39;
+		if (ramfs_unlink_locked(new_dir, new_name) == -39) return -ENOTEMPTY;
 		/* unlink may have unlinked the source if old_name==new_name; re-find */
 		pp = &od->entries;
 		while (*pp && strcmp((*pp)->name, old_name) != 0) pp = &(*pp)->next;
@@ -277,10 +278,10 @@ static int ramfs_rename_locked(vfs_inode_t *old_dir, const char *old_name,
 
 	/* cross-directory: unlink any existing target, then splice the entry out
 	 * of the old list and into the new one, fixing parent dir link counts. */
-	if (ramfs_unlink_locked(new_dir, new_name) == -39) return -39;
+	if (ramfs_unlink_locked(new_dir, new_name) == -39) return -ENOTEMPTY;
 	pp = &od->entries;
 	while (*pp && *pp != e) pp = &(*pp)->next;
-	if (!*pp) return -2;
+	if (!*pp) return -ENOENT;
 	*pp = e->next;
 	od->count--;
 	if (S_ISDIR(e->inode->mode)) old_dir->nlink--;
@@ -313,7 +314,7 @@ static int ramfs_stat(vfs_inode_t *inode, vfs_stat_t *out)
 
 static int ramfs_readlink(vfs_inode_t *inode, char *buf, size_t bufsize)
 {
-	if (!S_ISLNK(inode->mode)) return -22; /* EINVAL: priv is dir/file data, not a target */
+	if (!S_ISLNK(inode->mode)) return -EINVAL;   /* priv is dir/file data, not a target */
 	const char *target = (const char *)inode->priv;
 	if (!target) return -1;
 	int len = 0;
@@ -354,14 +355,14 @@ static int ramfs_symlink_locked(vfs_inode_t *dir, const char *name, const char *
 
 static int ramfs_link_locked(vfs_inode_t *dir, const char *name, vfs_inode_t *target)
 {
-	if (S_ISDIR(target->mode)) return -21;
-	if (!target->nlink || target->deferred_unlink) return -2;   /* no name left to add to */
+	if (S_ISDIR(target->mode)) return -EISDIR;
+	if (!target->nlink || target->deferred_unlink) return -ENOENT;   /* no name left to add to */
 	ramfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	for (ramfs_entry_t *e = rd->entries; e; e = e->next)
-		if (strcmp(e->name, name) == 0) return -17;
+		if (strcmp(e->name, name) == 0) return -EEXIST;
 	ramfs_entry_t *ent = kmalloc(sizeof(*ent));
-	if (!ent) return -12;
+	if (!ent) return -ENOMEM;
 	int nlen = 0;
 	while (name[nlen] && nlen < 255) nlen++;
 	memcpy(ent->name, name, nlen); ent->name[nlen] = '\0';
@@ -375,7 +376,7 @@ static int ramfs_link_locked(vfs_inode_t *dir, const char *name, vfs_inode_t *ta
 
 static int ramfs_truncate(vfs_inode_t *inode, off_t len)
 {
-	if (!S_ISREG(inode->mode)) return -22;
+	if (!S_ISREG(inode->mode)) return -EINVAL;
 	return pagefile_truncate(inode, len);
 }
 

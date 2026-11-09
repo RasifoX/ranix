@@ -132,10 +132,10 @@ static void map_undo(process_t *p, uint64_t va, uint64_t v, uint64_t len)
 
 static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uint64_t off)
 {
-	if (len == 0 || (off & (PAGE_SIZE - 1)) || (int64_t)off < 0 || off + len < off) return -22;
-	if (!(flags & (MAP_SHARED | MAP_PRIVATE))) return -22;
-	if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1))) return -22;
-	if (len >= USER_SPAN) return -12;   /* more than all of user space; rounding must not wrap */
+	if (len == 0 || (off & (PAGE_SIZE - 1)) || (int64_t)off < 0 || off + len < off) return -EINVAL;
+	if (!(flags & (MAP_SHARED | MAP_PRIVATE))) return -EINVAL;
+	if ((flags & MAP_FIXED) && (addr & (PAGE_SIZE - 1))) return -EINVAL;
+	if (len >= USER_SPAN) return -ENOMEM;   /* more than all of user space; rounding must not wrap */
 	process_t *p = task_current();
 
 	/* RLIMIT_AS: refuse a mapping that would push the address space over the
@@ -146,32 +146,32 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		for (vma_t *v = p->vm->vmas; v; v = v->next) used += v->size;
 		spin_unlock_irq(&p->vm->fault_lock, cf);
 		uint64_t req = (len + 0xFFF) & ~0xFFFULL;
-		if (used + req > p->rlim_cur[RLIMIT_AS]) return -12; /* ENOMEM */
+		if (used + req > p->rlim_cur[RLIMIT_AS]) return -ENOMEM;
 	}
 
 	/* MAP_FIXED_NOREPLACE: MAP_FIXED that fails with EEXIST over anything already
 	 * there. Wine lays out its address space with it. */
 	if ((flags & 0x100000) && addr) {
-		if (addr & (PAGE_SIZE - 1)) return -22;
-		if (!access_ok((void *)addr, len)) return -12;
+		if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+		if (!access_ok((void *)addr, len)) return -ENOMEM;
 		uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
 		int hit = arch_vm_get_paddr(p->vm->root, addr) != 0;   /* the heap has no VMA */
 		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 		for (vma_t *v = p->vm->vmas; v && !hit; v = v->next)
 			hit = v->vaddr < end && v->vaddr + v->size > addr;
 		spin_unlock_irq(&p->vm->fault_lock, cf);
-		if (hit) return -17;
+		if (hit) return -EEXIST;
 		flags |= MAP_FIXED;
 	}
 
 	/* MAP_FIXED maps at a user-chosen address; reject a kernel-range target so it
 	 * cannot write a PTE over the (shared) kernel half of the page tables. */
-	if ((flags & MAP_FIXED) && addr && !access_ok((void *)addr, len)) return -22;
+	if ((flags & MAP_FIXED) && addr && !access_ok((void *)addr, len)) return -EINVAL;
 
 	/* JITs (V8, the JVM, LuaJIT) need W+X by default, as on Linux. A process
 	 * that wants W^X opts in with prctl(PR_SET_MDWE) and keeps it across exec. */
 	if (task_current()->mdwe && (prot & PROT_WRITE) && (prot & PROT_EXEC))
-		return -13;   /* EACCES */
+		return -EACCES;
 
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
@@ -182,26 +182,26 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * reserved pool, in the process's own high VA window. Eagerly populated. */
 	if ((flags & MAP_HUGETLB) && ((flags >> MAP_HUGE_SHIFT) & 0x3F) == 30 &&
 	    (flags & MAP_ANONYMOUS) && prot != 0) {
-		if (len > (uint64_t)-1 - (HUGE_1G_SIZE - 1)) return -12;   /* rounding would wrap */
+		if (len > (uint64_t)-1 - (HUGE_1G_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
 		len = (len + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_1G_MASK;
 		else {
 			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 			uint64_t next = (p->vm->huge1g_next + HUGE_1G_SIZE - 1) & HUGE_1G_MASK;
-			if (next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -12; }   /* cursor overflow */
+			if (next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* cursor overflow */
 			va = next; p->vm->huge1g_next = next + len;
 			spin_unlock_irq(&p->vm->fault_lock, cf);
 		}
 		if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
-		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
+		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
 		for (uint64_t v = va; v < va + len; v += HUGE_1G_SIZE) {
 			uint64_t blk = huge1g_alloc();
 			if (!blk || vm_map_huge_1g(p->vm, v, blk, vmflags) != 0) {
 				if (blk) huge1g_put(blk);
 				for (uint64_t u = va; u < v; u += HUGE_1G_SIZE) vm_unmap(p->vm, u);
 				cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
-				return -12;
+				return -ENOMEM;
 			}
 			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_1G_SIZE);
 		}
@@ -220,7 +220,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 	 * round to the huge-page boundary; pages are populated eagerly so there is
 	 * no demand-fault path to teach about blocks. */
 	if ((flags & MAP_HUGETLB) && (flags & MAP_ANONYMOUS) && prot != 0) {
-		if (len > (uint64_t)-1 - (HUGE_PAGE_SIZE - 1)) return -12;   /* rounding would wrap */
+		if (len > (uint64_t)-1 - (HUGE_PAGE_SIZE - 1)) return -ENOMEM;   /* rounding would wrap */
 		len = (len + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
 		uint64_t va;
 		if ((flags & MAP_FIXED) && addr) va = addr & HUGE_PAGE_MASK;
@@ -228,12 +228,12 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			uint64_t ceil = HUGE1G_VA_BASE;   /* mmap window ends below the 1 GB-hugepage window, itself below the stack */
 			uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 			uint64_t next = (p->vm->mmap_next + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
-			if (next + len > ceil || next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -12; }   /* over window / wrap */
+			if (next + len > ceil || next + len < next) { spin_unlock_irq(&p->vm->fault_lock, cf); return -ENOMEM; }   /* over window / wrap */
 			va = next; p->vm->mmap_next = next + len;
 			spin_unlock_irq(&p->vm->fault_lock, cf);
 		}
 		if ((flags & MAP_FIXED) && addr) drop_old_pages(p, va, len);
-		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; }
+		if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; }
 		uint64_t done = 0;
 		for (uint64_t v = va; v < va + len; v += HUGE_PAGE_SIZE) {
 			void *blk = buddy_alloc(9);   /* 2 MB = 512 pages */
@@ -241,7 +241,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 				if (blk) buddy_free((uint64_t)blk, 9);
 				for (uint64_t u = va; u < v; u += HUGE_PAGE_SIZE) vm_unmap(p->vm, u);
 				cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
-				return -12;
+				return -ENOMEM;
 			}
 			memset((void *)PHYS_TO_VIRT(blk), 0, HUGE_PAGE_SIZE);
 			done += HUGE_PAGE_SIZE;
@@ -272,7 +272,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 		if (p->vm->mmap_next + len > ceil || p->vm->mmap_next + len < p->vm->mmap_next) {
 			spin_unlock_irq(&p->vm->fault_lock, cf);
-			return -12;
+			return -ENOMEM;
 		}
 		va = p->vm->mmap_next; p->vm->mmap_next += len;
 		spin_unlock_irq(&p->vm->fault_lock, cf);
@@ -289,11 +289,11 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		           !(flags & (MAP_LOCKED | MAP_POPULATE_)) && !p->mlock_future;
 		if (prot != 0 && !lazy) {
 			/* eager: past all of RAM this only OOM-kills other tasks before failing */
-			if (len / PAGE_SIZE > buddy_total_pages()) return -12;
-			if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -12; } /* over memory.max */
+			if (len / PAGE_SIZE > buddy_total_pages()) return -ENOMEM;
+			if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { cgroup_oom_kill(p->cgroup); return -ENOMEM; } /* over memory.max */
 			for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 				void *pg = mm_alloc_page_oom();
-				if (!pg) { map_undo(p, va, v, len); kprintf(KERN_WARN "mm: mmap out of memory pid=%u va=0x%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -12; }
+				if (!pg) { map_undo(p, va, v, len); kprintf(KERN_WARN "mm: mmap out of memory pid=%u va=0x%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -ENOMEM; }
 				memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 				vm_map(p->vm, v, (uint64_t)pg, vmflags);
 			}
@@ -312,16 +312,16 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 
 	/* File-backed mmap */
 	vfs_file_t *f = fget(p->fds, fd);   /* pin across the blocking map loop */
-	if (!f) return -9;
+	if (!f) return -EBADF;
 
-	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { fput(f); return -13; } /* EACCES */
+	if ((prot & PROT_EXEC) && (f->mnt_flags & MS_NOEXEC)) { fput(f); return -EACCES; } /* EACCES */
 	/* a mapping reads the file; O_WRONLY may have been all the opener could get */
-	if (f->path[0] == '/' && (f->flags & 3) == O_WRONLY) { fput(f); return -13; }
+	if (f->path[0] == '/' && (f->flags & 3) == O_WRONLY) { fput(f); return -EACCES; }
 
 	/* stores through a shared mapping land in the file; files with no path, like
 	 * the io_uring rings, carry no access mode */
 	int ro_shared = (flags & MAP_SHARED) && f->path[0] == '/' && (f->flags & 3) == O_RDONLY;
-	if (ro_shared && (prot & PROT_WRITE)) { fput(f); return -13; } /* EACCES */
+	if (ro_shared && (prot & PROT_WRITE)) { fput(f); return -EACCES; } /* EACCES */
 
 	if (f->inode->fops && f->inode->fops->mmap_page) {
 		int shared = (flags & MAP_SHARED) != 0;
@@ -333,7 +333,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 			if (!phys) {
 				for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
 				fput(f);
-				return -12;
+				return -ENOMEM;
 			}
 			vm_map(p->vm, v, phys, pte_flags);
 			file_off += PAGE_SIZE;
@@ -379,7 +379,7 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 				if (!phys) {
 					for (uint64_t u = va; u < v; u += PAGE_SIZE) vm_unmap(p->vm, u);
 					fput(f);
-					return -22; /* EINVAL — offset past backing */
+					return -EINVAL;   /* offset past backing */
 				}
 				vm_map(p->vm, v, phys, pte_flags);
 				file_off += PAGE_SIZE;
@@ -399,14 +399,14 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 		}
 	}
 
-	if (!f->inode->fops || !f->inode->fops->read) { fput(f); return -19; }   /* ENODEV */
-	if (len / PAGE_SIZE > buddy_total_pages()) { fput(f); return -12; }      /* copied eagerly */
-	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { fput(f); return -12; }
+	if (!f->inode->fops || !f->inode->fops->read) { fput(f); return -ENODEV; }   /* ENODEV */
+	if (len / PAGE_SIZE > buddy_total_pages()) { fput(f); return -ENOMEM; }      /* copied eagerly */
+	if (cgroup_charge_mem(p->vm, p->cgroup, (long)len) != 0) { fput(f); return -ENOMEM; }
 
 	uint64_t file_off = off;
 	for (uint64_t v = va; v < va + len; v += PAGE_SIZE) {
 		void *pg = buddy_alloc(0);
-		if (!pg) { map_undo(p, va, v, len); fput(f); return -12; }
+		if (!pg) { map_undo(p, va, v, len); fput(f); return -ENOMEM; }
 		void *pg_virt = (void *)PHYS_TO_VIRT(pg);
 		memset(pg_virt, 0, PAGE_SIZE);
 
@@ -443,10 +443,10 @@ static long sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, uin
 static long sys_munmap(uint64_t addr, size_t len)
 {
 	process_t *p  = task_current();
-	if (!len || (addr & (PAGE_SIZE - 1))) return -22;
-	if (len >= USER_SPAN) return -22;
+	if (!len || (addr & (PAGE_SIZE - 1))) return -EINVAL;
+	if (len >= USER_SPAN) return -EINVAL;
 	len           = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
+	if (!access_ok((void *)addr, len)) return -EINVAL;   /* user range only */
 	drop_old_pages(p, addr, len);                    /* a per-page walk of 512 GB cannot be killed */
 	/* Drop the VMA coverage for exactly [addr, addr+len): trims VMAs the range
 	 * partially overlaps and splits one it punches a hole in, not just the fully
@@ -462,18 +462,18 @@ static long sys_munmap(uint64_t addr, size_t len)
  * to a now read-only page must fault). */
 static long sys_mprotect(uint64_t addr, size_t len, int prot)
 {
-	if (addr & (PAGE_SIZE - 1)) return -22;
-	if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC | 0x03000000 /* GROWSDOWN/UP */)) return -22;
+	if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+	if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC | 0x03000000 /* GROWSDOWN/UP */)) return -EINVAL;
 	if (len == 0) return 0;
 	process_t *p = task_current();
-	if (len >= USER_SPAN) return -12;
+	if (len >= USER_SPAN) return -ENOMEM;
 	len  = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-	if (!access_ok((void *)addr, len)) return -22;   /* user range only */
+	if (!access_ok((void *)addr, len)) return -EINVAL;   /* user range only */
 
 	/* JITs (V8, the JVM, LuaJIT) need W+X by default, as on Linux. A process
 	 * that wants W^X opts in with prctl(PR_SET_MDWE) and keeps it across exec. */
 	if (task_current()->mdwe && (prot & PROT_WRITE) && (prot & PROT_EXEC))
-		return -13;   /* EACCES */
+		return -EACCES;
 
 	uint32_t vmflags = VM_USER;
 	if (prot & PROT_READ)  vmflags |= VM_READ;
@@ -499,7 +499,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 		for (vma_t *v = p->vm->vmas; v; v = v->next)
 			if ((v->flags & VMA_NOWRITE) && v->vaddr < addr + len && v->vaddr + v->size > addr) {
 				spin_unlock_irq(&p->vm->fault_lock, vf);
-				return -13;   /* EACCES */
+				return -EACCES;
 			}
 	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		uint64_t vstart = v->vaddr, vend = v->vaddr + v->size;
@@ -546,7 +546,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 			vma_t *m = p->vm->vmas;
 			while (m && !(va >= m->vaddr && va < m->vaddr + m->size)) m = m->next;
 			/* nothing there: refuse, or this fills all of an address range with pages */
-			if (!m) { arch_tlb_flush_range(p->vm, addr, addr + len); return -12; }
+			if (!m) { arch_tlb_flush_range(p->vm, addr, addr + len); return -ENOMEM; }
 			if (prot == 0) continue;
 			if (m && (m->flags & VMA_ANON) && !(m->flags & VMA_SHARED) && (m->flags & VMA_READ)) {
 				uint64_t end = m->vaddr + m->size;
@@ -558,9 +558,9 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 				va = (end < addr + len ? end : addr + len) - PAGE_SIZE;
 				continue;
 			}
-			if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return -12;
+			if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return -ENOMEM;
 			void *pg = buddy_alloc(0);
-			if (!pg) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return -12; }
+			if (!pg) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return -ENOMEM; }
 			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
 			vm_map(p->vm, va, (uint64_t)pg, vmflags);
 		}
@@ -718,18 +718,18 @@ static long sys_set_mempolicy(int mode)
 #define MPOL_F_MEMS_ALLOWED  4
 static long sys_get_mempolicy(int *mode, unsigned long *nmask, unsigned long maxnode, unsigned long flags)
 {
-	if (flags & ~(unsigned long)(MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED)) return -22;
-	if (nmask && maxnode == 0) return -22;
+	if (flags & ~(unsigned long)(MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED)) return -EINVAL;
+	if (nmask && maxnode == 0) return -EINVAL;
 	if (mode) {
 		int m = 0;
-		if (copy_to_user(mode, &m, sizeof(m)) != 0) return -14;
+		if (copy_to_user(mode, &m, sizeof(m)) != 0) return -EFAULT;
 	}
 	if (nmask) {
 		unsigned long words = (maxnode - 1) / (8 * sizeof(unsigned long)) + 1;
 		if (words > 128) words = 128;
 		for (unsigned long i = 0; i < words; i++) {
 			unsigned long v = (i == 0 && (flags & MPOL_F_MEMS_ALLOWED)) ? 1 : 0;
-			if (copy_to_user(nmask + i, &v, sizeof(v)) != 0) return -14;
+			if (copy_to_user(nmask + i, &v, sizeof(v)) != 0) return -EFAULT;
 		}
 	}
 	return 0;
@@ -738,8 +738,8 @@ static long sys_get_mempolicy(int *mode, unsigned long *nmask, unsigned long max
 static long sys_madvise(uint64_t addr, size_t len, int advice)
 {
 	process_t *p = task_current();
-	if (addr & (PAGE_SIZE - 1)) return -22;
-	if (len >= USER_SPAN || !access_ok((void *)addr, len)) return -12;
+	if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+	if (len >= USER_SPAN || !access_ok((void *)addr, len)) return -ENOMEM;
 	switch (advice) {
 	case MADV_HUGEPAGE: {
 		uint64_t start = (addr + HUGE_PAGE_SIZE - 1) & HUGE_PAGE_MASK;
@@ -788,7 +788,7 @@ static long sys_mlock(uint64_t addr, size_t len)
 	process_t *p = task_current();
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	len = (addr - start) + len;
-	if (!access_ok((void *)start, len)) return -12;   /* ENOMEM: range outside user space */
+	if (!access_ok((void *)start, len)) return -ENOMEM;   /* range outside user space */
 	mm_prefault(p, start, len);
 	mm_set_locked(p, start, len, 1);
 	return 0;
@@ -800,7 +800,7 @@ static long sys_munlock(uint64_t addr, size_t len)
 	process_t *p = task_current();
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	len = (addr - start) + len;
-	if (!access_ok((void *)start, len)) return -12;
+	if (!access_ok((void *)start, len)) return -ENOMEM;
 	mm_set_locked(p, start, len, 0);
 	return 0;
 }
@@ -809,13 +809,13 @@ static long sys_munlock(uint64_t addr, size_t len)
 
 static long sys_mlock2(uint64_t addr, size_t len, int flags)
 {
-	if (flags & ~MLOCK_ONFAULT) return -22;
+	if (flags & ~MLOCK_ONFAULT) return -EINVAL;
 	if (flags & MLOCK_ONFAULT) {   /* lock present pages now, lock the rest as they fault */
 		if (len == 0) return 0;
 		process_t *p = task_current();
 		uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 		len = (addr - start) + len;
-		if (!access_ok((void *)start, len)) return -12;
+		if (!access_ok((void *)start, len)) return -ENOMEM;
 		mm_set_locked(p, start, len, 1);
 		return 0;
 	}
@@ -832,7 +832,7 @@ static long sys_mlock2(uint64_t addr, size_t len, int flags)
 static long sys_mlockall(int flags)
 {
 	if (!(flags & (MCL_CURRENT | MCL_FUTURE)) || (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)))
-		return -22;
+		return -EINVAL;
 	process_t *p = task_current();
 	p->mlock_future = (flags & MCL_FUTURE) ? 1 : 0;
 	if (flags & MCL_CURRENT) {
@@ -853,9 +853,9 @@ static long sys_munlockall(void)
 static long sys_msync(uint64_t addr, size_t len, int flags)
 {
 	/* MS_ASYNC=1 MS_INVALIDATE=2 MS_SYNC=4; SYNC and ASYNC are mutually exclusive */
-	if (flags & ~0x7) return -22;
-	if ((flags & 1) && (flags & 4)) return -22;
-	if (addr & 0xFFF) return -22;                      /* EINVAL: must be page-aligned */
+	if (flags & ~0x7) return -EINVAL;
+	if ((flags & 1) && (flags & 4)) return -EINVAL;
+	if (addr & 0xFFF) return -EINVAL;   /* must be page-aligned */
 	process_t *p = task_current();
 	uint64_t end = addr + ((len + 0xFFF) & ~0xFFFULL);
 	/* the whole range must be mapped, else ENOMEM */
@@ -863,7 +863,7 @@ static long sys_msync(uint64_t addr, size_t len, int flags)
 		int found = 0;
 		for (vma_t *v = p->vm->vmas; v; v = v->next)
 			if (va >= v->vaddr && va < v->vaddr + v->size) { found = 1; break; }
-		if (!found) return -12;                        /* ENOMEM */
+		if (!found) return -ENOMEM;
 	}
 #if IS_ENABLED(CONFIG_FS_EXT2)
 	if (flags & 4) ext2_sync_all();   /* the disk cache is write-back */

@@ -10,6 +10,7 @@
 #include <kernel/sync.h>
 #include <kernel/board.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 int net_drop_hit(void);
 
@@ -207,7 +208,7 @@ static int ip_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
         uint32_t chunk = plen - off < maxdata ? plen - off : maxdata;
         int more = (off + chunk < plen);
         skb_t *skb = skb_alloc();
-        if (!skb) return -12;
+        if (!skb) return -ENOMEM;
         memcpy(skb->data, payload + off, chunk);
         skb->len = (uint16_t)chunk;
         ip_hdr_t *iph = (ip_hdr_t *)skb_push(skb, sizeof(ip_hdr_t));

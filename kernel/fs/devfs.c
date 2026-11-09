@@ -12,6 +12,7 @@
 #include <kernel/asess.h>
 #include <kernel/csprng.h>
 #include <kernel/fs/devfs.h>
+#include <kernel/errno.h>
 
 /*
  * devfs — virtual device filesystem at /dev.
@@ -74,7 +75,7 @@ static vfs_fops_t zero_fops = {
 static ssize_t full_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	(void)f; (void)buf; (void)len;
-	return -28; /* ENOSPC */
+	return -ENOSPC;
 }
 
 static vfs_fops_t full_fops = {
@@ -114,12 +115,12 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 	if (dmesg_restrict) {
 		process_t *c = task_current();
 		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN))
-			return -1;   /* EPERM */
+			return -EPERM;
 	}
 	size_t total = kprintf_log_len();
 	if ((size_t)f->pos >= total) return 0;
 	char *tmp = kmalloc(total ? total : 1);
-	if (!tmp) return -12;
+	if (!tmp) return -ENOMEM;
 	size_t got = kprintf_read_log(tmp, total);
 	if ((size_t)f->pos >= got) { kfree(tmp); return 0; }
 	/* One record a read, "level,seq,usec,flags;text\n": util-linux dmesg parses this. */
@@ -155,11 +156,11 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 		head[h++] = ',';
 	}
 	head[h++] = '-'; head[h++] = ';';
-	if (h + ll + 1 > len) { kfree(tmp); return -22; }
+	if (h + ll + 1 > len) { kfree(tmp); return -EINVAL; }
 	char nl = '\n';
 	if (copy_fop_to_user(buf, head, h) != 0 ||
 	    copy_fop_to_user((char *)buf + h, l, ll) != 0 ||
-	    copy_fop_to_user((char *)buf + h + ll, &nl, 1) != 0) { kfree(tmp); return -14; }
+	    copy_fop_to_user((char *)buf + h + ll, &nl, 1) != 0) { kfree(tmp); return -EFAULT; }
 	f->pos += (off_t)(end - (tmp + f->pos)) + 1;
 	kfree(tmp);
 	return (ssize_t)(h + ll + 1);
@@ -230,7 +231,7 @@ static void epoch_to_rtc(int64_t t, struct rtc_time *r)
 static int rtc_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
 	(void)f;
-	if (cmd != RTC_RD_TIME) return -25;
+	if (cmd != RTC_RD_TIME) return -ENOTTY;
 	int64_t s, n; ranix_walltime(&s, &n);
 	struct rtc_time r;
 	memset(&r, 0, sizeof(r));
@@ -263,10 +264,10 @@ static ssize_t fdproxy_read(vfs_file_t *f, void *buf, size_t len)
 {
 	devfs_fdproxy_t *dp = f->inode->priv;
 	process_t *cur = task_current();
-	if (!cur || !cur->fds) return -9;
+	if (!cur || !cur->fds) return -EBADF;
 	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking read */
 	if (!target || !target->inode || !target->inode->fops ||
-	    !target->inode->fops->read) { if (target) fput(target); return -9; }
+	    !target->inode->fops->read) { if (target) fput(target); return -EBADF; }
 	ssize_t r = target->inode->fops->read(target, buf, len);
 	fput(target);
 	return r;
@@ -276,10 +277,10 @@ static ssize_t fdproxy_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	devfs_fdproxy_t *dp = f->inode->priv;
 	process_t *cur = task_current();
-	if (!cur || !cur->fds) return -9;
+	if (!cur || !cur->fds) return -EBADF;
 	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking write */
 	if (!target || !target->inode || !target->inode->fops ||
-	    !target->inode->fops->write) { if (target) fput(target); return -9; }
+	    !target->inode->fops->write) { if (target) fput(target); return -EBADF; }
 	ssize_t r = target->inode->fops->write(target, buf, len);
 	fput(target);
 	return r;

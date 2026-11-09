@@ -24,6 +24,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 #include <kernel/fs/ntfs_core.h>
+#include <kernel/errno.h>
 
 #define NTFS_BOUNCE   (128u * 1024)
 #define NTFS_ID_DIR   ".ntfs-id"
@@ -303,7 +304,7 @@ static int ntfs_statfs(vfs_inode_t *in, vfs_statfs_t *out)
 
 static int ntfs_open_file(vfs_inode_t *in, vfs_file_t *f, int flags)
 {
-	if ((flags & 3) != O_RDONLY) return -30;
+	if ((flags & 3) != O_RDONLY) return -EROFS;
 	atomic_fetch_add32(&((ntfs_sb_t *)in->i_sb)->refs, 1);
 	return 0;
 }
@@ -320,7 +321,7 @@ static ssize_t ntfs_read(vfs_file_t *f, void *buf, size_t len)
 	ntfs_sb_t *sb = in->i_sb;
 	uint8_t *out = buf;
 	size_t done = 0;
-	if (f->pos < 0) return -22;
+	if (f->pos < 0) return -EINVAL;
 	while (done < len) {
 		uint32_t n = len - done > NTFS_BOUNCE ? NTFS_BOUNCE : (uint32_t)(len - done);
 		/* one chunk under the lock, so a long read leaves room for lookups */
@@ -340,7 +341,7 @@ static off_t ntfs_seek(vfs_file_t *f, off_t off, int whence)
 {
 	off_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? f->pos :
 	             whence == SEEK_END ? (off_t)f->inode->size : -1;
-	if (base < 0 || base + off < 0) return -22;
+	if (base < 0 || base + off < 0) return -EINVAL;
 	f->pos = base + off;
 	return f->pos;
 }

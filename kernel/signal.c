@@ -121,7 +121,7 @@ int kloop_should_stop(void)
 int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
                      uid_t si_uid, uint64_t si_value, int thread_directed)
 {
-	if (!p || sig <= 0 || sig > NSIG) return -22;
+	if (!p || sig <= 0 || sig > NSIG) return -EINVAL;
 
 	/* Standard signals coalesce — the bitmask is sufficient and the siginfo is
 	 * synthesized on delivery. Only RT signals queue. */
@@ -130,7 +130,7 @@ int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
 	sigqueue_t *q = NULL;
 	if (is_rt) {
 		q = kmalloc(sizeof(*q));
-		if (!q) return -11; /* EAGAIN */
+		if (!q) return -EAGAIN;
 		q->next = NULL;
 		q->si_signo = sig;
 		q->si_errno = 0;
@@ -163,7 +163,7 @@ int task_signal_info(process_t *p, int sig, int si_code, pid_t si_pid,
 		if (target->sigq_count >= SIGQUEUE_MAX) {
 			spin_unlock_irq(&sched_lock, f);
 			kfree(q);
-			return -11; /* EAGAIN */
+			return -EAGAIN;
 		}
 		sigq_append_locked(target, q);
 	}
@@ -379,12 +379,12 @@ int tty_jobctl_check(void *tty, vfs_fops_t *tty_fops, pid_t fg_pgrp, int sig)
 	void (*h)(int) = p->sighand->actions[sig - 1].sa_handler;
 	int ignored = ((uintptr_t)h == 1);
 	int blocked = (p->sig_mask & bit) != 0;
-	if (ignored || blocked) return -5;   /* EIO */
+	if (ignored || blocked) return -EIO;
 
 	uint64_t f = spin_lock_irq(&sched_lock);
 	int orphan = pgrp_is_orphaned_locked(p->pgrp, p->sid);
 	spin_unlock_irq(&sched_lock, f);
-	if (orphan) return -5;   /* EIO */
+	if (orphan) return -EIO;
 
 	/* Stop the whole pgrp; the others stop on their own user-return dispatch.
 	 * The current task stops here, inside the syscall, then retries the I/O when
@@ -412,7 +412,7 @@ int tty_acquire(void *tty, vfs_fops_t *fops, int steal)
 {
 	process_t *p = task_current();
 	if (p->ctty == tty) return 1;
-	if (p->ctty || p->sid != (pid_t)p->pid) return -1; /* EPERM */
+	if (p->ctty || p->sid != (pid_t)p->pid) return -EPERM;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (tty_held_elsewhere_locked(tty, p->sid)) {
 		if (!steal || !capable_task(p, CAP_SYS_ADMIN)) {
@@ -435,10 +435,10 @@ int tty_acquire(void *tty, vfs_fops_t *fops, int steal)
 long tty_check_fg(void *tty, int need_ctty, pid_t nr, pid_t *out)
 {
 	process_t *p = task_current();
-	if (nr < 0) return -22; /* EINVAL */
-	if (need_ctty ? p->ctty != tty : p->ctty && p->ctty != tty) return -25; /* ENOTTY */
+	if (nr < 0) return -EINVAL;
+	if (need_ctty ? p->ctty != tty : p->ctty && p->ctty != tty) return -ENOTTY;
 	pid_t pgrp = pid_from_user(nr);
-	if (!pgrp) return -3; /* ESRCH */
+	if (!pgrp) return -ESRCH;
 	long r = -3;
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *head = proctab[0];

@@ -46,7 +46,7 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 		return r;
 	}
 	/* fd not in table — fallback for stdin/stdout before /dev/console open */
-	if (fd < 0 || fd > 2) return -9;
+	if (fd < 0 || fd > 2) return -EBADF;
 	switch (cmd) {
 	case TIOCGWINSZ: {
 		linux_winsize_t ws = {24, 80, 0, 0};
@@ -58,11 +58,11 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 	}
 	case TCSETS: case TCSETSW: case TCSETSF: return 0;
 	case TIOCGPGRP: { int pgid = (int)tty_fg_pgrp; return copy_to_user((void *)(uintptr_t)arg, &pgid, 4) ? -14 : 0; }
-	case TIOCSPGRP: { int pgid; if (copy_from_user(&pgid, (void *)(uintptr_t)arg, 4) != 0) return -14; tty_fg_pgrp = pgid; return 0; }
+	case TIOCSPGRP: { int pgid; if (copy_from_user(&pgid, (void *)(uintptr_t)arg, 4) != 0) return -EFAULT; tty_fg_pgrp = pgid; return 0; }
 	case TIOCSPROMPT: {
 		return 0;
 	}
-	default: return -25; /* ENOTTY */
+	default: return -ENOTTY;
 	}
 }
 
@@ -97,15 +97,15 @@ static int fd_poll_bits(int fd)
 static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 {
 	/* nfds is unbounded user input: bound it before the size multiplication */
-	if (nfds > FD_MAX) return -22;
-	if (nfds && !access_ok(fds, nfds * sizeof(linux_pollfd_t))) return -14;
+	if (nfds > FD_MAX) return -EINVAL;
+	if (nfds && !access_ok(fds, nfds * sizeof(linux_pollfd_t))) return -EFAULT;
 
 	linux_pollfd_t *kfds = NULL;
 	if (nfds) {
 		kfds = kmalloc(nfds * sizeof(linux_pollfd_t));
-		if (!kfds) return -12;
+		if (!kfds) return -ENOMEM;
 		if (copy_from_user(kfds, fds, nfds * sizeof(linux_pollfd_t)) != 0) {
-			kfree(kfds); return -14;
+			kfree(kfds); return -EFAULT;
 		}
 	}
 
@@ -131,7 +131,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			if (kfds[i].revents) ready++;
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		if (task_has_actionable_signal()) { kfree(kfds); return -4; }
+		if (task_has_actionable_signal()) { kfree(kfds); return -EINTR; }
 		poll_block(deadline);
 	}
 
@@ -142,11 +142,11 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 
 static long select_until(int nfds, uint64_t *readfds, uint64_t *writefds, uint64_t deadline)
 {
-	if (nfds < 0) return -22;
+	if (nfds < 0) return -EINVAL;
 
 	uint64_t rfds = 0, wfds = 0;
-	if (nfds && readfds  && copy_from_user(&rfds, readfds,  8) != 0) return -14;
-	if (nfds && writefds && copy_from_user(&wfds, writefds, 8) != 0) return -14;
+	if (nfds && readfds  && copy_from_user(&rfds, readfds,  8) != 0) return -EFAULT;
+	if (nfds && writefds && copy_from_user(&wfds, writefds, 8) != 0) return -EFAULT;
 
 	int ready = 0;
 	uint64_t rres = 0, wres = 0;
@@ -156,17 +156,17 @@ static long select_until(int nfds, uint64_t *readfds, uint64_t *writefds, uint64
 		for (int i = 0; i < nfds && i < 64; i++) {
 			if (!((rfds | wfds) & (1ULL << i))) continue;
 			int bits = fd_poll_bits(i);
-			if (bits & POLLNVAL) return -9;
+			if (bits & POLLNVAL) return -EBADF;
 			if ((rfds & (1ULL << i)) && (bits & POLLIN))  { rres |= (1ULL << i); ready++; }
 			if ((wfds & (1ULL << i)) && (bits & POLLOUT)) { wres |= (1ULL << i); ready++; }
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		if (task_has_actionable_signal()) return -4;
+		if (task_has_actionable_signal()) return -EINTR;
 		poll_block(deadline);
 	}
 
-	if (nfds && readfds  && copy_to_user(readfds,  &rres, 8) != 0) return -14;
-	if (nfds && writefds && copy_to_user(writefds, &wres, 8) != 0) return -14;
+	if (nfds && readfds  && copy_to_user(readfds,  &rres, 8) != 0) return -EFAULT;
+	if (nfds && writefds && copy_to_user(writefds, &wres, 8) != 0) return -EFAULT;
 	return ready;
 }
 
@@ -177,8 +177,8 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 	uint64_t deadline = (uint64_t)-1;
 	if (timeout) {
 		linux_timeval_t tv;
-		if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) return -14;
-		if (tv.tv_sec < 0 || tv.tv_usec < 0) return -22;
+		if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) return -EFAULT;
+		if (tv.tv_sec < 0 || tv.tv_usec < 0) return -EINVAL;
 		if (tv.tv_sec || tv.tv_usec)
 			deadline = kernel_ticks + (uint64_t)tv.tv_sec * TIMER_HZ +
 			           (uint64_t)tv.tv_usec * TIMER_HZ / 1000000 + 1;
@@ -195,7 +195,7 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
 static long wait_mask_enter(const void *umask)
 {
 	uint64_t m;
-	if (copy_from_user(&m, umask, sizeof(m)) != 0) return -14;
+	if (copy_from_user(&m, umask, sizeof(m)) != 0) return -EFAULT;
 	process_t *p = task_current();
 	p->sig_saved_mask = p->sig_mask;
 	p->sig_mask = m & ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
@@ -217,13 +217,13 @@ static long sys_pselect6(int nfds, uint64_t *r, uint64_t *w, uint64_t *e,
                          linux_timespec_t *ts, void *sigarg)
 {
 	struct { const void *set; size_t len; } sa = { NULL, 0 };
-	if (sigarg && copy_from_user(&sa, sigarg, sizeof(sa)) != 0) return -14;
+	if (sigarg && copy_from_user(&sa, sigarg, sizeof(sa)) != 0) return -EFAULT;
 	(void)e;
 	uint64_t deadline = (uint64_t)-1;
 	if (ts) {
 		linux_timespec_t k;
-		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -14;
-		if (k.tv_sec < 0 || k.tv_nsec < 0) return -22;
+		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
+		if (k.tv_sec < 0 || k.tv_nsec < 0) return -EINVAL;
 		deadline = k.tv_sec || k.tv_nsec
 		         ? kernel_ticks + (uint64_t)k.tv_sec * TIMER_HZ +
 		           (uint64_t)k.tv_nsec * TIMER_HZ / 1000000000 + 1
@@ -242,8 +242,8 @@ static long sys_ppoll(linux_pollfd_t *fds, uint64_t nfds,
 	int timeout_ms = -1;
 	if (ts) {
 		linux_timespec_t k;
-		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -14;
-		if (k.tv_sec < 0 || k.tv_nsec < 0) return -22;
+		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
+		if (k.tv_sec < 0 || k.tv_nsec < 0) return -EINVAL;
 		/* a long timeout must not wrap into a negative (infinite) one */
 		timeout_ms = k.tv_sec >= 0x7fffffffL / 1000 ? 0x7fffffff
 		           : (int)(k.tv_sec * 1000 + k.tv_nsec / 1000000);
@@ -310,20 +310,20 @@ static epoll_t *epfd_get(int epfd, vfs_file_t **held)
 static long sys_epoll_create1(int flags)
 {
 	epoll_t *ep = kmalloc(sizeof(*ep));
-	if (!ep) return -12;
+	if (!ep) return -ENOMEM;
 	memset(ep, 0, sizeof(*ep));
 	ep->lock = (spinlock_t)SPINLOCK_INIT;
 	for (int i = 0; i < EPOLL_MAX_WATCH; i++) ep->fds[i] = -1;
 
 	vfs_inode_t *in = kmalloc(sizeof(*in));
-	if (!in) { kfree(ep); return -12; }
+	if (!in) { kfree(ep); return -ENOMEM; }
 	memset(in, 0, sizeof(*in));
 	in->fops     = &epoll_fops;
 	in->priv     = ep;
 	in->refcount = 1;
 
 	vfs_file_t *f = kmalloc(sizeof(*f));
-	if (!f) { kfree(ep); kfree(in); return -12; }
+	if (!f) { kfree(ep); kfree(in); return -ENOMEM; }
 	memset(f, 0, sizeof(*f));
 	f->inode    = in;
 	f->refcount = 0;   /* fd_alloc takes the +1; a single close() then frees */
@@ -341,7 +341,7 @@ static long epoll_ctl_do(epoll_t *ep, int op, int fd, linux_epoll_event_t ev)
 
 	if (op == EPOLL_CTL_ADD) {
 		for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-			if (ep->fds[i] == fd) { spin_unlock_irq(&ep->lock, f); return -17; }
+			if (ep->fds[i] == fd) { spin_unlock_irq(&ep->lock, f); return -EEXIST; }
 		}
 		for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
 			if (ep->fds[i] < 0) {
@@ -354,7 +354,7 @@ static long epoll_ctl_do(epoll_t *ep, int op, int fd, linux_epoll_event_t ev)
 			}
 		}
 		spin_unlock_irq(&ep->lock, f);
-		return -28;
+		return -ENOSPC;
 	}
 
 	for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
@@ -377,13 +377,13 @@ static long epoll_ctl_do(epoll_t *ep, int op, int fd, linux_epoll_event_t ev)
 
 static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 {
-	if (op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD) return -22;
+	if (op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD) return -EINVAL;
 	linux_epoll_event_t ev = {0};
 	if (op != EPOLL_CTL_DEL && copy_from_user(&ev, uevent, sizeof(ev)) != 0)
-		return -14;
+		return -EFAULT;
 	vfs_file_t *held;
 	epoll_t *ep = epfd_get(epfd, &held);
-	if (!ep) return -9;
+	if (!ep) return -EBADF;
 	long r;
 	if (fd == epfd) r = -22;
 	else if (!fd_get(task_current()->fds, fd)) r = -9;
@@ -395,20 +395,20 @@ static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxevents,
                               int timeout_ms)
 {
-	if (!uevents || maxevents <= 0) return -22;
-	if (!access_ok(uevents, (size_t)maxevents * sizeof(linux_epoll_event_t))) return -14;
+	if (!uevents || maxevents <= 0) return -EINVAL;
+	if (!access_ok(uevents, (size_t)maxevents * sizeof(linux_epoll_event_t))) return -EFAULT;
 	/* at most EPOLL_MAX_WATCH can be ready, whatever the caller asked for */
 	if (maxevents > EPOLL_MAX_WATCH) maxevents = EPOLL_MAX_WATCH;
 	vfs_file_t *held;
 	epoll_t *ep = epfd_get(epfd, &held);
-	if (!ep) return -9;
+	if (!ep) return -EBADF;
 
 	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
 	                  : (timeout_ms == 0) ? 0
 	                  : kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
 
 	linux_epoll_event_t *kev = kmalloc((size_t)maxevents * sizeof(*kev));
-	if (!kev) { fput(held); return -12; }
+	if (!kev) { fput(held); return -ENOMEM; }
 
 	int ready = 0;
 	while (1) {
@@ -454,7 +454,7 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 			spin_unlock_irq(&ep->lock, f);
 		}
 		if (ready > 0 || kernel_ticks >= deadline) break;
-		if (task_has_actionable_signal()) { kfree(kev); fput(held); return -4; }
+		if (task_has_actionable_signal()) { kfree(kev); fput(held); return -EINTR; }
 		poll_block(deadline);
 	}
 
@@ -482,8 +482,8 @@ static long sys_epoll_pwait2(int epfd, linux_epoll_event_t *uevents, int maxeven
 	int ms = -1;
 	if (ts) {
 		linux_timespec_t k;
-		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -14;
-		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000) return -22;
+		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
+		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000) return -EINVAL;
 		uint64_t t = (uint64_t)k.tv_sec * 1000 + ((uint64_t)k.tv_nsec + 999999) / 1000000;
 		ms = t > 0x7fffffff ? 0x7fffffff : (int)t;
 	}
@@ -495,9 +495,9 @@ static long sys_epoll_pwait2(int epfd, linux_epoll_event_t *uevents, int maxeven
 static long sys_symlink(const char *t, const char *lp)
 {
 	char *kt = kmalloc(PATH_MAX);
-	if (!kt) return -12;
+	if (!kt) return -ENOMEM;
 	char *klp = kmalloc(PATH_MAX);
-	if (!klp) { kfree(kt); return -12; }
+	if (!klp) { kfree(kt); return -ENOMEM; }
 	long ret;
 	int r;
 	if ((r = copy_path_from_user(kt, t)) || (r = resolve_path(klp, AT_FDCWD, lp)))
@@ -510,9 +510,9 @@ static long sys_symlink(const char *t, const char *lp)
 static long sys_symlinkat(const char *t, int d, const char *lp)
 {
 	char *kt = kmalloc(PATH_MAX);
-	if (!kt) return -12;
+	if (!kt) return -ENOMEM;
 	char *klp = kmalloc(PATH_MAX);
-	if (!klp) { kfree(kt); return -12; }
+	if (!klp) { kfree(kt); return -ENOMEM; }
 	long ret;
 	int r;
 	if ((r = copy_path_from_user(kt, t)) || (r = resolve_path(klp, d, lp)))
@@ -524,11 +524,11 @@ static long sys_symlinkat(const char *t, int d, const char *lp)
 }
 static long sys_linkat(int od, const char *o, int nd, const char *n, int f)
 {
-	if (f & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)) return -22; /* EINVAL */
+	if (f & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)) return -EINVAL;
 	char *ko = kmalloc(PATH_MAX);
-	if (!ko) return -12;
+	if (!ko) return -ENOMEM;
 	char *kn = kmalloc(PATH_MAX);
-	if (!kn) { kfree(ko); return -12; }
+	if (!kn) { kfree(ko); return -ENOMEM; }
 	long ret;
 	int r;
 	if ((r = resolve_path(ko, od, o)) || (r = resolve_path(kn, nd, n)))
@@ -557,8 +557,8 @@ static long sys_fchmod(int fd, mode_t m)
 {
 	process_t *proc = task_current();
 	vfs_file_t *f = fd_get(proc->fds, fd);
-	if (!f || !f->inode) return -9;
-	if (f->mnt_flags & MS_RDONLY) return -30; /* EROFS */
+	if (!f || !f->inode) return -EBADF;
+	if (f->mnt_flags & MS_RDONLY) return -EROFS;
 	return vfs_chmod_inode(f->inode, m);
 }
 /* fchmodat takes three arguments in the Linux ABI: it has no flags, so whatever
@@ -581,8 +581,8 @@ static long sys_fchown(int fd, uid_t u, gid_t g)
 {
 	process_t *proc = task_current();
 	vfs_file_t *f = (proc && proc->fds) ? fd_get(proc->fds, fd) : NULL;
-	if (!f || !f->inode) return -9;
-	if (f->mnt_flags & MS_RDONLY) return -30; /* EROFS */
+	if (!f || !f->inode) return -EBADF;
+	if (f->mnt_flags & MS_RDONLY) return -EROFS;
 	return vfs_chown_inode(f->inode, u, g);
 }
 static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int flags)
@@ -606,24 +606,24 @@ static long sys_fchownat(int d, const char *p, uid_t u, gid_t g, int flags)
 
 static long sys_write(int fd, const void *buf, size_t len)
 {
-	if (!access_ok(buf, len)) return -14;
+	if (!access_ok(buf, len)) return -EFAULT;
 	return vfs_write(fd, buf, len);
 }
 
 static long sys_read(int fd, void *buf, size_t len)
 {
-	if (!access_ok(buf, len)) return -14;
+	if (!access_ok(buf, len)) return -EFAULT;
 	return vfs_read(fd, buf, len);
 }
 
 static long sys_writev(int fd, const iovec_t *iov, int cnt)
 {
-	if (cnt < 0 || cnt > 1024) return -22;   /* IOV_MAX */
+	if (cnt < 0 || cnt > 1024) return -EINVAL;   /* IOV_MAX */
 
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
 		iovec_t v;
-		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -14;
+		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -EFAULT;
 		if (!v.iov_base || v.iov_len == 0) continue;
 		long r = sys_write(fd, v.iov_base, v.iov_len);
 		if (r < 0) return total ? total : r;
@@ -640,15 +640,15 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 	long err = 0;
 	process_t *p = task_current();
 	vfs_file_t *in = fget(p->fds, in_fd);
-	if (!in) return -9;
+	if (!in) return -EBADF;
 	/* bytes read from these cannot be put back if the write side then fails */
 	mode_t m = in->inode->mode;
 	int stream = !S_ISREG(m) && !S_ISBLK(m) && !S_ISCHR(m);
 	fput(in);
-	if (stream) return -22;
+	if (stream) return -EINVAL;
 	if (offset) {
 		long off;
-		if (copy_from_user(&off, offset, sizeof(off)) != 0) return -14;
+		if (copy_from_user(&off, offset, sizeof(off)) != 0) return -EFAULT;
 		vfs_seek(in_fd, off, 0);
 	}
 	/* /dev/zero to /dev/null never runs dry: stop at Linux's MAX_RW_COUNT and on
@@ -671,19 +671,19 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 	}
 	if (offset) {
 		long off = (long)vfs_seek(in_fd, 0, 1);
-		if (copy_to_user(offset, &off, sizeof(off)) != 0 && !sent) return -14;
+		if (copy_to_user(offset, &off, sizeof(off)) != 0 && !sent) return -EFAULT;
 	}
 	return sent ? (long)sent : err;
 }
 
 static long sys_readv(int fd, const iovec_t *iov, int cnt)
 {
-	if (cnt < 0 || cnt > 1024) return -22;   /* IOV_MAX */
+	if (cnt < 0 || cnt > 1024) return -EINVAL;   /* IOV_MAX */
 
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
 		iovec_t v;
-		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -14;
+		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -EFAULT;
 		if (!v.iov_base || v.iov_len == 0) continue;
 		long r = sys_read(fd, v.iov_base, v.iov_len);
 		if (r < 0) return total ? total : r;
@@ -714,25 +714,25 @@ static long proc_fd_reopen(const char *kp, int flags)
 {
 	const char *p = kp;
 	process_t *cur = task_current();
-	if (strncmp(p, "/proc/", 6) != 0) return -2;
+	if (strncmp(p, "/proc/", 6) != 0) return -ENOENT;
 	p += 6;
 	if (strncmp(p, "self/fd/", 8) == 0) {
 		p += 8;
 	} else {
 		long pid = 0;
 		while (*p >= '0' && *p <= '9') pid = pid * 10 + (*p++ - '0');
-		if (pid != task_vpid(cur) && pid != (long)cur->tgid) return -2;
-		if (strncmp(p, "/fd/", 4) != 0) return -2;
+		if (pid != task_vpid(cur) && pid != (long)cur->tgid) return -ENOENT;
+		if (strncmp(p, "/fd/", 4) != 0) return -ENOENT;
 		p += 4;
 	}
 	int n = 0;
-	if (*p < '0' || *p > '9') return -2;
+	if (*p < '0' || *p > '9') return -ENOENT;
 	while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
-	if (*p) return -2;
+	if (*p) return -ENOENT;
 	vfs_file_t *of = fd_get(cur->fds, n);
-	if (!of || !of->inode || !S_ISREG(of->inode->mode)) return -2;
+	if (!of || !of->inode || !S_ISREG(of->inode->mode)) return -ENOENT;
 	vfs_file_t *f = kmalloc(sizeof(*f));
-	if (!f) return -12;
+	if (!f) return -ENOMEM;
 	memset(f, 0, sizeof(*f));
 	f->inode = of->inode;
 	f->flags = flags & ~0100000;         /* the rest of O_CLOEXEC is handled below */
@@ -774,7 +774,7 @@ static long sys_close(int fd)
  * is accepted but the table is not unshared (single-table semantics). */
 static long sys_close_range(unsigned int first, unsigned int last, unsigned int flags)
 {
-	if (first > last || (flags & ~6u)) return -22; /* EINVAL */
+	if (first > last || (flags & ~6u)) return -EINVAL;
 	process_t *p = task_current();
 	if (!p->fds) return 0;
 	unsigned int cap = (unsigned int)p->fds->cap;
@@ -798,7 +798,7 @@ static long sys_fstat(int fd, linux_stat_t *st)
 {
 	process_t  *p = task_current();
 	vfs_file_t *f = fget(p->fds, fd);
-	if (!f) return -9;
+	if (!f) return -EBADF;
 	linux_stat_t ks;
 	memset(&ks, 0, sizeof(ks));
 

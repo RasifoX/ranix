@@ -156,6 +156,7 @@ static int fill_mounts(char *buf, size_t sz)
 
 #include <kernel/board.h>
 #include <kernel/fs/procfs.h>
+#include <kernel/errno.h>
 
 static int fill_uptime(char *buf, size_t sz)
 {
@@ -820,7 +821,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos < (off_t)n) {
 		size_t avail = (size_t)(n - f->pos);
 		if (len > avail) len = avail;
-		if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) { buddy_free(phys, 0); return -14; }
+		if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) { buddy_free(phys, 0); return -EFAULT; }
 		f->pos += (off_t)len;
 		ret = (ssize_t)len;
 	}
@@ -837,15 +838,15 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 	if (pr->type == PROC_F_P_OOMADJ) {
 		char tmp[16];
 		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
-		if (copy_fop_from_user(tmp, buf, n) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -EFAULT;
 		tmp[n] = '\0';
 		int neg = tmp[0] == '-', i = neg, v = 0;
-		if (tmp[i] < '0' || tmp[i] > '9') return -22;
+		if (tmp[i] < '0' || tmp[i] > '9') return -EINVAL;
 		for (; tmp[i] >= '0' && tmp[i] <= '9'; i++) v = v * 10 + (tmp[i] - '0');
 		if (neg) v = -v;
-		if (v < -1000 || v > 1000) return -22;
+		if (v < -1000 || v > 1000) return -EINVAL;
 		process_t *p = find_proc(pr->pid);
-		if (!p) return -3;
+		if (!p) return -ESRCH;
 		process_t *me = task_current();
 		/* anyone may make themselves a likelier victim; lowering takes root */
 		int ok = (me->euid == 0) || ((me->euid == p->uid) && v >= p->oom_score_adj);
@@ -855,16 +856,16 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 	}
 
 	if (pr->type == PROC_F_SYS_HOSTNAME) {
-		if (len == 0 || len >= 65) return -22;
+		if (len == 0 || len >= 65) return -EINVAL;
 		char tmp[65];
-		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
 		size_t n = len;
 		if (n > 0 && tmp[n-1] == '\n') n--;
-		if (n >= 65) return -22;
+		if (n >= 65) return -EINVAL;
 		process_t *wr = task_current();
 		if (!capable_task(wr, CAP_SYS_ADMIN) &&
 		    !(cap_has(wr->cap_effective, CAP_SYS_ADMIN) && wr->uts_ns && wr->uts_ns != &init_uts_ns))
-			return -1; /* EPERM */
+			return -EPERM;
 		if (n > 0) {
 			uts_namespace_t *ns = current_uts();
 			memcpy(ns->nodename, tmp, n);
@@ -873,10 +874,10 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		return (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_CORE_PATTERN) {
-		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
-		if (len == 0 || len >= 128) return -22;
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
+		if (len == 0 || len >= 128) return -EINVAL;
 		char tmp[128];
-		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
 		size_t n = len;
 		if (n > 0 && tmp[n-1] == '\n') n--;
 		memcpy(core_pattern, tmp, n);
@@ -884,28 +885,28 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		return (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_RANIX_DEADLINE) {
-		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
 		char tmp[16];
-		if (len == 0 || len >= sizeof(tmp)) return -22;
-		if (copy_fop_from_user(tmp, buf, len) != 0) return -14;
+		if (len == 0 || len >= sizeof(tmp)) return -EINVAL;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
 		size_t n = len;
 		if (tmp[n-1] == '\n') n--;
-		if (n == 0 || n > 9) return -22;
+		if (n == 0 || n > 9) return -EINVAL;
 		unsigned v = 0;
 		for (size_t i = 0; i < n; i++) {
-			if (tmp[i] < '0' || tmp[i] > '9') return -22;
+			if (tmp[i] < '0' || tmp[i] > '9') return -EINVAL;
 			v = v * 10 + (unsigned)(tmp[i] - '0');
 		}
-		if (!wdog_deadline_set) return -38; /* ENOSYS: no deadline on this arch */
+		if (!wdog_deadline_set) return -ENOSYS;   /* no deadline on this arch */
 		int r = wdog_deadline_set(v);
 		return r ? r : (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_KPTR_RESTRICT || pr->type == PROC_F_SYS_DMESG_RESTRICT) {
 		process_t *c = task_current();
-		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN)) return -1; /* EPERM */
+		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN)) return -EPERM;
 		char tmp[16];
 		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
-		if (copy_fop_from_user(tmp, buf, n) != 0) return -14;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -EFAULT;
 		tmp[n] = '\0';
 		int v = (tmp[0] >= '0' && tmp[0] <= '9') ? tmp[0] - '0' : 0;
 		if (pr->type == PROC_F_SYS_KPTR_RESTRICT) { if (v > 2) v = 2; kptr_restrict = v; }
@@ -941,9 +942,9 @@ static uint64_t proc_ino_alloc(void)
 static ssize_t procfs_mem_rw(vfs_file_t *f, void *ubuf, size_t len, int write)
 {
 	procfs_inode_priv_t *pr = (procfs_inode_priv_t *)f->inode->priv;
-	if (!proc_may_access(pr->pid)) return -1;   /* EPERM — ptrace gate */
+	if (!proc_may_access(pr->pid)) return -EPERM;   /* ptrace gate */
 	vm_space_t *vm = proc_get_vm(pr->pid);   /* pinned; vm_destroy to release */
-	if (!vm) return -3;   /* ESRCH */
+	if (!vm) return -ESRCH;
 	uint64_t vaddr = (uint64_t)f->pos;
 	char tmp[256];
 	size_t done = 0;
@@ -1240,14 +1241,14 @@ static int procfs_fdinfo_format(int pid, int fd_n, char *b)
 static ssize_t procfs_fdinfo_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_fdinfo_priv_t *pr = f->inode->priv;
-	if (!procfs_fds_visible(pr->pid)) return -13;
+	if (!procfs_fds_visible(pr->pid)) return -EACCES;
 	char tmp[96];
 	int n = procfs_fdinfo_format(pr->pid, pr->fd_n, tmp);
-	if (n < 0) return -2;   /* closed since the lookup */
+	if (n < 0) return -ENOENT;   /* closed since the lookup */
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -EFAULT;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }
@@ -1800,7 +1801,7 @@ static ssize_t procfs_timens_off_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -EFAULT;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }
@@ -1812,11 +1813,11 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 	process_t *p = pid == 0 ? task_current() : proc_get((pid_t)pid);
 	if (!p) return -1;
 	/* offsets may only be set on a pending time ns (one no task has joined) */
-	if (!p->time_ns_new) { if (pid) proc_put(p); return -13; } /* EACCES */
+	if (!p->time_ns_new) { if (pid) proc_put(p); return -EACCES; } /* EACCES */
 
 	char kb[128];
 	if (len >= sizeof(kb)) len = sizeof(kb) - 1;
-	if (copy_fop_from_user(kb, buf, len) != 0) { if (pid) proc_put(p); return -14; }
+	if (copy_fop_from_user(kb, buf, len) != 0) { if (pid) proc_put(p); return -EFAULT; }
 	kb[len] = '\0';
 
 	const char *s = kb;
@@ -1881,7 +1882,7 @@ static ssize_t procfs_uidmap_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -EFAULT;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }
@@ -1894,7 +1895,7 @@ static ssize_t procfs_uidmap_write(vfs_file_t *f, const void *buf, size_t len)
 	if (!p->user_ns) { if (pr->pid) proc_put(p); return -1; }   /* only a non-initial user ns is mappable */
 	char kb[256];
 	size_t n = len < sizeof(kb) - 1 ? len : sizeof(kb) - 1;
-	if (copy_from_user(kb, buf, n) != 0) { if (pr->pid) proc_put(p); return -14; }
+	if (copy_from_user(kb, buf, n) != 0) { if (pr->pid) proc_put(p); return -EFAULT; }
 	kb[n] = '\0';
 	int rc = user_ns_map_permitted(task_current(), p->user_ns, kb, pr->is_gid)
 	         ? user_ns_set_map(p->user_ns, kb, pr->is_gid) : -1;
@@ -1940,7 +1941,7 @@ static ssize_t procfs_cgroup_read(vfs_file_t *f, void *buf, size_t len)
 	if (f->pos >= (off_t)n) return 0;
 	size_t avail = (size_t)(n - f->pos);
 	if (len > avail) len = avail;
-	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	if (copy_to_user(buf, tmp + f->pos, len) != 0) return -EFAULT;
 	f->pos += (off_t)len;
 	return (ssize_t)len;
 }

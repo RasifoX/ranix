@@ -2,6 +2,7 @@
 #include <kernel/net/ipv6.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
+#include <kernel/errno.h>
 
 /* Stateless first-match-wins filter. One rule array per direction; a rule is a
  * set of optional match fields plus a verdict. A packet that matches no rule is
@@ -230,12 +231,12 @@ int nf_ctl_set(const char *line, size_t len)
     }
 
     nf_rule_t r; int dir;
-    if (parse_rule(line, end, &r, &dir) != 0) return -22;   /* EINVAL */
+    if (parse_rule(line, end, &r, &dir) != 0) return -EINVAL;
 
     uint64_t f = spin_lock_irq(&nf_lock);
     int *n = dir == NF_OUT ? &nf_out_n : &nf_in_n;
     nf_rule_t *tbl = dir == NF_OUT ? nf_out_rules : nf_in_rules;
-    if (*n >= NF_MAX_RULES) { spin_unlock_irq(&nf_lock, f); return -28; } /* ENOSPC */
+    if (*n >= NF_MAX_RULES) { spin_unlock_irq(&nf_lock, f); return -ENOSPC; } /* ENOSPC */
     tbl[*n] = r;
     (*n)++;
     nf_rules_active = nf_in_n + nf_out_n;
