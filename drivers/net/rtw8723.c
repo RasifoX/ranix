@@ -13,12 +13,15 @@
  *               ioctl RTW_PEEK / RTW_POKE {u32 addr, width, val}
  *               ioctl RTW_STOP   power off
  *               ioctl RTW_LINK   u8[6] mac: carrier on for wlan0; 0: carrier off
- *               ioctl RTW_RXDBG  u32[8] out: ring state, for "fjord-wifi rxdbg"
+ *               ioctl RTW_RXDBG  u32[8] out: ring state, for "fjord-wifi rxdbg";
+ *                                [4] MGQ, [5] BEQ: frames pushed << 16 | handed back,
+ *                                [6] MGQ_DESA read back (the chip's current descriptor)
  *               read   before RTW_RINGS: efuse summary text ("mac_hi=... mac_lo=...")
  *                      after:  one received frame, as the RX descriptor (32 bytes)
  *                              followed by the DMA buffer (driver info, shift, frame)
  *               write  [queue: 0 = management, 1 = best effort][40-byte TX
- *                      descriptor words 0..9][802.11 frame]
+ *                      descriptor words 0..9][802.11 frame]; the kernel adds the
+ *                      buffer and next-descriptor addresses in words 10..13
  *               poll   readable when a received frame is waiting
  *   /dev/wlan0  Ethernet frames between the network stack and fjord-wifi:
  *               read = frames the stack wants sent, write = frames received.
@@ -152,7 +155,8 @@ struct rtw_reg    { uint32_t addr, width, val; };
 #define R_TDECTRL          0x208
 #define R_RQPN_NPQ         0x214
 #define R_AUTO_LLT         0x224
-#define R_PCIE_CTRL_REG    0x300       /* low byte: TX queue kick */
+#define R_PCIE_CTRL_REG    0x300       /* low byte: TX queue kick; +1: DMA stop bits */
+#define R_HISR             0x0b4       /* 88E-family interrupt status (read only here) */
 #define R_INT_MIG          0x304
 #define R_MGQ_DESA         0x318
 #define R_BEQ_DESA         0x330
@@ -256,7 +260,23 @@ struct rtw_reg    { uint32_t addr, width, val; };
 #define TX_COUNT    32
 #define TX_BUF      4096
 #define RX_DESC_SZ  32          /* rtwn_rx_stat_pci */
-#define TX_DESC_SZ  64          /* r92ce_tx_desc: words 0-7 control, 8 buf, 10 next */
+#define TX_DESC_SZ  64          /* ring stride, as r92ce_tx_desc */
+/*
+ * TX descriptor words. The 8723B control block is 40 bytes, words 0-9: FreeBSD
+ * r23bu_attach.c sets txdesc_len = sizeof(struct r12a_tx_desc) and fills it with
+ * r12a_fill_tx_desc (rtl8812a/r12a_tx_desc.h: txdw0-6, a reserved word 7, txdw8
+ * HWSEQ_EN, txdw9 SEQ). fjord-wifi builds exactly that block (QSEL in txdw1, DRVRATE
+ * in txdw3, rate in txdw4). The PCIe tail follows the control block the way
+ * r92ce_tx_desc follows its 32-byte one: buffer address, its high half, next
+ * descriptor, its high half. The first version of this file used the r92ce offsets
+ * (buffer at word 8), which overwrote txdw8/txdw9 and left the chip reading its
+ * frame from word 10, the next descriptor's address.
+ */
+#define TXD_CTRL_WORDS  10
+#define TXD_BUF         10
+#define TXD_BUF64       11
+#define TXD_NEXT        12
+#define TXD_NEXT64      13
 
 #define RXDW0_PKTLEN_M  0x00003fffu
 #define RXDW0_INFOSZ_S  16
@@ -280,6 +300,9 @@ typedef struct {
     dmamem_t desc, buf;
     uint32_t cur;
     spinlock_t lock;
+    /* diagnostics, reset by RTW_RINGS: frames given to the chip, descriptors it
+     * handed back (OWN cleared), writes refused because the ring was full */
+    uint32_t tail, inflight, pushed, done, full;
 } txq_t;
 
 #define WLAN_TXQ_MAX 64
@@ -488,6 +511,7 @@ static int power_on(void)
 
 static void power_off(void)
 {
+    wr1(R_PCIE_CTRL_REG + 1, 0xff);                             /* DMA stop bits (r88ee_power_off) */
     wr4(R_CR, 0);                                               /* stop RX/TX */
     wr1(R_TXPAUSE, TX_QUEUE_ALL);
     set1(R_SYS_FUNC_EN, SYS_FUNC_BBRSTB, 0);
@@ -641,9 +665,14 @@ static void rings_reset(void)
     g.rx_cur = 0;
     for (int q = 0; q < NQ; q++) {
         memset(g.tx[q].desc.virt, 0, TX_COUNT * TX_DESC_SZ);
-        for (uint32_t i = 0; i < TX_COUNT; i++)          /* r92ce_setup_tx_desc: a chain */
-            tx_desc(q, i)[10] = (uint32_t)(g.tx[q].desc.phys + ((i + 1) % TX_COUNT) * TX_DESC_SZ);
+        for (uint32_t i = 0; i < TX_COUNT; i++) {        /* r92ce_setup_tx_desc: a chain */
+            uint64_t next = g.tx[q].desc.phys + ((i + 1) % TX_COUNT) * TX_DESC_SZ;
+            tx_desc(q, i)[TXD_NEXT]   = (uint32_t)next;
+            tx_desc(q, i)[TXD_NEXT64] = (uint32_t)(next >> 32);
+        }
         g.tx[q].cur = 0;
+        g.tx[q].tail = g.tx[q].inflight = 0;
+        g.tx[q].pushed = g.tx[q].done = g.tx[q].full = 0;
     }
     dma_wmb();
 }
@@ -656,6 +685,7 @@ static int rings_start(uint32_t base[3])
     }
     g.rings_up = 0;
     set1(R_CR, CR_MACRXEN | CR_MACTXEN, 0);
+    uint32_t pcie_ctrl = rd4(R_PCIE_CTRL_REG);
     rings_reset();
     wr4(R_RX_DESA, (uint32_t)g.rx_desc.phys);
     for (int q = 0; q < NQ; q++) wr4(q_desa[q], (uint32_t)g.tx[q].desc.phys);
@@ -663,7 +693,11 @@ static int rings_start(uint32_t base[3])
     wr4(R_RCR, RCR_APM | RCR_AM | RCR_AB | RCR_ADF | RCR_AMF | RCR_HTC_LOC_CTRL |
                RCR_APP_PHYSTS | RCR_APP_ICV | RCR_APP_MIC);
     wr1(R_TXPAUSE, 0);
+    wr1(R_PCIE_CTRL_REG + 1, 0);                                /* DMA stop bits off (r88ee_post_init) */
     set1(R_CR, 0, CR_MACRXEN | CR_MACTXEN);
+    kprintf(KERN_INFO "rtw8723: rings rx %08x mgq %08x beq %08x, tx desc 40+tail (buf @40, next @48), "
+            "pcie_ctrl was %08x\n", (uint32_t)g.rx_desc.phys, (uint32_t)g.tx[Q_MGT].desc.phys,
+            (uint32_t)g.tx[Q_BE].desc.phys, pcie_ctrl);
     base[0] = (uint32_t)g.rx_desc.phys;
     base[1] = (uint32_t)g.tx[Q_MGT].desc.phys;
     base[2] = (uint32_t)g.tx[Q_BE].desc.phys;
@@ -703,6 +737,17 @@ static ssize_t rx_pop(void *ubuf, size_t len)
     return bad ? -EFAULT : (ssize_t)n;
 }
 
+/* Descriptors the chip has handed back since the last call (caller holds t->lock). */
+static void tx_reclaim(int q)
+{
+    txq_t *t = &g.tx[q];
+    while (t->inflight && !(tx_desc(q, t->tail)[0] & TXDW0_OWN)) {
+        t->tail = (t->tail + 1) % TX_COUNT;
+        t->inflight--;
+        t->done++;
+    }
+}
+
 static ssize_t tx_push(const void *ubuf, size_t len)
 {
     if (len < 1 + 40 + 24 || len > 1 + 40 + TX_BUF) return -EINVAL;
@@ -710,7 +755,7 @@ static ssize_t tx_push(const void *ubuf, size_t len)
     if (!b) return -ENOMEM;
     if (copy_fop_from_user(b, ubuf, len)) { kfree(b); return -EFAULT; }
     int q = b[0];
-    uint32_t w[10];
+    uint32_t w[TXD_CTRL_WORDS];
     memcpy(w, b + 1, sizeof w);
     uint32_t flen = (uint32_t)len - 41;
     /* The chip reads pktlen and txbufsize bytes from the buffer: never past the frame. */
@@ -718,20 +763,39 @@ static ssize_t tx_push(const void *ubuf, size_t len)
 
     txq_t *t = &g.tx[q];
     uint64_t f = spin_lock_irq(&t->lock);
-    volatile uint32_t *d = tx_desc(q, t->cur);
-    if (d[0] & TXDW0_OWN) { spin_unlock_irq(&t->lock, f); kfree(b); return -EAGAIN; }
-    uint64_t pa = t->buf.phys + (uint64_t)t->cur * TX_BUF;
-    memcpy(t->buf.virt + (uint64_t)t->cur * TX_BUF, b + 41, flen);
-    for (int k = 1; k < 8; k++) d[k] = w[k];
-    d[8] = (uint32_t)pa;                                        /* r92ce_tx_postsetup */
-    d[9] = (uint32_t)(pa >> 32);
+    tx_reclaim(q);
+    uint32_t slot = t->cur;
+    volatile uint32_t *d = tx_desc(q, slot);
+    if (d[0] & TXDW0_OWN) {
+        t->full++;
+        spin_unlock_irq(&t->lock, f);
+        kfree(b);
+        return -EAGAIN;
+    }
+    uint64_t pa = t->buf.phys + (uint64_t)slot * TX_BUF;
+    memcpy(t->buf.virt + (uint64_t)slot * TX_BUF, b + 41, flen);
+    for (int k = 1; k < TXD_CTRL_WORDS; k++) d[k] = w[k];
+    d[TXD_BUF]   = (uint32_t)pa;                                /* r92ce_tx_postsetup */
+    d[TXD_BUF64] = (uint32_t)(pa >> 32);
     dma_wmb();
     d[0] = w[0] | TXDW0_OWN;
     dma_wmb();
+    /* Observation only: where the chip's descriptor pointer stands before this kick
+     * (the DESA registers read back the current descriptor), and the status bits. */
+    uint32_t desa = rd4(q_desa[q]), hisr = rd4(R_HISR);
     wr2(R_PCIE_CTRL_REG, (uint16_t)(1u << q_kick[q]));
-    t->cur = (t->cur + 1) % TX_COUNT;
+    t->cur = (slot + 1) % TX_COUNT;
+    t->inflight++;
+    uint32_t n = ++t->pushed, done = t->done, full = t->full;
     spin_unlock_irq(&t->lock, f);
     kfree(b);
+
+    /* The first frames after RTW_RINGS, then every power of two: a few lines per
+     * session, enough to see whether descriptors come back and how the pointer moves. */
+    if (n <= 4 || !(n & (n - 1)))
+        kprintf(KERN_INFO "rtw8723: tx q%d #%u done %u full %u slot %u w0 %08x w1 %08x w3 %08x "
+                "w4 %08x w7 %08x buf %08x desa %08x hisr %08x\n",
+                q, n, done, full, slot, w[0], w[1], w[3], w[4], w[7], (uint32_t)pa, desa, hisr);
     return (ssize_t)len;
 }
 
@@ -870,6 +934,13 @@ static int rtw_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
             o[2] = rx_desc(hw)[0];
             o[3] = rx_desc(hw)[6];
         }
+        for (int q = 0; q < NQ && g.rings_up; q++) {   /* TX: pushed << 16 | done */
+            uint64_t fl = spin_lock_irq(&g.tx[q].lock);
+            tx_reclaim(q);
+            o[4 + q] = (g.tx[q].pushed & 0xffff) << 16 | (g.tx[q].done & 0xffff);
+            spin_unlock_irq(&g.tx[q].lock, fl);
+        }
+        if (g.rings_up) o[6] = rd4(R_MGQ_DESA);
         o[7] = g.rx_restarts;
         return copy_to_user(u, o, sizeof o) ? -EFAULT : 0;
     }
@@ -962,6 +1033,7 @@ static vfs_fops_t wlan_fops = {
 #define DEVICE_8723BE  0xb723
 #define CFG_BAR2       0x18
 #define CFG_BAR3       0x1c
+#define PCI_CMD_INTX_OFF 0x0400     /* PCI command register, interrupt disable */
 
 /* Standard PCI BAR sizing, with memory decode off while the BAR holds all ones. */
 static uint32_t bar_size(uint8_t b, uint8_t d, uint8_t fn)
@@ -981,6 +1053,24 @@ void rtw8723_init(void)
     if (pci_find(VENDOR_REALTEK, DEVICE_8723BE, &g.bus, &g.dev, &g.fn) != 0)
         return;     /* no card: the normal case in QEMU */
 
+    /* D0 (PCI PM spec: PMCSR at cap + 4, bits 1:0) in case the last OS left D3hot.
+     * Leaving D3hot may reset config space, so the BARs are put back if they changed. */
+    uint8_t pm = pci_find_cap(g.bus, g.dev, g.fn, PCI_CAP_PM);
+    if (pm) {
+        uint16_t pmcsr = pci_read16(g.bus, g.dev, g.fn, (uint8_t)(pm + 4));
+        if (pmcsr & 3) {
+            uint32_t b2 = pci_read32(g.bus, g.dev, g.fn, CFG_BAR2);
+            uint32_t b3 = pci_read32(g.bus, g.dev, g.fn, CFG_BAR3);
+            pci_write16(g.bus, g.dev, g.fn, (uint8_t)(pm + 4), pmcsr & ~3u);
+            mdelay(10);
+            if (pci_read32(g.bus, g.dev, g.fn, CFG_BAR2) != b2) {
+                pci_write32(g.bus, g.dev, g.fn, CFG_BAR2, b2);
+                pci_write32(g.bus, g.dev, g.fn, CFG_BAR3, b3);
+            }
+            kprintf(KERN_INFO "rtw8723: was in D%u, now D0\n", pmcsr & 3);
+        }
+    }
+
     uint32_t bar = pci_read32(g.bus, g.dev, g.fn, CFG_BAR2);
     if (bar & 1) {
         kprintf(KERN_ERR "rtw8723: bar2 is not memory (0x%x)\n", bar);
@@ -996,8 +1086,11 @@ void rtw8723_init(void)
     }
     if (size > 0x10000) size = 0x10000;
 
-    uint16_t cmd = pci_read16(g.bus, g.dev, g.fn, PCI_COMMAND);
-    pci_write16(g.bus, g.dev, g.fn, PCI_COMMAND, cmd | PCI_CMD_MEM | PCI_CMD_MASTER);
+    /* Memory decode first; bus mastering only after the card is told to stop DMA.
+     * A warm reboot may not reset the card, and the last OS's rings point into
+     * memory that is now ours. Polled driver: legacy INTx stays off. */
+    uint16_t cmd0 = pci_read16(g.bus, g.dev, g.fn, PCI_COMMAND);
+    pci_write16(g.bus, g.dev, g.fn, PCI_COMMAND, (uint16_t)((cmd0 | PCI_CMD_MEM | PCI_CMD_INTX_OFF) & ~PCI_CMD_MASTER));
 
     /* ASPM off, as rtwn_pci_attach does (PCIe Link Control bits 1:0). */
     uint8_t pcie = pci_find_cap(g.bus, g.dev, g.fn, PCI_CAP_PCIE);
@@ -1012,6 +1105,16 @@ void rtw8723_init(void)
         return;
     }
     g.regs_len = size;
+
+    /* What the card looks like on arrival (observation), then stop its DMA. */
+    kprintf(KERN_INFO "rtw8723: on arrival cmd %04x cr %04x pcie_ctrl %08x rx_desa %08x mgq_desa %08x\n",
+            cmd0, rd2(R_CR), rd4(R_PCIE_CTRL_REG), rd4(R_RX_DESA), rd4(R_MGQ_DESA));
+    wr1(R_PCIE_CTRL_REG + 1, 0xff);                             /* r88ee_power_off */
+    wr1(R_TXPAUSE, TX_QUEUE_ALL);
+    set1(R_CR, CR_MACRXEN | CR_MACTXEN, 0);
+    pci_write16(g.bus, g.dev, g.fn, PCI_COMMAND,
+                (uint16_t)(cmd0 | PCI_CMD_MEM | PCI_CMD_MASTER | PCI_CMD_INTX_OFF));
+
     g.rx_lock = (spinlock_t)SPINLOCK_INIT;
     g.txq_lock = (spinlock_t)SPINLOCK_INIT;
 
