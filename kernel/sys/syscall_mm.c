@@ -103,6 +103,7 @@ static void unmap_span(process_t *p, uint64_t lo, uint64_t hi)
 
 static void drop_old_pages(process_t *p, uint64_t va, uint64_t len)
 {
+	filecopy_drop(p->vm, va, len);   /* a shared copy of a file writes back first */
 	if (len <= (1UL << 30)) {
 		unmap_span(p, va, va + len);
 		return;
@@ -372,7 +373,8 @@ static long mmap_file_fop(const mmap_file_t *m)
 	return (long)va;
 }
 
-/* Private copy: read the file into fresh pages, eagerly. */
+/* Copy: read the file into fresh pages, eagerly. MAP_SHARED pages are shared
+ * across fork, and what changes in them goes back to the file (filecopy.h). */
 static long mmap_file_copy(const mmap_file_t *m)
 {
 	process_t *p = m->p; vfs_file_t *f = m->f;
@@ -398,7 +400,16 @@ static long mmap_file_copy(const mmap_file_t *m)
 		vm_map(p->vm, v, (uint64_t)pg, m->vmflags);
 		if (m->prot & PROT_EXEC) mmap_sync_icache((uintptr_t)pg_virt);
 	}
-	vma_replace(p, va, len, VMA_USER | vma_prot(m->prot));
+	uint32_t vf = VMA_USER | vma_prot(m->prot);
+	if (m->flags & MAP_SHARED) vf |= VMA_SHARED;
+	if (m->ro_shared) vf |= VMA_NOWRITE;
+	vma_replace(p, va, len, vf);
+	if ((m->flags & MAP_SHARED) && !m->ro_shared && S_ISREG(f->inode->mode) && f->inode->fops->write &&
+	    filecopy_add(p->vm, va, len, f, m->off) != 0) {
+		drop_old_pages(p, va, len);
+		vma_clip(p, va, len);
+		return -ENOMEM;
+	}
 	return (long)va;
 }
 
@@ -905,6 +916,7 @@ static long sys_msync(uint64_t addr, size_t len, int flags)
 			if (va >= v->vaddr && va < v->vaddr + v->size) { found = 1; break; }
 		if (!found) return -ENOMEM;
 	}
+	if (flags & 5) filecopy_sync(p->vm, addr, end - addr);   /* MS_SYNC, MS_ASYNC */
 #if IS_ENABLED(CONFIG_FS_EXT2)
 	if (flags & 4) ext2_sync_all();   /* the disk cache is write-back */
 #endif

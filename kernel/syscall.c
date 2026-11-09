@@ -37,6 +37,7 @@
 #include <kernel/time.h>
 #include <kernel/fs/ramfs.h>
 #include <kernel/errno.h>
+#include <kernel/mm/filecopy.h>
 
 /* mmap flags */
 #define MAP_SHARED    0x01
@@ -203,6 +204,7 @@ void vma_replace(process_t *p, uint64_t va, uint64_t len, uint32_t flags)
 void vma_free_space(vm_space_t *vs)
 {
 	if (!vs) return;
+	filecopy_drop(vs, 0, (uint64_t)-1);   /* shared file copies go back first */
 	vma_t *v = vs->vmas;
 	while (v) {
 		vma_t *next = v->next;
