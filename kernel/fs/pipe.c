@@ -234,7 +234,9 @@ static int pipe_poll(vfs_file_t *file)
         if (pipe->writers == 0) r |= 0x0011; /* POLLHUP | POLLIN: drained EOF is readable */
     }
     if (acc != O_RDONLY) {
-        if (free > 0) r |= 0x0004; /* POLLOUT */
+        /* writable with a page free, as Linux's page-sized slots give (and
+         * POSIX's PIPE_BUF): a half-read full pipe is not writable yet */
+        if (free >= PIPE_BUF_SIZE || free == pipe->size) r |= 0x0004; /* POLLOUT */
         if (pipe->readers == 0) r |= 0x0008; /* POLLERR: write end with no reader */
     }
     return r;

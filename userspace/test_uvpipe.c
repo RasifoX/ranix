@@ -246,7 +246,11 @@ static void *drainer(void *a)
 		seen = drain_go;
 		msleep(30);            /* let the writer settle in epoll_pwait */
 		drained_at = now();
-		if (read(*(int *)a, &c, 1) != 1) return (void *)1;
+		/* a page, as libuv's reader takes: a pipe is writable again once a
+		 * page is free (Linux pipe slots), not after one byte */
+		char pg[4096];
+		(void)c;
+		if (read(*(int *)a, pg, sizeof(pg)) != sizeof(pg)) return (void *)1;
 	}
 }
 
