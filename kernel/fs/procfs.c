@@ -346,6 +346,11 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_str(&b, "VmSize:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "VmHWM:\t");  pb_u64(&b, rss_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "VmRSS:\t");  pb_u64(&b, rss_kb); pb_str(&b, " kB\n");
+	uint64_t lck = 0;
+	for (vma_t *v = p->vm ? p->vm->vmas : NULL; v; v = v->next)
+		if (v->flags & VMA_LOCKED) lck += v->size;
+	pb_str(&b, "VmLck:\t");  pb_u64(&b, lck / 1024); pb_str(&b, " kB\n");
+	pb_str(&b, "VmSwap:\t0 kB\n");   /* no swap */
 	pb_str(&b, "Threads:\t"); pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, '\n');
 	uint64_t sigign = 0, sigcgt = 0;
 	for (int _i = 0; p->sighand && _i < NSIG; _i++) {
@@ -515,22 +520,21 @@ static int fill_proc_maps(char *buf, size_t sz, int pid)
 	if (!proc_may_access(pid)) return (int)(sz - b.rem);   /* ptrace gate; empty on denial */
 	process_t *p = find_proc(pid);
 	if (!p || !p->vm) return (int)(sz - b.rem);
-	/* iterate VMAs */
+	/* iterate VMAs: start-end perms offset dev:ino path, addresses as Linux's
+	 * %08lx (at least 8 hex digits, no more padding) */
 	for (vma_t *v = p->vm->vmas; v; v = v->next) {
-		/* start-end perms offset dev:ino path */
-		uint64_t end = v->vaddr + v->size;
-		/* print hex addr */
-		char hex[17]; int hi;
-		uint64_t tmp = v->vaddr;
-		for (hi = 15; hi >= 0; hi--) { hex[hi] = "0123456789abcdef"[tmp & 0xf]; tmp >>= 4; }
-		hex[16] = '\0'; pb_str(&b, hex); pb_char(&b, '-');
-		tmp = end;
-		for (hi = 15; hi >= 0; hi--) { hex[hi] = "0123456789abcdef"[tmp & 0xf]; tmp >>= 4; }
-		pb_str(&b, hex); pb_char(&b, ' ');
+		uint64_t ends[2] = { v->vaddr, v->vaddr + v->size };
+		for (int e = 0; e < 2; e++) {
+			char hex[17]; int hi = 16;
+			uint64_t tmp = ends[e];
+			hex[16] = '\0';
+			do { hex[--hi] = "0123456789abcdef"[tmp & 0xf]; tmp >>= 4; } while (tmp || hi > 8);
+			pb_str(&b, hex + hi); pb_char(&b, e ? ' ' : '-');
+		}
 		pb_char(&b, (v->flags & VMA_READ)  ? 'r' : '-');
 		pb_char(&b, (v->flags & VMA_WRITE) ? 'w' : '-');
 		pb_char(&b, (v->flags & VMA_EXEC)  ? 'x' : '-');
-		pb_char(&b, 'p');
+		pb_char(&b, (v->flags & VMA_SHARED) ? 's' : 'p');
 		pb_str(&b, " 00000000 00:00 0\n");
 	}
 	proc_put(p);
