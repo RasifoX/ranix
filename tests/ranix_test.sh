@@ -565,6 +565,10 @@ EM=$(timeout 30 /bin/test_ext2_mmap_bs /dev/nvme0n1 /mnt5 10485760 2048 2>&1); e
 check "c-ext2-mmap-2k"    "OK"                 "$(echo "$EM" | tail -1)"
 EM=$(timeout 30 /bin/test_ext2_mmap_bs /dev/nvme0n1 /mnt5 11534336 1024 2>&1); echo "$EM" | grep -v "^OK" | sed 's/^/  ext2-mmap-1k: /'
 check "c-ext2-mmap-1k"    "OK"                 "$(echo "$EM" | tail -1)"
+ES=$(timeout 60 /bin/test_ext2_mmap_shared /dev/nvme0n1 /mnt5 10485760 2048 2>&1); echo "$ES" | grep -v "^OK$" | sed 's/^/  ext2-mmap-shared-2k: /'
+check "c-ext2-mmap-shared-2k" "OK"             "$(echo "$ES" | tail -1)"
+ES=$(timeout 60 /bin/test_ext2_mmap_shared /dev/nvme0n1 /mnt5 11534336 1024 2>&1); echo "$ES" | grep -v "^OK$" | sed 's/^/  ext2-mmap-shared-1k: /'
+check "c-ext2-mmap-shared-1k" "OK"             "$(echo "$ES" | tail -1)"
 OV=$(timeout 30 /bin/test_ovl_lower_close /dev/nvme0n1 11534336 /mnt6 2>&1); echo "$OV" | grep -v "^OK" | sed 's/^/  ovl-lower-close: /'
 check "c-ovl-lower-close" "OK"                 "$(echo "$OV" | tail -1)"
 fi
