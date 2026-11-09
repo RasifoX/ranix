@@ -875,6 +875,8 @@ $(BUILD_DIR)/usb-test.img:
 # while the suite mounts this one at /mnt2 (mount -t ext2 /dev/nvme0n1 /mnt2) and
 # read/writes both independently. The ext2 fs occupies the first 4 MB; raw block
 # markers for the NVM READ/WRITE round-trip test live past the fs at high sectors.
+# More ext2s further in, reached with mount offset=: 4 KiB blocks at 8 MB,
+# 2 KiB at 10 MB, 1 KiB at 11 MB.
 $(BUILD_DIR)/nvme-test.img: Makefile
 	@rm -rf $(BUILD_DIR)/nvmeseed
 	@mkdir -p $(BUILD_DIR)/nvmeseed
@@ -889,6 +891,13 @@ $(BUILD_DIR)/nvme-test.img: Makefile
 	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs2.img bs=1M count=2 2>/dev/null
 	mkfs.ext2 -F -q -b 4096 -d $(BUILD_DIR)/nvmeseed $(BUILD_DIR)/nvme-fs2.img >/dev/null 2>&1
 	dd if=$(BUILD_DIR)/nvme-fs2.img of=$@ bs=1M seek=8 conv=notrunc 2>/dev/null
+	@# blocks smaller than a page, for c-ext2-mmap-2k/-1k (mounted with offset=)
+	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs3.img bs=1M count=1 2>/dev/null
+	mkfs.ext2 -F -q -b 2048 $(BUILD_DIR)/nvme-fs3.img >/dev/null 2>&1
+	dd if=$(BUILD_DIR)/nvme-fs3.img of=$@ bs=1M seek=10 conv=notrunc 2>/dev/null
+	dd if=/dev/zero of=$(BUILD_DIR)/nvme-fs4.img bs=1M count=1 2>/dev/null
+	mkfs.ext2 -F -q -b 1024 $(BUILD_DIR)/nvme-fs4.img >/dev/null 2>&1
+	dd if=$(BUILD_DIR)/nvme-fs4.img of=$@ bs=1M seek=11 conv=notrunc 2>/dev/null
 	printf 'RANIX-NVME-DISK-OK' | dd of=$@ bs=512 seek=12000 conv=notrunc 2>/dev/null
 	@echo "[OK] nvme-test.img"
 
