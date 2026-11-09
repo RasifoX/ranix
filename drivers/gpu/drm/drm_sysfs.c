@@ -265,10 +265,11 @@ static int gen(int node, char *o)
 		n += puts_(o, d[v < 4 ? v : 0]);
 		break;
 	}
-	case F_CMODES: {
-		uint32_t w, h;
-		if (drm_kms_mode_size(&w, &h)) {
-			n += putdec(o + n, w); o[n++] = 'x'; n += putdec(o + n, h); o[n++] = '\n';
+	case F_CMODES: {                       /* every size the connector offers, preferred first */
+		uint32_t wh[32];
+		int k = drm_kms_modes(wh, 16);
+		for (int i = 0; i < k; i++) {
+			n += putdec(o + n, wh[2 * i]); o[n++] = 'x'; n += putdec(o + n, wh[2 * i + 1]); o[n++] = '\n';
 		}
 		break;
 	}

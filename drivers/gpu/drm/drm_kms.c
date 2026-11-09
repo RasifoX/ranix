@@ -4,8 +4,9 @@
  */
 /*
  * Ranix KMS: one CRTC, one encoder, one connector, a primary and a cursor plane,
- * all on the mode the firmware left running (no modeset: no PLLs, no link
- * training). Two ways to put a client framebuffer on the glass:
+ * on the mode the firmware left running (no modeset: no PLLs, no link
+ * training) unless a display back end lists sizes and can switch between them
+ * (virtio-gpu). Two ways to put a client framebuffer on the glass:
  *
  *  copy  - every target: the framebuffer is copied (and converted) into the
  *          firmware's linear framebuffer. A page flip waits for the beam to enter
@@ -15,6 +16,10 @@
  *          pointed at the client buffer itself. Default where available;
  *          "ranix.drmcopy" or "0" into /sys/class/drm/ranix_flip turns it off.
  *          A visible cursor or a buffer of another size or format is copied.
+ *
+ * A back end that owns its scanout (virtio/virtio_gpu.c) gives KMS a RAM buffer
+ * to copy into instead of the firmware's, is told which rectangles changed
+ * (damage), and may show the cursor itself (cursor plane in hardware).
  *
  * Vblank: the back end's frame counter, sampled from the 1 ms tick; without
  * one a 60 Hz clock.
@@ -84,6 +89,7 @@ static struct {
 	drm_gem_t *cur;
 	uint32_t   cur_w, cur_h, cur_pitch;
 	int32_t    cur_x, cur_y;
+	int        cur_hw;         /* the back end shows (or hides) the cursor: not drawn here */
 
 	/* vblank and flips, under drm_ev_lock */
 	uint64_t vbl_seq, vbl_ns, frame_ns, sw_base;
@@ -221,10 +227,20 @@ void drm_kms_gem_release(drm_gem_t *o)
 	if (K.hw && K.hw->release) K.hw->release(o);
 }
 
+/* a cursor KMS has to draw into the picture itself */
+static int sw_cursor(void) { return K.cur && !K.cur_hw; }
+
+/* hand the cursor to the back end; without one (or if it declines) KMS draws it */
+static void cursor_define(void)
+{
+	K.cur_hw = K.hw && K.hw->cursor &&
+	           K.hw->cursor(K.cur, K.cur_w, K.cur_h, K.cur_pitch, K.cur_x, K.cur_y) == 0;
+}
+
 /* can the plane, as the firmware programmed it, show this framebuffer directly */
 static int hw_eligible(drm_fb_t *fb)
 {
-	if (!K.hwflip || K.cur) return 0;
+	if (!K.hwflip || sw_cursor()) return 0;
 	if (fb->format != DRM_FORMAT_XRGB8888 && fb->format != DRM_FORMAT_ARGB8888) return 0;
 	if (fb->width != K.w || fb->height != K.h || K.cx || K.cy || fb->offset) return 0;
 	return 1;
@@ -290,7 +306,7 @@ static void fill_row(uint32_t *row, int x1, int x2, int y)
 
 static void cursor_row(uint32_t *row, int x1, int x2, int y)
 {
-	if (!K.cur || y < K.cur_y || y >= K.cur_y + (int)K.cur_h) return;
+	if (!sw_cursor() || y < K.cur_y || y >= K.cur_y + (int)K.cur_h) return;
 	int a1 = K.cur_x > x1 ? K.cur_x : x1;
 	int a2 = K.cur_x + (int)K.cur_w < x2 ? K.cur_x + (int)K.cur_w : x2;
 	if (a1 >= a2) return;
@@ -327,6 +343,7 @@ static void present(int x1, int y1, int x2, int y2)
 			}
 		memcpy(K.fbmem + (uint64_t)y * K.fbpitch + (uint64_t)x1 * 4, K.row + x1, (size_t)(x2 - x1) * 4);
 	}
+	if (K.hw && K.hw->damage) K.hw->damage(NULL, x1, y1, x2, y2);
 }
 
 static void present_all(void) { present(0, 0, (int)K.w, (int)K.h); }
@@ -446,6 +463,100 @@ static int put_ids(uint64_t uptr, uint32_t ucount, const uint32_t *ids, uint32_t
 	return 0;
 }
 
+static void mode_name(char *o, uint32_t w, uint32_t h)
+{
+	char t[12]; int n = 0, i = 0;
+	uint32_t v = w;
+	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (n) o[i++] = t[--n];
+	o[i++] = 'x';
+	v = h;
+	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (n) o[i++] = t[--n];
+	o[i] = 0;
+}
+
+/* Timings for a size nothing measured: a plausible 60 Hz mode around it
+ * (the client only needs the size; virtual displays have no beam). */
+static void mode_porches(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h)
+{
+	memset(m, 0, sizeof(*m));
+	m->hdisplay = (uint16_t)w;
+	m->vdisplay = (uint16_t)h;
+	m->hsync_start = (uint16_t)(w + 48);
+	m->hsync_end = (uint16_t)(w + 80);
+	m->htotal = (uint16_t)(w + 160);
+	m->vsync_start = (uint16_t)(h + 3);
+	m->vsync_end = (uint16_t)(h + 8);
+	m->vtotal = (uint16_t)(h + 30);
+}
+
+static void mode_finish(struct drm_mode_modeinfo *m, uint32_t type)
+{
+	if (m->htotal < m->hdisplay) m->htotal = (uint16_t)(m->hdisplay + 160);
+	if (m->vtotal < m->vdisplay) m->vtotal = (uint16_t)(m->vdisplay + 30);
+	m->vrefresh = (uint32_t)((1000000000ULL + K.frame_ns / 2) / K.frame_ns);
+	m->clock = (uint32_t)((uint64_t)m->htotal * m->vtotal * 1000000ULL / K.frame_ns);
+	m->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+	m->type = type;
+	mode_name(m->name, m->hdisplay, m->vdisplay);
+}
+
+#define MAX_MODES 16
+
+/* the connector's modes: the back end's sizes, or the one mode we run */
+static uint32_t mode_list(struct drm_mode_modeinfo *ml)
+{
+	uint32_t wh[2 * MAX_MODES];
+	int n = K.hw && K.hw->modes ? K.hw->modes(wh, MAX_MODES) : 0;
+	if (n <= 0) { ml[0] = K.mode; return 1; }
+	for (int i = 0; i < n; i++) {
+		mode_porches(&ml[i], wh[2 * i], wh[2 * i + 1]);
+		mode_finish(&ml[i], i ? DRM_MODE_TYPE_DRIVER : DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER);
+	}
+	return (uint32_t)n;
+}
+
+int drm_kms_modes(uint32_t *wh, int max)
+{
+	if (!K.ok) return 0;
+	struct drm_mode_modeinfo ml[MAX_MODES];
+	uint32_t n = mode_list(ml);
+	int k = 0;
+	for (uint32_t i = 0; i < n && k < max; i++, k++) { wh[2 * k] = ml[i].hdisplay; wh[2 * k + 1] = ml[i].vdisplay; }
+	return k;
+}
+
+/* is w x h one of the connector's sizes */
+static int mode_listed(uint32_t w, uint32_t h)
+{
+	struct drm_mode_modeinfo ml[MAX_MODES];
+	uint32_t n = mode_list(ml);
+	for (uint32_t i = 0; i < n; i++) if (ml[i].hdisplay == w && ml[i].vdisplay == h) return 1;
+	return 0;
+}
+
+/* Switch the CRTC to w x h. The back end shows its own (black) buffer of the
+ * new size until the caller puts a framebuffer up. */
+static int mode_switch(uint32_t w, uint32_t h)
+{
+	if (w == K.w && h == K.h) return 0;
+	if (!K.hw || !K.hw->set_mode) return -EINVAL_;
+	uint32_t *row = kmalloc((size_t)w * 4);
+	if (!row) return -ENOMEM_;
+	flip_settle();
+	drm_fw_fb_t fw;
+	if (K.hw->set_mode(w, h, &fw)) { kfree(row); return -EINVAL_; }
+	kfree(K.row);
+	K.row = row;
+	K.w = fw.w; K.h = fw.h; K.fbpitch = fw.pitch; K.fbmem = fw.mem;
+	K.hw_scan = 0;
+	struct drm_mode_modeinfo ml[MAX_MODES];       /* GETCRTC reports the listed mode */
+	uint32_t n = mode_list(ml);
+	for (uint32_t i = 0; i < n; i++) if (ml[i].hdisplay == K.w && ml[i].vdisplay == K.h) K.mode = ml[i];
+	return 0;
+}
+
 /* ── KMS ioctls ───────────────────────────────────────────────── */
 
 int drm_ioctl_getresources(drm_filep_t *fp, void *d)
@@ -497,7 +608,8 @@ int drm_ioctl_setcrtc(drm_filep_t *fp, void *d)
 		crtc_disable(1);
 		return 0;
 	}
-	if (c->mode.hdisplay != K.w || c->mode.vdisplay != K.h) return -EINVAL_;   /* no modeset (yet) */
+	uint32_t mw = c->mode.hdisplay, mh = c->mode.vdisplay;
+	if ((mw != K.w || mh != K.h) && !(K.hw && K.hw->set_mode && mode_listed(mw, mh))) return -EINVAL_;
 	if (c->count_connectors > 1) return -EINVAL_;
 	if (c->count_connectors) {
 		uint32_t id;
@@ -509,15 +621,18 @@ int drm_ioctl_setcrtc(drm_filep_t *fp, void *d)
 		 * framebuffer object. Clients (glmark2) put it back on exit; the console
 		 * returns to the screen. */
 		crtc_disable(0);
+		int e = mode_switch(mw, mh);
 		K.enabled = 1;
-		return 0;
+		return e;
 	}
 	drm_fb_t *fb;
 	if (c->fb_id == 0xFFFFFFFFu) fb = K.scan;
 	else fb = fb_lookup(c->fb_id);
 	if (!fb) return -ENOENT_;
-	if ((uint64_t)c->x + K.w > fb->width || (uint64_t)c->y + K.h > fb->height) return -ENOSPC_;
+	if ((uint64_t)c->x + mw > fb->width || (uint64_t)c->y + mh > fb->height) return -ENOSPC_;
 	flip_settle();
+	int me = mode_switch(mw, mh);
+	if (me) return me;
 	fb->refcount++;
 	K.cx = c->x; K.cy = c->y;
 	K.enabled = 1;
@@ -531,7 +646,7 @@ static int cursor_set(uint32_t flags, uint32_t crtc, int32_t x, int32_t y, uint3
 {
 	if (crtc != ID_CRTC) return -ENOENT_;
 	if (!(flags & (DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE)) || (flags & ~3u)) return -EINVAL_;
-	int ox = K.cur_x, oy = K.cur_y, ow = (int)K.cur_w, oh = (int)K.cur_h, was = K.cur != NULL;
+	int ox = K.cur_x, oy = K.cur_y, ow = (int)K.cur_w, oh = (int)K.cur_h, was = sw_cursor();
 	if (flags & DRM_MODE_CURSOR_BO) {
 		drm_gem_t *o = NULL;
 		if (handle) {
@@ -546,8 +661,10 @@ static int cursor_set(uint32_t flags, uint32_t crtc, int32_t x, int32_t y, uint3
 		K.cur_w = o ? w : 0; K.cur_h = o ? h : 0; K.cur_pitch = w * 4;
 	}
 	if (flags & DRM_MODE_CURSOR_MOVE) { K.cur_x = x; K.cur_y = y; }
+	if (flags & DRM_MODE_CURSOR_BO) cursor_define();
+	else if (K.cur_hw && K.cur) K.hw->cursor_move(K.cur_x, K.cur_y);
 	if (!K.enabled) return 0;
-	if (K.hw_scan && K.cur) {                  /* the cursor is drawn by copying: leave flip mode */
+	if (K.hw_scan && sw_cursor()) {                  /* the cursor is drawn by copying: leave flip mode */
 		flip_settle();
 		drm_fb_t *s = K.scan;
 		if (s) s->refcount++;
@@ -557,8 +674,8 @@ static int cursor_set(uint32_t flags, uint32_t crtc, int32_t x, int32_t y, uint3
 	}
 	if (!K.hw_scan) {
 		if (was) present(ox, oy, ox + ow, oy + oh);
-		if (K.cur) present(K.cur_x, K.cur_y, K.cur_x + (int)K.cur_w, K.cur_y + (int)K.cur_h);
-		if (!K.cur && was && K.scan && hw_eligible(K.scan)) {   /* cursor gone: flip mode again */
+		if (sw_cursor()) present(K.cur_x, K.cur_y, K.cur_x + (int)K.cur_w, K.cur_y + (int)K.cur_h);
+		if (!sw_cursor() && was && K.scan && hw_eligible(K.scan)) {   /* cursor gone: flip mode again */
 			K.scan->refcount++;
 			flip_settle();
 			show(K.scan, NULL, 0);
@@ -610,8 +727,13 @@ int drm_ioctl_getconnector(drm_filep_t *fp, void *d)
 	uint32_t enc = ID_ENCODER;
 	int e;
 	if ((e = put_ids(c->encoders_ptr, c->count_encoders, &enc, 1))) return e;
-	if (c->count_modes >= 1 && c->modes_ptr &&
-	    copy_to_user((void *)(uintptr_t)c->modes_ptr, &K.mode, sizeof(K.mode))) return -EFAULT_;
+	struct drm_mode_modeinfo ml[MAX_MODES];
+	uint32_t nm = mode_list(ml);
+	/* as many as the caller has room for, preferred first: clients that ask for
+	 * one mode (test_drm, Fjord) get the preferred one */
+	uint32_t nc = c->count_modes < nm ? c->count_modes : nm;
+	if (nc && c->modes_ptr &&
+	    copy_to_user((void *)(uintptr_t)c->modes_ptr, ml, nc * sizeof(ml[0]))) return -EFAULT_;
 	uint32_t props[2] = { PROP_DPMS, PROP_NONDESKTOP };
 	uint64_t vals[2] = { K.dpms, 0 };
 	if (c->count_props >= 2) {
@@ -619,7 +741,7 @@ int drm_ioctl_getconnector(drm_filep_t *fp, void *d)
 		if (c->prop_values_ptr && copy_to_user((void *)(uintptr_t)c->prop_values_ptr, vals, sizeof(vals))) return -EFAULT_;
 	}
 	c->count_encoders = 1;
-	c->count_modes = 1;
+	c->count_modes = nm;
 	c->count_props = 2;
 	c->encoder_id = ID_ENCODER;
 	c->connector_type = K.conn_type;
@@ -933,6 +1055,15 @@ int drm_ioctl_dirtyfb(drm_filep_t *fp, void *d)
 	if (!fb) return -ENOENT_;
 	if (c->num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS) return -EINVAL_;
 	if (fb != K.scan || !K.enabled) return 0;
+	if (K.hw_scan && K.hw->damage) {          /* the device keeps its own copy: send it the changes */
+		if (!c->num_clips) { K.hw->damage(fb->obj, 0, 0, (int)fb->width, (int)fb->height); return 0; }
+		for (uint32_t i = 0; i < c->num_clips; i++) {
+			struct drm_clip_rect r;
+			if (copy_from_user(&r, (void *)(uintptr_t)(c->clips_ptr + sizeof(r) * i), sizeof(r))) return -EFAULT_;
+			K.hw->damage(fb->obj, r.x1, r.y1, r.x2, r.y2);
+		}
+		return 0;
+	}
 	if (K.hw_scan) {                          /* the plane reads memory: push the CPU's writes out */
 		drm_gem_flush(fb->obj, fb->offset, (uint64_t)fb->pitch * fb->height);
 		return 0;
@@ -997,6 +1128,8 @@ int drm_ioctl_setplane(drm_filep_t *fp, void *d)
 		drm_gem_get(fb->obj);
 		K.cur = fb->obj;
 		K.cur_w = fb->width; K.cur_h = fb->height; K.cur_pitch = fb->pitch;
+		K.cur_x = s->crtc_x; K.cur_y = s->crtc_y;
+		cursor_define();
 		return cursor_set(DRM_MODE_CURSOR_MOVE, ID_CRTC, s->crtc_x, s->crtc_y, 0, 0, 0, fp);
 	}
 	if (s->plane_id != ID_PLANE_PRIMARY) return -ENOENT_;
@@ -1137,72 +1270,66 @@ void drm_kms_file_close(drm_filep_t *fp)
 		if (b->owner == fp) { *pp = b->next; kfree(b); } else pp = &b->next;
 	}
 	if (fp == drm_master && K.cur) {            /* the master's cursor leaves with it */
+		int was = sw_cursor();
 		drm_gem_put(K.cur);
 		K.cur = NULL;
-		if (K.enabled && !K.hw_scan) present(K.cur_x, K.cur_y, K.cur_x + (int)K.cur_w, K.cur_y + (int)K.cur_h);
+		cursor_define();
+		if (was && K.enabled && !K.hw_scan) present(K.cur_x, K.cur_y, K.cur_x + (int)K.cur_w, K.cur_y + (int)K.cur_h);
 		K.cur_w = K.cur_h = 0;
 	}
 }
 
 /* ── init ─────────────────────────────────────────────────────── */
 
-static void mode_name(char *o, uint32_t w, uint32_t h)
+/* The firmware's framebuffer as KMS's copy target, and the Intel back end if
+ * it drives that display. */
+static int fw_init(drm_fw_fb_t *fw)
 {
-	char t[12]; int n = 0, i = 0;
-	uint32_t v = w;
-	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
-	while (n) o[i++] = t[--n];
-	o[i++] = 'x';
-	v = h;
-	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
-	while (n) o[i++] = t[--n];
-	o[i] = 0;
+	if (!global_fb_phys || global_fb.depth != 32 || !global_fb.width || !global_fb.height) return -1;
+	K.fb_bgr = global_fb.red_shift == 0 && global_fb.blue_shift == 16;
+#ifdef __x86_64__
+	uint8_t *mem = ioremap(global_fb_phys, global_fb.fb_size, VM_READ | VM_WRITE | VM_WC);   /* VM_DEVICE would make it UC */
+#else
+	uint8_t *mem = global_fb.fb;
+#endif
+	if (!mem) return -1;
+	*fw = (drm_fw_fb_t){ global_fb.width, global_fb.height, global_fb.pitch, mem, global_fb.fb_size };
+	K.mode.hdisplay = (uint16_t)fw->w;
+	K.mode.vdisplay = (uint16_t)fw->h;
+	K.hw = intel_display_probe(fw, &K.mode, &K.frame_ns, &K.hwflip);
+	return 0;
 }
 
 int drm_kms_init(void)
 {
-	if (!global_fb_phys || global_fb.depth != 32 || !global_fb.width || !global_fb.height) return -1;
-	K.w = global_fb.width;
-	K.h = global_fb.height;
-	K.fbpitch = global_fb.pitch;
-	K.fb_bgr = global_fb.red_shift == 0 && global_fb.blue_shift == 16;
-#ifdef __x86_64__
-	K.fbmem = ioremap(global_fb_phys, global_fb.fb_size, VM_READ | VM_WRITE | VM_WC);   /* VM_DEVICE would make it UC */
-#else
-	K.fbmem = global_fb.fb;
-#endif
+	drm_fw_fb_t fw;
+	K.frame_ns = 16666667;
+	/* a back end with its own scanout first (it needs no firmware buffer) */
+	K.hw = virtio_gpu_probe(&fw, &K.mode, &K.frame_ns, &K.hwflip);
+	if (!K.hw && fw_init(&fw)) return -1;
+	K.w = fw.w;
+	K.h = fw.h;
+	K.fbpitch = fw.pitch;
+	K.fbmem = fw.mem;
 	K.row = kmalloc(K.w * 4);
 	if (!K.fbmem || !K.row) return -1;
-	K.frame_ns = 16666667;
 	K.mode.hdisplay = (uint16_t)K.w;
 	K.mode.vdisplay = (uint16_t)K.h;
-	drm_fw_fb_t fw = { K.w, K.h, K.fbpitch, K.fbmem, global_fb.fb_size };
-	K.hw = intel_display_probe(&fw, &K.mode, &K.frame_ns, &K.hwflip);
-	if (!K.hw) {
-		/* a plausible 60 Hz mode around the firmware's size */
-		K.mode.hsync_start = (uint16_t)(K.w + 48);
-		K.mode.hsync_end = (uint16_t)(K.w + 80);
-		K.mode.htotal = (uint16_t)(K.w + 160);
-		K.mode.vsync_start = (uint16_t)(K.h + 3);
-		K.mode.vsync_end = (uint16_t)(K.h + 8);
-		K.mode.vtotal = (uint16_t)(K.h + 30);
+	if (!K.hw || K.hw->modes) {
+		/* a plausible 60 Hz mode around the size */
+		mode_porches(&K.mode, K.w, K.h);
 		K.conn_type = DRM_MODE_CONNECTOR_VIRTUAL;
 		K.enc_type = DRM_MODE_ENCODER_VIRTUAL;
-		K.sw_base = drm_now_ns() / K.frame_ns;
-	} else {
+	}
+	if (K.hw) {
 		K.conn_type = K.hw->conn_type;
 		K.enc_type = K.hw->enc_type;
 		uint64_t since;
 		K.hwcount = K.hw->vblank && K.hw->vblank(&K.hw_last, &since);
 		if (!K.hw->flip) K.hwflip = 0;
 	}
-	if (K.mode.htotal < K.w) K.mode.htotal = (uint16_t)(K.w + 160);
-	if (K.mode.vtotal < K.h) K.mode.vtotal = (uint16_t)(K.h + 30);
-	K.mode.vrefresh = (uint32_t)((1000000000ULL + K.frame_ns / 2) / K.frame_ns);
-	K.mode.clock = (uint32_t)((uint64_t)K.mode.htotal * K.mode.vtotal * 1000000ULL / K.frame_ns);
-	K.mode.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-	K.mode.type = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
-	mode_name(K.mode.name, K.w, K.h);
+	if (!K.hwcount) K.sw_base = drm_now_ns() / K.frame_ns;
+	mode_finish(&K.mode, DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER);
 	K.enabled = 1;                          /* the firmware's picture is on */
 	K.ok = 1;
 	return 0;
