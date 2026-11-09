@@ -1052,6 +1052,17 @@ void *proc_get_ns(pid_t pid, int kind)
 }
 
 /* Count live threads sharing a thread group (for /proc/<pid>/status Threads). */
+process_t *proc_other_threads_locked(process_t *p, int (*fn)(process_t *t, void *arg), void *arg)
+{
+	process_t *sentinel = proctab[0];
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next) {
+		if (t == p || t->tgid != p->tgid || t->state == PROC_DEAD || t->state == PROC_ZOMBIE)
+			continue;
+		if (fn(t, arg)) return t;
+	}
+	return NULL;
+}
+
 int proc_thread_count(pid_t tgid)
 {
 	int n = 0;

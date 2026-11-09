@@ -1290,8 +1290,45 @@ static long seccomp_set_strict(process_t *p)
 	return 0;
 }
 
-/* Install a SECCOMP_MODE_FILTER program from a user sock_fprog {len, filter}. */
-static long seccomp_install(process_t *p, uint64_t fprog_uptr)
+#define SECCOMP_FILTER_FLAG_TSYNC       1u
+#define SECCOMP_FILTER_FLAG_SPEC_ALLOW  4u    /* no seccomp-forced mitigation here: nothing to skip */
+#define SECCOMP_FILTER_FLAG_TSYNC_ESRCH 16u
+
+static int seccomp_is_ancestor(const struct seccomp_filter *a, const struct seccomp_filter *of)
+{
+	for (; of; of = of->prev)
+		if (of == a) return 1;
+	return 0;
+}
+
+/* TSYNC: a thread can take the caller's chain if it runs none, or one the
+ * caller's already contains (Linux seccomp_can_sync_threads). */
+static int seccomp_tsync_blocks(process_t *t, void *caller)
+{
+	const process_t *p = caller;
+	if (t->seccomp_mode == 1) return 1;
+	return t->seccomp_filter && !seccomp_is_ancestor(t->seccomp_filter, p->seccomp_filter);
+}
+
+/* The thread takes the caller's chain (and no_new_privs). Its old node is an
+ * ancestor of the new one, so dropping that reference never frees it here. */
+static int seccomp_tsync_one(process_t *t, void *caller)
+{
+	const process_t *p = caller;
+	struct seccomp_filter *old = t->seccomp_filter;
+	atomic_fetch_add32(&p->seccomp_filter->refs, 1);
+	t->seccomp_filter = p->seccomp_filter;
+	smp_wmb();
+	t->seccomp_mode = 2;
+	if (p->no_new_privs) t->no_new_privs = 1;
+	if (old) atomic_sub_fetch32(&old->refs, 1);
+	return 0;
+}
+
+/* Install a SECCOMP_MODE_FILTER program from a user sock_fprog {len, filter}.
+ * With TSYNC a thread that cannot take it is reported by its TID (or ESRCH
+ * with TSYNC_ESRCH), and nothing is installed. */
+static long seccomp_install(process_t *p, uint64_t fprog_uptr, unsigned flags)
 {
 	struct { uint16_t len; uint64_t filter; } fp;
 	if (copy_from_user(&fp, (void *)(uintptr_t)fprog_uptr, sizeof(fp)) != 0) return -14;
@@ -1305,21 +1342,40 @@ static long seccomp_install(process_t *p, uint64_t fprog_uptr)
 	struct seccomp_filter *flt = kmalloc(sizeof(*flt) + sz);
 	if (!flt) return -12;
 	if (copy_from_user(flt->insns, (void *)(uintptr_t)fp.filter, sz) != 0) { kfree(flt); return -14; }
-	flt->prev     = p->seccomp_filter;   /* takes over the task's reference */
 	flt->refs     = 1;
 	flt->len      = fp.len;
 	flt->path_len = path_len;
-	p->seccomp_filter = flt;
-	p->seccomp_mode   = 2;
-	return 0;
+
+	long ret = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	/* checked and applied under sched_lock: no clone or install slips in between */
+	process_t *blk = (flags & SECCOMP_FILTER_FLAG_TSYNC)
+	               ? proc_other_threads_locked(p, seccomp_tsync_blocks, p) : NULL;
+	if (blk) {
+		ret = (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) ? -3 : task_vpid(blk);
+	} else {
+		flt->prev = p->seccomp_filter;   /* takes over the task's reference */
+		p->seccomp_filter = flt;
+		smp_wmb();
+		p->seccomp_mode = 2;
+		if (flags & SECCOMP_FILTER_FLAG_TSYNC) proc_other_threads_locked(p, seccomp_tsync_one, p);
+		flt = NULL;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	if (flt) kfree(flt);
+	return ret;
 }
 
 static long sys_seccomp(unsigned int op, unsigned int flags, uint64_t args)
 {
 	process_t *p = task_current();
-	if (flags) return -22;   /* ignoring TSYNC would leave sibling threads unfiltered */
-	if (op == 0) return seccomp_set_strict(p);        /* SECCOMP_SET_MODE_STRICT */
-	if (op == 1) return seccomp_install(p, args);     /* SECCOMP_SET_MODE_FILTER */
+	const unsigned known = SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_SPEC_ALLOW |
+	                       SECCOMP_FILTER_FLAG_TSYNC_ESRCH;
+	if (op == 0) return flags ? -22 : seccomp_set_strict(p);   /* SECCOMP_SET_MODE_STRICT */
+	if (op == 1) {                                              /* SECCOMP_SET_MODE_FILTER */
+		if (flags & ~known) return -22;   /* LOG, NEW_LISTENER: not here */
+		return seccomp_install(p, args, flags);
+	}
 	return -22;
 }
 
@@ -1359,7 +1415,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return p->dumpable;
 	case PR_SET_SECCOMP:
 		if (arg2 == 1) return seccomp_set_strict(p);
-		if (arg2 == 2) return seccomp_install(p, arg3);     /* FILTER, arg3=sock_fprog */
+		if (arg2 == 2) return seccomp_install(p, arg3, 0);  /* FILTER, arg3=sock_fprog */
 		return -22;
 	case PR_GET_SECCOMP:
 		return p->seccomp_mode;
