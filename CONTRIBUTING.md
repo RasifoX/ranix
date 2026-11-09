@@ -1,13 +1,28 @@
-# Contributing to Ranix (DRAFT)
+# Contributing to Ranix
 
-Status: draft, not yet adopted. The license is not decided (see README);
-until it is, contributions cannot be accepted from outside the project.
+Ranix is licensed under the EUPL v1.2 (`LICENSE`, summary in
+`LICENSING.md`). By contributing you agree that your contribution is
+licensed under the same licence ("inbound = outbound"). There is no
+contributor licence agreement; the Developer Certificate of Origin below
+takes its place.
+
+The licensor of Ranix is RasifoX (a personal project, developed under the
+Metastaz umbrella). You keep the copyright in your own changes; the
+project's notice reads "Copyright (c) 2026 RasifoX" and contributors are
+recorded in the Git history through their sign-off.
 
 ## Ground rules
 - Original code only. Do not copy, paste, translate or "port" code from
-  GPL or other copyleft projects, and do not read such sources while
-  writing a Ranix patch. Public specifications and datasheets are fine;
-  cite them in the commit message.
+  GPL or other copyleft projects. Reading other systems' code to learn
+  how hardware behaves is allowed; write the Ranix code yourself and name
+  what you read in the commit message. Public specifications and
+  datasheets are fine; cite them too.
+- Code under a permissive licence (MIT, BSD, ISC, Apache-2.0) may be
+  imported only unchanged in its own file or directory, with its
+  copyright and licence header kept, and an entry added to `NOTICE`.
+- New Ranix files start with `/* SPDX-License-Identifier: EUPL-1.2 */`
+  (`# SPDX-License-Identifier: EUPL-1.2` in scripts and Makefiles).
+  Never change or remove a third-party file's licence header.
 - Fix the root cause. A patch that hides a symptom (a retry, a longer
   timeout, a skipped test) needs a written reason in the commit message.
 - Every behavior change comes with a test: `userspace/test_<name>.c`
@@ -31,8 +46,31 @@ until it is, contributions cannot be accepted from outside the project.
 ## Commits
 - Subject: `area: what changed` (e.g. `ipc: wake every semaphore sleeper`).
 - Body: the bug, the root cause, the fix, the test, and the suite result.
-- If an AI agent wrote any part of the patch, say so in a trailer:
-  `Agent: <tool/model>`; the human who approved it signs off.
+- Every commit ends with `Signed-off-by:` (see below).
+
+## Developer Certificate of Origin
+
+Ranix uses the Developer Certificate of Origin 1.1
+(<https://developercertificate.org/>). Adding
+
+    Signed-off-by: Your Name <you@example.org>
+
+to a commit (`git commit -s`) certifies that you wrote the change or have
+the right to submit it under the project's licence, as the DCO text says.
+Use your real name. A commit without a sign-off is not merged.
+
+## Changes written with AI agents
+
+AI agents may write code for Ranix, but an agent cannot sign the DCO and
+cannot be responsible for a change. So:
+
+- Credit the agent with a trailer naming the model, for example
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- A named human adds `Signed-off-by:` and is responsible for the change:
+  that it may be contributed under the EUPL, that it is not copied from
+  incompatible code, and that it was reviewed and tested as below.
+- Say in the commit message what the agent was given to read (datasheets,
+  other drivers), the same as for a human author.
 
 ## Rules for internal AI contributor agents
 1. Work only in your own working directory or branch. Never write to

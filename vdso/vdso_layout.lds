@@ -1,36 +1,55 @@
-/* vDSO layout: force everything into ONE read-exec PT_LOAD at vaddr 0 with file
- * offset == virtual address, so the kernel can map the raw image contiguously
- * and libc's AT_SYSINFO_EHDR-relative symbol resolution lands correctly. A
- * default -shared link splits RX text from an RW .dynamic segment (page-aligned
- * apart), which breaks a flat copy. There are no relocations and no writable
- * globals, so a single RX segment is safe.
+/*
+ * vDSO image layout (x86_64 and aarch64).
  *
- * The text segment carries FILEHDR + PHDRS so its p_vaddr is 0 (the ELF header
- * lands at byte 0 == AT_SYSINFO_EHDR). glibc derives the load bias as
- * AT_SYSINFO_EHDR minus the first PT_LOAD's p_vaddr; if the segment started past
- * the headers, that bias is off by the header size and _DYNAMIC resolves into
- * .dynstr — a fatal ld.so assertion. */
-SECTIONS
-{
-	. = SIZEOF_HEADERS;
-
-	.hash          : { *(.hash) }
-	.gnu.hash      : { *(.gnu.hash) }
-	.dynsym        : { *(.dynsym) }
-	.dynstr        : { *(.dynstr) }
-	.gnu.version   : { *(.gnu.version) }
-	.gnu.version_d : { *(.gnu.version_d) }
-	.gnu.version_r : { *(.gnu.version_r) }
-	.dynamic       : { *(.dynamic) }            :text :dynamic
-	.rodata        : { *(.rodata*) }            :text
-	.text          : { *(.text*) }              :text
-	.data          : { *(.data* .got* .got.plt* .bss*) } :text
-
-	/DISCARD/ : { *(.note*) *(.eh_frame*) *(.eh_frame_hdr) *(.comment) }
-}
+ * The kernel copies this image into every process as one flat block and passes
+ * its start as AT_SYSINFO_EHDR. For that to work:
+ *
+ *  - There must be exactly one PT_LOAD, read+execute, starting at virtual
+ *    address 0 with file offset == virtual address. A plain -shared link would
+ *    put .dynamic in a second, writable, page-aligned segment, and a flat copy
+ *    would then be wrong.
+ *  - That PT_LOAD must also cover the ELF and program headers, so its p_vaddr
+ *    is 0. The C library computes the load bias as AT_SYSINFO_EHDR minus the
+ *    first PT_LOAD's p_vaddr; if the segment began after the headers, _DYNAMIC
+ *    would resolve into .dynstr and ld.so aborts.
+ *
+ * The image has no relocations and no writable data, so a single read-execute
+ * segment is enough. Input sections not listed here are not expected; any
+ * .data/.bss that does appear is folded into the same segment.
+ */
 
 PHDRS
 {
-	text    PT_LOAD    FILEHDR PHDRS FLAGS(5);   /* R E — headers + whole image */
-	dynamic PT_DYNAMIC FLAGS(4);
+	image   PT_LOAD    FILEHDR PHDRS FLAGS(5);  /* PF_R | PF_X */
+	dyninfo PT_DYNAMIC FLAGS(4);                /* PF_R */
+}
+
+SECTIONS
+{
+	/* Headers first, then the tables the dynamic linker reads to look up
+	 * symbols, in the order the toolchain's own default script uses. */
+	. = SIZEOF_HEADERS;
+
+	.hash           : { *(.hash) }           :image
+	.gnu.hash       : { *(.gnu.hash) }
+	.dynsym         : { *(.dynsym) }
+	.dynstr         : { *(.dynstr) }
+	.gnu.version    : { *(.gnu.version) }
+	.gnu.version_d  : { *(.gnu.version_d) }
+	.gnu.version_r  : { *(.gnu.version_r) }
+
+	/* .dynamic sits in the load segment and is also named by PT_DYNAMIC. */
+	.dynamic        : { *(.dynamic) }        :image :dyninfo
+
+	/* Constants and code; everything stays in the one segment. */
+	.rodata         : { *(.rodata*) }        :image
+	.text           : { *(.text*) }
+	.data           : { *(.data* .got* .got.plt* .bss*) }
+
+	/DISCARD/ : {
+		*(.comment)
+		*(.note*)
+		*(.eh_frame_hdr)
+		*(.eh_frame*)
+	}
 }

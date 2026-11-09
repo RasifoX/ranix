@@ -32,4 +32,6 @@ Kernel Swap, Troubleshooting, Hardware).
 
 ## License
 
-Not decided yet. Until a license is published, no rights are granted.
+Copyright (c) 2026 RasifoX. Ranix is licensed under the EUPL v1.2 (`LICENSE`); see `LICENSING.md` for a
+plain-language summary and `NOTICE` for third-party parts and their licences.
+The names Ranix and Baron are not covered by the licence.
