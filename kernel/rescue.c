@@ -46,6 +46,10 @@
 #include <kernel/init.h>
 #include <kernel/errno.h>
 
+/* drivers/watchdog/wdog_core.c is x86_64 only: weak, so NULL elsewhere */
+#pragma weak wdog_deadline_left
+#pragma weak wdog_deadline_set
+
 
 
 /* ── keys and nonces ───────────────────────────────────────────────────────── */
@@ -285,7 +289,7 @@ static void cmd_ping(kout_t *o)
 	kout_s(o, " kstall="); kout_u(o, kwatch_kstall_count);
 	kout_s(o, " sync="); kout_s(o, rx_sync_state == 2 ? "done" : rx_sync_state == 1 ? "running" : "never");
 	if (rx_sync_state == 2) { kout_s(o, " sync_ms="); kout_u(o, rx_sync_ms); }
-	kout_s(o, " deadline_s="); kout_u(o, wdog_deadline_left());
+	kout_s(o, " deadline_s="); kout_u(o, wdog_deadline_left ? wdog_deadline_left() : 0);
 	if (rx_hard_at) { kout_s(o, " reset_in_s="); kout_u(o, rx_hard_at > kernel_ticks ? (rx_hard_at - kernel_ticks) / TIMER_HZ : 0); }
 	kout_c(o, '\n');
 }
@@ -369,6 +373,7 @@ static void run_cmd(kout_t *o, const char *c)
 	else if (word_is(&c, "poweroff")) { schedule_act(ACT_POWEROFF, 10); kout_s(o, "sync, then power off (10 s at the latest)\n"); }
 	else if (word_is(&c, "deadline")) {
 		int ok; unsigned s = parse_u(&c, &ok);
+		if (!wdog_deadline_set) { kout_s(o, "no deadline on this arch\n"); return; }
 		if (!ok) { kout_s(o, "deadline_s="); kout_u(o, wdog_deadline_left()); kout_c(o, '\n'); return; }
 		kout_s(o, wdog_deadline_set(s) == 0 ? "ok\n" : "refused\n");
 	}
