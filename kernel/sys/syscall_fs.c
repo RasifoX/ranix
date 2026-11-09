@@ -279,31 +279,19 @@ static long sys_newfstatat(int dirfd, const char *path, linux_stat_t *st, int fl
 	return copy_to_user(st, &ks, sizeof(ks)) ? -14 : 0;
 }
 
-/* R_OK=4 W_OK=2 X_OK=1 happen to equal the rwx permission bits. access() uses
- * the REAL uid/gid (faccessat with AT_EACCESS would use effective — minor). */
+/* R_OK=4 W_OK=2 X_OK=1 equal the FS_MAY_* bits. access() asks for the REAL
+ * uid/gid, with capabilities only when the real uid is 0; AT_EACCESS asks for
+ * the task as it is (fsuid/fsgid, effective capabilities), as Linux. */
 static long access_check(const char *kp, int mode, int use_eff)
 {
 	if (mode & ~7) return -EINVAL;
 	vfs_stat_t vs = {0};
 	if (vfs_stat(kp, &vs) != 0) return -ENOENT;
 	if (mode == 0) return 0;                        /* F_OK: exists */
-	process_t *p = task_current();
-	uid_t uid = !p ? 0 : (use_eff ? p->euid : p->uid);
-	gid_t gid = !p ? 0 : (use_eff ? p->egid : p->gid);
-	if (uid == 0) {                                 /* root: r/w always, x if any x bit */
-		if ((mode & 1) && !(vs.mode & 0111)) return -EACCES;
-		return 0;
-	}
-	int shift;
-	if (vs.uid == uid) shift = 6;
-	else {
-		int in_group = (vs.gid == gid);
-		for (int i = 0; !in_group && p && i < p->ngroups; i++)
-			if (p->groups[i] == vs.gid) in_group = 1;
-		shift = in_group ? 3 : 0;
-	}
-	int want = mode & 7;
-	return (((vs.mode >> shift) & 7) & want) == want ? 0 : -13;
+	fs_cred_t c;
+	if (use_eff) fs_cred_task(task_current(), &c);
+	else fs_cred_access(task_current(), &c);
+	return fs_permission(&c, vs.mode, vs.uid, vs.gid, mode);
 }
 
 static long sys_access(const char *path, int mode)
@@ -632,7 +620,7 @@ static long sys_chdir(const char *path)
 	if (!S_ISDIR(st.mode)) return -ENOTDIR;
 	path_normalize(kp);
 	process_t *p = task_current();
-	if (p->euid && access_check(kp, 1, 1)) return -EACCES;
+	if (access_check(kp, 1, 1)) return -EACCES;
 	return fs_set_cwd(p->fs, kp);
 }
 
@@ -871,6 +859,7 @@ static long sys_setuid(uid_t uid)
 	} else {
 		return -EPERM;
 	}
+	p->fs_uid_set = 0;   /* the fsuid follows the euid again */
 	cred_setxuid_fixup(p, was_priv, old_euid);
 	return 0;
 }
@@ -886,6 +875,7 @@ static long sys_setgid(gid_t gid)
 	} else {
 		return -EPERM;
 	}
+	p->fs_gid_set = 0;
 	return 0;
 }
 

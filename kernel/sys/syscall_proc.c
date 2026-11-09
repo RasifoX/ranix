@@ -1644,6 +1644,7 @@ static void exec_apply_creds(process_t *p, uid_t new_euid, gid_t new_egid)
 {
 	p->euid = new_euid; p->suid = new_euid;
 	p->egid = new_egid; p->sgid = new_egid;
+	p->fs_uid_set = p->fs_gid_set = 0;   /* fsuid/fsgid = the new euid/egid */
 
 	/* capability transition on exec (no file caps):
 	 * P'(permitted)   = P(inheritable)

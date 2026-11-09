@@ -21,6 +21,8 @@
 #include <kernel/fs/ext2.h>
 #include <kernel/cgroup.h>
 #include <kernel/errno.h>
+#include <kernel/fscred.h>
+#include <kernel/capabilities.h>
 
 static vfs_dentry_t *root_dentry = NULL;
 static vfs_dentry_t *follow_mounts(vfs_dentry_t *d);
@@ -457,31 +459,16 @@ static int vfs_inode_drop_open(vfs_inode_t *in)
 #define MAY_WRITE 2
 #define MAY_EXEC  1
 
+/* uid/gid: the filesystem ids to check for (task_fsuid/task_fsgid); the
+ * capabilities that may override the mode are the current task's. */
 static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 {
 	if (!inode) return -EACCES;
-	if (uid == 0) return 0; /* root bypasses all permission checks */
-
-	mode_t m = inode->mode & 0777;
-	int shift;
-	if (inode->uid == uid) {
-		shift = 6;
-	} else {
-		/* check egid and supplementary groups */
-		int in_group = (inode->gid == gid);
-		if (!in_group) {
-			process_t *p = task_current();
-			if (p) {
-				for (int i = 0; i < p->ngroups; i++) {
-					if (p->groups[i] == inode->gid) { in_group = 1; break; }
-				}
-			}
-		}
-		shift = in_group ? 3 : 0;
-	}
-
-	if (((m >> shift) & accmode) == (unsigned)accmode) return 0;
-	return -EACCES;
+	fs_cred_t c;
+	fs_cred_task(task_current(), &c);
+	c.uid = uid;
+	c.gid = gid;
+	return fs_permission(&c, inode->mode, inode->uid, inode->gid, accmode);
 }
 
 /* May the current task look names up in dir? A task's first walks run before it
@@ -489,19 +476,20 @@ static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 int vfs_may_search(vfs_inode_t *dir)
 {
 	process_t *p = task_current();
-	if (!p || !dir || !vfs_check_perm(dir, MAY_EXEC, p->euid, p->egid)) return 1;
+	if (!p || !dir || !vfs_check_perm(dir, MAY_EXEC, task_fsuid(p), task_fsgid(p))) return 1;
 	p->walk_denied = 1;
 	return 0;
 }
 
-/* In a sticky directory a name goes only by its file's owner or the directory's. */
+/* In a sticky directory a name goes only by its file's owner, the directory's,
+ * or a holder of CAP_FOWNER over the file (Linux check_sticky). */
 static int sticky_denied(vfs_inode_t *dir, const char *name)
 {
 	process_t *p = task_current();
-	if (!(dir->mode & S_ISVTX) || !p || p->euid == 0 || dir->uid == p->euid) return 0;
+	if (!(dir->mode & S_ISVTX) || !p || dir->uid == task_fsuid(p)) return 0;
 	vfs_inode_t *in = dir->iops->lookup(dir, name);
 	if (!in) return 0;
-	int denied = in->uid != p->euid;
+	int denied = !fs_owner_or_capable(in->uid, in->gid);
 	if (!in->cached) vfs_inode_free(in);
 	return denied;
 }
@@ -510,20 +498,20 @@ static int sticky_denied(vfs_inode_t *dir, const char *name)
 static int may_change(vfs_inode_t *dir)
 {
 	process_t *p = task_current();
-	return vfs_check_perm(dir, MAY_WRITE | MAY_EXEC, p ? p->euid : 0, p ? p->egid : 0);
+	return vfs_check_perm(dir, MAY_WRITE | MAY_EXEC, task_fsuid(p), task_fsgid(p));
 }
 
 int vfs_may_write(vfs_inode_t *in)
 {
 	process_t *p = task_current();
-	return vfs_check_perm(in, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
+	return vfs_check_perm(in, MAY_WRITE, task_fsuid(p), task_fsgid(p));
 }
 
 /* fchdir: entering an already open directory still needs search permission */
 int vfs_may_enter(vfs_inode_t *dir)
 {
 	process_t *p = task_current();
-	return vfs_check_perm(dir, MAY_EXEC, p ? p->euid : 0, p ? p->egid : 0);
+	return vfs_check_perm(dir, MAY_EXEC, task_fsuid(p), task_fsgid(p));
 }
 
 /* ── dentry pool ─────────────────────────────────────────── */
@@ -2264,7 +2252,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 {
 	process_t *p = task_current();
 	if (!p->fds) return -1;
-	return vfs_open_fds(p->fds, p->euid, p->egid, fs_umask_of((struct process *)p), path, flags, mode);
+	return vfs_open_fds(p->fds, task_fsuid(p), task_fsgid(p), fs_umask_of((struct process *)p), path, flags, mode);
 }
 
 /* lexical canonicalization of an absolute path (collapse "//", ".", "..").
@@ -2754,9 +2742,12 @@ int vfs_mknod(const char *path, mode_t mode, dev_t dev)
 	if (vfs_dentry_readonly(parent)) { kfree(dir_path); return -EROFS; } /* EROFS */
 	if (!parent->inode->iops->mknod) { kfree(dir_path); return -1; }
 	process_t *p = task_current();
-	/* EPERM: only root may create device nodes; anyone may leave a socket name */
-	if (p && p->euid != 0 && (mode & 0170000) != 0140000) { kfree(dir_path); return -1; }
-	int pr = vfs_check_perm(parent->inode, MAY_WRITE, p ? p->euid : 0, p ? p->egid : 0);
+	/* EPERM: device nodes take CAP_MKNOD; anyone may leave a socket name */
+	if (p && !capable_task((struct process *)p, CAP_MKNOD) && (mode & 0170000) != 0140000) {
+		kfree(dir_path);
+		return -EPERM;
+	}
+	int pr = vfs_check_perm(parent->inode, MAY_WRITE, task_fsuid(p), task_fsgid(p));
 	if (pr) { kfree(dir_path); return pr; }
 
 	int r = parent->inode->iops->mknod(parent->inode, fname, mode, dev);
@@ -3087,11 +3078,10 @@ static void iattr_stamp_ctime(vfs_iattr_t *a)
 
 static int current_owns(vfs_inode_t *in)
 {
-	process_t *p = task_current();
-	return !p || p->euid == 0 || p->euid == in->uid;
+	return fs_owner_or_capable(in->uid, in->gid);
 }
 
-/* owner or root, as for chown */
+/* the owner, or CAP_FOWNER (Linux inode_owner_or_capable) */
 int vfs_chmod_inode(vfs_inode_t *in, mode_t mode)
 {
 	if (!in) return -ENOENT;
@@ -3107,7 +3097,7 @@ int vfs_utimes_inode(vfs_inode_t *in, vfs_iattr_t *a, int explicit_times)
 	if (!current_owns(in)) {
 		if (explicit_times) return -EPERM;
 		process_t *p = task_current();
-		if (vfs_check_perm(in, MAY_WRITE, p->euid, p->egid)) return -EACCES;
+		if (vfs_check_perm(in, MAY_WRITE, task_fsuid(p), task_fsgid(p))) return -EACCES;
 	}
 	iattr_stamp_ctime(a);
 	return vfs_inode_setattr(in, a);
@@ -3126,21 +3116,17 @@ int vfs_chmod(const char *path, mode_t mode)
 }
 
 /* change owner/group of an inode (uid/gid == (uid_t)-1 leaves it unchanged).
- * Only root may change the uid; clears set-user/group-ID bits. */
+ * Linux chown_ok/chgrp_ok: CAP_CHOWN may do anything; the owner may only give
+ * the file a group it is in. Clears set-user/group-ID bits. */
 int vfs_chown_inode(vfs_inode_t *in, uid_t uid, gid_t gid)
 {
 	if (!in) return -ENOENT;
-	process_t *p = task_current();
-	uid_t euid = p ? p->euid : 0;
-	if (euid != 0) {
-		/* non-root: only the owner, only the group, only to a group they're in */
-		if (in->uid != euid) return -EPERM;
-		if (uid != (uid_t)-1 && uid != in->uid) return -1;
-		if (gid != (gid_t)-1) {
-			int ok = (p && gid == p->egid);
-			for (int i = 0; p && !ok && i < p->ngroups; i++) ok = (p->groups[i] == gid);
-			if (!ok) return -1;
-		}
+	fs_cred_t c;
+	fs_cred_task(task_current(), &c);
+	if (!fs_capable(&c, in->uid, in->gid, CAP_CHOWN)) {
+		if (in->uid != c.uid) return -EPERM;
+		if (uid != (uid_t)-1 && uid != in->uid) return -EPERM;
+		if (gid != (gid_t)-1 && gid != in->gid && !fs_in_group(&c, gid)) return -EPERM;
 	}
 	vfs_iattr_t a = { .valid = ATTR_MODE, .uid = uid, .gid = gid };
 	a.mode = in->mode & 07777 & ~(mode_t)06000;    /* drop setuid/setgid on chown */
