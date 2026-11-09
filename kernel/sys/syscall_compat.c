@@ -13,6 +13,13 @@ static long iov_at(int fd, const iovec_t *iov, int cnt, off_t pos, int write)
 {
 	if (cnt < 0 || cnt > 1024) return -EINVAL;   /* IOV_MAX */
 	if (pos < 0) return -EINVAL;
+	/* the whole request first: a length past SSIZE_MAX, alone or summed, is EINVAL */
+	uint64_t sum = 0;
+	for (int i = 0; i < cnt; i++) {
+		iovec_t v;
+		if (copy_from_user(&v, &iov[i], sizeof(v)) != 0) return -14;
+		if ((int64_t)v.iov_len < 0 || (sum += v.iov_len) > 0x7fffffffffffffffULL) return -EINVAL;
+	}
 	long total = 0;
 	for (int i = 0; i < cnt; i++) {
 		iovec_t v;
@@ -30,13 +37,17 @@ static long iov_at(int fd, const iovec_t *iov, int cnt, off_t pos, int write)
 static long sys_preadv(int fd, const iovec_t *iov, int cnt, off_t pos)  { return iov_at(fd, iov, cnt, pos, 0); }
 static long sys_pwritev(int fd, const iovec_t *iov, int cnt, off_t pos) { return iov_at(fd, iov, cnt, pos, 1); }
 
-/* offset -1 means the file position; the RWF_ flags are only hints here */
-static long sys_preadv2(int fd, const iovec_t *iov, int cnt, off_t pos)
+/* offset -1 means the file position. The RWF_ flags Linux knows (HIPRI..ATOMIC)
+ * are hints here; any other bit is EOPNOTSUPP, as on Linux. */
+#define RWF_KNOWN 0x7f
+static long sys_preadv2(int fd, const iovec_t *iov, int cnt, off_t pos, int flags)
 {
+	if (flags & ~RWF_KNOWN) return -EOPNOTSUPP;
 	return pos == -1 ? sys_readv(fd, iov, cnt) : iov_at(fd, iov, cnt, pos, 0);
 }
-static long sys_pwritev2(int fd, const iovec_t *iov, int cnt, off_t pos)
+static long sys_pwritev2(int fd, const iovec_t *iov, int cnt, off_t pos, int flags)
 {
+	if (flags & ~RWF_KNOWN) return -EOPNOTSUPP;
 	return pos == -1 ? sys_writev(fd, iov, cnt) : iov_at(fd, iov, cnt, pos, 1);
 }
 
