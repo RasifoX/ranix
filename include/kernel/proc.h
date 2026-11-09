@@ -216,6 +216,8 @@ typedef struct process {
 	int             no_new_privs; /* prctl(PR_SET_NO_NEW_PRIVS): sticky, inherited */
 	uint8_t         mdwe;              /* PR_SET_MDWE: refuse W+X mappings; inherited, irreversible */
 	int             pdeathsig;    /* prctl(PR_SET_PDEATHSIG): signal on parent death */
+	uint64_t        timer_slack;  /* PR_SET_TIMERSLACK, ns; 0 is the default */
+	uint64_t        timer_slack_default; /* what PR_SET_TIMERSLACK 0 restores; 0 is 50 us */
 	uid_t           fsuid;     /* filesystem uid; fs_uid_set==0 → follows euid */
 	gid_t           fsgid;
 	uint8_t         fs_uid_set;

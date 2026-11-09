@@ -1544,6 +1544,26 @@ static long sys_seccomp(unsigned int op, unsigned int flags, uint64_t args)
 	return -EINVAL;
 }
 
+/* The advice is a hint and changes nothing here, but the call is checked as on
+ * Linux: a bad fd, a pipe, an unknown advice or a negative length is an error. */
+static long sys_fadvise64(int fd, int64_t off, int64_t len, int advice)
+{
+	(void)off;
+	vfs_file_t *f = fd_get(task_current()->fds, fd);
+	if (!f) return -EBADF;
+	if (f->inode && S_ISFIFO(f->inode->mode)) return -ESPIPE;
+	if (advice < 0 || advice > 5 || len < 0) return -EINVAL;   /* NORMAL..NOREUSE */
+	return 0;
+}
+
+#define PR_CAPBSET_READ    23
+#define PR_CAPBSET_DROP    24
+#define PR_GET_SECUREBITS  27
+#define PR_SET_SECUREBITS  28
+#define PR_SET_TIMERSLACK  29
+#define PR_GET_TIMERSLACK  30
+#define CAP_LAST_CAP_NR    40
+
 static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5)
 {
 	(void)arg3; (void)arg4; (void)arg5;
@@ -1605,6 +1625,24 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return copy_to_user((void *)(uintptr_t)arg2, &p->pdeathsig, sizeof(int)) == 0 ? 0 : -14;
 	case PR_RANIX_ASESS_ID:
 		return (long)asess_id_of(p);
+	case PR_SET_TIMERSLACK:
+		p->timer_slack = arg2 ? arg2 : p->timer_slack_default;
+		return 0;
+	case PR_GET_TIMERSLACK: {
+		uint64_t v = p->timer_slack ? p->timer_slack : p->timer_slack_default;
+		return (long)(v ? v : 50000);
+	}
+	/* No bounding set is kept and none is ever narrowed: every capability is in
+	 * it. Changing it, or the securebits, takes CAP_SETPCAP, and is not done. */
+	case PR_CAPBSET_READ:
+		return arg2 > CAP_LAST_CAP_NR ? -EINVAL : 1;
+	case PR_GET_SECUREBITS:
+		return 0;
+	case PR_CAPBSET_DROP:
+		if (arg2 > CAP_LAST_CAP_NR) return -EINVAL;
+		/* fall through */
+	case PR_SET_SECUREBITS:
+		return capable_task(p, CAP_SETPCAP) ? -EINVAL : -EPERM;
 	default:
 		return -EINVAL;   /* unhandled option (do not claim success) */
 	}
