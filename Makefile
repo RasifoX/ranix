@@ -216,7 +216,10 @@ SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
 $(BUILD_DIR)/drivers/gpu/drm/i915/%.o: CFLAGS += -Idrivers/gpu/linuxkpi/include -Idrivers/gpu/drm/i915
 SRCS_ASM = $(SRCS_ARCH_ASM)
 
-CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -Wall -fno-omit-frame-pointer $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
+# -fno-strict-aliasing, as Linux: kernel code reads records and frames through
+# pointers of another type, and under strict aliasing the compiler may drop the
+# stores those reads depend on (seccomp_data's args were lost that way).
+CFLAGS = -ffreestanding -nostdlib -nostdinc -O2 -fno-strict-aliasing -Wall -fno-omit-frame-pointer $(ARCH_CFLAGS) $(INCLUDES) -MMD -MP
 LDFLAGS = -nostdlib
 
 OBJS  = $(SRCS_C:%.c=$(BUILD_DIR)/%.o)
