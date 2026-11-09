@@ -201,6 +201,14 @@ int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid)
 	return pos;
 }
 
+/* Does p hold cap in its own user namespace? (Linux ns_capable with
+ * current_user_ns.) Capabilities gained by making a namespace count only for
+ * what stays inside it, such as a chroot; capable_task asks for the machine. */
+int capable_own_ns(struct process *p, int cap)
+{
+	return cap_has(((process_t *)p)->cap_effective, cap);
+}
+
 int capable_task(struct process *p, int cap)
 {
 	process_t *t = (process_t *)p;

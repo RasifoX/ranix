@@ -2,6 +2,7 @@
  * cache into its cap, where every lookup turns volatile. Paths through volatile
  * directories must keep resolving, with "..", chroot and a create at the end. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -77,12 +78,25 @@ int main(void)
 	}
 	printf("volatile ok\n");
 
-	/* chroot to a volatile directory has nothing lasting to point at */
+	/* chroot to a volatile directory has nothing lasting to point at: the root
+	 * becomes an empty one (what Linux leaves once the directory's task exits) */
 	pid_t c = fork();
-	if (c == 0) _exit(chroot("/proc/self/task") == -1 && errno == EINVAL ? 0 : 1);
+	if (c == 0) {
+		struct stat s2;
+		if (chroot("/proc/self/task")) _exit(1);
+		if (stat("/proc", &s2) == 0 || stat("/bin", &s2) == 0) _exit(2);
+		/* '..' and '/..' stay at the empty root */
+		if (chdir("..") || chdir("/..") || stat("../bin", &s2) == 0 || stat("/../proc", &s2) == 0) _exit(3);
+		/* and it lists nothing */
+		DIR *d = opendir("/");
+		struct dirent *e;
+		while (d && (e = readdir(d)))
+			if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) _exit(4);
+		_exit(0);
+	}
 	int s;
 	waitpid(c, &s, 0);
-	if (WEXITSTATUS(s)) FAIL("chroot volatile");
+	if (WEXITSTATUS(s)) { printf("step %d\n", WEXITSTATUS(s)); FAIL("chroot volatile"); }
 	printf("chroot ok\nOK\n");
 	return 0;
 }

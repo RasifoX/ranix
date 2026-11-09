@@ -1057,37 +1057,51 @@ static vfs_inode_t *procfs_fddir_lookup(vfs_inode_t *dir, const char *name)
 	return ret;
 }
 
+/* the fd table /proc/<pid>/fd and fdinfo list: pid 0 is the reader itself.
+ * Release with procfs_fds_put. */
+static fd_table_t *procfs_fds_get(int pid)
+{
+	return pid == 0 ? task_current()->fds : proc_get_fds((pid_t)pid);
+}
+
+static void procfs_fds_put(int pid, fd_table_t *fds)
+{
+	if (pid != 0) fd_table_put(fds);
+}
+
+/* the number of the idx-th open fd, or -1 */
+static int procfs_fd_nth(fd_table_t *fds, uint32_t idx)
+{
+	uint32_t found = 0;
+	for (int i = 0; i < fds->cap; i++) {
+		if (!fd_get(fds, i)) continue;
+		if (found++ == idx) return i;
+	}
+	return -1;
+}
+
+/* one directory entry named by the number v */
+static void procfs_num_dirent(vfs_dirent_t *out, int v, uint32_t idx, uint32_t mode)
+{
+	char rev[12]; int ri = 0, ti = 0;
+	do { rev[ri++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (ri) out->name[ti++] = rev[--ri];
+	out->name[ti] = '\0';
+	out->ino      = proc_ino_next;
+	out->mode     = mode;
+	out->next_off = idx + 1;
+}
+
 static int procfs_fddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
-	int self = (pid == 0);
-	fd_table_t *fds = self ? task_current()->fds : proc_get_fds((pid_t)pid);
+	fd_table_t *fds = procfs_fds_get(pid);
 	if (!fds) return -1;
-	int ret = -1;
-	uint32_t found = 0;
-	for (int i = 0; i < fds->cap; i++) {
-		if (!fd_get(fds, i)) continue;
-		if (found == idx) {
-			out->ino      = proc_ino_next;
-			out->mode     = S_IFLNK | 0777;
-			out->next_off = idx + 1;
-			char tmp[12]; int ti = 0;
-			int v = i;
-			if (v == 0) { tmp[ti++] = '0'; } else {
-				char rev[12]; int ri = 0;
-				while (v) { rev[ri++] = '0' + v % 10; v /= 10; }
-				for (int j = ri - 1; j >= 0; j--) tmp[ti++] = rev[j];
-			}
-			memcpy(out->name, tmp, (size_t)ti);
-			out->name[ti] = '\0';
-			ret = 0;
-			break;
-		}
-		found++;
-	}
-	if (!self) fd_table_put(fds);
-	return ret;
+	int i = procfs_fd_nth(fds, idx);
+	if (i >= 0) procfs_num_dirent(out, i, idx, S_IFLNK | 0777);
+	procfs_fds_put(pid, fds);
+	return i >= 0 ? 0 : -1;
 }
 
 static vfs_iops_t procfs_fddir_iops = {
@@ -1110,6 +1124,159 @@ static vfs_inode_t *procfs_fddir_inode(int pid)
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid = pid;
 	in->priv = pp;
+	return in;
+}
+
+/* ── /proc/<pid>/fdinfo: per open fd, its offset and open flags ──
+ * Linux format ("pos:\t0\nflags:\t02\nmnt_id:\t0\nino:\t5\n"). The task's
+ * own, as on Linux: the directory is 0500 and each file 0400 of its euid, and
+ * a read by anyone else without CAP_SYS_PTRACE is refused. Chromium's sandbox
+ * chroots into /proc/self/fdinfo/: a directory nothing can be made in. */
+
+typedef struct { int pid; int fd_n; } procfs_fdinfo_priv_t;
+
+/* may the reader see task pid's open files? */
+static int procfs_fds_visible(int pid)
+{
+	process_t *cur = task_current();
+	if (pid == 0) return 1;
+	process_t *t = proc_get((pid_t)pid);
+	if (!t) return 0;
+	int ok = t->tgid == cur->tgid || t->euid == cur->euid ||
+	         capable_task((struct process *)cur, CAP_SYS_PTRACE);
+	proc_put(t);
+	return ok;
+}
+
+/* the inode's owner: the task's euid/egid */
+static void procfs_owner(vfs_inode_t *in, int pid)
+{
+	process_t *t = pid ? proc_get((pid_t)pid) : task_current();
+	if (!t) return;
+	in->uid = t->euid; in->gid = t->egid;
+	if (pid) proc_put(t);
+}
+
+static int procfs_octal(char *b, unsigned v)
+{
+	char rev[12]; int r = 0, n = 0;
+	b[n++] = '0';
+	do { rev[r++] = (char)('0' + (v & 7)); v >>= 3; } while (v);
+	while (r) b[n++] = rev[--r];
+	return n;
+}
+
+static int procfs_decimal(char *b, uint64_t v)
+{
+	char rev[24]; int r = 0, n = 0;
+	do { rev[r++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v);
+	while (r) b[n++] = rev[--r];
+	return n;
+}
+
+static int procfs_cat(char *b, const char *s)
+{
+	int n = (int)strlen(s);
+	memcpy(b, s, (size_t)n);
+	return n;
+}
+
+static int procfs_fdinfo_format(int pid, int fd_n, char *b)
+{
+	fd_table_t *fds = procfs_fds_get(pid);
+	if (!fds) return -1;
+	vfs_file_t *f = fget(fds, fd_n);   /* pin the file across the deref */
+	unsigned flags = f ? (unsigned)f->flags : 0;
+	if (f && fd_is_cloexec(fds, fd_n)) flags |= 02000000;   /* O_CLOEXEC, as Linux shows it */
+	procfs_fds_put(pid, fds);
+	if (!f) return -1;
+	int n = 0;
+	n += procfs_cat(b + n, "pos:\t");
+	n += procfs_decimal(b + n, (uint64_t)(f->pos < 0 ? 0 : f->pos));
+	n += procfs_cat(b + n, "\nflags:\t");
+	n += procfs_octal(b + n, flags);
+	n += procfs_cat(b + n, "\nmnt_id:\t0\nino:\t");
+	n += procfs_decimal(b + n, f->inode ? (uint64_t)f->inode->ino : 0);
+	b[n++] = '\n';
+	fput(f);
+	return n;
+}
+
+static ssize_t procfs_fdinfo_read(vfs_file_t *f, void *buf, size_t len)
+{
+	procfs_fdinfo_priv_t *pr = f->inode->priv;
+	if (!procfs_fds_visible(pr->pid)) return -13;
+	char tmp[96];
+	int n = procfs_fdinfo_format(pr->pid, pr->fd_n, tmp);
+	if (n < 0) return -2;   /* closed since the lookup */
+	if (f->pos >= (off_t)n) return 0;
+	size_t avail = (size_t)(n - f->pos);
+	if (len > avail) len = avail;
+	if (copy_fop_to_user(buf, tmp + f->pos, len) != 0) return -14;
+	f->pos += (off_t)len;
+	return (ssize_t)len;
+}
+
+static vfs_fops_t procfs_fdinfo_fops = { .read = procfs_fdinfo_read };
+
+static vfs_inode_t *procfs_fdinfo_inode(int pid, int fd_n)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino      = proc_ino_alloc();
+	in->mode     = S_IFREG | 0400;
+	in->nlink    = 1;
+	in->refcount = 1;
+	in->fops     = &procfs_fdinfo_fops;
+	procfs_owner(in, pid);
+	procfs_fdinfo_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	pr->pid = pid; pr->fd_n = fd_n;
+	in->priv = pr;
+	return in;
+}
+
+static vfs_inode_t *procfs_fdinfodir_lookup(vfs_inode_t *dir, const char *name)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	int fd_n = 0; const char *s = name;
+	if (!*s || !procfs_fds_visible(pid)) return NULL;
+	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
+	if (*s) return NULL;
+	fd_table_t *fds = procfs_fds_get(pid);
+	if (!fds) return NULL;
+	vfs_inode_t *ret = fd_get(fds, fd_n) ? procfs_fdinfo_inode(pid, fd_n) : NULL;
+	procfs_fds_put(pid, fds);
+	return ret;
+}
+
+static int procfs_fdinfodir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	procfs_fddir_priv_t *pp = dir->priv;
+	int pid = pp ? pp->pid : 0;
+	if (!procfs_fds_visible(pid)) return -1;
+	fd_table_t *fds = procfs_fds_get(pid);
+	if (!fds) return -1;
+	int i = procfs_fd_nth(fds, idx);
+	if (i >= 0) procfs_num_dirent(out, i, idx, S_IFREG | 0400);
+	procfs_fds_put(pid, fds);
+	return i >= 0 ? 0 : -1;
+}
+
+static vfs_iops_t procfs_fdinfodir_iops = {
+	.lookup  = procfs_fdinfodir_lookup,
+	.readdir = procfs_fdinfodir_readdir,
+};
+
+static vfs_inode_t *procfs_fdinfodir_inode(int pid)
+{
+	vfs_inode_t *in = procfs_fddir_inode(pid);
+	if (!in) return NULL;
+	in->mode = S_IFDIR | 0500;
+	in->iops = &procfs_fdinfodir_iops;
+	procfs_owner(in, pid);
 	return in;
 }
 
@@ -1910,6 +2077,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_taskdir_inode(pid);
 	if (strcmp(name, "fd") == 0)
 		return procfs_fddir_inode(pid);
+	if (strcmp(name, "fdinfo") == 0)
+		return procfs_fdinfodir_inode(pid);
 	if (strcmp(name, "ns") == 0)
 		return procfs_nsdir_inode(pid);
 	if (strcmp(name, "timens_offsets") == 0)
