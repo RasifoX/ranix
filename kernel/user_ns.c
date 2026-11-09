@@ -9,6 +9,7 @@
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
+#include <kernel/errno.h>
 
 
 /* init ns: identity map (n_uid/n_gid == 0 means 1:1) */
@@ -181,6 +182,29 @@ int user_ns_map_permitted(struct process *writer, user_namespace_t *ns, const ch
 	if (count != 1 || *s) return 0;          /* one line, one id */
 	uint32_t k = is_gid ? make_kgid(ns->parent, outside) : make_kuid(ns->parent, outside);
 	return k == (is_gid ? w->egid : w->euid);
+}
+
+/* "deny" only before a gid_map is written (it would not take back groups
+ * already settable); "allow" never after "deny". The writer needs
+ * CAP_SYS_ADMIN over the namespace. */
+int user_ns_set_setgroups(struct process *writer, user_namespace_t *ns, const char *buf)
+{
+	process_t *w = (process_t *)writer;
+	user_namespace_t *wns = w->user_ns ? w->user_ns : &init_user_ns;
+	int deny;
+	while (*buf == ' ' || *buf == '\t') buf++;
+	if (!strncmp(buf, "allow", 5)) { deny = 0; buf += 5; }
+	else if (!strncmp(buf, "deny", 4)) { deny = 1; buf += 4; }
+	else return -EINVAL;
+	while (*buf == ' ' || *buf == '\t' || *buf == '\n') buf++;
+	if (*buf) return -EINVAL;
+	if (!capable_task(writer, CAP_SYS_ADMIN) &&
+	    !((wns == ns || wns == ns->parent) && cap_has(w->cap_effective, CAP_SYS_ADMIN)))
+		return -EPERM;
+	if (!deny) return ns->setgroups_denied ? -EPERM : 0;
+	if (ns == &init_user_ns || ns->n_gid) return -EPERM;
+	ns->setgroups_denied = 1;
+	return 0;
 }
 
 int user_ns_format_map(user_namespace_t *ns, char *buf, int sz, int is_gid)

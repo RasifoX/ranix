@@ -882,6 +882,7 @@ static long sys_getgroups(int size, gid_t *list) {
 static long sys_setgroups(int size, const gid_t *list) {
 	process_t *p = task_current();
 	if (p->euid != 0) return -EPERM;   /* only root */
+	if (p->user_ns && p->user_ns->setgroups_denied) return -EPERM;   /* /proc/<pid>/setgroups "deny" */
 	if (size < 0 || size > 32) return -EINVAL;
 	if (size > 0 && !access_ok(list, (size_t)size * sizeof(gid_t))) return -EFAULT;
 	for (int i = 0; i < size; i++) {
