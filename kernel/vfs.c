@@ -2892,7 +2892,9 @@ int vfs_kernel_install(const char *path, const void *data, size_t len)
 	f.pos   = 0;
 	f.flags = O_WRONLY;
 
-	return inode->fops->write(&f, data, len) == (ssize_t)len ? 0 : -1;
+	if (inode->fops->write(&f, data, len) == (ssize_t)len) return 0;
+	vfs_unlink(path);   /* a part of the file is no file, and its pages go back */
+	return -1;
 }
 
 int vfs_symlink(const char *target, const char *linkpath)

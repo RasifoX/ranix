@@ -657,7 +657,8 @@ void sched_init(void)
 	cpu->idle         = p;
 	all_cpus[0]       = cpu;
 
-	proctab_grow();
+	/* without it nothing can run; carrying on would write through NULL */
+	if (proctab_grow()) kpanic("sched: no memory for the process table");
 	proctab[0] = p;
 	proc_cnt   = 2;   /* pid 1 stays free for init; kernel threads start before it */
 

@@ -8,6 +8,8 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/cmdline.h>
 #include <kernel/init.h>
+#include <kernel/mm/pmm.h>
+#include <kernel/mm/buddy.h>
 
 uint64_t boot_initrd_start = 0;
 uint64_t boot_initrd_size  = 0;
@@ -49,6 +51,17 @@ static void inode_apply_meta(const char *path, uint32_t uid, uint32_t gid, uint3
     d->inode->mode = (d->inode->mode & 0170000) | (mode & 07777);
 }
 
+/* A file that would leave the kernel less than this to run on is left out:
+ * an initramfs bigger than memory then boots without it, instead of starving
+ * everything after it. max(16 MB, 1/32 of memory), in pages. */
+static uint64_t initrd_reserve_pages(void)
+{
+    uint64_t r = buddy_total_pages() / 32, min = (16ULL << 20) / PAGE_SIZE;
+    return r > min ? r : min;
+}
+
+static unsigned long skipped_files, skipped_bytes;
+
 static void install(const char *path, const uint8_t *data, unsigned int len,
                     uint32_t mode, uint32_t uid, uint32_t gid)
 {
@@ -74,6 +87,12 @@ static void install(const char *path, const uint8_t *data, unsigned int len,
         target[tlen] = '\0';
         vfs_symlink(target, path);
     } else if ((mode & 0170000) == 0100000) {
+        uint64_t pages = ((uint64_t)len + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (pmm_free_pages() < pages + initrd_reserve_pages()) {
+            skipped_files++;
+            skipped_bytes += len;
+            return;
+        }
         if (vfs_kernel_install(path, data, len) != 0)
             kprintf(KERN_ERR "initrd: failed to install file: %s\n", path);
     }
@@ -147,7 +166,10 @@ void initrd_init(void)
         ptr = (ptr + 3) & ~3ULL;
     }
 
-    kprintf(KERN_INFO "initrd: %lu files, %lu bytes\n", nfiles, nbytes);
+    kprintf(KERN_INFO "initrd: %lu files, %lu bytes\n", nfiles - skipped_files, nbytes - skipped_bytes);
+    if (skipped_files)
+        kprintf(KERN_ERR "initrd: out of memory: %lu files (%lu MB) left out, %lu MB kept for the kernel\n",
+                skipped_files, skipped_bytes >> 20, (initrd_reserve_pages() * PAGE_SIZE) >> 20);
 
     /* /etc skeleton — only install if not already provided by initramfs */
     vfs_mkdir("/etc", 0755);

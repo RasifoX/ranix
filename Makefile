@@ -279,7 +279,7 @@ PY_VER             = 3.12.3
 PY_XY              = 3.12
 PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
 
-.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -977,6 +977,9 @@ endif
 # Two-boot persistence proofs (x86_64 only, ~4 boots, kept out of the single-boot
 # `test`). persist = a disk ext2 write at /mnt survives a reboot; diskroot = init
 # pivots into a full disk rootfs and / itself persists. Both must print PASS.
+oomboottest:
+	@bash tests/oomboot.sh
+
 persisttest:
 	@bash tests/persist.sh
 	@bash tests/diskroot.sh
