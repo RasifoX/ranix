@@ -416,8 +416,8 @@ static int syscall_gate(process_t *sc, uint64_t ip, long n, const long *a, long 
 		case 0x00050000u:            /* ERRNO: -data, at most MAX_ERRNO; 0 is success */
 			*ret = -(long)(data > 4095 ? 4095 : data);
 			return 1;
-		case 0x00030000u:            /* TRAP: not run, ENOSYS, and SIGSYS on the way out */
-			*ret = -38;
+		case 0x00030000u:            /* TRAP: not run, rolled back, SIGSYS on the way out */
+			*ret = CTX_SYSCALL_ROLLBACK(n, a[0]);
 			task_force_seccomp(ip, (int)n, SECCOMP_AUDIT_ARCH, (int)data);
 			return 1;
 		case 0x7ff00000u:            /* TRACE, USER_NOTIF: no tracer or listener here */
