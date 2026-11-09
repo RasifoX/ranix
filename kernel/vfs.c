@@ -3034,6 +3034,10 @@ int vfs_rename(const char *old_path, const char *new_path)
 	vfs_inode_t *old_in = NULL, *new_in = NULL;
 	int ret;
 	if (!old_dir || !new_dir) { ret = -ENOMEM; goto out; }
+	/* a directory takes along the tasks standing in it (fs_rename_cwds); looked
+	 * up before the parents, whose dentries a later walk may reuse */
+	vfs_stat_t mst;
+	int moving_dir = vfs_lstat(old_path, &mst) == 0 && S_ISDIR(mst.mode);
 
 	vfs_dentry_t *old_parent = vfs_dentry_resolve(old_dir);
 	if (!old_parent || !old_parent->inode) { ret = -ENOENT; goto out; }
@@ -3067,6 +3071,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 	if (!old_in->iops || !old_in->iops->rename) { ret = -ENOSYS; goto out; }
 
 	ret = old_in->iops->rename(old_in, old_name, new_in, new_name);
+	if (ret == 0 && moving_dir) fs_rename_cwds(fs_root_of(task_current()), old_path, new_path);
 	if (ret == 0 && vfs_inotify_hook) {
 		vfs_inotify_hook(old_dir, 0x00000040 /*IN_MOVED_FROM*/, old_name);
 		vfs_inotify_hook(new_dir, 0x00000080 /*IN_MOVED_TO*/,   new_name);
