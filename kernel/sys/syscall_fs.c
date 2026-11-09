@@ -631,6 +631,7 @@ static long sys_chroot(const char *path)
 	if (!d || !d->inode) return -2;             /* ENOENT */
 	if (!S_ISDIR(d->inode->mode)) return -20;   /* ENOTDIR */
 	if (vfs_dentry_is_volatile(d)) return -22;  /* EINVAL: p->root outlives it */
+	vfs_dentry_keep(d);   /* p->root points at it: the dcache must not drop it */
 	p->root = d;
 	/* cwd is now relative to the new root; reset to "/" so a path that pointed
 	 * outside the jail can't be reached (simple, escape-safe). */
@@ -665,6 +666,7 @@ static long sys_pivot_root(const char *new_root, const char *put_old)
 	/* Switch the caller's root to new_root. Children inherit it, so an init that
 	 * pivot_roots and then execs the real init moves the whole process tree to
 	 * the new root without global mount-tree surgery (initramfs→disk switch). */
+	vfs_dentry_keep(dn);
 	p->root = dn;
 	p->cwd[0] = '/'; p->cwd[1] = '\0';
 pr_out:

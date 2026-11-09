@@ -533,6 +533,11 @@ check "c-umountbusy"      "OK"                 "$(echo "$UB" | tail -1)"
 # cached, and "../" from a link met that way must start in the link's directory
 DC=$(timeout 240 /bin/test_dcachefull /dev/nvme0n1 /mnt2 2>&1); echo "$DC" | grep -v "^PASS" | sed 's/^/  dcachefull: /'
 check "c-dcachefull"      "OK"                 "$(echo "$DC" | tail -1)"
+# a find-style walk over more names than the cache holds: it stays bounded, and
+# whatever a task holds (root, open file, mountpoint, a chmod) survives eviction
+DL=$(timeout 300 /bin/test_dcachelru /dev/nvme0n1 /mnt2 2>&1); echo "$DL" | grep -v "^PASS" | sed 's/^/  dcachelru: /'
+echo "$DL" | grep "bounded" | sed 's/^/  dcachelru: /'
+check "c-dcachelru"       "OK"                 "$(echo "$DL" | tail -1)"
 check "dcache-warn"       "1"                  "$(dmesg | grep -c "dentries cached, past the limit")"
 # dmesg reads the newest log, whatever the buffer: a small one gets the last
 # lines, a large one all of the ring; /dev/kmsg readers see the same lines
