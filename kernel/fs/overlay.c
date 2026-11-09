@@ -122,6 +122,41 @@ static int copy_up_file(ovl_inode_t *oi)
 
 static vfs_inode_t *active_inode(ovl_inode_t *oi) { return oi->upper ? oi->upper : oi->lower; }
 
+/* An open overlay file: the layer it reads from, and what that layer's own
+ * open left in its file (ext2 counts open files there, and its close uncounts
+ * them: without that close the layer stays busy for good). */
+typedef struct {
+	vfs_inode_t *real;
+	void        *real_priv;
+	int          opened;       /* the real open ran, so its close must too */
+} ovl_file_t;
+
+/* Open the real inode for an overlay file; its file position comes back too. */
+static int ovl_real_open(ovl_file_t *of, vfs_inode_t *real, vfs_file_t *file, int flags)
+{
+	of->real = real; of->real_priv = NULL; of->opened = 0;
+	if (real->fops && real->fops->open) {
+		vfs_file_t tmp = *file; tmp.inode = real; tmp.priv = NULL;
+		int r = real->fops->open(real, &tmp, flags);
+		file->pos = tmp.pos;
+		if (r) return r;
+		of->real_priv = tmp.priv;
+		of->opened = 1;
+		return 0;
+	}
+	if (flags & O_APPEND) file->pos = (off_t)real->size;
+	return 0;
+}
+
+static void ovl_real_close(ovl_file_t *of, vfs_file_t *file)
+{
+	if (!of->opened) return;
+	of->opened = 0;
+	if (!of->real->fops || !of->real->fops->close) return;
+	vfs_file_t tmp = *file; tmp.inode = of->real; tmp.priv = of->real_priv;
+	of->real->fops->close(&tmp);
+}
+
 static int ovl_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 {
 	ovl_inode_t *oi = inode->priv;
@@ -130,22 +165,30 @@ static int ovl_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 	if (wr && !oi->upper) { if (copy_up_file(oi) != 0) return -1; }
 	vfs_inode_t *real = active_inode(oi);
 	if (!real) return -1;
-	file->priv = real;                          /* fast path for read/write */
-	if (real->fops && real->fops->open) {
-		vfs_file_t tmp = *file; tmp.inode = real;
-		int r = real->fops->open(real, &tmp, flags);
-		file->pos = tmp.pos;
-		return r;
-	}
-	if (flags & O_APPEND) file->pos = (off_t)real->size;
+	ovl_file_t *of = kmalloc(sizeof(*of));
+	if (!of) return -ENOMEM;
+	int r = ovl_real_open(of, real, file, flags);
+	if (r) { kfree(of); return r; }
+	file->priv = of;
+	return 0;
+}
+
+static int ovl_close(vfs_file_t *f)
+{
+	ovl_file_t *of = f->priv;
+	if (!of) return 0;
+	ovl_real_close(of, f);
+	kfree(of);
+	f->priv = NULL;
 	return 0;
 }
 
 static ssize_t ovl_read(vfs_file_t *f, void *buf, size_t len)
 {
-	vfs_inode_t *real = f->priv;
+	ovl_file_t *of = f->priv;
+	vfs_inode_t *real = of ? of->real : NULL;
 	if (!real || !real->fops || !real->fops->read) return -EINVAL;
-	vfs_file_t tmp = *f; tmp.inode = real;
+	vfs_file_t tmp = *f; tmp.inode = real; tmp.priv = of->real_priv;
 	ssize_t r = real->fops->read(&tmp, buf, len);
 	f->pos = tmp.pos;
 	return r;
@@ -154,17 +197,23 @@ static ssize_t ovl_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t ovl_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	ovl_inode_t *oi = f->inode->priv;
-	if (!oi->upper) { if (copy_up_file(oi) != 0) return -ENOSPC; f->priv = oi->upper; }
+	ovl_file_t *of = f->priv;
+	if (!of) return -EINVAL;
+	if (!oi->upper && copy_up_file(oi) != 0) return -ENOSPC;
+	if (of->real != oi->upper) {   /* opened on the lower layer: move this file up */
+		ovl_real_close(of, f);
+		if (ovl_real_open(of, oi->upper, f, f->flags & ~(O_TRUNC | O_CREAT)) != 0) return -EIO;
+	}
 	vfs_inode_t *real = oi->upper;
 	if (!real || !real->fops || !real->fops->write) return -EINVAL;
-	vfs_file_t tmp = *f; tmp.inode = real;
+	vfs_file_t tmp = *f; tmp.inode = real; tmp.priv = of->real_priv;
 	ssize_t r = real->fops->write(&tmp, buf, len);
 	f->pos = tmp.pos;
 	if (r > 0) { f->inode->size = real->size; }
 	return r;
 }
 
-static vfs_fops_t ovl_fops = { .open = ovl_open, .read = ovl_read, .write = ovl_write };
+static vfs_fops_t ovl_fops = { .open = ovl_open, .close = ovl_close, .read = ovl_read, .write = ovl_write };
 static vfs_fops_t ovl_dir_fops = { 0 };
 
 /* ── inode ops ───────────────────────────────────────────── */
