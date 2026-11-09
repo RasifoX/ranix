@@ -602,6 +602,7 @@ check "c-tcp-rel"    "OK"  "$(timeout 135 /bin/test_tcprel 2>/dev/null | tail -1
 check "c-udp"        "OK"  "$(timeout 10 /bin/test_udp 2>/dev/null)"
 check "c-ping6"      "OK"  "$(timeout 10 /bin/test_ping6 2>/dev/null)"
 check "c-udp6"       "OK"  "$(timeout 10 /bin/test_udp6 2>/dev/null)"
+check "c-sockaddr-len" "OK" "$(timeout 20 /bin/test_sockaddr_len 2>&1 | tail -1)"
 check "c-tcp6"       "OK"  "$(timeout 10 /bin/test_tcp6 2>/dev/null)"
 check "c-ipfrag"     "OK"  "$(timeout 10 /bin/test_ipfrag 2>/dev/null)"
 check "c-ip6frag"    "OK"  "$(timeout 10 /bin/test_ip6frag 2>/dev/null)"
