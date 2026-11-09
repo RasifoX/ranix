@@ -111,10 +111,17 @@ static long sys_readahead(int fd, off_t off, size_t count)
 	return fd_file(fd) ? 0 : -9;
 }
 
+/* syncfs(2), unlike sync(2), reports a writeback error, as fsync does: a caller
+ * that installs a file (ranix-boot) must learn that it did not reach the disk. */
 static long sys_syncfs(int fd)
 {
 	if (!fd_file(fd)) return -EBADF;
-	return sys_sync();
+	int r = 0;
+#if IS_ENABLED(CONFIG_FS_EXT2)
+	r = ext2_sync_all();
+#endif
+	int b = block_flush_all();
+	return r ? r : b;
 }
 
 static long sys_fsetxattr(int fd, const char *n, const void *v, size_t s, int flags)
