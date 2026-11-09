@@ -626,14 +626,16 @@ static void thp_collapse(process_t *p, uint64_t va)
 
 /* Locate the anonymous VMA covering [va, va+PAGE_SIZE). Huge VMAs are excluded:
  * they are eagerly populated and never carry a 4K demand-fault path, so the
- * per-page prefault/drop helpers must leave them alone. */
-static uint32_t anon_vma_at(process_t *p, uint64_t va)
+ * per-page prefault/drop helpers must leave them alone. *end (if asked) is where
+ * the VMA holding va ends, anonymous or not. */
+static uint32_t anon_vma_at(process_t *p, uint64_t va, uint64_t *end)
 {
 	uint32_t r = 0;
 	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);   /* siblings unmap concurrently */
 	for (vma_t *v = p->vm->vmas; v; v = v->next) {
 		if (va < v->vaddr || va >= v->vaddr + v->size) continue;
 		if ((v->flags & VMA_ANON) && !(v->flags & (VMA_HUGE | VMA_HUGE_1G))) r = v->flags;
+		if (end) *end = v->vaddr + v->size;
 		break;
 	}
 	spin_unlock_irq(&p->vm->fault_lock, cf);
@@ -665,7 +667,7 @@ static void mm_prefault(process_t *p, uint64_t addr, size_t len)
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 	for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-		uint32_t vfl = anon_vma_at(p, va);
+		uint32_t vfl = anon_vma_at(p, va, NULL);
 		if (!vfl) { va = vma_next_after(p, va); continue; }
 		if (!(vfl & VMA_READ)) continue;
 		if (arch_vm_get_paddr(p->vm->root, va)) continue;
@@ -688,15 +690,17 @@ static void mm_prefault(process_t *p, uint64_t addr, size_t len)
  * which is a permitted MADV_FREE outcome. */
 static void mm_drop(process_t *p, uint64_t addr, size_t len)
 {
-	extern uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	uint64_t end   = (addr + len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-	for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-		uint32_t vfl = anon_vma_at(p, va);
-		if (!vfl) { va = vma_next_after(p, va); continue; }
-		if (vfl & VMA_SHARED) continue;
-		if (!arch_vm_get_paddr(p->vm->root, va)) continue;
-		vm_unmap(p->vm, va);
+	/* a VMA at a time, and only its populated page tables (unmap_span): V8
+	 * drops gigabytes of mostly empty reservation in one call */
+	for (uint64_t va = start; va < end; ) {
+		uint64_t vend = 0;
+		uint32_t vfl = anon_vma_at(p, va, &vend);
+		if (!vfl) { va = vma_next_after(p, va) + PAGE_SIZE; continue; }
+		uint64_t hi = vend < end ? vend : end;
+		if (!(vfl & VMA_SHARED)) unmap_span(p, va, hi);
+		va = hi;
 	}
 }
 

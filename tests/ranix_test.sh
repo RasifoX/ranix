@@ -408,7 +408,9 @@ check "c-usercred"    "OK"            "$(timeout 10 /bin/test_usercred 2>&1 | ta
 check "c-credctl"     "OK"            "$(timeout 15 /bin/test_credctl 2>&1 | tail -1)"
 check "c-nettcp"      "OK"            "$(timeout 10 /bin/test_nettcp 2>&1 | tail -1)"
 check "c-uidmap"      "OK"            "$(timeout 10 /bin/test_uidmap 2>&1 | tail -1)"
-check "c-usernssuid"  "OK"            "$(timeout 15 /bin/test_usernssuid 2>&1 | tail -1)"
+US=$(timeout 15 /bin/test_usernssuid 2>&1)   # its detail lines show why, should it fail
+[ "$(echo "$US" | tail -1)" = OK ] || echo "$US" | sed 's/^/  usernssuid: /'
+check "c-usernssuid"  "OK"            "$(echo "$US" | tail -1)"
 check "c-fdinfo"      "OK"            "$(timeout 15 /bin/test_fdinfo 2>&1 | tail -1)"
 check "c-usernschroot" "OK"           "$(timeout 15 /bin/test_usernschroot 2>&1 | tail -1)"
 check "c-clonefs"     "OK"            "$(timeout 120 /bin/test_clonefs 2>&1 | tail -1)"
@@ -608,6 +610,7 @@ check "c-seccomp"    "OK"  "$(timeout 10 /bin/test_seccomp 2>/dev/null)"
 check "c-seccomp-trap" "OK" "$(timeout 15 /bin/test_seccomp_trap 2>&1 | tail -1)"
 check "c-seccomp-args" "OK" "$(timeout 15 /bin/test_seccomp_args 2>&1 | tail -1)"
 check "c-seccomp-tsync" "OK" "$(timeout 20 /bin/test_seccomp_tsync 2>&1 | tail -1)"
+check "c-madvise-big" "OK" "$(timeout 30 /bin/test_madvise_big 2>&1 | tail -1)"
 check "c-procmem"    "OK"  "$(timeout 10 /bin/test_procmem 2>/dev/null)"
 check "c-extable"    "OK"  "$(timeout 10 /bin/test_extable 2>/dev/null)"
 check "c-uts-ns"     "uts-ok" "$(timeout 10 /bin/test_uts 2>/dev/null)"
