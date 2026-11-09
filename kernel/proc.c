@@ -1253,6 +1253,8 @@ static void exit_hangup_session(process_t *p)
 			t->sig_pending |= (1UL << (SIGHUP - 1)) | (1UL << (SIGCONT - 1));
 			t->sig_pending &= ~((1UL << (SIGTSTP - 1)) | (1UL << (SIGTTIN - 1)) |
 			                    (1UL << (SIGTTOU - 1)));
+			sig_from_forget(t, (1UL << (SIGTSTP - 1)) | (1UL << (SIGTTIN - 1)) |
+			                   (1UL << (SIGTTOU - 1)));
 			if (t->job_stopped) { t->job_stopped = 0; t->job_continued = 1; }
 			if (t->state == PROC_SLEEPING) {
 				t->state = PROC_READY;

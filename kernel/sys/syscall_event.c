@@ -680,6 +680,7 @@ static ssize_t signalfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
             sig = 1;
             while (sig <= 64 && !((pending >> (sig-1)) & 1)) sig++;
             p->sig_pending &= ~(1ULL << (sig-1));
+            sig_from_forget(p, 1ULL << (sig-1));
         }
         spin_unlock_irq(&sched_lock, sf);
         if (sig) {

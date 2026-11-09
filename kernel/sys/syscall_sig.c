@@ -57,13 +57,27 @@ static long sys_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, s
 	return 0;
 }
 
-/* Process-directed signal to a pinned task. */
+/* Process-directed signal to a pinned task, from the caller (SI_USER). */
 static long kill_task(process_t *t, int sig)
 {
 	if (sig < 0 || sig > NSIG) return -EINVAL;
 	if (!signal_may_send(task_current(), t, sig)) return -EPERM;
-	if (sig) task_signal_group(t, sig);   /* any eligible thread */
-	return 0;
+	if (!sig) return 0;
+	pid_t pid;
+	uid_t uid;
+	signal_sender(t, &pid, &uid);
+	return task_signal_info(t, sig, SI_USER, pid, uid, 0, 0);   /* any eligible thread */
+}
+
+/* tgkill, tkill: to exactly thread t, from the caller (SI_TKILL). */
+static long tkill_task(process_t *t, int sig)
+{
+	if (!signal_may_send(task_current(), t, sig)) return -EPERM;
+	if (!sig) return 0;   /* 0 only probes */
+	pid_t pid;
+	uid_t uid;
+	signal_sender(t, &pid, &uid);
+	return task_signal_info(t, sig, SI_TKILL, pid, uid, 0, 1);
 }
 
 static long sys_kill(pid_t pid, int sig)
@@ -98,9 +112,8 @@ static long sys_tgkill(pid_t tgid, pid_t tid, int sig)
 	process_t *t = proc_get_user(tid);
 	process_t *leader = proc_get_user(tgid);
 	long r = 0;
-	if (!t || !leader || t->tgid != leader->pid) r = -3; /* tid not in tgid */
-	else if (!signal_may_send(task_current(), t, sig)) r = -1; /* EPERM */
-	else if (sig) task_signal(t, sig);   /* 0 only probes; 1 << -1 is no signal */
+	if (!t || !leader || t->tgid != leader->pid) r = -ESRCH; /* tid not in tgid */
+	else r = tkill_task(t, sig);
 	proc_put(leader);
 	proc_put(t);
 	return r;
@@ -114,9 +127,7 @@ static long sys_tkill(pid_t tid, int sig)
 	if (tid <= 0 || sig < 0 || sig > NSIG) return -EINVAL;
 	process_t *t = proc_get_user(tid);
 	if (!t) return -ESRCH;
-	long r = 0;
-	if (!signal_may_send(task_current(), t, sig)) r = -1; /* EPERM */
-	else if (sig) task_signal(t, sig);
+	long r = tkill_task(t, sig);
 	proc_put(t);
 	return r;
 }
@@ -170,9 +181,10 @@ static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_t
 	return ret;
 }
 
-/* sigqueue(2): post an RT signal to a process carrying si_value. The siginfo
- * the sender supplies is read from user memory; we only trust its si_code and
- * si_value and stamp the real sender pid/uid. */
+/* sigqueue(2): post a signal to a process carrying si_value. The siginfo the
+ * sender supplies is read from user memory; we only trust its si_code and
+ * si_value and stamp the real sender pid/uid (Linux keeps the caller's, which
+ * glibc and musl fill with the same getpid/getuid). */
 static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 {
 	if (sig <= 0 || sig > NSIG) return -EINVAL;
@@ -182,9 +194,13 @@ static long sys_rt_sigqueueinfo(pid_t pid, int sig, const void *uinfo)
 	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
 	process_t *p = proc_get_user(pid);
 	if (!p) return -ESRCH;
-	process_t *cur = task_current();
-	long r = signal_may_send(cur, p, sig)
-	       ? task_signal_info(p, sig, si_code, (pid_t)cur->pid, cur->euid, si_value, 0) : -1;
+	long r = -EPERM;
+	if (signal_may_send(task_current(), p, sig)) {
+		pid_t spid;
+		uid_t suid;
+		signal_sender(p, &spid, &suid);
+		r = task_signal_info(p, sig, si_code, spid, suid, si_value, 0);
+	}
 	proc_put(p);
 	return r;
 }
@@ -198,11 +214,14 @@ static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *ui
 	if (copy_from_user(&si_value, (const uint8_t *)uinfo + 24, sizeof(si_value)) != 0) return -EFAULT;
 	process_t *t = proc_get_user(tid);
 	process_t *leader = proc_get_user(tgid);
-	process_t *cur = task_current();
-	long r;
-	if (!t || !leader || t->tgid != leader->pid) r = -3;
-	else if (!signal_may_send(cur, t, sig)) r = -1;
-	else r = task_signal_info(t, sig, si_code, (pid_t)cur->pid, cur->euid, si_value, 1);
+	long r = -EPERM;
+	if (!t || !leader || t->tgid != leader->pid) r = -ESRCH;
+	else if (signal_may_send(task_current(), t, sig)) {
+		pid_t spid;
+		uid_t suid;
+		signal_sender(t, &spid, &suid);
+		r = task_signal_info(t, sig, si_code, spid, suid, si_value, 1);
+	}
 	proc_put(leader);
 	proc_put(t);
 	return r;

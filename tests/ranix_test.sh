@@ -731,6 +731,8 @@ check "container"     "container-ok" "$(timeout 12 /bin/test_container 2>/dev/nu
 check "c-ptrace"     "OK"  "$(timeout 8 /bin/test_ptrace 2>/dev/null)"
 check "c-ptracestop" "OK"  "$(timeout 20 /bin/test_ptracestop 2>/dev/null)"
 check "c-ptrace-siginfo" "OK" "$(timeout 20 /bin/test_ptrace_siginfo 2>&1 | tail -1)"
+KS=$(timeout 20 /bin/test_kill_siginfo 2>&1); echo "$KS" | grep -v "^OK$" | sed 's/^/  kill-siginfo: /'
+check "c-kill-siginfo" "OK" "$(echo "$KS" | tail -1)"
 check "c-singlestep" "OK"  "$(timeout 8 /bin/test_singlestep 2>/dev/null)"
 
 # ── 40. misc ─────────────────────────────────────────────────
