@@ -605,6 +605,7 @@ typedef struct {
 #define PROC_F_ASESS_DENIED       92
 #define PROC_F_HWDIAG             93
 #define PROC_F_SYS_RANIX_DEADLINE 94
+#define PROC_F_SYS_TAINTED        95
 
 /* kernel.kptr_restrict: 0 = show kernel pointers, 1 = hide from non-root, 2 =
  * hide from all. Default 1. No raw kernel pointer reaches /proc today, so this
@@ -714,6 +715,7 @@ static const struct {
 	{ "syscall", PROC_F_P_SYSCALL },
 	{ "auxv",    PROC_F_P_AUXV    },
 	{ "mountinfo", PROC_F_P_MOUNTINFO },
+	{ "mounts",    PROC_F_MOUNTS },        /* what /proc/mounts shows */
 	{ "oom_score_adj", PROC_F_P_OOMADJ },
 	{ "oom_score", PROC_F_P_OOMSCORE },
 };
@@ -815,6 +817,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_CORE_PATTERN: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_TAINTED: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, "0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -2628,8 +2631,9 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "kptr_restrict",  PROC_F_SYS_KPTR_RESTRICT  },
 	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
 	{ "ranix_deadline", PROC_F_SYS_RANIX_DEADLINE },
+	{ "tainted",        PROC_F_SYS_TAINTED },   /* nothing taints this kernel: always 0 */
 };
-#define SYS_KERNEL_N 10
+#define SYS_KERNEL_N 11
 
 /* /proc/sys/vm — overcommit_memory lives here in Linux (not under kernel.*) */
 static procfs_sysfile_t sys_vm_files[] = {
