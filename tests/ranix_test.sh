@@ -412,6 +412,7 @@ check "c-usernssuid"  "OK"            "$(timeout 15 /bin/test_usernssuid 2>&1 | 
 check "c-fdinfo"      "OK"            "$(timeout 15 /bin/test_fdinfo 2>&1 | tail -1)"
 check "c-usernschroot" "OK"           "$(timeout 15 /bin/test_usernschroot 2>&1 | tail -1)"
 check "c-clonefs"     "OK"            "$(timeout 120 /bin/test_clonefs 2>&1 | tail -1)"
+check "c-nspid"       "OK"            "$(timeout 10 /bin/test_nspid 2>&1 | tail -1)"
 check "c-ofdlock"     "OK"            "$(timeout 8 /bin/test_ofdlock 2>&1 | tail -1)"
 check "c-ps2aux"      "OK"            "$(timeout 10 /bin/test_ps2aux 2>&1 | tail -1)"
 check "c-atflags"     "OK"            "$(timeout 8 /bin/test_atflags 2>/dev/null)"

@@ -281,6 +281,25 @@ static uint64_t proc_rss_bytes(process_t *p)
 	return n > 0 ? (uint64_t)n : 0;
 }
 
+/* "NStgid:" / "NSpid:" lines (Linux): the task's number in each pid namespace
+ * from the reader's own down to the task's, tab-separated. A sandboxed task
+ * (Chromium's renderer) shows two or more. */
+static void pb_ns_ids(pb_t *b, const char *label, process_t *t)
+{
+	/* pidnrs[] runs from the initial namespace (0) to the task's own */
+	pid_namespace_t *mine = current_pid_ns();
+	int from = 0;
+	for (int i = 0; i < t->pid_levels; i++)
+		if (t->pidnrs[i].ns == mine) { from = i; break; }
+	pb_str(b, label);
+	if (t->pid_levels == 0) { pb_char(b, '\t'); pb_u64(b, (uint64_t)t->pid); }
+	for (int i = from; i < t->pid_levels; i++) {
+		pb_char(b, '\t');
+		pb_u64(b, (uint64_t)t->pidnrs[i].nr);
+	}
+	pb_char(b, '\n');
+}
+
 static int fill_proc_status(char *buf, size_t sz, int pid)
 {
 	process_t *p = find_proc(pid);
@@ -294,6 +313,10 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	pb_str(&b, "Tgid:\t"); pb_u64(&b, p->tgid ? p->tgid : p->pid); pb_char(&b, '\n');
 	pb_str(&b, "Pid:\t");  pb_u64(&b, p->pid); pb_char(&b, '\n');
 	pb_str(&b, "PPid:\t"); pb_u64(&b, p->ppid); pb_char(&b, '\n');
+	process_t *leader = find_proc(p->tgid ? p->tgid : p->pid);
+	pb_ns_ids(&b, "NStgid:", leader ? leader : p);
+	pb_ns_ids(&b, "NSpid:", p);
+	if (leader) proc_put(leader);
 	pb_str(&b, "TracerPid:\t"); pb_u64(&b, (uint64_t)p->tracer); pb_char(&b, '\n');
 	pb_str(&b, "PtraceStop:\t"); pb_u64(&b, (uint64_t)p->ptrace_stop); pb_char(&b, ' ');
 	pb_u64(&b, (uint64_t)p->ptrace_stop_reported); pb_char(&b, ' ');
