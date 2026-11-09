@@ -312,6 +312,135 @@ static uint64_t futex_deadline_ticks(int64_t end_ns)
 	return kernel_ticks + (uint64_t)rem / (1000000000 / TIMER_HZ) + 1;
 }
 
+/* The wait's deadline from the user's timeout, as an absolute mono_time in
+ * *end_ns; *timed stays 0 for no timeout (or one too far off to matter). */
+static long futex_deadline(int op, int cmd, linux_timespec_t *timeout, int64_t *end_ns_out, int *timed_out)
+{
+	int timed = 0;
+	int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
+	if (timeout) {
+		linux_timespec_t kts;
+		if (copy_from_user(&kts, timeout, sizeof(kts)) != 0) return -EFAULT;
+		if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L) return -EINVAL;
+		if (kts.tv_sec > 0x7fffffffffffffffLL / 1000000000LL - 2) timeout = NULL;
+		else {
+			/* FUTEX_WAIT's timeout is a relative span, FUTEX_WAIT_BITSET's an
+			 * absolute deadline on the same boot-relative clock mono_time
+			 * reports. Track the deadline in ns and decide the timeout against
+			 * mono_time — kernel_ticks does not track wall time under TCG, so
+			 * it serves only as the deadline-sweep wake-up hint below. */
+			int64_t ns, nn; mono_time(&ns, &nn);
+			int64_t now_ns = ns * 1000000000LL + nn;
+			int64_t want   = kts.tv_sec * 1000000000LL + kts.tv_nsec;
+			end_ns = (cmd == 9) ? want : now_ns + want;
+			/* FUTEX_CLOCK_REALTIME: that instant is wall-clock time (glibc's
+			 * pthread_cond_timedwait), decades past the boot clock: move it onto
+			 * mono_time, or the wait never times out. */
+			if (cmd == 9 && (op & FUTEX_CLOCK_REALTIME)) {
+				int64_t rs, rn; real_time(&rs, &rn);
+				end_ns = want - ((rs * 1000000000LL + rn) - now_ns);
+			}
+			timed  = 1;
+		}
+	}
+	*end_ns_out = end_ns; *timed_out = timed;
+	return 0;
+}
+
+/* FUTEX_WAIT and FUTEX_WAIT_BITSET: sleep while *uaddr == val, until woken, a
+ * delivered signal, a changed word or the deadline. */
+static long futex_wait(process_t *self, void *mm, uint32_t *uaddr, int op, int cmd, uint32_t val,
+                       linux_timespec_t *timeout)
+{
+	int timed = 0;
+	int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
+	long err = futex_deadline(op, cmd, timeout, &end_ns, &timed);
+	if (err) return err;
+	if (task_has_actionable_signal()) return -EINTR;   /* the first sleep would not see it */
+	futex_q_t q = { self, uaddr, mm, 0, NULL };
+	/* Fault the word in before taking the lock: the fault path can sleep and
+	 * allocate, which it must not do under an IRQ-off spinlock. */
+	uint32_t cur;
+	if ((uintptr_t)uaddr & 3) return -EINVAL;
+	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
+	uint64_t f = spin_lock_irq(&futex_lock);
+	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -EFAULT; }
+	if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -EAGAIN; }
+	unsigned h = futex_hash(mm, uaddr);
+	q.next = futex_bucket[h]; futex_bucket[h] = &q;
+	uint64_t fs = spin_lock_irq(&sched_lock);
+	self->state = PROC_SLEEPING;
+	/* event-driven: woken by futex_do_wake or task_signal. timed waits also
+	 * arm wake_deadline so the sched_tick deadline sweep fires a wake-up — no
+	 * per-tick blanket poll either way. */
+	self->sleeping_on_queue = 1;
+	if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
+	             sched_note_wake_deadline(self->wake_deadline); }
+	spin_unlock_irq(&sched_lock, fs);
+	spin_unlock_irq(&futex_lock, f);
+
+	for (;;) {
+		arch_yield();
+		f = spin_lock_irq(&futex_lock);
+		if (q.woken) { self->wake_deadline = 0; spin_unlock_irq(&futex_lock, f); return 0; }
+		/* Only a signal that will actually be delivered interrupts the wait.
+		 * An ignored (SIG_IGN) or non-fatal-default pending signal must not —
+		 * a process that ignores SIGPIPE would otherwise get a spurious EINTR
+		 * on a condvar wait. Mirrors pipe/event's task_has_actionable_signal. */
+		int sig = task_has_actionable_signal();
+		uint32_t c2;
+		int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
+		int tmo  = 0;
+		if (timed) { int64_t s, n; mono_time(&s, &n); tmo = (s * 1000000000LL + n) >= end_ns; }
+		if (sig || vchg || tmo) {
+			self->wake_deadline = 0;
+			futex_unlink(&q);
+			spin_unlock_irq(&futex_lock, f);
+			return sig ? -4 : (tmo ? -110 : -11);
+		}
+		fs = spin_lock_irq(&sched_lock);
+		self->state = PROC_SLEEPING;
+		self->sleeping_on_queue = 1;
+		if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
+		             sched_note_wake_deadline(self->wake_deadline); }
+		spin_unlock_irq(&sched_lock, fs);
+		spin_unlock_irq(&futex_lock, f);
+	}
+}
+
+/* FUTEX_WAKE_OP: change *uaddr2 by the op in val3, wake val waiters on uaddr and,
+ * when the old value passes val3's comparison, up to val2 (in timeout) on uaddr2. */
+static long futex_wake_op(void *mm, uint32_t *uaddr, uint32_t val, uint32_t *uaddr2,
+                          linux_timespec_t *timeout, uint32_t val3)
+{
+	if (!uaddr2) return -EINVAL;
+	uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
+	uint32_t oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
+	if (op3 & 8) { oparg = 1u << (oparg & 31); op3 &= ~8u; }
+	uint32_t oldval = 0;
+	if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -EFAULT;
+	uint32_t newval = oldval;
+	switch (op3) {
+	case 0: newval  = oparg; break; case 1: newval += oparg; break;
+	case 2: newval |= oparg; break; case 3: newval &= ~oparg; break;
+	case 4: newval ^= oparg; break;
+	}
+	if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -EFAULT;
+	uint64_t f = spin_lock_irq(&futex_lock);
+	int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
+	int do2 = 0;
+	switch (cmp3) {
+	case 0: do2 = (oldval == cmparg); break; case 1: do2 = (oldval != cmparg); break;
+	case 2: do2 = ((int32_t)oldval <  (int32_t)cmparg); break;
+	case 3: do2 = ((int32_t)oldval <= (int32_t)cmparg); break;
+	case 4: do2 = ((int32_t)oldval >  (int32_t)cmparg); break;
+	case 5: do2 = ((int32_t)oldval >= (int32_t)cmparg); break;
+	}
+	if (do2) woken += futex_do_wake(mm, uaddr2, (int)(uintptr_t)timeout, NULL, 0);
+	spin_unlock_irq(&futex_lock, f);
+	return woken;
+}
+
 static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
                       linux_timespec_t *timeout, uint32_t *uaddr2, uint32_t val3)
 {
@@ -323,85 +452,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 	process_t *self = task_current();
 	void *mm = self->vm;
 
-	if (cmd == FUTEX_WAIT || cmd == 9 /* FUTEX_WAIT_BITSET */) {
-		int timed = 0;
-		int64_t end_ns = 0;   /* absolute mono_time deadline (ns) */
-		if (timeout) {
-			linux_timespec_t kts;
-			if (copy_from_user(&kts, timeout, sizeof(kts)) != 0) return -EFAULT;
-			if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L) return -EINVAL;
-			if (kts.tv_sec > 0x7fffffffffffffffLL / 1000000000LL - 2) timeout = NULL;
-			else {
-				/* FUTEX_WAIT's timeout is a relative span, FUTEX_WAIT_BITSET's an
-				 * absolute deadline on the same boot-relative clock mono_time
-				 * reports. Track the deadline in ns and decide the timeout against
-				 * mono_time — kernel_ticks does not track wall time under TCG, so
-				 * it serves only as the deadline-sweep wake-up hint below. */
-				int64_t ns, nn; mono_time(&ns, &nn);
-				int64_t now_ns = ns * 1000000000LL + nn;
-				int64_t want   = kts.tv_sec * 1000000000LL + kts.tv_nsec;
-				end_ns = (cmd == 9) ? want : now_ns + want;
-				/* FUTEX_CLOCK_REALTIME: that instant is wall-clock time (glibc's
-				 * pthread_cond_timedwait), decades past the boot clock: move it onto
-				 * mono_time, or the wait never times out. */
-				if (cmd == 9 && (op & FUTEX_CLOCK_REALTIME)) {
-					int64_t rs, rn; real_time(&rs, &rn);
-					end_ns = want - ((rs * 1000000000LL + rn) - now_ns);
-				}
-				timed  = 1;
-			}
-		}
-		if (task_has_actionable_signal()) return -EINTR;   /* the first sleep would not see it */
-		futex_q_t q = { self, uaddr, mm, 0, NULL };
-		/* Fault the word in before taking the lock: the fault path can sleep and
-		 * allocate, which it must not do under an IRQ-off spinlock. */
-		uint32_t cur;
-		if ((uintptr_t)uaddr & 3) return -EINVAL;
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
-		uint64_t f = spin_lock_irq(&futex_lock);
-		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -EFAULT; }
-		if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -EAGAIN; }
-		unsigned h = futex_hash(mm, uaddr);
-		q.next = futex_bucket[h]; futex_bucket[h] = &q;
-		uint64_t fs = spin_lock_irq(&sched_lock);
-		self->state = PROC_SLEEPING;
-		/* event-driven: woken by futex_do_wake or task_signal. timed waits also
-		 * arm wake_deadline so the sched_tick deadline sweep fires a wake-up — no
-		 * per-tick blanket poll either way. */
-		self->sleeping_on_queue = 1;
-		if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
-		             sched_note_wake_deadline(self->wake_deadline); }
-		spin_unlock_irq(&sched_lock, fs);
-		spin_unlock_irq(&futex_lock, f);
-
-		for (;;) {
-			arch_yield();
-			f = spin_lock_irq(&futex_lock);
-			if (q.woken) { self->wake_deadline = 0; spin_unlock_irq(&futex_lock, f); return 0; }
-			/* Only a signal that will actually be delivered interrupts the wait.
-			 * An ignored (SIG_IGN) or non-fatal-default pending signal must not —
-			 * a process that ignores SIGPIPE would otherwise get a spurious EINTR
-			 * on a condvar wait. Mirrors pipe/event's task_has_actionable_signal. */
-			int sig = task_has_actionable_signal();
-			uint32_t c2;
-			int vchg = (copy_from_user(&c2, uaddr, sizeof(c2)) == 0 && c2 != val);
-			int tmo  = 0;
-			if (timed) { int64_t s, n; mono_time(&s, &n); tmo = (s * 1000000000LL + n) >= end_ns; }
-			if (sig || vchg || tmo) {
-				self->wake_deadline = 0;
-				futex_unlink(&q);
-				spin_unlock_irq(&futex_lock, f);
-				return sig ? -4 : (tmo ? -110 : -11);
-			}
-			fs = spin_lock_irq(&sched_lock);
-			self->state = PROC_SLEEPING;
-			self->sleeping_on_queue = 1;
-			if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
-			             sched_note_wake_deadline(self->wake_deadline); }
-			spin_unlock_irq(&sched_lock, fs);
-			spin_unlock_irq(&futex_lock, f);
-		}
-	}
+	if (cmd == FUTEX_WAIT || cmd == 9 /* FUTEX_WAIT_BITSET */)
+		return futex_wait(self, mm, uaddr, op, cmd, val, timeout);
 
 	if (cmd == FUTEX_WAKE) {
 		uint64_t f = spin_lock_irq(&futex_lock);
@@ -410,34 +462,8 @@ static long sys_futex(uint32_t *uaddr, int op, uint32_t val,
 		return woken;
 	}
 
-	if (cmd == FUTEX_WAKE_OP) {
-		if (!uaddr2) return -EINVAL;
-		uint32_t op3 = (val3 >> 28) & 0xf, cmp3 = (val3 >> 24) & 0xf;
-		uint32_t oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
-		if (op3 & 8) { oparg = 1u << (oparg & 31); op3 &= ~8u; }
-		uint32_t oldval = 0;
-		if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) != 0) return -EFAULT;
-		uint32_t newval = oldval;
-		switch (op3) {
-		case 0: newval  = oparg; break; case 1: newval += oparg; break;
-		case 2: newval |= oparg; break; case 3: newval &= ~oparg; break;
-		case 4: newval ^= oparg; break;
-		}
-		if (copy_to_user(uaddr2, &newval, sizeof(newval)) != 0) return -EFAULT;
-		uint64_t f = spin_lock_irq(&futex_lock);
-		int woken = futex_do_wake(mm, uaddr, (int)val, NULL, 0);
-		int do2 = 0;
-		switch (cmp3) {
-		case 0: do2 = (oldval == cmparg); break; case 1: do2 = (oldval != cmparg); break;
-		case 2: do2 = ((int32_t)oldval <  (int32_t)cmparg); break;
-		case 3: do2 = ((int32_t)oldval <= (int32_t)cmparg); break;
-		case 4: do2 = ((int32_t)oldval >  (int32_t)cmparg); break;
-		case 5: do2 = ((int32_t)oldval >= (int32_t)cmparg); break;
-		}
-		if (do2) woken += futex_do_wake(mm, uaddr2, (int)(uintptr_t)timeout, NULL, 0);
-		spin_unlock_irq(&futex_lock, f);
-		return woken;
-	}
+	if (cmd == FUTEX_WAKE_OP)
+		return futex_wake_op(mm, uaddr, val, uaddr2, timeout, val3);
 
 	if (cmd == FUTEX_REQUEUE || cmd == 4 /* FUTEX_CMP_REQUEUE */) {
 		if (cmd == 4) {
