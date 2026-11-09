@@ -44,6 +44,10 @@ int main(void)
 	m = mmap(NULL, 4096, PROT_WRITE, MAP_SHARED, fd, 0);
 	errno = m == MAP_FAILED ? errno : 0;
 	want("mmap of a closed fd", m == MAP_FAILED ? -1 : 0, EBADF);
+	/* Linux looks the fd up before it checks the length (mmap08 passes 0) */
+	m = mmap(NULL, 0, PROT_WRITE, MAP_SHARED, fd, 0);
+	errno = m == MAP_FAILED ? errno : 0;
+	want("mmap of a closed fd, length 0", m == MAP_FAILED ? -1 : 0, EBADF);
 	unlink("/tmp/argcheck");
 	puts(bad ? "FAIL" : "OK");
 	return bad != 0;
