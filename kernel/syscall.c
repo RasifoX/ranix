@@ -1081,6 +1081,7 @@ void syscall_handle(arch_context_t *ctx)
 
 	task_current()->ctx = ctx;
 	task_current()->walk_denied = 0;
+	task_current()->walk_err = 0;
 	ptrace_stop_check(ctx, 0);
 
 	long sargs[6] = { arg0, arg1, arg2, arg3, arg4, arg5 };
@@ -1103,9 +1104,12 @@ void syscall_handle(arch_context_t *ctx)
 
 	if (fd0_pin) fput(fd0_pin);
 
-	/* Every caller reports a failed walk as ENOENT. A session keeps that answer:
-	 * what it may not search is simply not in its view. */
-	if (ret == -ENOENT && task_current()->walk_denied && !task_current()->asess) ret = -EACCES;
+	/* Every caller reports a failed walk as ENOENT; the walk noted why. A session
+	 * keeps that answer: what it may not search is simply not in its view. */
+	if (ret == -ENOENT && !task_current()->asess) {
+		if (task_current()->walk_err) ret = -task_current()->walk_err;
+		else if (task_current()->walk_denied) ret = -EACCES;
+	}
 
 	vfs_walk_done(task_current());
 	slowsys_exit(n, ret, sargs, ss_s, ss_ns);
