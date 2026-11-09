@@ -25,6 +25,9 @@
 #define CLONE_NEWNET  0x40000000
 #define CLONE_NEWCGROUP 0x02000000
 #define CLONE_NEWTIME 0x00000080
+/* the namespace flags clone(2) takes (CLONE_NEWTIME is not one: clone's low byte is the exit signal) */
+#define CLONE_NEW_ANY (CLONE_NEWNS | CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWIPC | \
+                       CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWCGROUP)
 
 /* shared global allocator for namespace identities (/proc/<pid>/ns/*) */
 unsigned long ns_inum_alloc(void);
