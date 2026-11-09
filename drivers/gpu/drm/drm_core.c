@@ -40,9 +40,7 @@ static uint32_t   drm_next_magic = 1;
 #define EVENT_SPACE 4096
 #define SYNCOBJ_MAX 256
 
-extern uint64_t slowsys_ns(void);          /* until the kernel has a mono_ns() in a header */
-
-uint64_t drm_now_ns(void) { return slowsys_ns(); }
+uint64_t drm_now_ns(void) { return mono_ns(); }
 
 void drm_sleep_ms(uint32_t ms) { task_sleep_until(kernel_ticks + ms); }   /* 1 kHz tick */
 
