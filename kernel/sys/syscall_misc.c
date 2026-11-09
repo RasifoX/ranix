@@ -473,10 +473,7 @@ static long sys_fchdir(int fd)
 	if (vfs_may_enter(f->inode)) return -13;   /* EACCES, as chdir() */
 	const char *fp = f->lpath ? f->lpath : f->path;   /* lpath: too long for path[] */
 	if (fp[0] != '/') return -20;
-	size_t fl = strlen(fp);
-	if (fl >= sizeof(p->cwd)) return -36; /* ENAMETOOLONG */
-	memcpy(p->cwd, fp, fl + 1);
-	return 0;
+	return fs_set_cwd(p->fs, fp);
 }
 
 static long sys_creat(const char *path, mode_t mode)

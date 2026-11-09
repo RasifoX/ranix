@@ -622,7 +622,7 @@ void syscall_handle(arch_context_t *ctx)
 	case SYS_ARCH_RT_SIGACTION: ret = sys_rt_sigaction((int)arg0, (const sigaction_t*)arg1, (sigaction_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGPROCMASK: ret = sys_rt_sigprocmask((int)arg0, (const uint64_t*)arg1, (uint64_t*)arg2, (size_t)arg3); break;
 	case SYS_ARCH_RT_SIGRETURN: sys_rt_sigreturn(ctx); task_current()->in_syscall = 0; return; /* returns directly (no ret value), but must still clear in_syscall or CPU-time accounting stays stuck in "kernel" */
-	case SYS_ARCH_VFORK:  ret = sys_vfork(0); break;
+	case SYS_ARCH_VFORK:  ret = sys_vfork(0, 0); break;
 #ifdef SYS_ARCH_FORK
 	case SYS_ARCH_FORK:   ret = sys_fork(); break;
 #endif
@@ -646,7 +646,7 @@ void syscall_handle(arch_context_t *ctx)
 #endif
 		   ) { ret = -1; break; }
 		if (flags & CLONE_VFORK) {
-			ret = sys_vfork((uint64_t)arg1);   /* arg1 = child stack, if any */
+			ret = sys_vfork((uint64_t)arg1, flags);   /* arg1 = child stack, if any */
 		} else if (flags & CLONE_VM) {
 			/* Thread: share address space */
 			uint64_t newsp  = (uint64_t)arg1;
@@ -665,7 +665,7 @@ void syscall_handle(arch_context_t *ctx)
 			 * distinct flags sharing the one ctid argument. */
 			uint32_t *clear_tid = (flags & CLONE_CTID)    ? ctid_arg : NULL;
 			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? ctid_arg : NULL;
-			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1));
+			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1), (flags & CLONE_FS) != 0);
 		} else {
 			ret = (long)proc_fork(flags, (uint64_t)arg1);   /* its own stack, if it gave one */
 		}
@@ -695,13 +695,13 @@ void syscall_handle(arch_context_t *ctx)
 			/* posix_spawn: a child sharing nothing but running on its own stack
 			 * until it execs. CLONE_THREAD is what marks a real thread; VFORK
 			 * without it is a spawn, so give it a private (COW) space + that stack. */
-			ret = sys_vfork(newsp);
+			ret = sys_vfork(newsp, flags);
 		} else if (flags & CLONE_VM) {
 			uint32_t *ptid = (flags & CLONE_PTID) ? (uint32_t*)ca.parent_tid : NULL;
 			uint64_t tls   = (flags & CLONE_SETTLS) ? ca.tls : 0;
 			uint32_t *clear_tid = (flags & CLONE_CTID)    ? (uint32_t*)ca.child_tid : NULL;
 			uint32_t *set_tid   = (flags & CLONE_CSETTID) ? (uint32_t*)ca.child_tid : NULL;
-			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1));
+			ret = (long)proc_clone_thread_ex(newsp, tls, clear_tid, ptid, set_tid, (flags & CLONE_THREAD) ? 0 : (int)((flags & 0xC00) | 1), (flags & CLONE_FS) != 0);
 		} else {
 			ret = (long)proc_fork(flags, ca.stack ? newsp : 0);
 		}

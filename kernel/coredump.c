@@ -114,9 +114,11 @@ void coredump(process_t *proc, int sig, arch_context_t *tf)
 		if (n >= sizeof(path)) return;
 		memcpy(path, core_pattern, n + 1);
 	} else {
-		const char *cwd = proc->cwd[0] ? proc->cwd : "/";
+		fs_path_t *held = fs_cwd_get(proc->fs);
+		const char *cwd = held->s;
 		int n = 0;
 		for (const char *s = cwd; *s && n < 200; s++) path[n++] = *s;
+		fs_path_put(held);
 		if (n == 0 || path[n - 1] != '/') path[n++] = '/';
 		for (const char *s = core_pattern; *s && n < 250; s++) path[n++] = *s;
 		path[n] = '\0';

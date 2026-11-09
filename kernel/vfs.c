@@ -268,8 +268,13 @@ static int walk_anchored(const char *start, const char *end)
 {
 	process_t *p = task_current();
 	size_t n = (size_t)(end - start);
-	return p && (on_anchor(p->cwd, start, n) || on_anchor(p->walk_anchor[0], start, n) ||
-	             on_anchor(p->walk_anchor[1], start, n));
+	if (!p) return 0;
+	if (on_anchor(p->walk_anchor[0], start, n) || on_anchor(p->walk_anchor[1], start, n))
+		return 1;
+	fs_path_t *cwd = fs_cwd_get(p->fs);   /* held: a CLONE_FS sibling may chdir */
+	int r = on_anchor(cwd->s, start, n);
+	fs_path_put(cwd);
+	return r;
 }
 
 /* for the rest of this syscall; without memory the walk just stays strict */
@@ -1086,7 +1091,8 @@ static vfs_dentry_t *resolve_walk_rp(const char *path, unsigned long *mflags, ch
 	/* chroot: an absolute path is relative to the process's own root, not the
 	 * global one. NULL ->root means it sees "/" as the global root. */
 	process_t *_cur = task_current();
-	w.proc_root = (_cur && _cur->root) ? (vfs_dentry_t *)_cur->root : root_dentry;
+	vfs_dentry_t *_root = fs_root_of((struct process *)_cur);
+	w.proc_root = _root ? _root : root_dentry;
 
 	/* a mount's root has ->parent set to outside the mount, so a process root that
 	 * is a mountpoint is left through this dentry, not through proc_root */
@@ -1545,7 +1551,7 @@ static void dentry_abspath(vfs_dentry_t *d, char *out, size_t sz)
 	process_t *cur = task_current();
 	for (vfs_dentry_t *c = d; c && n < 64; c = c->parent) {
 		if (!c->parent || c->parent == c) break;   /* reached root */
-		if (cur && c == cur->root) break;          /* nothing above it is visible */
+		if (cur && c == fs_root_of((struct process *)cur)) break;   /* nothing above it is visible */
 		chain[n++] = c;
 	}
 	if (n == 0) { if (sz > 1) { out[0] = '/'; out[1] = '\0'; } else if (sz) out[0] = '\0'; return; }
@@ -1564,7 +1570,8 @@ static void dentry_abspath(vfs_dentry_t *d, char *out, size_t sz)
 static vfs_dentry_t *my_root(void)
 {
 	process_t *c = task_current();
-	return c && c->root ? (vfs_dentry_t *)c->root : root_dentry;
+	vfs_dentry_t *r = fs_root_of((struct process *)c);
+	return r ? r : root_dentry;
 }
 
 size_t vfs_proc_mounts(char *buf, size_t sz)
@@ -1968,7 +1975,7 @@ int vfs_open(const char *path, int flags, mode_t mode)
 {
 	process_t *p = task_current();
 	if (!p->fds) return -1;
-	return vfs_open_fds(p->fds, p->euid, p->egid, p->umask, path, flags, mode);
+	return vfs_open_fds(p->fds, p->euid, p->egid, fs_umask_of((struct process *)p), path, flags, mode);
 }
 
 /* lexical canonicalization of an absolute path (collapse "//", ".", "..").
@@ -2381,7 +2388,7 @@ int vfs_mkdir(const char *path, mode_t mode)
 	if (pr) { kfree(dir_path); return pr; }
 	if (!parent->inode->iops->mkdir) { kfree(dir_path); return -1; }   /* EPERM, as Linux */
 
-	mode_t cmode = mode & ~(p ? p->umask : 022);
+	mode_t cmode = mode & ~fs_umask_of((struct process *)p);
 	int mr = parent->inode->iops->mkdir(parent->inode, dname, cmode);
 	if (mr != 0) { kfree(dir_path); return mr < -1 ? mr : -1; }   /* a racing mkdir -p needs EEXIST */
 
@@ -2409,7 +2416,7 @@ int vfs_mkfifo(const char *path, mode_t mode)
 	int pr = may_change(parent->inode);
 	if (pr) { kfree(dir_path); return pr; }
 
-	mode_t cmode = (mode & 07777 & ~(p ? p->umask : 022)) | S_IFIFO;
+	mode_t cmode = (mode & 07777 & ~fs_umask_of((struct process *)p)) | S_IFIFO;
 	int r = parent->inode->iops->mknod(parent->inode, fname, cmode, 0);
 	if (r != 0) { kfree(dir_path); return r; }
 	vfs_inode_t *in = parent->inode->iops->lookup(parent->inode, fname);

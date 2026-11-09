@@ -35,8 +35,10 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 	process_t *p = task_current();
 	const char *base;
 	vfs_file_t *f = NULL;   /* pinned: base points into it, a sibling may close dirfd */
+	fs_path_t *cwd = NULL;  /* held: a CLONE_FS sibling may chdir meanwhile */
 	if (dirfd == AT_FDCWD) {
-		base = p->cwd;
+		cwd = fs_cwd_get(p->fs);
+		base = cwd->s;
 	} else {
 		f = (p && p->fds) ? fget(p->fds, dirfd) : NULL;
 		if (!f) return -9;                                      /* EBADF */
@@ -47,11 +49,12 @@ static int resolve_path(char *out, int dirfd, const char *upath)
 		vfs_walk_anchor(p, base);
 	}
 	int blen = strlen(base), plen = strlen(out);
-	if (blen + 1 + plen >= PATH_MAX) { fput(f); return -36; }
+	if (blen + 1 + plen >= PATH_MAX) { fput(f); fs_path_put(cwd); return -36; }
 	char *tmp = kmalloc(PATH_MAX);
-	if (!tmp) { fput(f); return -12; }
+	if (!tmp) { fput(f); fs_path_put(cwd); return -12; }
 	memcpy(tmp, base, blen);
 	fput(f);
+	fs_path_put(cwd);
 	if (blen == 0 || tmp[blen - 1] != '/') tmp[blen++] = '/';
 	memcpy(tmp + blen, out, plen);
 	tmp[blen + plen] = '\0';
@@ -614,10 +617,7 @@ static long sys_chdir(const char *path)
 	path_normalize(kp);
 	process_t *p = task_current();
 	if (p->euid && access_check(kp, 1, 1)) return -13; /* EACCES */
-	int n = strlen(kp);
-	if ((size_t)(n + 1) > sizeof(p->cwd)) return -36;
-	memcpy(p->cwd, kp, (size_t)(n + 1));
-	return 0;
+	return fs_set_cwd(p->fs, kp);
 }
 
 static long sys_chroot(const char *path)
@@ -634,12 +634,12 @@ static long sys_chroot(const char *path)
 	if (!S_ISDIR(d->inode->mode)) return -20;   /* ENOTDIR */
 	/* a generated directory has no dentry to hold: an empty root stands in */
 	if (vfs_dentry_is_volatile(d)) d = vfs_empty_root();
-	else vfs_dentry_keep(d);   /* p->root points at it: the dcache must not drop it */
-	p->root = d;
+	else vfs_dentry_keep(d);   /* the root points at it: the dcache must not drop it */
 	/* cwd is now relative to the new root; reset to "/" so a path that pointed
-	 * outside the jail can't be reached (simple, escape-safe). */
-	p->cwd[0] = '/'; p->cwd[1] = '\0';
-	return 0;
+	 * outside the jail can't be reached (simple, escape-safe). Shared under
+	 * CLONE_FS: the tasks sharing it move with it, as on Linux. */
+	p->fs->root = d;
+	return fs_set_cwd(p->fs, "/");
 }
 
 static long sys_pivot_root(const char *new_root, const char *put_old)
@@ -670,8 +670,8 @@ static long sys_pivot_root(const char *new_root, const char *put_old)
 	 * pivot_roots and then execs the real init moves the whole process tree to
 	 * the new root without global mount-tree surgery (initramfs→disk switch). */
 	vfs_dentry_keep(dn);
-	p->root = dn;
-	p->cwd[0] = '/'; p->cwd[1] = '\0';
+	p->fs->root = dn;
+	ret = fs_set_cwd(p->fs, "/");
 pr_out:
 	kfree(knew); kfree(kold);
 	return ret;
@@ -680,11 +680,12 @@ pr_out:
 static long sys_getcwd(char *buf, size_t size)
 {
 	if (!buf || size == 0) return -14;
-	process_t *p = task_current();
-	int n = strlen(p->cwd);
-	if ((size_t)(n + 1) > size) return -34; /* ERANGE */
-	if (copy_to_user(buf, p->cwd, n + 1) != 0) return -14;
-	return (long)(n + 1);
+	fs_path_t *cwd = fs_cwd_get(task_current()->fs);
+	int n = strlen(cwd->s);
+	long r = (size_t)(n + 1) > size ? -34                         /* ERANGE */
+	       : copy_to_user(buf, cwd->s, n + 1) != 0 ? -14 : (long)(n + 1);
+	fs_path_put(cwd);
+	return r;
 }
 
 /* ── process info ────────────────────────────────────────── */
@@ -925,8 +926,8 @@ static long sys_sigaltstack(const stack_t *uss, stack_t *uoss, uint64_t usp)
 static long sys_umask(mode_t mask)
 {
 	process_t *p = task_current();
-	mode_t old = p->umask;
-	p->umask = mask & 0777;
+	mode_t old = p->fs->umask;
+	p->fs->umask = mask & 0777;
 	return (long)old;
 }
 

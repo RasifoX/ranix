@@ -108,8 +108,7 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	}
 
 	p->fds = fd_table_create();
-	p->cwd[0] = '/'; p->cwd[1] = '\0';
-	p->umask = 022;
+	p->fs  = fs_new();
 
 	uint8_t *sp_top = p->kstack + kstack_size_val;
 	arch_context_t *ctx = (arch_context_t *)(sp_top - sizeof(arch_context_t));
@@ -136,21 +135,10 @@ pid_t proc_create(const char *name, void (*fn)(void))
 	return p->pid;
 }
 
-pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
+/* The first user task's ids: the creator's. suid/sgid become the new
+ * euid/egid (no setuid bit here); as root it gets every capability. */
+static void init_creds(process_t *p, const process_t *current)
 {
-	void *pcb_phys = buddy_alloc(PCB_ORDER);
-	if (!pcb_phys) return -1;
-	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
-	memset(p, 0, sizeof(*p));
-	p->magic = PROC_MAGIC;
-	p->start_tick = kernel_ticks;
-	p->sighand = sighand_alloc(NULL);
-	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
-
-	process_t *current = task_current();
-	p->ppid  = current->pid;
-	p->state = PROC_READY;
-	/* exec: inherit ruid/rgid; suid/sgid become new euid/egid (no setuid-bit here) */
 	p->uid  = current->uid;
 	p->euid = current->euid;
 	p->suid = current->euid; /* suid = euid after exec */
@@ -163,9 +151,12 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		p->cap_effective   = ~0ULL;
 		p->cap_inheritable = ~0ULL;
 	}
+}
 
-	/* name is the image's full path: comm is its basename, exe_path the whole
-	 * path (glibc readlinks /proc/self/exe and asserts it is absolute). */
+/* name is the image's full path: comm is its basename, exe_path the whole
+ * path (glibc readlinks /proc/self/exe and asserts it is absolute). */
+static void init_names(process_t *p, const char *name)
+{
 	const char *base = name;
 	for (const char *s = name; *s; s++) if (*s == '/') base = s + 1;
 	int nlen = 0;
@@ -177,53 +168,43 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 		while (name[el] && el < PROC_NAME_MAX - 1) { p->exe_path[el] = name[el]; el++; }
 		p->exe_path[el] = '\0';
 	}
+}
 
-	p->vm = vm_create();
-	if (!p->vm) goto fail;
-
-	elf_info_t ei = {0};
-	if (elf_load(p->vm, elf_data, elf_len, 0, &ei) != 0) {
-		kprintf(KERN_WARN "init: elf_load failed\n");
-		goto fail;
-	}
-
-	p->vm->brk      = ei.load_end;
-	p->vm->mmap_next    = ARCH_USER_MMAP_BASE;
-	p->vm->huge1g_next  = HUGE1G_VA_BASE;
-	p->reaped       = 0;
-
-	/* Dynamically linked init: load its interpreter (ld.so) and enter that
-	 * instead — the loader relocates the image and jumps to the real entry,
-	 * which it reads from AT_ENTRY. Same contract execve(2) honours. */
-	uint64_t jump_entry = ei.entry;
-	uint64_t at_base    = 0;
-	uint64_t interp_lo = 0, interp_hi = 0;
-	if (ei.interp[0]) {
-		vfs_stat_t ist = {0};
-		if (vfs_stat(ei.interp, &ist) == 0 && ist.size > 0) {
-			uint8_t *ibuf = kmalloc(ist.size);
-			if (ibuf) {
-				int ifd = vfs_open(ei.interp, O_RDONLY, 0);
-				if (ifd >= 0) {
-					vfs_read(ifd, ibuf, ist.size);
-					vfs_close(ifd);
-					elf_info_t ii = {0};
-					if (elf_load(p->vm, ibuf, (size_t)ist.size, p->vm->mmap_next, &ii) == 0) {
-						jump_entry   = ii.entry;
-						at_base      = p->vm->mmap_next;
-						interp_lo    = ii.load_bias;
-						interp_hi    = ii.load_end;
-						p->vm->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-					}
+/* Dynamically linked init: load its interpreter (ld.so) and enter that
+ * instead — the loader relocates the image and jumps to the real entry,
+ * which it reads from AT_ENTRY. Same contract execve(2) honours.
+ * Nothing changes if it cannot be loaded. */
+static void init_load_interp(process_t *p, const elf_info_t *ei, uint64_t *jump_entry,
+                             uint64_t *at_base, uint64_t *interp_lo, uint64_t *interp_hi)
+{
+	vfs_stat_t ist = {0};
+	if (vfs_stat(ei->interp, &ist) == 0 && ist.size > 0) {
+		uint8_t *ibuf = kmalloc(ist.size);
+		if (ibuf) {
+			int ifd = vfs_open(ei->interp, O_RDONLY, 0);
+			if (ifd >= 0) {
+				vfs_read(ifd, ibuf, ist.size);
+				vfs_close(ifd);
+				elf_info_t ii = {0};
+				if (elf_load(p->vm, ibuf, (size_t)ist.size, p->vm->mmap_next, &ii) == 0) {
+					*jump_entry  = ii.entry;
+					*at_base     = p->vm->mmap_next;
+					*interp_lo   = ii.load_bias;
+					*interp_hi   = ii.load_end;
+					p->vm->mmap_next = (ii.load_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 				}
-				kfree(ibuf);
 			}
+			kfree(ibuf);
 		}
 	}
+}
 
+/* The user stack, and a page above it. -1: out of memory. */
+static int init_map_stack(process_t *p)
+{
 	for (int i = 0; i < ARCH_USER_STACK_PAGES; i++) {
 		void *spage_phys = buddy_alloc(0);
-		if (!spage_phys) goto fail;
+		if (!spage_phys) return -1;
 		memset((void *)PHYS_TO_VIRT(spage_phys), 0, PAGE_SIZE);
 		uint64_t sva = ARCH_USER_STACK_TOP - (uint64_t)(ARCH_USER_STACK_PAGES - i) * PAGE_SIZE;
 		vm_map(p->vm, sva, (uint64_t)spage_phys, VM_USER | VM_READ | VM_WRITE);
@@ -235,13 +216,15 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 			vm_map(p->vm, ARCH_USER_STACK_TOP, (uint64_t)guard_phys, VM_USER | VM_READ | VM_WRITE);
 		}
 	}
+	return 0;
+}
 
-	p->kstack = kstack_alloc();
-	if (!p->kstack) goto fail;
-
-	uint8_t *ksp = p->kstack + kstack_size_val;
-	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-
+/* argv = { name }, no envp, a short auxv: written straight into the new
+ * address space while it is switched in; ctx enters at jump_entry. */
+static void init_build_stack(process_t *p, const process_t *current, const char *name,
+                             const elf_info_t *ei, uint64_t jump_entry, uint64_t at_base,
+                             arch_context_t *ctx)
+{
 	/* Switch to new VM to write to user stack */
 	extern vm_space_t *kernel_vm_space;
 	vm_space_t *old_vm = current->vm;
@@ -265,12 +248,12 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	/* auxv */
 	sp -= 16; ((uint64_t*)sp)[0] = 0; ((uint64_t*)sp)[1] = 0; /* AT_NULL */
-	sp -= 16; ((uint64_t*)sp)[0] = 9; ((uint64_t*)sp)[1] = ei.entry; /* AT_ENTRY */
+	sp -= 16; ((uint64_t*)sp)[0] = 9; ((uint64_t*)sp)[1] = ei->entry; /* AT_ENTRY */
 	sp -= 16; ((uint64_t*)sp)[0] = 7; ((uint64_t*)sp)[1] = at_base; /* AT_BASE */
 	sp -= 16; ((uint64_t*)sp)[0] = 6; ((uint64_t*)sp)[1] = PAGE_SIZE; /* AT_PAGESZ */
-	sp -= 16; ((uint64_t*)sp)[0] = 5; ((uint64_t*)sp)[1] = ei.phnum; /* AT_PHNUM */
-	sp -= 16; ((uint64_t*)sp)[0] = 4; ((uint64_t*)sp)[1] = ei.phentsize; /* AT_PHENT */
-	sp -= 16; ((uint64_t*)sp)[0] = 3; ((uint64_t*)sp)[1] = ei.phdr_va; /* AT_PHDR */
+	sp -= 16; ((uint64_t*)sp)[0] = 5; ((uint64_t*)sp)[1] = ei->phnum; /* AT_PHNUM */
+	sp -= 16; ((uint64_t*)sp)[0] = 4; ((uint64_t*)sp)[1] = ei->phentsize; /* AT_PHENT */
+	sp -= 16; ((uint64_t*)sp)[0] = 3; ((uint64_t*)sp)[1] = ei->phdr_va; /* AT_PHDR */
 	sp -= 16; ((uint64_t*)sp)[0] = 25; ((uint64_t*)sp)[1] = at_random; /* AT_RANDOM */
 
 	sp -= 8; *(uint64_t*)sp = 0; /* envp NULL */
@@ -282,6 +265,54 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 
 	if (old_vm) arch_vm_switch((uint64_t)old_vm->root, old_vm->asid);
 	else arch_vm_switch((uint64_t)kernel_vm_space->root, 0);
+}
+
+pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
+{
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
+	if (!pcb_phys) return -1;
+	process_t *p = (process_t *)PHYS_TO_VIRT(pcb_phys);
+	memset(p, 0, sizeof(*p));
+	p->magic = PROC_MAGIC;
+	p->start_tick = kernel_ticks;
+	p->sighand = sighand_alloc(NULL);
+	if (!p->sighand) { buddy_free(VIRT_TO_PHYS(p), PCB_ORDER); return -1; }
+
+	process_t *current = task_current();
+	p->ppid  = current->pid;
+	p->state = PROC_READY;
+	init_creds(p, current);
+
+	init_names(p, name);
+
+	p->vm = vm_create();
+	if (!p->vm) goto fail;
+
+	elf_info_t ei = {0};
+	if (elf_load(p->vm, elf_data, elf_len, 0, &ei) != 0) {
+		kprintf(KERN_WARN "init: elf_load failed\n");
+		goto fail;
+	}
+
+	p->vm->brk      = ei.load_end;
+	p->vm->mmap_next    = ARCH_USER_MMAP_BASE;
+	p->vm->huge1g_next  = HUGE1G_VA_BASE;
+	p->reaped       = 0;
+
+	uint64_t jump_entry = ei.entry;
+	uint64_t at_base    = 0;
+	uint64_t interp_lo = 0, interp_hi = 0;
+	if (ei.interp[0]) init_load_interp(p, &ei, &jump_entry, &at_base, &interp_lo, &interp_hi);
+
+	if (init_map_stack(p)) goto fail;
+
+	p->kstack = kstack_alloc();
+	if (!p->kstack) goto fail;
+
+	uint8_t *ksp = p->kstack + kstack_size_val;
+	arch_context_t *ctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+
+	init_build_stack(p, current, name, &ei, jump_entry, at_base, ctx);
 
 	p->ctx = ctx;
 	/* Record the initial VMAs (stack, image, interpreter) like execve does. The
@@ -301,17 +332,15 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 	 * freestanding C runtime (glibc) assumes the standard descriptors already
 	 * exist and aborts otherwise. */
 	if (p->fds) {
-		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_RDONLY, 0);
-		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_WRONLY, 0);
-		vfs_open_fds(p->fds, p->euid, p->egid, p->umask, "/dev/console", O_WRONLY, 0);
+		mode_t um = fs_umask_of((struct process *)current);
+		vfs_open_fds(p->fds, p->euid, p->egid, um, "/dev/console", O_RDONLY, 0);
+		vfs_open_fds(p->fds, p->euid, p->egid, um, "/dev/console", O_WRONLY, 0);
+		vfs_open_fds(p->fds, p->euid, p->egid, um, "/dev/console", O_WRONLY, 0);
 	}
-	/* Inherit the cwd, but guarantee it is absolute: init's parent is the boot
-	 * task, whose cwd was never set — an empty/relative cwd makes getcwd(2) fail
-	 * (musl rejects a non-'/' result), which then propagates to every process. */
-	if (current->cwd[0] == '/') memcpy(p->cwd, current->cwd, sizeof(p->cwd));
-	else { p->cwd[0] = '/'; p->cwd[1] = '\0'; }
-	p->umask = current->umask;
-	p->root  = current->root;   /* chroot survives exec */
+	/* the creator's root (chroot survives exec), cwd and umask; a cwd is
+	 * always absolute (fs_struct starts at "/") */
+	p->fs = fs_copy(current->fs);
+	if (!p->fs) goto fail;
 
 	{
 		uint64_t f = spin_lock_irq(&sched_lock);
@@ -337,6 +366,7 @@ pid_t proc_exec(const char *name, const void *elf_data, size_t elf_len)
 fail:
 	if (p->vm) vm_destroy(p->vm);
 	if (p->fds) fd_table_destroy(p->fds);
+	fs_put(p->fs);
 	sighand_put(p->sighand);
 	if (p->kstack) buddy_free(VIRT_TO_PHYS(p->kstack), kstack_order_val);
 	buddy_free(VIRT_TO_PHYS(p), PCB_ORDER);
@@ -344,6 +374,182 @@ fail:
 }
 
 static void reap_dead_threads(void);
+
+/* CLONE_FS: the same root, cwd and umask as the parent; else a copy of them. */
+static fs_struct_t *task_fs_for_child(process_t *parent, int share)
+{
+	return share && parent->fs ? fs_get(parent->fs) : fs_copy(parent->fs);
+}
+
+/* What a new task carries over from its creator besides ids, memory, files and
+ * its place in the file tree: the same for fork and for a new thread. */
+static void copy_task_state(process_t *child, const process_t *parent)
+{
+	memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
+	memcpy(child->saved_auxv, parent->saved_auxv, sizeof(child->saved_auxv));
+	child->saved_auxv_len = parent->saved_auxv_len;
+
+	/* a new task runs the same image: inherit the parent's argv so
+	 * /proc/<pid>/cmdline (ps full command) reflects the real command line. */
+	if (parent->cmdline && parent->cmdline_len) {
+		child->cmdline = kmalloc(parent->cmdline_len);
+		if (child->cmdline) {
+			memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
+			child->cmdline_len = parent->cmdline_len;
+		}
+	}
+	child->oom_score_adj = parent->oom_score_adj;
+	child->uname_linux   = parent->uname_linux;
+	child->ctty          = parent->ctty;
+	child->ctty_fops     = parent->ctty_fops;
+}
+
+/* The child gets its own (COW) address space, so deep-copy the parent space's
+ * VMA list into the child space. Threads share a space and thus its VMAs;
+ * only this fork-a-new-space path duplicates them. Read the parent list under
+ * its fault_lock so a sibling thread's concurrent mmap/munmap can't tear it.
+ * -1: out of memory. */
+static int fork_copy_vmas(process_t *child, process_t *parent)
+{
+	uint64_t vlf = spin_lock_irq(&parent->vm->fault_lock);
+	vma_t **dst = &child->vm->vmas;
+	for (vma_t *v = parent->vm->vmas; v; v = v->next) {
+		vma_t *nv = kmalloc(sizeof(*nv));
+		if (!nv) { spin_unlock_irq(&parent->vm->fault_lock, vlf); return -1; }
+		*nv = *v; nv->next = NULL;
+		*dst = nv; dst = &nv->next;
+	}
+	spin_unlock_irq(&parent->vm->fault_lock, vlf);
+	return 0;
+}
+
+/* A new task's first frame: the parent's syscall frame returning 0 (from
+ * clone, for a thread), on the stack the caller gave if any. */
+static void new_task_ctx(process_t *child, process_t *parent, uint64_t newsp)
+{
+	uint8_t *ksp = child->kstack + kstack_size_val;
+	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
+	memcpy(cctx, parent->in_syscall ? parent->uctx : parent->ctx, sizeof(arch_context_t));   /* a sleep moves ctx */
+	CTX_SYSCALL_RET(cctx, 0);
+	/* clone/vfork with an explicit child stack (e.g. glibc posix_spawn passes
+	 * CLONE_VM|CLONE_VFORK + a stack): the child must run on it, not inherit
+	 * the parent's SP, or the two corrupt each other's frames. */
+	if (newsp) {
+#if defined(__aarch64__)
+		cctx->sp = newsp;
+#else
+		cctx->rsp = newsp;
+#endif
+	}
+	child->ctx = cctx;
+}
+
+/* The child's namespaces: new ones for the CLONE_NEW* flags, else the
+ * parent's. -1: out of memory (the caller releases what was taken). */
+static int fork_namespaces(process_t *child, process_t *parent, uint64_t clone_flags)
+{
+	if (clone_flags & CLONE_NEWUTS) {
+		child->uts_ns = uts_ns_clone(parent->uts_ns);
+		if (!child->uts_ns) return -1;
+	} else {
+		child->uts_ns = uts_ns_get(parent->uts_ns);
+	}
+	if (clone_flags & CLONE_NEWIPC) {
+		child->ipc_ns = ipc_ns_clone(parent->ipc_ns);
+		if (!child->ipc_ns) return -1;
+	} else {
+		child->ipc_ns = ipc_ns_get(parent->ipc_ns);
+	}
+	/* a pending time ns (from the parent's unshare) applies to its children */
+	child->time_ns = parent->time_ns_new
+	               ? time_ns_get(parent->time_ns_new)
+	               : time_ns_get(parent->time_ns);
+	child->mnt_ns  = mnt_ns_get(parent->mnt_ns);
+	if (clone_flags & CLONE_NEWUSER) {
+		child->user_ns = user_ns_create_child(parent->user_ns ? parent->user_ns : &init_user_ns, parent->euid);
+		if (!child->user_ns) return -1;
+		child->cap_effective = child->cap_permitted = CAP_FULL;
+	} else {
+		child->user_ns = user_ns_get(parent->user_ns);
+	}
+	if (clone_flags & CLONE_NEWNET) {
+		child->net_ns = net_ns_create();
+		if (!child->net_ns) return -1;
+	} else {
+		child->net_ns = net_ns_get(parent->net_ns);
+	}
+	child->cgroup_ns = (clone_flags & CLONE_NEWCGROUP)
+	                 ? cgroup_ns_create()
+	                 : cgroup_ns_get(parent->cgroup_ns);
+	return 0;
+}
+
+/* Make the child a task: charge it, give it a pid, put it on the lists and the
+ * run queue, all under sched_lock. Returns its pid as the caller sees it, or
+ * -EAGAIN/-ENOMEM with nothing published. */
+static pid_t fork_publish(process_t *child, process_t *parent, struct asess *enter,
+                          pid_namespace_t *target_pidns)
+{
+	pid_t ret;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	/* Charged under sched_lock, with the publish below: proc_move_cgroup
+	 * holds it too, so parent->cgroup cannot change between the two. */
+	if (asess_fork(child, parent, enter) != 0) {
+		spin_unlock_irq(&sched_lock, f);
+		return -11;
+	}
+	void *cg = enter ? asess_cgroup(enter) : parent->cgroup;
+	if (cgroup_can_fork(cg) != 0) {
+		asess_fork_cancel(child);
+		spin_unlock_irq(&sched_lock, f);
+		return -11;
+	}
+	int pid = alloc_pid();
+	if (pid < 0) {
+		asess_fork_cancel(child);
+		cgroup_cancel_fork(cg);
+		spin_unlock_irq(&sched_lock, f);
+		return -12;
+	}
+	cgroup_fork_attach(child, cg);
+	child->pid  = pid;
+	child->tgid = pid;
+	child->vfork_waiter  = parent->vfork_pending ? parent->pid : 0;
+	child->vfork_pending = 0;
+	child->pgrp = enter ? pid : parent->pgrp;
+	if (enter) child->sid = pid;
+	seccomp_fork(child, parent);
+	child->next = proctab[0]->next;
+	proctab[0]->next = child;
+	{ extern void ptrace_follow_fork(process_t *, process_t *); ptrace_follow_fork(parent, child); }
+	runqueue_add(child);
+	proctab[pid] = child;
+	pidns_attach(child, target_pidns, pid);
+	/* setns can aim a child at a pid ns the parent cannot see */
+	ret = task_pid_nr_ns(child, current_pid_ns());
+	if (!ret) ret = pid;
+	spin_unlock_irq(&sched_lock, f);
+	return ret;
+}
+
+/* Release what a half-made forked child holds (not the PCB, not its pid ns). */
+static void fork_undo(process_t *child)
+{
+	fs_put(child->fs);
+	cpu_affinity_free(child);
+	proc_cmdline_free(child);
+	if (child->vm)     vm_destroy(child->vm);
+	if (child->fds)    fd_table_destroy(child->fds);
+	sighand_put(child->sighand);
+	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
+	if (child->uts_ns) uts_ns_put(child->uts_ns);
+	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
+	if (child->time_ns) time_ns_put(child->time_ns);
+	if (child->mnt_ns) mnt_ns_put(child->mnt_ns);
+	if (child->user_ns) user_ns_put(child->user_ns);
+	if (child->net_ns) net_ns_put(child->net_ns);
+	if (child->cgroup_ns) cgroup_ns_put(child->cgroup_ns);
+}
 
 static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 {
@@ -416,42 +622,11 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 
 	child->fds = fd_table_copy(parent->fds);
 	if (!child->fds) goto fail_early;
-	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
-	memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
-	memcpy(child->saved_auxv, parent->saved_auxv, sizeof(child->saved_auxv));
-	child->saved_auxv_len = parent->saved_auxv_len;
+	child->fs = task_fs_for_child(parent, clone_flags & CLONE_FS);
+	if (!child->fs) goto fail_early;
+	copy_task_state(child, parent);
 
-	/* a forked child runs the same image: inherit the parent's argv so
-	 * /proc/<pid>/cmdline (ps full command) reflects the real command line. */
-	if (parent->cmdline && parent->cmdline_len) {
-		child->cmdline = kmalloc(parent->cmdline_len);
-		if (child->cmdline) {
-			memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
-			child->cmdline_len = parent->cmdline_len;
-		}
-	}
-	child->root         = parent->root;
-	child->umask = parent->umask;
-	child->oom_score_adj = parent->oom_score_adj;
-	child->uname_linux = parent->uname_linux;
-	child->ctty         = parent->ctty;
-	child->ctty_fops    = parent->ctty_fops;
-
-	/* The child gets its own (COW) address space, so deep-copy the parent space's
-	 * VMA list into the child space. Threads share a space and thus its VMAs;
-	 * only this fork-a-new-space path duplicates them. Read the parent list under
-	 * its fault_lock so a sibling thread's concurrent mmap/munmap can't tear it. */
-	{
-		uint64_t vlf = spin_lock_irq(&parent->vm->fault_lock);
-		vma_t **dst = &child->vm->vmas;
-		for (vma_t *v = parent->vm->vmas; v; v = v->next) {
-			vma_t *nv = kmalloc(sizeof(*nv));
-			if (!nv) { spin_unlock_irq(&parent->vm->fault_lock, vlf); goto fail_early; }
-			*nv = *v; nv->next = NULL;
-			*dst = nv; dst = &nv->next;
-		}
-		spin_unlock_irq(&parent->vm->fault_lock, vlf);
-	}
+	if (fork_copy_vmas(child, parent)) goto fail_early;
 
 	child->sighand = sighand_alloc(parent->sighand);   /* fork → private copy */
 	if (!child->sighand) goto fail_early;
@@ -461,58 +636,10 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 	child->kstack = kstack_alloc();
 	if (!child->kstack) goto fail_early;
 
-	{
-		uint8_t *ksp = child->kstack + kstack_size_val;
-		arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-		memcpy(cctx, parent->in_syscall ? parent->uctx : parent->ctx, sizeof(arch_context_t));   /* a sleep moves ctx */
-		CTX_SYSCALL_RET(cctx, 0);
-		/* clone/vfork with an explicit child stack (e.g. glibc posix_spawn passes
-		 * CLONE_VM|CLONE_VFORK + a stack): the child must run on it, not inherit
-		 * the parent's SP, or the two corrupt each other's frames. */
-		if (newsp) {
-#if defined(__aarch64__)
-			cctx->sp = newsp;
-#else
-			cctx->rsp = newsp;
-#endif
-		}
-		child->ctx = cctx;
-	}
+	new_task_ctx(child, parent, newsp);
 	child->tls_base        = parent->tls_base;
 	child->user_gs_base    = parent->user_gs_base;
-	if (clone_flags & CLONE_NEWUTS) {
-		child->uts_ns = uts_ns_clone(parent->uts_ns);
-		if (!child->uts_ns) goto fail_early;
-	} else {
-		child->uts_ns = uts_ns_get(parent->uts_ns);
-	}
-	if (clone_flags & CLONE_NEWIPC) {
-		child->ipc_ns = ipc_ns_clone(parent->ipc_ns);
-		if (!child->ipc_ns) goto fail_early;
-	} else {
-		child->ipc_ns = ipc_ns_get(parent->ipc_ns);
-	}
-	/* a pending time ns (from the parent's unshare) applies to its children */
-	child->time_ns = parent->time_ns_new
-	               ? time_ns_get(parent->time_ns_new)
-	               : time_ns_get(parent->time_ns);
-	child->mnt_ns  = mnt_ns_get(parent->mnt_ns);
-	if (clone_flags & CLONE_NEWUSER) {
-		child->user_ns = user_ns_create_child(parent->user_ns ? parent->user_ns : &init_user_ns, parent->euid);
-		if (!child->user_ns) goto fail_early;
-		child->cap_effective = child->cap_permitted = CAP_FULL;
-	} else {
-		child->user_ns = user_ns_get(parent->user_ns);
-	}
-	if (clone_flags & CLONE_NEWNET) {
-		child->net_ns = net_ns_create();
-		if (!child->net_ns) goto fail_early;
-	} else {
-		child->net_ns = net_ns_get(parent->net_ns);
-	}
-	child->cgroup_ns = (clone_flags & CLONE_NEWCGROUP)
-	                 ? cgroup_ns_create()
-	                 : cgroup_ns_get(parent->cgroup_ns);
+	if (fork_namespaces(child, parent, clone_flags)) goto fail_early;
 	child->ticks_remaining = sched_quantum_val;
 
 	if (enter) {
@@ -521,66 +648,13 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter)
 		err = -12;
 	}
 
-	pid_t ret;
-	{
-		uint64_t f = spin_lock_irq(&sched_lock);
-		/* Charged under sched_lock, with the publish below: proc_move_cgroup
-		 * holds it too, so parent->cgroup cannot change between the two. */
-		if (asess_fork(child, parent, enter) != 0) {
-			spin_unlock_irq(&sched_lock, f);
-			err = -11;
-			goto fail_early;
-		}
-		void *cg = enter ? asess_cgroup(enter) : parent->cgroup;
-		if (cgroup_can_fork(cg) != 0) {
-			asess_fork_cancel(child);
-			spin_unlock_irq(&sched_lock, f);
-			err = -11;
-			goto fail_early;
-		}
-		int pid = alloc_pid();
-		if (pid < 0) {
-			asess_fork_cancel(child);
-			cgroup_cancel_fork(cg);
-			spin_unlock_irq(&sched_lock, f);
-			goto fail_early;
-		}
-		cgroup_fork_attach(child, cg);
-		child->pid  = pid;
-		child->tgid = pid;
-		child->vfork_waiter  = parent->vfork_pending ? parent->pid : 0;
-		child->vfork_pending = 0;
-		child->pgrp = enter ? pid : parent->pgrp;
-		if (enter) child->sid = pid;
-		seccomp_fork(child, parent);
-		child->next = proctab[0]->next;
-		proctab[0]->next = child;
-		{ extern void ptrace_follow_fork(process_t *, process_t *); ptrace_follow_fork(parent, child); }
-		runqueue_add(child);
-		proctab[pid] = child;
-		pidns_attach(child, target_pidns, pid);
-		/* setns can aim a child at a pid ns the parent cannot see */
-		ret = task_pid_nr_ns(child, current_pid_ns());
-		if (!ret) ret = pid;
-		spin_unlock_irq(&sched_lock, f);
-	}
+	pid_t ret = fork_publish(child, parent, enter, target_pidns);
+	if (ret < 0) { err = ret; goto fail_early; }
 	if (owns_pidns) pid_ns_put(target_pidns);   /* child holds its own ref now */
 	return ret;
 
 fail_early:
-	cpu_affinity_free(child);
-	proc_cmdline_free(child);
-	if (child->vm)     vm_destroy(child->vm);
-	if (child->fds)    fd_table_destroy(child->fds);
-	sighand_put(child->sighand);
-	if (child->kstack) buddy_free(VIRT_TO_PHYS(child->kstack), kstack_order_val);
-	if (child->uts_ns) uts_ns_put(child->uts_ns);
-	if (child->ipc_ns) ipc_ns_put(child->ipc_ns);
-	if (child->time_ns) time_ns_put(child->time_ns);
-	if (child->mnt_ns) mnt_ns_put(child->mnt_ns);
-	if (child->user_ns) user_ns_put(child->user_ns);
-	if (child->net_ns) net_ns_put(child->net_ns);
-	if (child->cgroup_ns) cgroup_ns_put(child->cgroup_ns);
+	fork_undo(child);
 	if (owns_pidns) pid_ns_put(target_pidns);
 	buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	return err;
@@ -620,7 +694,7 @@ static void reap_dead_threads(void)
  * memory, the way a thread does, but has its own id group and its parent waits
  * for it. Set for the one clone in progress (the caller's syscall). */
 pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
-                           int as_process);
+                           int as_process, int share_fs);
 
 /* Who a new task is and what it may do, the same for fork and for a new thread:
  * one place, so the two paths cannot drift apart again (a thread once started
@@ -644,122 +718,32 @@ void copy_creds(process_t *child, const process_t *parent)
 
 pid_t proc_clone_thread(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid)
 {
-	return proc_clone_thread_ex(newsp, tls, ctid, ptid, set_tid, 0);
+	return proc_clone_thread_ex(newsp, tls, ctid, ptid, set_tid, 0, 1);
 }
 
-pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
-                           int as_process)
+/* Make a new thread (or clone(CLONE_VM) process) a task, under sched_lock:
+ * charge it, give it a tid, write the tid where the caller asked, run it.
+ * Returns the tid as the caller sees it, or -EAGAIN/-ENOMEM with nothing
+ * published. */
+static pid_t thread_publish(process_t *child, process_t *parent, int as_process,
+                            uint32_t *ptid, uint32_t *set_tid)
 {
-	reap_dead_threads();
-	process_t *parent = task_current();
-	long err = -12;   /* out of memory, not the EPERM a bare -1 would read as */
-	void *pcb_phys = buddy_alloc(PCB_ORDER);
-	if (!pcb_phys) return -12;
-	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
-	memset(child, 0, sizeof(*child));
-	child->magic = PROC_MAGIC;
-	child->start_tick = kernel_ticks;
-
-	child->ppid         = parent->ppid;   /* a thread has the group's parent */
-	child->pgrp         = parent->pgrp;
-	child->sid          = parent->sid;
-	child->state        = PROC_READY;
-	copy_creds(child, parent);   /* limits too: they are the group's */
-	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
-
-	int nlen = 0;
-	while (parent->name[nlen] && nlen < PROC_NAME_MAX - 3) nlen++;
-	memcpy(child->name, parent->name, nlen);
-	child->name[nlen] = '\0';
-
-	/* Threads share the VM space */
-	child->vm = vm_get(parent->vm);
-	if (!child->vm) goto fail;
-
-	/* Threads share the fd table — bump the table's refcount */
-	/* a clone(CLONE_VM) process without CLONE_FILES gets its own table, as after fork */
-	child->fds = (as_process && !(as_process & 0x400)) ? fd_table_copy(parent->fds)
-	                                                    : fd_table_get(parent->fds);
-	if (!child->fds) goto fail;
-
-	memcpy(child->cwd, parent->cwd, sizeof(child->cwd));
-	memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
-	memcpy(child->saved_auxv, parent->saved_auxv, sizeof(child->saved_auxv));
-	child->saved_auxv_len = parent->saved_auxv_len;
-	child->root  = parent->root;
-	child->umask = parent->umask;
-	child->oom_score_adj = parent->oom_score_adj;
-	child->uname_linux = parent->uname_linux;
-	child->ctty      = parent->ctty;
-	child->ctty_fops = parent->ctty_fops;
-
-	if (parent->cmdline && parent->cmdline_len) {
-		child->cmdline = kmalloc(parent->cmdline_len);
-		if (child->cmdline) {
-			memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
-			child->cmdline_len = parent->cmdline_len;
-		}
-	}
-
-	/* Threads share signal dispositions (CLONE_SIGHAND) but each has its own
-	 * blocked mask, inherited from the creator. */
-	child->sighand  = (as_process && !(as_process & 0x800)) ? sighand_alloc(parent->sighand)
-	                                                        : sighand_get(parent->sighand);
-	if (!child->sighand) goto fail;
-	child->sig_mask = parent->sig_mask;
-
-	child->kstack = kstack_alloc();
-	if (!child->kstack) goto fail;
-
-	uint8_t *ksp = child->kstack + kstack_size_val;
-	arch_context_t *cctx = (arch_context_t *)(ksp - sizeof(arch_context_t));
-	memcpy(cctx, parent->in_syscall ? parent->uctx : parent->ctx, sizeof(arch_context_t));   /* a sleep moves ctx */
-
-	/* Thread starts at clone() return point with return value 0 */
-	CTX_SYSCALL_RET(cctx, 0);
-
-	/* Set new stack pointer */
-	if (newsp) {
-#if defined(__aarch64__)
-		cctx->sp = newsp;
-#elif defined(__x86_64__)
-		cctx->rsp = newsp;
-#endif
-	}
-
-	child->tls_base = tls ? tls : parent->tls_base;
-	child->user_gs_base = parent->user_gs_base;
-	child->uts_ns   = uts_ns_get(parent->uts_ns);
-	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
-	child->time_ns  = time_ns_get(parent->time_ns);
-	child->mnt_ns   = mnt_ns_get(parent->mnt_ns);
-	child->user_ns  = user_ns_get(parent->user_ns);
-	child->net_ns   = net_ns_get(parent->net_ns);
-	child->cgroup_ns = cgroup_ns_get(parent->cgroup_ns);
-
-	child->clear_child_tid = ctid;
-
-	child->ctx             = cctx;
-	child->ticks_remaining = sched_quantum_val;
-
 	uint64_t f = spin_lock_irq(&sched_lock);
 	if (asess_fork(child, parent, NULL) != 0) {
 		spin_unlock_irq(&sched_lock, f);
-		err = -11;
-		goto fail;
+		return -11;
 	}
 	if (cgroup_can_fork(parent->cgroup) != 0) {
 		asess_fork_cancel(child);
 		spin_unlock_irq(&sched_lock, f);
-		err = -11;
-		goto fail;
+		return -11;
 	}
 	int pid = alloc_pid();
 	if (pid < 0) {
 		asess_fork_cancel(child);
 		cgroup_cancel_fork(parent->cgroup);
 		spin_unlock_irq(&sched_lock, f);
-		goto fail;
+		return -12;
 	}
 	cgroup_fork_attach(child, parent->cgroup);
 	child->pid  = pid;
@@ -800,8 +784,12 @@ pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_
 
 	spin_unlock_irq(&sched_lock, f);
 	return vtid;
+}
 
-fail:
+/* Release what a half-made thread holds (not the PCB). */
+static void thread_undo(process_t *child)
+{
+	fs_put(child->fs);
 	cpu_affinity_free(child);
 	proc_cmdline_free(child);
 	if (child->vm) vm_destroy(child->vm);
@@ -815,6 +803,78 @@ fail:
 	if (child->user_ns) user_ns_put(child->user_ns);
 	if (child->net_ns) net_ns_put(child->net_ns);
 	if (child->cgroup_ns) cgroup_ns_put(child->cgroup_ns);
+}
+
+pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_t *ptid, uint32_t *set_tid,
+                           int as_process, int share_fs)
+{
+	reap_dead_threads();
+	process_t *parent = task_current();
+	long err = -12;   /* out of memory, not the EPERM a bare -1 would read as */
+	void *pcb_phys = buddy_alloc(PCB_ORDER);
+	if (!pcb_phys) return -12;
+	process_t *child  = (process_t *)PHYS_TO_VIRT(pcb_phys);
+	memset(child, 0, sizeof(*child));
+	child->magic = PROC_MAGIC;
+	child->start_tick = kernel_ticks;
+
+	child->ppid         = parent->ppid;   /* a thread has the group's parent */
+	child->pgrp         = parent->pgrp;
+	child->sid          = parent->sid;
+	child->state        = PROC_READY;
+	copy_creds(child, parent);   /* limits too: they are the group's */
+	child->cpu_affinity = cpu_affinity_dup(parent->cpu_affinity);
+
+	int nlen = 0;
+	while (parent->name[nlen] && nlen < PROC_NAME_MAX - 3) nlen++;
+	memcpy(child->name, parent->name, nlen);
+	child->name[nlen] = '\0';
+
+	/* Threads share the VM space */
+	child->vm = vm_get(parent->vm);
+	if (!child->vm) goto fail;
+
+	/* Threads share the fd table — bump the table's refcount */
+	/* a clone(CLONE_VM) process without CLONE_FILES gets its own table, as after fork */
+	child->fds = (as_process && !(as_process & 0x400)) ? fd_table_copy(parent->fds)
+	                                                    : fd_table_get(parent->fds);
+	if (!child->fds) goto fail;
+	child->fs = task_fs_for_child(parent, share_fs);
+	if (!child->fs) goto fail;
+
+	copy_task_state(child, parent);
+
+	/* Threads share signal dispositions (CLONE_SIGHAND) but each has its own
+	 * blocked mask, inherited from the creator. */
+	child->sighand  = (as_process && !(as_process & 0x800)) ? sighand_alloc(parent->sighand)
+	                                                        : sighand_get(parent->sighand);
+	if (!child->sighand) goto fail;
+	child->sig_mask = parent->sig_mask;
+
+	child->kstack = kstack_alloc();
+	if (!child->kstack) goto fail;
+
+	new_task_ctx(child, parent, newsp);   /* starts at clone() returning 0 */
+
+	child->tls_base = tls ? tls : parent->tls_base;
+	child->user_gs_base = parent->user_gs_base;
+	child->uts_ns   = uts_ns_get(parent->uts_ns);
+	child->ipc_ns   = ipc_ns_get(parent->ipc_ns);
+	child->time_ns  = time_ns_get(parent->time_ns);
+	child->mnt_ns   = mnt_ns_get(parent->mnt_ns);
+	child->user_ns  = user_ns_get(parent->user_ns);
+	child->net_ns   = net_ns_get(parent->net_ns);
+	child->cgroup_ns = cgroup_ns_get(parent->cgroup_ns);
+
+	child->clear_child_tid = ctid;
+	child->ticks_remaining = sched_quantum_val;
+
+	pid_t vtid = thread_publish(child, parent, as_process, ptid, set_tid);
+	if (vtid < 0) { err = vtid; goto fail; }
+	return vtid;
+
+fail:
+	thread_undo(child);
 	buddy_free(VIRT_TO_PHYS(child), PCB_ORDER);
 	return err;
 }
@@ -1065,6 +1125,24 @@ void oom_kill_victim(process_t *v)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* Is p's root/cwd/umask shared with a live task outside its thread group
+ * (CLONE_FS without CLONE_THREAD)? Linux check_unsafe_exec: a setuid exec must
+ * then not raise ids, or that task could move the new image's root and cwd. */
+int fs_shared_outside_group(process_t *p)
+{
+	fs_struct_t *fs = p->fs;
+	if (!fs || fs->users <= 1) return 0;
+	int found = 0;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	for (int i = 1; i < proc_cnt && !found; i++) {
+		process_t *t = proctab[i];
+		if (!t || t->state == PROC_DEAD || t->state == PROC_ZOMBIE) continue;
+		found = t->fs == fs && t->tgid != p->tgid;
+	}
+	spin_unlock_irq(&sched_lock, f);
+	return found;
+}
+
 /* 1 if a live task's root lies at or under the dentry top */
 int proc_root_under(const void *top)
 {
@@ -1073,7 +1151,7 @@ int proc_root_under(const void *top)
 	for (int i = 1; i < proc_cnt && !found; i++) {
 		process_t *p = proctab[i];
 		if (!p || p->state == PROC_DEAD || p->state == PROC_ZOMBIE) continue;
-		for (vfs_dentry_t *d = p->root; d && !found; d = d->parent)
+		for (vfs_dentry_t *d = fs_root_of((struct process *)p); d && !found; d = d->parent)
 			found = d == top;
 	}
 	spin_unlock_irq(&sched_lock, f);
@@ -1117,32 +1195,10 @@ void vfork_release(process_t *c)
 	}
 }
 
-void task_exit(void)
+/* What the thread leaves in user memory, done while p->vm is still live and
+ * outside sched_lock (futex before sched): clear_child_tid, robust futexes. */
+static void exit_user_state(process_t *p)
 {
-	process_t *p = task_current();
-	KASSERT(p->magic == PROC_MAGIC);
-	tty_task_gone(p->pid);
-	/* Re-entry guard: if this process is already exiting (e.g. a second
-	 * fatal signal, or it was resumed from a runqueue while dying), do not
-	 * run the teardown again — just leave the CPU and never return. */
-	if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) {
-		for (;;) {
-			uint64_t gf = spin_lock_irq(&sched_lock);
-			p->state = PROC_DEAD;
-			spin_unlock_irq(&sched_lock, gf);
-			arch_yield();
-		}
-	}
-	p->exiting = 1;
-	vfork_release(p);
-	if (p->killed_by_sig && !p->group_exiting)
-		task_group_exit(p, p->exit_code, 1);
-	extern void vfs_posix_drop_pid(int pid);
-	/* release the process's fcntl record locks: they are the thread group's,
-	 * so only the last thread using its fd table lets them go */
-	if (!p->fds || (int32_t)p->fds->refcount <= 1)
-		vfs_posix_drop_pid((int)p->tgid);
-
 	uint32_t *cctid = p->clear_child_tid;
 
 	/* Write tid=0 and wake futex waiter while p->vm is still set.
@@ -1173,52 +1229,44 @@ void task_exit(void)
 	p->robust_list = NULL;
 	seccomp_put(p->seccomp_filter);
 	p->seccomp_filter = NULL;
+}
 
-	/* If this is a pid namespace's init (nr 1), capture that before detaching
-	 * so the reparent section can tear the namespace down; hold an extra ref so
-	 * it survives the put below. */
-	pid_namespace_t *exit_pidns = p->pid_ns;
-	int exit_is_reaper = exit_pidns && exit_pidns != &init_pid_ns && task_vpid(p) == 1;
-	if (exit_is_reaper) pid_ns_get(exit_pidns);
-	pidns_detach(p);
-	if (p->pid_ns_new) { pid_ns_put(p->pid_ns_new); p->pid_ns_new = NULL; }
-	pid_ns_put(p->pid_ns);
-	p->pid_ns = NULL;
-	{
-		uint64_t cf = spin_lock_irq(&sched_lock);
-		cgroup_exit(p);
-		spin_unlock_irq(&sched_lock, cf);
-	}
-	sigqueue_drop(p);
-
-	/* Controlling-terminal hangup: when a session leader exits, SIGHUP+SIGCONT
-	 * its session and detach that ctty from every member. */
-	if (p->ctty && p->sid == (pid_t)p->pid) {
-		void *dead_ctty = p->ctty;
-		pid_t dead_sid  = p->sid;
-		uint64_t hf = spin_lock_irq(&sched_lock);
-		process_t *hs = proctab[0];
-		for (process_t *t = hs->next; t && t != hs; t = t->next) {
-			if (t->ctty == dead_ctty && t->sid == dead_sid && t != p) {
-				t->sig_pending |= (1UL << (SIGHUP - 1)) | (1UL << (SIGCONT - 1));
-				t->sig_pending &= ~((1UL << (SIGTSTP - 1)) | (1UL << (SIGTTIN - 1)) |
-				                    (1UL << (SIGTTOU - 1)));
-				if (t->job_stopped) { t->job_stopped = 0; t->job_continued = 1; }
-				if (t->state == PROC_SLEEPING) {
-					t->state = PROC_READY;
-					if (!t->on_cpu) runqueue_add(t);
-					arch_get_cpu_ctx()->need_resched = 1;
-				}
-				t->ctty = NULL; t->ctty_fops = NULL;
+/* Controlling-terminal hangup: when a session leader exits, SIGHUP+SIGCONT
+ * its session and detach that ctty from every member. */
+static void exit_hangup_session(process_t *p)
+{
+	if (!(p->ctty && p->sid == (pid_t)p->pid)) return;
+	void *dead_ctty = p->ctty;
+	pid_t dead_sid  = p->sid;
+	uint64_t hf = spin_lock_irq(&sched_lock);
+	process_t *hs = proctab[0];
+	for (process_t *t = hs->next; t && t != hs; t = t->next) {
+		if (t->ctty == dead_ctty && t->sid == dead_sid && t != p) {
+			t->sig_pending |= (1UL << (SIGHUP - 1)) | (1UL << (SIGCONT - 1));
+			t->sig_pending &= ~((1UL << (SIGTSTP - 1)) | (1UL << (SIGTTIN - 1)) |
+			                    (1UL << (SIGTTOU - 1)));
+			if (t->job_stopped) { t->job_stopped = 0; t->job_continued = 1; }
+			if (t->state == PROC_SLEEPING) {
+				t->state = PROC_READY;
+				if (!t->on_cpu) runqueue_add(t);
+				arch_get_cpu_ctx()->need_resched = 1;
 			}
+			t->ctty = NULL; t->ctty_fops = NULL;
 		}
-		spin_unlock_irq(&sched_lock, hf);
 	}
+	spin_unlock_irq(&sched_lock, hf);
+}
 
+/* Let go of the memory, files, signal table and namespaces. The pointers are
+ * taken under sched_lock (a pinned-PCB /proc reader looks under it too); the
+ * puts happen outside it, while the task is still schedulable. */
+static void exit_release(process_t *p)
+{
 	uint64_t f = spin_lock_irq(&sched_lock);
 	vm_space_t *dying_vm  = p->vm;   p->vm  = NULL;
 	fd_table_t *dying_fds = p->fds;  p->fds = NULL;
 	sighand_t  *dying_sh  = p->sighand; p->sighand = NULL;
+	fs_struct_t *dying_fs = p->fs;      p->fs = NULL;   /* fs_of_task reads it under this lock */
 	/* Steal the namespace pointers under the same lock as vm/fds: a pinned-PCB
 	 * /proc reader (proc_get_ns) reads ns + xxx_ns_get under sched_lock, so it
 	 * either refs before the steal or sees NULL — never a dangling ns. */
@@ -1245,6 +1293,7 @@ void task_exit(void)
 
 	/* Free resources — process is still schedulable during this. */
 	sighand_put(dying_sh);
+	if (dying_fs != &init_fs) fs_put(dying_fs);
 	arch_get_cpu_ctx()->wd_where = "exit:fdput";
 	if (dying_fds) fd_table_put(dying_fds);
 	if (dying_vm) {
@@ -1252,13 +1301,122 @@ void task_exit(void)
 		vm_activate();
 		vm_destroy(dying_vm);
 	}
+}
+
+/* Under sched_lock: wake the tracer, then the parent with SIGCHLD. */
+static void exit_notify(process_t *p, int group_left)
+{
+	if (p->tracer > 0 && (int)p->tracer < proc_cnt && proctab[p->tracer]) {
+		process_t *t = proctab[p->tracer];     /* the tracer hears of the exit first */
+		if (t->state == PROC_SLEEPING) {
+			t->state = PROC_READY;
+			if (!t->on_cpu) runqueue_add(t);
+		}
+		t->sig_pending |= 1UL << (SIGCHLD - 1);
+	}
+	/* A thread is nobody's child: no wakeup, no SIGCHLD. The process ends with its
+	 * last thread, which need not be the leader. */
+	if (!group_left || p->tracer) {
+		process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
+		if (parent) {
+			if (parent->state == PROC_SLEEPING) {
+				parent->state = PROC_READY;
+				if (!parent->on_cpu) runqueue_add(parent);
+				arch_get_cpu_ctx()->need_resched = 1;
+			}
+			parent->sig_pending |= (1UL << (SIGCHLD - 1));
+		}
+		wake_group_waiters(p->ppid);
+	}
+}
+
+/* A pid namespace's init dying takes the whole namespace down: SIGKILL
+ * every remaining member (standard CLONE_NEWPID semantics). Under sched_lock. */
+static void exit_kill_pidns(process_t *p, pid_namespace_t *exit_pidns)
+{
+	exit_pidns->dead = 1;
+	for (process_t *c = proctab[0]->next; c && c != proctab[0]; c = c->next)
+		if (c != p && c->pid_ns == exit_pidns) {
+			c->sig_pending |= (1UL << (SIGKILL - 1));
+			if (c->state == PROC_SLEEPING) {
+				c->state = PROC_READY;
+				if (!c->on_cpu) runqueue_add(c);
+				arch_get_cpu_ctx()->need_resched = 1;
+			}
+		}
+}
+
+/* Under sched_lock: whatever p was tracing runs free. */
+static void exit_free_tracees(process_t *p)
+{
+	for (process_t *c = proctab[0]->next; c && c != proctab[0]; c = c->next)
+		if (c->tracer == (pid_t)p->pid) {       /* its tracer is gone: run free */
+			c->tracer = 0;
+			c->ptrace_opts = c->ptrace_options = 0;
+			c->ptrace_stop = 0;
+			c->ptrace_in_syscall = 0;
+			if (c->state == PROC_SLEEPING) {
+				c->state = PROC_READY;
+				if (!c->on_cpu) runqueue_add(c);
+			}
+		}
+}
+
+void task_exit(void)
+{
+	process_t *p = task_current();
+	KASSERT(p->magic == PROC_MAGIC);
+	tty_task_gone(p->pid);
+	/* Re-entry guard: if this process is already exiting (e.g. a second
+	 * fatal signal, or it was resumed from a runqueue while dying), do not
+	 * run the teardown again — just leave the CPU and never return. */
+	if (p->state == PROC_DEAD || p->state == PROC_ZOMBIE) {
+		for (;;) {
+			uint64_t gf = spin_lock_irq(&sched_lock);
+			p->state = PROC_DEAD;
+			spin_unlock_irq(&sched_lock, gf);
+			arch_yield();
+		}
+	}
+	p->exiting = 1;
+	vfork_release(p);
+	if (p->killed_by_sig && !p->group_exiting)
+		task_group_exit(p, p->exit_code, 1);
+	extern void vfs_posix_drop_pid(int pid);
+	/* release the process's fcntl record locks: they are the thread group's,
+	 * so only the last thread using its fd table lets them go */
+	if (!p->fds || (int32_t)p->fds->refcount <= 1)
+		vfs_posix_drop_pid((int)p->tgid);
+
+	exit_user_state(p);
+
+	/* If this is a pid namespace's init (nr 1), capture that before detaching
+	 * so the reparent section can tear the namespace down; hold an extra ref so
+	 * it survives the put below. */
+	pid_namespace_t *exit_pidns = p->pid_ns;
+	int exit_is_reaper = exit_pidns && exit_pidns != &init_pid_ns && task_vpid(p) == 1;
+	if (exit_is_reaper) pid_ns_get(exit_pidns);
+	pidns_detach(p);
+	if (p->pid_ns_new) { pid_ns_put(p->pid_ns_new); p->pid_ns_new = NULL; }
+	pid_ns_put(p->pid_ns);
+	p->pid_ns = NULL;
+	{
+		uint64_t cf = spin_lock_irq(&sched_lock);
+		cgroup_exit(p);
+		spin_unlock_irq(&sched_lock, cf);
+	}
+	sigqueue_drop(p);
+
+	exit_hangup_session(p);
+
+	exit_release(p);
 	/* The VMA list belongs to the address space, freed by vm_destroy above when
 	 * the last thread drops its reference — not per-thread here. */
 
 	/* Cleanup done — now mark dead and wake parent. */
 	arch_get_cpu_ctx()->wd_where = "exit:reparent";
 	vfs_walk_done(p);
-	f = spin_lock_irq(&sched_lock);
+	uint64_t f = spin_lock_irq(&sched_lock);
 	if (p->pid != p->tgid && p->tgid > 0 && p->tgid < proc_cnt && proctab[p->tgid]) {
 		/* a thread's CPU time is its process's, and `time` reads it from the leader */
 		proctab[p->tgid]->utime_ticks += p->utime_ticks;
@@ -1278,17 +1436,7 @@ void task_exit(void)
 			group_left = 1;
 			break;
 		}
-	for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next)
-		if (c->tracer == (pid_t)p->pid) {       /* its tracer is gone: run free */
-			c->tracer = 0;
-			c->ptrace_opts = c->ptrace_options = 0;
-			c->ptrace_stop = 0;
-			c->ptrace_in_syscall = 0;
-			if (c->state == PROC_SLEEPING) {
-				c->state = PROC_READY;
-				if (!c->on_cpu) runqueue_add(c);
-			}
-		}
+	exit_free_tracees(p);
 	if (!group_left) {
 		extern void ptimer_drop(pid_t tgid);
 		ptimer_drop(p->tgid);
@@ -1315,43 +1463,9 @@ void task_exit(void)
 		}
 	}
 
-	/* A pid namespace's init dying takes the whole namespace down: SIGKILL
-	 * every remaining member (standard CLONE_NEWPID semantics). */
-	if (exit_is_reaper) {
-		exit_pidns->dead = 1;
-		for (process_t *c = sentinel2->next; c && c != sentinel2; c = c->next)
-			if (c != p && c->pid_ns == exit_pidns) {
-				c->sig_pending |= (1UL << (SIGKILL - 1));
-				if (c->state == PROC_SLEEPING) {
-					c->state = PROC_READY;
-					if (!c->on_cpu) runqueue_add(c);
-					arch_get_cpu_ctx()->need_resched = 1;
-				}
-			}
-	}
+	if (exit_is_reaper) exit_kill_pidns(p, exit_pidns);
 
-	if (p->tracer > 0 && (int)p->tracer < proc_cnt && proctab[p->tracer]) {
-		process_t *t = proctab[p->tracer];     /* the tracer hears of the exit first */
-		if (t->state == PROC_SLEEPING) {
-			t->state = PROC_READY;
-			if (!t->on_cpu) runqueue_add(t);
-		}
-		t->sig_pending |= 1UL << (SIGCHLD - 1);
-	}
-	/* A thread is nobody's child: no wakeup, no SIGCHLD. The process ends with its
-	 * last thread, which need not be the leader. */
-	if (!group_left || p->tracer) {
-		process_t *parent = (p->ppid < proc_cnt) ? proctab[p->ppid] : NULL;
-		if (parent) {
-			if (parent->state == PROC_SLEEPING) {
-				parent->state = PROC_READY;
-				if (!parent->on_cpu) runqueue_add(parent);
-				arch_get_cpu_ctx()->need_resched = 1;
-			}
-			parent->sig_pending |= (1UL << (SIGCHLD - 1));
-		}
-		wake_group_waiters(p->ppid);
-	}
+	exit_notify(p, group_left);
 
 	spin_unlock_irq(&sched_lock, f);
 

@@ -42,6 +42,13 @@ static long sys_unshare(unsigned long flags)
 {
 	process_t *p = task_current();
 	if (!may_create_ns(p, flags)) return -1; /* EPERM */
+	if ((flags & CLONE_FS) && p->fs && p->fs->users > 1) {
+		/* a private copy: chdir and chroot no longer reach the others */
+		fs_struct_t *fs = fs_copy(p->fs);
+		if (!fs) return -12;
+		fs_put(p->fs);
+		p->fs = fs;
+	}
 	if (flags & CLONE_NEWUTS) {
 		uts_namespace_t *ns = uts_ns_clone(p->uts_ns);
 		if (!ns) return -12; /* ENOMEM */
@@ -1262,11 +1269,13 @@ static int exec_make_absolute(process_t *p, char *kpath)
 {
 	int i = strlen(kpath);
 	if (i && kpath[0] != '/') {
-		int bl = strlen(p->cwd);
-		if (bl + 1 + i >= PATH_MAX) return -36;
+		fs_path_t *cwd = fs_cwd_get(p->fs);
+		int bl = strlen(cwd->s);
+		if (bl + 1 + i >= PATH_MAX) { fs_path_put(cwd); return -36; }
 		memmove(kpath + bl + 1, kpath, i + 1);
-		memcpy(kpath, p->cwd, bl);
+		memcpy(kpath, cwd->s, bl);
 		kpath[bl] = '/';
+		fs_path_put(cwd);
 	}
 	return 0;
 }
@@ -1414,7 +1423,8 @@ static long exec_stage_args(exec_args_t *a, char **pre, int shebang_n,
  * suppresses S_ISUID/S_ISGID elevation: the image runs with the caller's ids.
  * A nosuid mount suppresses it too. So does a file owner with no id in the
  * caller's user namespace (Linux bprm_fill_uid): a setuid-root binary run
- * inside a user namespace must not give root of the machine. */
+ * inside a user namespace must not give root of the machine. And so does a
+ * root and cwd shared (CLONE_FS) with a task outside the thread group. */
 static void exec_new_creds(process_t *p, const vfs_stat_t *st, unsigned long mnt_flags,
                            uid_t *euid, gid_t *egid)
 {
@@ -1423,6 +1433,7 @@ static void exec_new_creds(process_t *p, const vfs_stat_t *st, unsigned long mnt
 	int nnp = p->no_new_privs || p->tracer != 0 || (mnt_flags & MS_NOSUID);
 	user_namespace_t *ns = p->user_ns ? p->user_ns : &init_user_ns;
 	if (!kuid_has_mapping(ns, st->uid) || !kgid_has_mapping(ns, st->gid)) nnp = 1;
+	if ((st->mode & (S_ISUID | S_ISGID)) && fs_shared_outside_group(p)) nnp = 1;
 	if (!nnp && (st->mode & S_ISUID)) *euid = st->uid;
 	if (!nnp && (st->mode & S_ISGID)) *egid = st->gid;
 }
@@ -1484,14 +1495,17 @@ static long exec_load_interp(process_t *p, vm_space_t *new_vm, const elf_info_t 
 	const char *ipath = ei->interp;
 	char *iabs = NULL;
 	if (ei->interp[0] != '/') {
-		size_t rl = strlen(ei->interp), cl = strlen(p->cwd);
-		int slash = cl && p->cwd[cl - 1] != '/';
-		if (cl + (size_t)slash + rl + 1 > PATH_MAX) return -36; /* ENAMETOOLONG */
-		iabs = kmalloc(PATH_MAX);
-		if (!iabs) return -12;
-		memcpy(iabs, p->cwd, cl);
-		if (slash) iabs[cl] = '/';
-		memcpy(iabs + cl + slash, ei->interp, rl + 1);
+		fs_path_t *cwd = fs_cwd_get(p->fs);
+		size_t rl = strlen(ei->interp), cl = strlen(cwd->s);
+		int slash = cl && cwd->s[cl - 1] != '/';
+		iabs = cl + (size_t)slash + rl + 1 > PATH_MAX ? NULL : kmalloc(PATH_MAX);
+		if (iabs) {
+			memcpy(iabs, cwd->s, cl);
+			if (slash) iabs[cl] = '/';
+			memcpy(iabs + cl + slash, ei->interp, rl + 1);
+		}
+		fs_path_put(cwd);
+		if (!iabs) return cl + (size_t)slash + rl + 1 > PATH_MAX ? -36 : -12;
 		ipath = iabs;
 	}
 	vfs_stat_t ist = {0};
@@ -1998,7 +2012,7 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
 	return ret;
 }
 
-static long sys_vfork(uint64_t newsp)
+static long sys_vfork(uint64_t newsp, uint64_t flags)
 {
 	/* vfork-as-fork: give the child its own address space instead of
 	 * sharing the parent's stack. Sharing is unsafe under SMP — the
@@ -2009,7 +2023,7 @@ static long sys_vfork(uint64_t newsp)
 	 * Programs count on it, and a chain of vforks that did not wait multiplies. */
 	process_t *p = task_current();
 	p->vfork_pending = 1;
-	long pid = (long)proc_fork(0, newsp);
+	long pid = (long)proc_fork(flags & CLONE_FS, newsp);   /* Chromium shares its root */
 	if (pid < 0) { p->vfork_pending = 0; return pid; }
 	extern spinlock_t sched_lock;
 	while (!task_has_actionable_signal()) {
