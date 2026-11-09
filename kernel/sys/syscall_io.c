@@ -288,6 +288,7 @@ typedef struct {
 	uint64_t   data[EPOLL_MAX_WATCH];
 	uint32_t   last_ready[EPOLL_MAX_WATCH]; /* for EPOLLET edge tracking */
 	uint64_t   seen[EPOLL_MAX_WATCH];       /* poll_gen when last reported */
+	int        next;                        /* where the next scan starts: ready fds take turns */
 } epoll_t;
 
 static int epoll_close(vfs_file_t *file)
@@ -458,7 +459,11 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 	while (1) {
 		poll_arm_scan();
 		ready = 0;
-		for (int i = 0; i < EPOLL_MAX_WATCH && ready < maxevents; i++) {
+		/* start after the last fd reported, as Linux rotates its ready list:
+		 * with more ready than maxevents, every one gets its turn */
+		int first = ep->next, last = -1;
+		for (int k = 0; k < EPOLL_MAX_WATCH && ready < maxevents; k++) {
+			int i = (first + k) % EPOLL_MAX_WATCH;
 			uint64_t f = spin_lock_irq(&ep->lock);
 			int wfd = ep->fds[i];
 			if (wfd < 0 || ep->ev[i] == 0) { spin_unlock_irq(&ep->lock, f); continue; }
@@ -493,11 +498,13 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 				kev[ready].events = r;
 				kev[ready].data   = ep->data[i];
 				ready++;
+				last = i;
 				if (ep->ev[i] & EPOLLONESHOT)
 					ep->ev[i] = 0; /* disarm until re-armed with MOD */
 			}
 			spin_unlock_irq(&ep->lock, f);
 		}
+		if (last >= 0) ep->next = (last + 1) % EPOLL_MAX_WATCH;
 		if (ready > 0 || kernel_ticks >= deadline) break;
 		if (task_has_actionable_signal()) { kfree(kev); fput(held); return -EINTR; }
 		poll_block(deadline);
