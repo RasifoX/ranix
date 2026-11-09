@@ -859,28 +859,37 @@ static long sys_adjtimex(k_timex_t *utx)
 	return copy_to_user(utx, &tx, sizeof(tx)) ? -14 : 0;   /* TIME_OK */
 }
 
+/* EINTR with the time still to sleep in *urem, so a retry loop resumes */
+static long sleep_eintr(uint64_t left_ns, linux_timespec_t *urem)
+{
+	if (urem) {
+		linux_timespec_t r;
+		r.tv_sec  = (long)(left_ns / 1000000000ULL);
+		r.tv_nsec = (long)(left_ns % 1000000000ULL);
+		if (copy_to_user(urem, &r, sizeof(r)) != 0) return -EFAULT;
+	}
+	return -EINTR;
+}
+
+/* Never shorter than asked (POSIX). The tick count alone could come short by
+ * the part of the current tick already gone, so after the whole ticks the end
+ * is checked on the nanosecond clock, a tick at a time. */
 static long sleep_for(const linux_timespec_t *kts, linux_timespec_t *urem)
 {
 	linux_timespec_t k = *kts;
 	if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
 	/* a huge span must saturate: a wrapped end returns at once */
-	uint64_t ticks = (uint64_t)k.tv_sec >= (uint64_t)-1 / 2 / TIMER_HZ ? (uint64_t)-1 / 2
-	               : (uint64_t)k.tv_sec * TIMER_HZ + (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
-	uint64_t end = kernel_ticks + (ticks ? ticks : 1);
-	while (kernel_ticks < end) {
-		if (task_has_actionable_signal()) {   /* EINTR (delivered signal only) */
-			if (urem) {                       /* a retry loop resumes from here */
-				uint64_t left = end - kernel_ticks;
-				linux_timespec_t r;
-				r.tv_sec  = (long)(left / TIMER_HZ);
-				r.tv_nsec = (long)(left % TIMER_HZ) * (1000000000 / TIMER_HZ);
-				if (copy_to_user(urem, &r, sizeof(r)) != 0) return -EFAULT;
-			}
-			return -EINTR;
-		}
-		task_sleep_until(end);
+	int huge = (uint64_t)k.tv_sec >= (uint64_t)-1 / 2 / 1000000000ULL;
+	uint64_t want = huge ? (uint64_t)-1 / 2 : (uint64_t)k.tv_sec * 1000000000ULL + (uint64_t)k.tv_nsec;
+	uint64_t start = mono_ns();
+	uint64_t end = kernel_ticks + want / (1000000000ULL / TIMER_HZ);
+	for (;;) {
+		uint64_t gone = mono_ns() - start;
+		if (gone >= want) return 0;
+		if (task_has_actionable_signal())   /* EINTR (delivered signal only) */
+			return sleep_eintr(want - gone, urem);
+		task_sleep_until(kernel_ticks < end ? end : kernel_ticks + 1);
 	}
-	return 0;
 }
 
 static long sys_nanosleep(linux_timespec_t *req, linux_timespec_t *rem)

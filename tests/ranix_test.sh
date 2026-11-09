@@ -497,6 +497,7 @@ check "c-setgroupsfile" "OK" "$(timeout 10 /bin/test_setgroupsfile 2>&1 | tail -
 check "c-clockres"      "OK"  "$(timeout 10 /bin/test_clockres 2>&1 | tail -1)"
 check "c-spliceudp"     "OK"  "$(timeout 10 /bin/test_spliceudp 2>&1 | tail -1)"
 check "c-mountspoll"    "OK"  "$(timeout 10 /bin/test_mountspoll 2>&1 | tail -1)"
+check "c-sleepmin"      "OK"  "$(timeout 20 /bin/test_sleepmin 2>&1 | tail -1)"
 check "c-bigmmap"    "OK"  "$(timeout 20 /bin/test_bigmmap 2>/dev/null)"
 check "c-mremap"     "OK"  "$(timeout 10 /bin/test_mremap 2>/dev/null | tail -1)"
 check "c-faultrace"  "OK"  "$(timeout 120 /bin/test_faultrace 2>/dev/null | tail -1)"
