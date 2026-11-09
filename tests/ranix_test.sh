@@ -783,6 +783,8 @@ check "c-ifioctl"      "OK"  "$(timeout 5 /bin/test_ifioctl 2>/dev/null | tail -
 # set*id rights and filesystem ids (W's audit, AC's fixes): failures print their lines
 CR=$(timeout 15 /bin/test_setxid_caps 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  setxid-caps: /'
 check "c-setxid-caps"  "OK"  "$(echo "$CR" | tail -1)"
+CR=$(timeout 15 /bin/test_setreuid 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  setreuid: /'
+check "c-setreuid"     "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──
