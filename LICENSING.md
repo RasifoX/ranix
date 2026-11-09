@@ -23,7 +23,11 @@ Whoever licenses the work to you under the EUPL also grants you royalty-free use
 
 ## Parts under other licences
 
-Some files are not Ranix's own and keep their own licence: ACPICA (Intel, BSD-style), parts of the Intel i915 graphics driver (MIT), the Spleen font (BSD-2-Clause) and the LinuxKPI headers (BSD-2-Clause). `NOTICE` lists them, with paths. Each file states its licence in an `SPDX-License-Identifier` line or in its header. Files with no such line are Ranix's own and are under `EUPL-1.2`.
+Some files are not Ranix's own and keep their own licence: ACPICA (Intel, BSD-style), parts of the Intel i915 graphics driver (MIT), the Spleen font (BSD-2-Clause), the LinuxKPI headers (BSD-2-Clause), and the parts of the RTL8723BE Wi-Fi driver (ISC and BSD-2-Clause, from FreeBSD rtwn) and of the Raspberry Pi 4 Ethernet driver (BSD-2-Clause, from FreeBSD/NetBSD GENET) that were adapted from FreeBSD. Those two drivers were rewritten clean-room in November 2026 to replace earlier versions derived from GPL code. `NOTICE` lists them, with paths. Each file states its licence in an `SPDX-License-Identifier` line or in its header. Files with no such line are Ranix's own and are under `EUPL-1.2`.
+
+## Firmware
+
+Ranix does not contain device firmware. The RTL8723BE Wi-Fi card needs Realtek's `rtlwifi/rtl8723befw_36.bin`, which the Fjord image takes from linux-firmware. It is under Realtek's own binary licence (`LICENCE.rtlwifi_firmware.txt`), not the GPL and not the EUPL: it may be passed on unmodified, in binary form, with its notice and disclaimer, and may not be reverse-engineered. An image that ships the file must ship that licence with it.
 
 ## Names and logos
 
