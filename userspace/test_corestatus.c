@@ -38,6 +38,22 @@ int main(void)
 	if (!WIFSIGNALED(st) || WCOREDUMP(st)) {
 		printf("abort with RLIMIT_CORE 0: status 0x%x, want no WCOREDUMP\n", st); bad++;
 	}
+	/* the other signals whose default is a core, as on Linux (LTP waitpid01) */
+	int more[] = { SIGXCPU, SIGXFSZ, SIGSYS };
+	for (int i = 0; i < 3; i++) {
+		pid_t c = fork();
+		if (c == 0) {
+			struct rlimit r = { RLIM_INFINITY, RLIM_INFINITY };
+			setrlimit(RLIMIT_CORE, &r);
+			signal(more[i], SIG_DFL);
+			raise(more[i]);
+			_exit(0);
+		}
+		waitpid(c, &st, 0);
+		if (!WIFSIGNALED(st) || WTERMSIG(st) != more[i] || !WCOREDUMP(st)) {
+			printf("signal %d: status 0x%x, want it with WCOREDUMP\n", more[i], st); bad++;
+		}
+	}
 	siginfo_t si;
 	pid_t k = aborting_child(RLIM_INFINITY);
 	if (waitid(P_PID, (id_t)k, &si, WEXITED) != 0 || si.si_code != CLD_DUMPED || si.si_status != SIGABRT) {

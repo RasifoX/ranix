@@ -66,6 +66,9 @@ static int core_signal(int sig)
 	case 7:  /* SIGBUS  */
 	case 8:  /* SIGFPE  */
 	case 11: /* SIGSEGV */
+	case 24: /* SIGXCPU */
+	case 25: /* SIGXFSZ */
+	case 31: /* SIGSYS  */
 		return 1;
 	default:
 		return 0;
