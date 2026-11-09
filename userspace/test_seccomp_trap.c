@@ -1,7 +1,8 @@
 /* seccomp actions as on Linux, the ones Chromium's sandbox is built on:
  * - RET_TRAP: the syscall does not run; SIGSYS arrives with si_code SYS_SECCOMP,
  *   si_errno the filter's data, si_syscall, si_arch and si_call_addr just past
- *   the syscall instruction; what the handler leaves in rax is the result.
+ *   the syscall instruction; the context holds rax = the syscall number (Linux
+ *   rolls the call back); what the handler leaves in rax is the result.
  *   Blocked or ignored, SIGSYS kills (it is forced).
  * - RET_TRACE with no tracer: ENOSYS. RET_LOG: runs. RET_ERRNO(0): returns 0.
  * - The most restrictive action of all filters wins (TRAP over ERRNO).
@@ -36,7 +37,8 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 
 static volatile int got, code, err, nr;
 static volatile unsigned arch;
-static volatile uintptr_t call;
+static volatile uintptr_t call, rip;
+static volatile long rax;
 
 static void on_sys(int sig, siginfo_t *si, void *uc)
 {
@@ -46,6 +48,10 @@ static void on_sys(int sig, siginfo_t *si, void *uc)
 	nr = si->si_syscall;
 	arch = si->si_arch;
 	call = (uintptr_t)si->si_call_addr;
+	/* as Linux (syscall_rollback): the context holds the call as it was made,
+	 * rax the syscall number and rip si_call_addr (Chromium checks both) */
+	rax = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RAX];
+	rip = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
 	((ucontext_t *)uc)->uc_mcontext.gregs[REG_RAX] = 4242;
 }
 
@@ -90,6 +96,8 @@ static const char *trap_child(void)
 	if (err != 0x42) return "TRAP: si_errno is not the filter's data";
 	if (nr != SYS_getppid) return "TRAP: si_syscall";
 	if (arch != 0xc000003eu) return "TRAP: si_arch";
+	if (rax != SYS_getppid) return "TRAP: rax in the context is not the syscall number";
+	if (rip != call) return "TRAP: rip in the context is not si_call_addr";
 	if (!call || ((unsigned char *)call)[-2] != 0x0f || ((unsigned char *)call)[-1] != 0x05)
 		return "TRAP: si_call_addr is not just past a syscall instruction";
 	got = 0;

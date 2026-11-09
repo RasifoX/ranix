@@ -38,6 +38,8 @@ typedef struct {
 #define CTX_SYSCALL_ARG5(ctx)   ((ctx)->regs[5])
 #define CTX_SYSCALL_RET(ctx, v) ((ctx)->regs[0] = (uint64_t)(long)(v))
 #define CTX_SYSCALL_IP(ctx)     ((ctx)->elr)   /* just past the svc instruction */
+/* the return register as the call was made (Linux syscall_rollback): x0 held arg0 */
+#define CTX_SYSCALL_ROLLBACK(nr, arg0)  (arg0)
 
 /* aarch64 syscall numbers */
 /* Linux syscall numbers (sorted by number; the dispatch in syscall.c
