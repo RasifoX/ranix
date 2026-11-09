@@ -799,6 +799,8 @@ CR=$(timeout 10 /bin/test_sigqueue_spoof 2>&1); echo "$CR" | grep -v "^OK$" | se
 check "c-sigqueue-spoof" "OK" "$(echo "$CR" | tail -1)"
 CR=$(timeout 10 /bin/test_faccessat2 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  faccessat2: /'
 check "c-faccessat2"   "OK"  "$(echo "$CR" | tail -1)"
+CR=$(timeout 15 /bin/test_mlock_limit 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  mlock-limit: /'
+check "c-mlock-limit"  "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──
