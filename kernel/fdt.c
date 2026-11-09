@@ -117,19 +117,12 @@ const void *fdt_get_prop(const char *path, const char *prop_name, uint32_t *out_
 
 /* ── parse DTB into fdt_info_t ───────────────────────────── */
 
-static void parse_info(void)
+    /* /chosen initrd */
+static void parse_initrd(void)
 {
     uint32_t len;
     const void *val;
 
-    /* read root #address-cells and #size-cells (defaults: 2, 1) */
-    uint32_t addr_cells = 2, size_cells = 1;
-    val = fdt_get_prop("/", "#address-cells", &len);
-    if (val && len >= 4) addr_cells = be32(val);
-    val = fdt_get_prop("/", "#size-cells", &len);
-    if (val && len >= 4) size_cells = be32(val);
-
-    /* /chosen initrd */
     val = fdt_get_prop("chosen", "linux,initrd-start", &len);
     if (val) {
         if (len == 4) boot_initrd_start = be32(val);
@@ -144,20 +137,14 @@ static void parse_info(void)
                 boot_initrd_size = end - boot_initrd_start;
         }
     }
-
-    /* /model */
-    val = fdt_get_prop("/", "model", &len);
-    if (val)
-        copy_str(_info.model, val, len, sizeof(_info.model));
-    else
-        copy_str(_info.model, "unknown", 7, sizeof(_info.model));
-
-    /* /compatible */
-    val = fdt_get_prop("/", "compatible", &len);
-    if (val)
-        copy_str(_info.compatible, val, len, sizeof(_info.compatible));
+}
 
     /* /memory reg — may have multiple base+size pairs (Pi 4 4GB: two regions) */
+static void parse_memory(uint32_t addr_cells, uint32_t size_cells)
+{
+    uint32_t len;
+    const void *val;
+
     val = fdt_get_prop("memory", "reg", &len);
     if (val) {
         const uint8_t *p = (const uint8_t *)val;
@@ -179,73 +166,108 @@ static void parse_info(void)
             len -= entry_size;
         }
     }
+}
 
     /* Walk /cpus/cpu@N: count CPUs and read each one's spin-table
      * cpu-release-addr straight from the DTB (no hardcoded addresses). */
+static void parse_cpus(void)
+{
     _info.num_cpus = 0;
     for (int i = 0; i < 8; i++) _info.cpu_release[i] = 0;
-    {
-        fdt_header_t *hdr = (fdt_header_t *)_dtb;
-        uint8_t *structs = (uint8_t *)_dtb + be32(&hdr->off_dt_struct);
-        char *strings    = (char *)_dtb + be32(&hdr->off_dt_strings);
-        uint32_t ssize = be32(&hdr->size_dt_struct);
-        uint32_t off = 0;
-        int depth = 0;
-        int in_cpus = 0;
-        int cur_cpu = -1;   /* index of the cpu@N node we are currently inside */
+    fdt_header_t *hdr = (fdt_header_t *)_dtb;
+    uint8_t *structs = (uint8_t *)_dtb + be32(&hdr->off_dt_struct);
+    char *strings    = (char *)_dtb + be32(&hdr->off_dt_strings);
+    uint32_t ssize = be32(&hdr->size_dt_struct);
+    uint32_t off = 0;
+    int depth = 0;
+    int in_cpus = 0;
+    int cur_cpu = -1;   /* index of the cpu@N node we are currently inside */
 
-        while (off < ssize) {
-            uint32_t token = be32(structs + off);
-            off += 4;
-            if (token == FDT_BEGIN_NODE) {
-                const char *name = (const char *)(structs + off);
-                uint32_t nlen = strlen(name) + 1;
-                off += (nlen + 3) & ~3u;
-                if (depth == 1 && node_name_match(name, "cpus"))
-                    in_cpus = 1;
-                if (in_cpus && depth == 2 && node_name_match(name, "cpu")) {
-                    cur_cpu = (int)_info.num_cpus;
-                    _info.num_cpus++;
-                }
-                depth++;
-            } else if (token == FDT_END_NODE) {
-                depth--;
-                if (in_cpus && depth == 2) cur_cpu = -1;
-                if (in_cpus && depth <= 1)  in_cpus = 0;
-            } else if (token == FDT_PROP) {
-                uint32_t plen  = be32(structs + off);
-                uint32_t noff  = be32(structs + off + 4);
-                const void *pval = structs + off + 8;
-                off += 8;
-                if (cur_cpu >= 0 && cur_cpu < 8 &&
-                    strcmp(strings + noff, "cpu-release-addr") == 0) {
-                    if (plen == 8)      _info.cpu_release[cur_cpu] = be64(pval);
-                    else if (plen == 4) _info.cpu_release[cur_cpu] = be32(pval);
-                }
-                off += (plen + 3) & ~3u;
-            } else if (token == FDT_NOP) {
-                continue;
-            } else {
-                break;
+    while (off < ssize) {
+        uint32_t token = be32(structs + off);
+        off += 4;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name = (const char *)(structs + off);
+            uint32_t nlen = strlen(name) + 1;
+            off += (nlen + 3) & ~3u;
+            if (depth == 1 && node_name_match(name, "cpus"))
+                in_cpus = 1;
+            if (in_cpus && depth == 2 && node_name_match(name, "cpu")) {
+                cur_cpu = (int)_info.num_cpus;
+                _info.num_cpus++;
             }
+            depth++;
+        } else if (token == FDT_END_NODE) {
+            depth--;
+            if (in_cpus && depth == 2) cur_cpu = -1;
+            if (in_cpus && depth <= 1)  in_cpus = 0;
+        } else if (token == FDT_PROP) {
+            uint32_t plen  = be32(structs + off);
+            uint32_t noff  = be32(structs + off + 4);
+            const void *pval = structs + off + 8;
+            off += 8;
+            if (cur_cpu >= 0 && cur_cpu < 8 &&
+                strcmp(strings + noff, "cpu-release-addr") == 0) {
+                if (plen == 8)      _info.cpu_release[cur_cpu] = be64(pval);
+                else if (plen == 4) _info.cpu_release[cur_cpu] = be32(pval);
+            }
+            off += (plen + 3) & ~3u;
+        } else if (token == FDT_NOP) {
+            continue;
+        } else {
+            break;
         }
     }
     if (_info.num_cpus == 0)
         _info.num_cpus = 1;
+}
 
     /* PSCI conduit: /psci { method = "hvc" | "smc" }. On real Pi4 the
      * firmware provides PSCI at EL3 via SMC; QEMU virt uses HVC. */
+static void parse_psci(void)
+{
     _info.psci_present = 0;
     _info.psci_use_smc = 0;
-    {
-        uint32_t plen;
-        const void *m = fdt_get_prop("psci", "method", &plen);
-        if (m) {
-            _info.psci_present = 1;
-            if (plen >= 3 && ((const char *)m)[0] == 's')
-                _info.psci_use_smc = 1;   /* "smc" */
-        }
+    uint32_t plen;
+    const void *m = fdt_get_prop("psci", "method", &plen);
+    if (m) {
+        _info.psci_present = 1;
+        if (plen >= 3 && ((const char *)m)[0] == 's')
+            _info.psci_use_smc = 1;   /* "smc" */
     }
+}
+
+static void parse_info(void)
+{
+    uint32_t len;
+    const void *val;
+
+    /* read root #address-cells and #size-cells (defaults: 2, 1) */
+    uint32_t addr_cells = 2, size_cells = 1;
+    val = fdt_get_prop("/", "#address-cells", &len);
+    if (val && len >= 4) addr_cells = be32(val);
+    val = fdt_get_prop("/", "#size-cells", &len);
+    if (val && len >= 4) size_cells = be32(val);
+
+    parse_initrd();
+
+    /* /model */
+    val = fdt_get_prop("/", "model", &len);
+    if (val)
+        copy_str(_info.model, val, len, sizeof(_info.model));
+    else
+        copy_str(_info.model, "unknown", 7, sizeof(_info.model));
+
+    /* /compatible */
+    val = fdt_get_prop("/", "compatible", &len);
+    if (val)
+        copy_str(_info.compatible, val, len, sizeof(_info.compatible));
+
+    parse_memory(addr_cells, size_cells);
+
+    parse_cpus();
+
+    parse_psci();
 }
 
 /* ── public API ──────────────────────────────────────────── */

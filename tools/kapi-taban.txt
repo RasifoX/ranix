@@ -17,12 +17,8 @@ ad	kernel/sys/syscall_misc.c	1
 extern	kernel/mm/mmu.c	extern void enable_mmu(uint64_t table_addr);
 fn	arch/x86_64/vm.c	vm_copy	127
 fn	kernel/elf.c	elf_load_src	157
-fn	kernel/fdt.c	parse_info	129
 fn	kernel/fs/ext2.c	inode_alloc_block	140
 fn	kernel/fs/sysfs.c	sysfs_file_read	124
-fn	kernel/kprintf.c	panic_report	171
-fn	kernel/main.c	kernel_main	266
-fn	kernel/main.c	setup_physical_memory	149
 fn	kernel/mm/vm.c	vm_handle_fault	147
 fn	kernel/net/tcp.c	tcp_input	214
 fn	kernel/sched.c	schedule	129
