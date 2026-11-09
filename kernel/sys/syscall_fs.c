@@ -504,6 +504,28 @@ static long sys_dup3(int oldfd, int newfd, int flags)
 typedef struct { int16_t l_type; int16_t l_whence; int32_t _p; int64_t l_start; int64_t l_len; int32_t l_pid; int32_t _p2; } k_flock;
 #define FD_CLOEXEC 1
 
+/* Who-waits-for-whom for F_SETLKW, kept on the group leader (a record lock
+ * belongs to the process). Linux posix_locks_deadlock follows it from the
+ * holder; reaching the caller means the wait would never end. */
+static void plock_wait_set(pid_t tgid, pid_t holder)
+{
+	process_t *q = proc_get(tgid);
+	if (q) q->plock_wait = holder;
+	proc_put(q);
+}
+
+static int plock_would_deadlock(pid_t me, pid_t holder)
+{
+	for (int i = 0; i < 16 && holder > 0; i++) {   /* Linux gives up after 10 */
+		if (holder == me) return 1;
+		process_t *q = proc_get(holder);
+		pid_t next = q ? q->plock_wait : 0;
+		proc_put(q);
+		holder = next;
+	}
+	return 0;
+}
+
 /* F_GETLK/F_SETLK/F_SETLKW and the F_OFD_ forms on a pinned file */
 static long fcntl_lock(vfs_file_t *f, int cmd, uint64_t arg)
 {
@@ -542,12 +564,21 @@ static long fcntl_lock(vfs_file_t *f, int cmd, uint64_t arg)
 	}
 	if (fl.l_type == 2) { vfs_posix_unlock(f->inode, pid, start, end); return 0; } /* F_UNLCK */
 	int type = (fl.l_type == 1) ? 1 : 0;   /* F_WRLCK : F_RDLCK */
+	pid_t me = task_current()->tgid;
 	for (;;) {
 		int r = vfs_posix_setlk(f->inode, pid, type, start, end);
-		if (r == 0) return 0;
-		if (cmd != F_SETLKW) return r;     /* F_SETLK: EAGAIN on conflict */
+		if (r == 0 || cmd != F_SETLKW) {   /* F_SETLK: EAGAIN on conflict */
+			if (!ofd) plock_wait_set(me, 0);
+			return r;
+		}
+		if (!ofd) {   /* OFD locks have no deadlock check, as on Linux */
+			int t = type, holder = 0; int64_t s = start, e = end;
+			vfs_posix_getlk(f->inode, pid, &t, &s, &e, &holder);
+			if (plock_would_deadlock(me, holder)) { plock_wait_set(me, 0); return -EDEADLK; }
+			plock_wait_set(me, holder);
+		}
 		yield();
-		if (task_has_actionable_signal()) return -EINTR;
+		if (task_has_actionable_signal()) { if (!ofd) plock_wait_set(me, 0); return -EINTR; }
 	}
 }
 

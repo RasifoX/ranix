@@ -276,6 +276,7 @@ typedef struct process {
 
 	/* ── ptrace ──────────────────────────────── */
 	pid_t           tracer;
+	pid_t           plock_wait;     /* F_SETLKW: the process whose POSIX lock this one waits for, 0 none */
 	int             ptrace_opts;          /* 0=none, 1=trace syscalls */
 	int             ptrace_stop;          /* 0=running, 1=entry stop, 2=exit stop */
 	int             ptrace_stop_reported; /* 1 = waitpid already returned this stop */
