@@ -21,16 +21,23 @@ typedef struct route4 {
     uint32_t  gw;        /* next hop, 0 = destination is on the link */
     uint32_t  src;       /* preferred source address, 0 = the device address */
     uint32_t  metric;    /* lower wins between routes of the same prefix */
-    uint8_t   proto;     /* RT_PROTO_* */
+    uint8_t   proto;     /* RT_PROTO_*, as given (iproute2 adds with "boot") */
+    uint8_t   automatic; /* made by route4_sync_dev, which may remake or drop it */
     netdev_t *dev;
 } route4_t;
 
-/* Add a route. replace: an entry with the same dst/mask/metric is overwritten
- * (else -EEXIST). -ENETDOWN if the device is down. */
-int  route4_add(const route4_t *r, int replace);
-/* Delete the first route matching r->dst/r->mask and every other field of r
- * that is non-zero (gw, dev, metric, proto). -ESRCH if none matches. */
-int  route4_del(const route4_t *r);
+/* Add a route. An entry with the same dst/mask/metric is the "same route":
+ *   RT_ADD      it must not exist (-EEXIST)       `ip route add`
+ *   RT_REPLACE  overwrite it, or add              `ip route replace`
+ *   RT_CHANGE   overwrite it; it must exist (-ENOENT)  `ip route change`
+ * -ENETDOWN if the device is down. */
+#define RT_ADD     0
+#define RT_REPLACE 1
+#define RT_CHANGE  2
+int  route4_add(const route4_t *r, int mode);
+/* Delete the first route of namespace ns matching r->dst/r->mask and every
+ * other field of r that is non-zero (gw, dev, metric, proto). -ESRCH if none. */
+int  route4_del(net_namespace_t *ns, const route4_t *r);
 /* Copy out the i-th route of namespace ns (0, 1, ...). 0 = copied, -1 = no more. */
 int  route4_get(net_namespace_t *ns, int i, route4_t *out);
 

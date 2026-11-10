@@ -423,7 +423,9 @@ static netdev_t *ifr_dev(const struct ifreq *r)
 
 static short ifr_flags(const netdev_t *d)
 {
-    short f = IFF_UP | IFF_RUNNING;
+    short f = 0;
+    if (!d->admin_down)    f |= IFF_UP;
+    if (netdev_usable(d))  f |= IFF_RUNNING;
     if (d->ip == 0x7f000001) f |= IFF_LOOPBACK;
     else                     f |= IFF_BROADCAST | IFF_MULTICAST;
     return f;
@@ -468,6 +470,11 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
     case SIOCGIFTXQLEN:
         memset(&r.u, 0, sizeof(r.u));   /* no queueing discipline: qlen stays 0 */
         break;
+    case SIOCSIFFLAGS:
+        /* only IFF_UP acts; the other bits describe the device, they are not
+         * switches here. Root only: this cuts or restores a network. */
+        if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
+        return net_set_admin_up(d, (r.u.ifru_flags & IFF_UP) != 0);
     case SIOCGIFHWADDR:
         memset(&r.u, 0, sizeof(r.u));
         r.u.ifru_hwaddr.sa_family =
@@ -518,9 +525,9 @@ static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
     switch (cmd) {
     case SIOCGIFADDR: case SIOCGIFNETMASK: case SIOCGIFFLAGS:
     case SIOCGIFMTU:  case SIOCGIFINDEX:   case SIOCGIFHWADDR:
-    case SIOCGIFTXQLEN:
+    case SIOCGIFTXQLEN: case SIOCSIFFLAGS:
         return sock_ioctl_ifreq(cmd, arg);
-    case SIOCSIFFLAGS: case SIOCSIFADDR: case SIOCSIFNETMASK: case SIOCSIFMTU:
+    case SIOCSIFADDR: case SIOCSIFNETMASK: case SIOCSIFMTU:
     case SIOCSIFNAME:  case SIOCSIFHWADDR: case SIOCSIFTXQLEN:
         return capable_task(task_current(), CAP_NET_ADMIN) ? -95 : -1;
     case SIOCGIFCONF:

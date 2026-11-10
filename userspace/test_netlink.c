@@ -479,12 +479,19 @@ static int mutate_err(int fd, int type)
 
 static const int mutators[] = { RTM_NEWLINK, RTM_DELLINK, RTM_SETLINK, RTM_NEWADDR, RTM_DELADDR,
                                 RTM_NEWROUTE, RTM_DELROUTE };
+/* what root gets for an empty body: no such device to create (NEWLINK), no
+ * device named (SETLINK), no address family (routes), or not supported at all */
+static const int root_err[] = { -EOPNOTSUPP, -EOPNOTSUPP, -EINVAL, -EOPNOTSUPP, -EOPNOTSUPP,
+                                -EAFNOSUPPORT, -EAFNOSUPPORT };
 
 static int t_mutate(void)
 {
 	int fd = nl_open(SOCK_RAW);
 	for (unsigned i = 0; i < sizeof(mutators) / sizeof(mutators[0]); i++)
-		if (mutate_err(fd, mutators[i]) != -EOPNOTSUPP) return 1;
+		if (mutate_err(fd, mutators[i]) != root_err[i]) {
+			printf("  type %d: %d\n", mutators[i], mutate_err(fd, mutators[i]));
+			return 1;
+		}
 
 	if (mutate_err(fd, RTM_GETNEIGH + 100) != -EOPNOTSUPP) return 2;   /* unknown get */
 
