@@ -80,6 +80,18 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 
 typedef struct { int fd; short events; short revents; } linux_pollfd_t;
 
+/* The file's own edge counters (poll_gens fop): 1 if it has them */
+static int fd_poll_gens(int fd, uint64_t *in_gen, uint64_t *out_gen)
+{
+	process_t  *p = task_current();
+	vfs_file_t *f = p->fds ? fget(p->fds, fd) : NULL;
+	if (!f) return 0;
+	int have = f->inode && f->inode->fops && f->inode->fops->poll_gens;
+	if (have) f->inode->fops->poll_gens(f, in_gen, out_gen);
+	fput(f);
+	return have;
+}
+
 static int fd_poll_bits(int fd)
 {
 	process_t  *p = task_current();
@@ -289,6 +301,8 @@ typedef struct {
 	uint64_t   data[EPOLL_MAX_WATCH];
 	uint32_t   last_ready[EPOLL_MAX_WATCH]; /* for EPOLLET edge tracking */
 	uint64_t   seen[EPOLL_MAX_WATCH];       /* poll_gen when last reported */
+	uint64_t   seen_in[EPOLL_MAX_WATCH];    /* the file's own edge counters when last reported */
+	uint64_t   seen_out[EPOLL_MAX_WATCH];
 	int        next;                        /* where the next scan starts: ready fds take turns */
 } epoll_t;
 
@@ -470,8 +484,9 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 			if (wfd < 0 || ep->ev[i] == 0) { spin_unlock_irq(&ep->lock, f); continue; }
 			spin_unlock_irq(&ep->lock, f);
 			/* a poll fop may block or take other locks: not under ep->lock */
-			uint64_t gen = poll_gen;
+			uint64_t gen = poll_gen, gin = 0, gout = 0;
 			int bits = fd_poll_bits(wfd);
+			int own = (ep->ev[i] & EPOLLET) && fd_poll_gens(wfd, &gin, &gout);
 			f = spin_lock_irq(&ep->lock);
 			if (ep->fds[i] != wfd) { spin_unlock_irq(&ep->lock, f); continue; }
 			uint32_t r = 0;
@@ -487,9 +502,14 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 				/* edge-trigger: newly ready bits, or new data after a read that
 				 * left the fd looking the same: the reader saw EAGAIN and sleeps
 				 * until told, so a second arrival must count as an edge */
-				report = (r & ~ep->last_ready[i]) != 0 || (r && gen != ep->seen[i]);
+				report = (r & ~ep->last_ready[i]) != 0;
+				if (own)   /* the file says which direction moved (Linux: the wakeup's key) */
+					report |= ((r & EPOLLIN) && gin != ep->seen_in[i]) ||
+					          ((r & EPOLLOUT) && gout != ep->seen_out[i]);
+				else
+					report |= r && gen != ep->seen[i];
 				ep->last_ready[i] = r;
-				if (report) ep->seen[i] = gen;
+				if (report) { ep->seen[i] = gen; ep->seen_in[i] = gin; ep->seen_out[i] = gout; }
 			} else {
 				/* level-trigger: report whenever ready */
 				report = (r != 0);

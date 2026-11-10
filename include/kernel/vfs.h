@@ -160,6 +160,9 @@ typedef struct {
     off_t   (*seek)(struct vfs_file *file, off_t off, int whence);
     int     (*close)(struct vfs_file *file);
     int     (*poll)(struct vfs_file *file); /* 1=readable, 0=not */
+    /* optional, for edge-triggered epoll: counters of "data arrived" and "space
+     * freed" for this file, so an edge comes only from its own direction */
+    void    (*poll_gens)(struct vfs_file *file, uint64_t *in_gen, uint64_t *out_gen);
     uint64_t (*mmap)(struct vfs_file *file, off_t off); /* returns physical address */
     int      mmap_keep_pages; /* kernel owns the pages: unmap must not free them */
     int mmap_wc;      /* map write-combining: a framebuffer */
