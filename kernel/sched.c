@@ -1183,6 +1183,17 @@ void hrtimer_run(uint64_t now)
 	spin_unlock_irq(&sched_lock, f);
 }
 
+/* The current task, about to sleep (interrupts off), also ends at `end` on its
+ * CPU's one-shot timer. Without one, or with the queue full, its tick deadline
+ * alone ends it. */
+void sched_note_wake_ns(uint64_t end)
+{
+	if (!hrtimer_on) return;
+	process_t *c = task_current();
+	c->wake_ns = end;
+	if (hr_push(hr_mine(), c, end) == 1) arch_timer_reprogram();
+}
+
 /* Sleep to a CLOCK_MONOTONIC instant (or a signal). With a one-shot timer the
  * CPU's timer is set for it; the tick deadline (rounded up, +1) stays as the
  * backstop, and is the only end without one. */
@@ -1195,12 +1206,11 @@ void task_sleep_until_ns(uint64_t end)
 	if (!hrtimer_on) { task_sleep_until(backstop); return; }
 	uint64_t f = spin_lock_irq(&sched_lock);
 	process_t *c = task_current();
-	c->wake_ns            = end;
 	c->wake_deadline      = backstop;
 	c->sleeping_on_queue  = 1;
 	c->state              = PROC_SLEEPING;
 	sched_note_wake_deadline(backstop);
-	if (hr_push(hr_mine(), c, end) == 1) arch_timer_reprogram();
+	sched_note_wake_ns(end);
 	spin_unlock_irq(&sched_lock, f);
 	arch_yield();
 	c->wake_ns = 0;
