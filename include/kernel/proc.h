@@ -254,6 +254,7 @@ typedef struct process {
 	/* ── wait queue tracking ──────────────────── */
 	int             sleeping_on_queue; /* 1 when sleeping via sleep_on/sleep_on_locked */
 	uint64_t        wake_deadline;     /* tick to wake at (0 = none); for timed sleeps */
+	uint64_t        wake_ns;           /* fine end (CLOCK_MONOTONIC ns) while armed, 0 = none */
 	uint64_t        poll_seen, poll_seen_any;   /* event counts when this task last armed */
 #define POLL_KEYS 16
 	const void     *poll_keys[POLL_KEYS];       /* what its poll is watching */
@@ -364,6 +365,7 @@ void       sched_requeue_prev(void);
 void       yield(void);
 void       task_sleep(void);
 void       task_sleep_until(uint64_t deadline);
+void       task_sleep_until_ns(uint64_t end_ns);   /* to a CLOCK_MONOTONIC instant (or a signal) */
 void       task_sleep_interruptible(void);
 /* Sleep once if cond still holds, tested under sched_lock with interrupts off.
  * Whoever makes it false and then wakes the task cannot fall between the test and

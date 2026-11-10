@@ -14,6 +14,7 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <kernel/tick.h>
+#include <kernel/time.h>
 #include <asm/cpu.h>
 #include <kernel/sync.h>
 void pic8259_mask(uint32_t irq);
@@ -138,21 +139,90 @@ static void lapic_timer_calibrate(void)
 	kprintf(KERN_INFO "timer: lapic %u ticks per %d Hz\n", lapic_timer_initcnt, TIMER_HZ);
 }
 
-/* Start this CPU's periodic local timer. Calibrates lazily on first use. */
+/* One-shot mode: with a nanosecond clock (TSC or HPET) each CPU's timer is set
+ * for whichever comes first, its next tick or its earliest fine wakeup
+ * (hrtimer_next). Ticks keep their absolute times, so they do not drift; a
+ * timer interrupt that comes for a wakeup does no tick work. Without such a
+ * clock the timer stays periodic and sleeps end on the tick. */
+static uint8_t  lapic_oneshot[MAX_CPUS];   /* per CPU: a CPU still periodic must not be re-armed */
+static uint64_t lapic_cnt_per_ms;          /* local timer counts per ms of mono_ns, measured */
+static uint64_t tick_due_ns[MAX_CPUS];
+
+static uint64_t tick_period_ns(void)
+{
+	return 1000000000ULL / TIMER_HZ * (arch_get_cpu_ctx()->tick_slow ? TICK_SLOW : 1);
+}
+
+void arch_timer_reprogram(void)
+{
+	uint64_t cpu = arch_get_cpu_ctx()->cpu_id;
+	if (!lapic_oneshot[cpu]) return;
+	uint64_t now = mono_ns(), due = tick_due_ns[cpu], hr = hrtimer_next();
+	uint64_t at = hr < due ? hr : due;
+	uint64_t delta = at > now ? at - now : 0;
+	if (delta < 2000) delta = 2000;   /* not sooner than the interrupt can be taken */
+	uint64_t cnt = delta * lapic_cnt_per_ms / 1000000ULL;
+	if (cnt < 1) cnt = 1;
+	if (cnt > 0xFFFFFFFFULL) cnt = 0xFFFFFFFFULL;
+	lapic_write(LAPIC_TIMER_INIT, (uint32_t)cnt);
+}
+
+/* This CPU's timer to one-shot, once a nanosecond clock (TSC or HPET) is there:
+ * the BSP starts before ACPI has found the HPET, and switches on a later tick. */
+/* The local timer's rate against the clock the ends are on (mono_ns), measured
+ * once over 2 ms: the PIT- or crystal-derived count is a little off (KVM's is
+ * 1.4 %), and a one-shot set with it fires that much late, 350 us on 25 ms. */
+static void lapic_measure_rate(void)
+{
+	uint64_t f = irq_save();
+	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
+	uint64_t t0 = mono_ns();
+	uint32_t c0 = lapic_read(LAPIC_TIMER_CUR);
+	while (mono_ns() - t0 < 2000000ULL) { }
+	uint32_t c1 = lapic_read(LAPIC_TIMER_CUR);
+	uint64_t t1 = mono_ns();
+	irq_restore(f);
+	uint64_t r = (uint64_t)(c0 - c1) * 1000000ULL / (t1 - t0);
+	uint64_t m = lapic_timer_initcnt;   /* trust it only near the calibrated one */
+	lapic_cnt_per_ms = (r > m - m / 10 && r < m + m / 10) ? r : m;
+	kprintf(KERN_INFO "timer: one-shot, lapic %lu counts per ms of the clock\n", (unsigned long)lapic_cnt_per_ms);
+}
+
+static int lapic_go_oneshot(void)
+{
+	if (!tsc_now_ns() && !hpet_now_ns()) return 0;
+	if (!lapic_cnt_per_ms) lapic_measure_rate();   /* once, on the first CPU to switch */
+	uint64_t cpu = arch_get_cpu_ctx()->cpu_id;
+	tick_due_ns[cpu] = mono_ns() + tick_period_ns();
+	lapic_oneshot[cpu] = 1;
+	hrtimer_on = 1;
+	lapic_write(LAPIC_LVT_TIMER, VEC_LAPIC_TIMER);   /* one-shot */
+	arch_timer_reprogram();
+	return 1;
+}
+
+/* Start this CPU's local timer. Calibrates lazily on first use. */
 void lapic_timer_start(void)
 {
 	if (!lapic) return;
 	if (!lapic_timer_initcnt) lapic_timer_calibrate();
 	if (!lapic_timer_initcnt) return;
 	lapic_write(LAPIC_TIMER_DIV, 0x3);
+	if (lapic_go_oneshot()) return;
 	lapic_write(LAPIC_LVT_TIMER, VEC_LAPIC_TIMER | LVT_TIMER_PERIODIC);
 	lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt);
 }
 
 void arch_tick_slow(int slow)
 {
-	if (lapic && lapic_timer_initcnt)
-		lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt * (slow ? TICK_SLOW : 1));
+	if (!lapic || !lapic_timer_initcnt) return;
+	if (lapic_oneshot[arch_get_cpu_ctx()->cpu_id]) {   /* tick_slow is already set: the next tick moves */
+		tick_due_ns[arch_get_cpu_ctx()->cpu_id] = mono_ns() + tick_period_ns();
+		arch_timer_reprogram();
+		return;
+	}
+	lapic_write(LAPIC_TIMER_INIT, lapic_timer_initcnt * (slow ? TICK_SLOW : 1));
 }
 
 /* Move the BSP's global tick from the PIT to its LAPIC timer, so the tick
@@ -174,8 +244,24 @@ void lapic_bsp_tick_takeover(void)
 /* Vector 0xF1 handler — scheduler tick. The BSP's carries the global tick. */
 void lapic_timer_irq(void)
 {
-	if (arch_get_cpu_ctx()->cpu_id == 0) tick_notify();
-	else tick_notify_local();
+	cpu_context_t *c = arch_get_cpu_ctx();
+	if (!lapic_oneshot[c->cpu_id]) {
+		if (c->cpu_id == 0) tick_notify();
+		else tick_notify_local();
+		if (lapic_timer_initcnt) lapic_go_oneshot();   /* the clock may have come since */
+		lapic_write(LAPIC_EOI, 0);
+		return;
+	}
+	uint64_t now = mono_ns();
+	uint64_t *due = &tick_due_ns[c->cpu_id];
+	if (now + 20000 >= *due) {   /* the tick (a few us early is the tick, not a second interrupt) */
+		*due += tick_period_ns();
+		if (*due <= now) *due = now + tick_period_ns();   /* fell behind: no burst */
+		if (c->cpu_id == 0) tick_notify();
+		else tick_notify_local();
+	}
+	hrtimer_run(mono_ns());
+	arch_timer_reprogram();
 	lapic_write(LAPIC_EOI, 0);
 }
 
