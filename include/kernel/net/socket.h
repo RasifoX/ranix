@@ -89,6 +89,7 @@ typedef struct socket {
     in6_addr_t remote_ip6;
 
     netdev_t *dev;
+    netdev_t *bound_dev;    /* SO_BINDTODEVICE: sends only through this device */
     void     *cg;           /* cgroup paying for the socket and what it receives */
 
     /* recv queue */

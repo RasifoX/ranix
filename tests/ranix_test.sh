@@ -637,6 +637,13 @@ check "ip-route-add"  "yes" "$(ip route add 192.0.2.0/24 via 10.0.3.2 dev eth1 2
 check "ip-route-del"  "0"   "$(ip route del 192.0.2.0/24 2>&1; ip route | grep -c '^192.0.2.0/24')"
 check "ip-link-down"  "0 down" "$(ip link set eth1 down 2>&1; echo $(ip route | grep -c 'dev eth1') $(cat /sys/class/net/eth1/operstate 2>&1))"
 check "ip-link-up"    "2 up" "$(ip link set eth1 up 2>&1; echo $(ip route | grep -c 'dev eth1') $(cat /sys/class/net/eth1/operstate 2>&1))"
+BD=$(timeout 120 /bin/test_bindtodev 2>&1); echo "$BD" | grep -v "^OK$" | sed 's/^/  bindtodev: /'
+check "c-bindtodev"   "OK"  "$(echo "$BD" | tail -1)"
+txp() { sed -n "s/^ *$1://p" /proc/net/dev | awk '{print $10}'; }
+A0=$(txp eth0); A1=$(txp eth1); PI=$(ping -c 3 -W 1 -I eth1 10.0.2.2 2>&1); B0=$(txp eth0); B1=$(txp eth1)
+check "ping-I-eth1"   "yes" "$([ $((B1-A1)) -ge 3 ] && [ $((B0-A0)) -eq 0 ] && echo yes || echo "eth0 +$((B0-A0)) eth1 +$((B1-A1))")"
+[ $((B1-A1)) -ge 3 ] || echo "$PI" | sed 's/^/  ping-I: /'
+check "ping-I-reply"  "0"   "$(ping -c 2 -W 2 -I eth1 10.0.3.2 >/dev/null 2>&1; echo $?)"
 check "proc-irqs"     "yes" "$(grep -q 'CPU0' /proc/interrupts && echo yes)"
 check "c-eintr"      "OK"  "$(timeout 30 /bin/test_eintr 2>/dev/null | tail -1)"
 check "c-execstress" "OK" "$(timeout 60 /bin/test_execstress 2>/dev/null | tail -1)"

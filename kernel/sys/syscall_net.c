@@ -1006,7 +1006,7 @@ static long connect_set_peer(socket_t *s, const uint8_t *ka, uint32_t addrlen, u
         if (s->type == SOCK_DGRAM) {
             /* getaddrinfo probes a source address this way: no route means no such
              * source, not a socket that claims to be somewhere */
-            netdev_t *d6 = net_route_dev6(&s->remote_ip6);
+            netdev_t *d6 = net_route_dev6(&s->remote_ip6, s->bound_dev);
             if (!ipv6_reachable(d6, &s->remote_ip6)) return -ENETUNREACH;
             s->local_ip6 = ipv6_src_for(d6, &s->remote_ip6);
         }
@@ -1017,14 +1017,14 @@ static long connect_set_peer(socket_t *s, const uint8_t *ka, uint32_t addrlen, u
         s->remote_port = ntohs(sa.sin_port);
         if (s->domain == AF_INET && s->type == SOCK_DGRAM) {
             /* the route's device names the source getsockname reports */
-            netdev_t *d = net_route_dev(s->remote_ip);
+            netdev_t *d = net_route_dev(s->remote_ip, s->bound_dev);
             if (d == &current_net_ns()->lo && (s->remote_ip >> 24) != 127) return -ENETUNREACH;
             s->dev = d;
         }
         if (s->domain == AF_INET6 && s->type == SOCK_DGRAM) {
             /* getaddrinfo keeps one socket for both families, then asserts that the
              * source of an IPv4 peer reads back as ::ffff:a.b.c.d */
-            netdev_t *d = net_route_dev(s->remote_ip);
+            netdev_t *d = net_route_dev(s->remote_ip, s->bound_dev);
             uint32_t ip = htonl(d ? d->ip : 0);
             uint8_t *b = (uint8_t *)&s->local_ip6;
             memset(b, 0, 10);
@@ -1092,12 +1092,12 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     /* a namespace with only loopback has no way to this peer; the SYN would loop
      * back to nobody and connect would sleep forever */
     if (s->domain == AF_INET && (s->remote_ip >> 24) != 127 &&
-        net_route_dev(s->remote_ip) == &current_net_ns()->lo)
+        net_route_dev(s->remote_ip, s->bound_dev) == &current_net_ns()->lo)
         return -ENETUNREACH;
     /* fail fast on an unreachable IPv6 peer (no on-link prefix, no router) so an
      * AF_UNSPEC client falls back to IPv4 instead of blocking on a dropped SYN */
     if (s->domain == AF_INET6) {
-        netdev_t *d6 = net_route_dev6(&s->remote_ip6);
+        netdev_t *d6 = net_route_dev6(&s->remote_ip6, s->bound_dev);
         if (!ipv6_reachable(d6, &s->remote_ip6)) {
             /* nonblocking: report the failure through SO_ERROR/poll like Linux,
              * so a client iterating addrinfo (libfetch) moves on to the next
@@ -1148,11 +1148,11 @@ static long sendto_v4mapped(socket_t *s, const uint8_t *ka)
 
 /* ICMPv6 echo and friends: checksum the user's message and send it, waiting
  * up to ~1 s for the neighbour to resolve. */
-static long sendto_icmp6(uint8_t *kb, size_t len, in6_addr_t dst6)
+static long sendto_icmp6(socket_t *s, uint8_t *kb, size_t len, in6_addr_t dst6)
 {
     long rr;
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMPv6: single skb */
-    netdev_t  *txdev = net_route_dev6(&dst6);
+    netdev_t  *txdev = net_route_dev6(&dst6, s->bound_dev);
     in6_addr_t src6  = ipv6_src_for(txdev, &dst6);
     icmp6_hdr_t *ih = (icmp6_hdr_t *)kb;
     ih->checksum = 0;
@@ -1183,7 +1183,7 @@ static long sendto_udp6(socket_t *s, uint8_t *kb, size_t len, in6_addr_t dst6, u
     long rr = -38;
     if (!s->local_port) s->local_port = alloc_port();
     sock_register(s);
-    netdev_t *txdev = net_route_dev6(&dst6);
+    netdev_t *txdev = net_route_dev6(&dst6, s->bound_dev);
     for (int attempt = 0; attempt < 64; attempt++) {
         int rc = udp6_tx(txdev, &dst6, s->local_port, dst_port6,
                          kb, (uint16_t)len);
@@ -1217,7 +1217,7 @@ static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t 
     if ((fop ? copy_fop_from_user(kb, buf, len) : copy_from_user(kb, buf, len)) != 0) { kfree(kb); return -EFAULT; }
     /* fail fast if the destination has no route, rather than spinning the
      * resolve loop and returning a misleading ENOSYS */
-    if (!ipv6_reachable(net_route_dev6(&dst6), &dst6)) { kfree(kb); return -EHOSTUNREACH; }
+    if (!ipv6_reachable(net_route_dev6(&dst6, s->bound_dev), &dst6)) { kfree(kb); return -EHOSTUNREACH; }
 
     long rr = -38;
     /* ICMPv6 over SOCK_RAW *or* SOCK_DGRAM (Linux "ping socket": unprivileged
@@ -1226,7 +1226,7 @@ static long sendto_ipv6(socket_t *s, const void *buf, size_t len, const uint8_t 
     if (s->proto == IPPROTO_ICMPV6 &&
         (s->type == SOCK_RAW || s->type == SOCK_DGRAM) &&
         len >= sizeof(icmp6_hdr_t)) {
-        rr = sendto_icmp6(kb, len, dst6);
+        rr = sendto_icmp6(s, kb, len, dst6);
     } else if (s->type == SOCK_DGRAM) {
         rr = sendto_udp6(s, kb, len, dst6, dst_port6);
     }
@@ -1244,7 +1244,7 @@ static long sendto_udp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip,
     sock_register(s);
     /* first send to an unresolved peer triggers ARP and is dropped; poll RX
      * for the reply and retry so the datagram actually goes out */
-    netdev_t *txdev = net_route_dev(dst_ip);
+    netdev_t *txdev = net_route_dev(dst_ip, s->bound_dev);
     if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     /* the first send to an unresolved next-hop triggers ARP and is dropped;
      * wait (time-based, not a microsecond-fast count) for the ARP reply so
@@ -1265,7 +1265,7 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
 {
     long r = -38;
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMP: single skb */
-    netdev_t *txdev = net_route_dev(dst_ip);
+    netdev_t *txdev = net_route_dev(dst_ip, s->bound_dev);
     if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     if (len >= sizeof(icmp_hdr_t)) {
         icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
@@ -2027,6 +2027,7 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_RCVTIMEO    20
 #define SO_SNDTIMEO    21
 #define SO_ACCEPTCONN  30
+#define SO_BINDTODEVICE 25
 #define SO_IPPROTO_TCP  6
 #define SO_TCP_NODELAY  1
 #define SO_TCP_INFO    11
@@ -2089,6 +2090,28 @@ static int sockopt_known(socket_t *s, int lv, int opt)
 	return 0;
 }
 
+/* SO_BINDTODEVICE: the socket sends only through the named device, choosing
+ * among that device's routes (`ping -I wlan0`); "" unbinds. Root only
+ * (CAP_NET_RAW): it steers traffic past the routing table. Linux since 5.7 lets
+ * anyone bind a socket once; Ranix keeps it closed, as Linux did before.
+ * Received packets are not filtered by device. */
+static long sock_bind_to_device(socket_t *s, const void *val, uint32_t len)
+{
+	if (!capable_task(task_current(), CAP_NET_RAW)) return -EPERM;
+	char name[IFNAMSIZ];
+	memset(name, 0, sizeof(name));
+	if (len > IFNAMSIZ - 1) len = IFNAMSIZ - 1;
+	if (len && copy_from_user(name, val, len) != 0) return -EFAULT;
+	if (!name[0]) { s->bound_dev = NULL; return 0; }
+	netdev_t *d;
+	for (int i = 0; (d = net_dev(i)); i++)
+		if (strcmp(d->name, name) == 0) break;
+	if (!d) return -ENODEV;
+	s->bound_dev = d;
+	s->dev = d;
+	return 0;
+}
+
 static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t len)
 {
 	socket_t *s = fd_to_sock(fd);
@@ -2101,6 +2124,10 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		if (copy_from_user(line, val, len) != 0) return -EFAULT;
 		return nf_ctl_set(line, len);
 	}
+
+	/* a device name, not an int: before the level and int checks below */
+	if (lv == SO_SOL_SOCKET && opt == SO_BINDTODEVICE)
+		return sock_bind_to_device(s, val, len);
 
 	/* the level is the protocol's to answer first: AF_UNIX knows only
 	 * SOL_SOCKET; inet knows its own and IP's, and nothing else (Linux) */
@@ -2212,6 +2239,15 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		if (cp && copy_to_user(val, &uc, cp) != 0) return -EFAULT;
 		uint32_t rl = sizeof(uc);
 		if (copy_to_user(len, &rl, sizeof(rl)) != 0) return -EFAULT;
+		return 0;
+	}
+
+	if (lv == SO_SOL_SOCKET && opt == SO_BINDTODEVICE) {
+		const char *name = s->bound_dev ? s->bound_dev->name : "";
+		uint32_t n = s->bound_dev ? (uint32_t)strlen(name) + 1 : 0;
+		if (ulen < n) return -EINVAL;
+		if (n && copy_to_user(val, name, n) != 0) return -EFAULT;
+		if (copy_to_user(len, &n, sizeof(n)) != 0) return -EFAULT;
 		return 0;
 	}
 
