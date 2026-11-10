@@ -13,6 +13,7 @@
  *               ioctl RTW_PEEK / RTW_POKE {u32 addr, width, val}
  *               ioctl RTW_STOP   power off
  *               ioctl RTW_LINK   u8[6] mac: carrier on for wlan0; 0: carrier off
+ *               ioctl RTW_TXRPT  struct rtw_txrpt: per-rate TX reports, for rate control
  *               ioctl RTW_RXDBG  u32[8] out: ring state, for "fjord-wifi rxdbg";
  *                                [4] MGQ, [5] BEQ: frames pushed << 16 | handed back,
  *                                [6] MGQ_DESA read back (the chip's current descriptor)
@@ -110,6 +111,9 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/init.h>
+#include <kernel/time.h>
+#include <kernel/cmdline.h>
+#include <kernel/board.h>
 #include <asm/mmu.h>
 #include <asm/io.h>
 
@@ -122,9 +126,21 @@
 #define RTW_STOP   0x7705
 #define RTW_LINK   0x7706
 #define RTW_RXDBG  0x7707
+#define RTW_TXRPT  0x7708
 
 struct rtw_fw_arg { uint64_t ptr, len; };
 struct rtw_reg    { uint32_t addr, width, val; };
+/* RTW_TXRPT: firmware TX reports per rtwn rate index (0-3 CCK, 4-11 OFDM, 12-19 HT
+ * MCS0-7) since the previous call, then cleared. every: in, report every Nth BE
+ * frame (0 = off, RTW_TXRPT_KEEP = unchanged); out, the value in force. */
+#define RTW_NRATE      20
+#define RTW_TXRPT_KEEP 0xffffffffu
+struct rtw_txrpt {
+    uint32_t every;
+    uint32_t frames[RTW_NRATE];     /* reports received */
+    uint32_t ok[RTW_NRATE];         /* delivered (neither retry-over nor expired) */
+    uint32_t attempts[RTW_NRATE];   /* retries + 1, summed */
+};
 
 /* ── registers (names as in FreeBSD rtwn) ─────────────────── */
 
@@ -257,7 +273,7 @@ struct rtw_reg    { uint32_t addr, width, val; };
 
 #define RX_COUNT    64
 #define RX_BUF      4096
-#define TX_COUNT    32
+#define TX_COUNT    64          /* a full ring makes fjord-wifi drop the frame */
 #define TX_BUF      4096
 #define RX_DESC_SZ  32          /* rtwn_rx_stat_pci */
 #define TX_DESC_SZ  64          /* ring stride, as r92ce_tx_desc */
@@ -284,6 +300,15 @@ struct rtw_reg    { uint32_t addr, width, val; };
 #define RXDW0_EOR       0x40000000u
 #define RXDW0_OWN       0x80000000u
 #define TXDW0_OWN       0x80000000u
+#define RXDW0_CRCERR    0x00004000u  /* r92c_rx_desc.h */
+#define RXDW0_ICVERR    0x00008000u
+#define RXDW2_RPT_C2H   0x10000000u  /* r12a_rx_desc.h: a firmware report, not a frame */
+#define TXDW2_SPE_RPT   0x00080000u  /* r12a_tx_desc.h: ask for a TX report */
+#define C2H_TX_REPORT   0x03         /* r12a_fw_cmd.h, struct r12a_c2h_tx_rpt */
+#define TXRPT_RETRY_OVER  0x80
+#define TXRPT_LIFE_EXPIRE 0x40
+#define TXRPT_RETRY_CNT_M 0x3f
+#define HISR_RDU        0x00000002u  /* r88e_reg.h: RX descriptor unavailable (write 1 clears) */
 
 enum { Q_MGT = 0, Q_BE = 1, NQ = 2 };
 /* rtwn PCI queue numbers: the kick bit in R_PCIE_CTRL_REG */
@@ -303,6 +328,12 @@ typedef struct {
     /* diagnostics, reset by RTW_RINGS: frames given to the chip, descriptors it
      * handed back (OWN cleared), writes refused because the ring was full */
     uint32_t tail, inflight, pushed, done, full;
+    /* Timing: tick of each push; completion latency at reclaim, which runs every
+     * 1 ms tick (CRT6; CRT5 reclaimed only at the next push, so idle gaps showed up
+     * as latency); ticks with the ring full. lat_hist: <1, <2, <5, <10, <50, <200, >=200 ms */
+    uint64_t push_tick[TX_COUNT];
+    uint32_t lat_max, lat_10, full_ticks;
+    uint32_t lat_hist[7];
 } txq_t;
 
 #define WLAN_TXQ_MAX 64
@@ -333,6 +364,24 @@ static struct {
     uint32_t txq_head, txq_n;
     spinlock_t txq_lock;
 } g;
+
+/* Link diagnostics, printed as one "rtw8723: stat" line at most every 10 s while
+ * frames move. TX reports: every txrpt_every-th best-effort frame asks the firmware
+ * for a report (FreeBSD r12a: SPE_RPT, C2H id 3); the kernel reads the report and
+ * does not pass it to fjord-wifi. rtw8723.txrpt=N on the command line, 0 = off. */
+static struct {
+    uint32_t rx, crc, icv, c2h, other_c2h, rdu, backlog_max;
+    uint32_t be_n, rpt_asked, rpt, rpt_ok, rpt_over, rpt_exp, retries;
+    uint32_t retry_hist[5];         /* 0, 1, 2-3, 4-7, 8+ */
+    uint32_t rate_hist[13];         /* rtwn rate index 0-11 (CCK 1..11, OFDM 6..54), 12 = other */
+    uint32_t rxrate[21];            /* data-sized frames (>= 400 B) by RX rate (r12a rxdw3), 20 = other */
+    uint32_t rx_ampdu;              /* r12a rxdw1 AMPDU */
+    uint32_t wtx_drop;              /* stack frames dropped: wlan0 queue to fjord-wifi full */
+    uint64_t last_print;
+    uint32_t last_rx, last_be;
+} st;
+static struct rtw_txrpt rr;         /* per-rate, for RTW_TXRPT; rx_lock */
+static uint32_t txrpt_every = 8;
 
 /* ── helpers ──────────────────────────────────────────────── */
 
@@ -693,6 +742,8 @@ static void rings_reset(void)
         g.tx[q].cur = 0;
         g.tx[q].tail = g.tx[q].inflight = 0;
         g.tx[q].pushed = g.tx[q].done = g.tx[q].full = 0;
+        g.tx[q].lat_max = g.tx[q].lat_10 = g.tx[q].full_ticks = 0;
+        memset(g.tx[q].lat_hist, 0, sizeof g.tx[q].lat_hist);
     }
     dma_wmb();
 }
@@ -722,38 +773,127 @@ static int rings_start(uint32_t base[3])
     base[1] = (uint32_t)g.tx[Q_MGT].desc.phys;
     base[2] = (uint32_t)g.tx[Q_BE].desc.phys;
     g.rx_restarts++;
+    memset(&st, 0, sizeof st);
+    memset(&rr, 0, sizeof rr);
     g.rings_up = 1;
     return 0;
 }
 
+static void stat_print(void)
+{
+    kprintf(KERN_INFO "rtw8723: stat rx %u crc %u icv %u rdu %u backlog %u | be %u full %u mg %u full %u | "
+            "rpt %u/%u ok %u over %u exp %u retries %u [0:%u 1:%u 2-3:%u 4-7:%u 8+:%u] "
+            "rate 1M:%u 2M:%u 5M:%u 11M:%u 6M:%u 9M:%u 12M:%u 18M:%u 24M:%u 36M:%u 48M:%u 54M:%u x:%u c2h %u\n",
+            st.rx, st.crc, st.icv, st.rdu, st.backlog_max,
+            g.tx[Q_BE].pushed, g.tx[Q_BE].full, g.tx[Q_MGT].pushed, g.tx[Q_MGT].full,
+            st.rpt, st.rpt_asked, st.rpt_ok, st.rpt_over, st.rpt_exp, st.retries,
+            st.retry_hist[0], st.retry_hist[1], st.retry_hist[2], st.retry_hist[3], st.retry_hist[4],
+            st.rate_hist[0], st.rate_hist[1], st.rate_hist[2], st.rate_hist[3], st.rate_hist[4],
+            st.rate_hist[5], st.rate_hist[6], st.rate_hist[7], st.rate_hist[8], st.rate_hist[9],
+            st.rate_hist[10], st.rate_hist[11], st.rate_hist[12], st.other_c2h);
+    uint32_t *r = st.rxrate;
+    kprintf(KERN_INFO "rtw8723: stat2 rxrate(data) cck %u/%u/%u/%u ofdm %u/%u/%u/%u/%u/%u/%u/%u mcs %u/%u/%u/%u/%u/%u/%u/%u x %u "
+            "ampdu %u | be lat max %u ms >=10ms %u full %u ms hist <1:%u <2:%u <5:%u <10:%u <50:%u <200:%u >=200:%u | mg lat max %u | wlan_tx drop %u\n",
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
+            r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19], r[20], st.rx_ampdu,
+            g.tx[Q_BE].lat_max, g.tx[Q_BE].lat_10, g.tx[Q_BE].full_ticks,
+            g.tx[Q_BE].lat_hist[0], g.tx[Q_BE].lat_hist[1], g.tx[Q_BE].lat_hist[2], g.tx[Q_BE].lat_hist[3],
+            g.tx[Q_BE].lat_hist[4], g.tx[Q_BE].lat_hist[5], g.tx[Q_BE].lat_hist[6],
+            g.tx[Q_MGT].lat_max, st.wtx_drop);
+}
+
+/* Every 10 s, if anything moved; called without locks held. */
+static void stat_maybe_print(void)
+{
+    uint64_t now = kernel_ticks;
+    if (now - st.last_print < 10ULL * TIMER_HZ) return;
+    if (st.rx == st.last_rx && g.tx[Q_BE].pushed == st.last_be) return;
+    st.last_print = now;
+    st.last_rx = st.rx;
+    st.last_be = g.tx[Q_BE].pushed;
+    stat_print();
+}
+
+/* A firmware TX report (r12a_c2h_tx_rpt after a 2-byte id/sequence). */
+static void txrpt_take(const uint8_t *p, uint32_t n)
+{
+    if (n < 2 + 6 || p[0] != C2H_TX_REPORT) { st.other_c2h++; return; }
+    uint8_t b0 = p[2], b2 = p[4], rate = p[7];
+    uint32_t tries = b2 & TXRPT_RETRY_CNT_M;
+    st.rpt++;
+    if (b0 & TXRPT_RETRY_OVER) st.rpt_over++;
+    else if (b0 & TXRPT_LIFE_EXPIRE) st.rpt_exp++;
+    else st.rpt_ok++;
+    st.retries += tries;
+    st.retry_hist[tries == 0 ? 0 : tries == 1 ? 1 : tries < 4 ? 2 : tries < 8 ? 3 : 4]++;
+    st.rate_hist[rate < 12 ? rate : 12]++;
+    if (rate < RTW_NRATE) {
+        rr.frames[rate]++;
+        if (!(b0 & (TXRPT_RETRY_OVER | TXRPT_LIFE_EXPIRE))) rr.ok[rate]++;
+        rr.attempts[rate] += tries + 1;
+    }
+}
+
 /* One received frame: descriptor, then driver info + shift + frame from the buffer.
- * The copy to user space happens outside the lock, from a heap bounce buffer. */
+ * Firmware reports are consumed here. The copy to user space happens outside the
+ * lock, from a heap bounce buffer. */
 static ssize_t rx_pop(void *ubuf, size_t len)
 {
     uint8_t *frame = kmalloc(RX_DESC_SZ + RX_BUF);
     if (!frame) return -ENOMEM;
     uint64_t f = spin_lock_irq(&g.rx_lock);
-    uint32_t i = g.rx_cur;
-    volatile uint32_t *d = rx_desc(i);
-    uint32_t w0 = d[0];
-    if (w0 & RXDW0_OWN) {
-        spin_unlock_irq(&g.rx_lock, f);
-        kfree(frame);
-        return -EAGAIN;
+    uint32_t data;
+    for (;;) {
+        uint32_t i = g.rx_cur;
+        volatile uint32_t *d = rx_desc(i);
+        uint32_t w0 = d[0];
+        if (w0 & RXDW0_OWN) {
+            spin_unlock_irq(&g.rx_lock, f);
+            kfree(frame);
+            stat_maybe_print();
+            return -EAGAIN;
+        }
+        cbarrier();
+        if ((st.rx & 63) == 0) {                /* how far behind the reader is, now and then */
+            uint32_t k = 0;
+            while (k < RX_COUNT && !(rx_desc((i + k) % RX_COUNT)[0] & RXDW0_OWN)) k++;
+            if (k > st.backlog_max) st.backlog_max = k;
+        }
+        uint32_t pkt = w0 & RXDW0_PKTLEN_M;
+        uint32_t off = ((w0 >> RXDW0_INFOSZ_S) & 0xf) * 8 + ((w0 >> RXDW0_SHIFT_S) & 3);
+        data = pkt + off;
+        if (data > RX_BUF) data = RX_BUF;
+        int c2h = !!(d[2] & RXDW2_RPT_C2H);
+        if (c2h) {
+            st.c2h++;
+            if (off < RX_BUF) txrpt_take(g.rx_buf.virt + (uint64_t)i * RX_BUF + off,
+                                          pkt < RX_BUF - off ? pkt : RX_BUF - off);
+        } else {
+            st.rx++;
+            if (pkt >= 400) {
+                uint32_t rr3 = d[3] & 0x7f;
+                st.rxrate[rr3 < 20 ? rr3 : 20]++;
+                if (d[1] & 0x00008000u) st.rx_ampdu++;
+            }
+            if (w0 & RXDW0_CRCERR) st.crc++;
+            if (w0 & RXDW0_ICVERR) st.icv++;
+            for (int w = 0; w < 8; w++) ((uint32_t *)frame)[w] = d[w];
+            memcpy(frame + RX_DESC_SZ, g.rx_buf.virt + (uint64_t)i * RX_BUF, data);
+        }
+        rx_arm(i);
+        g.rx_cur = (i + 1) % RX_COUNT;
+        /* A full ring latches RDU and the chip stops fetching until it is cleared;
+         * clear it as soon as a slot is back instead of waiting for an empty ring. */
+        if (rd4(R_HISR) & HISR_RDU) { wr4(R_HISR, HISR_RDU); st.rdu++; }
+        if (!c2h) break;
     }
-    cbarrier();
-    uint32_t data = (w0 & RXDW0_PKTLEN_M) + ((w0 >> RXDW0_INFOSZ_S) & 0xf) * 8 + ((w0 >> RXDW0_SHIFT_S) & 3);
-    if (data > RX_BUF) data = RX_BUF;
-    for (int w = 0; w < 8; w++) ((uint32_t *)frame)[w] = d[w];
-    memcpy(frame + RX_DESC_SZ, g.rx_buf.virt + (uint64_t)i * RX_BUF, data);
-    rx_arm(i);
-    g.rx_cur = (i + 1) % RX_COUNT;
     spin_unlock_irq(&g.rx_lock, f);
 
     size_t n = RX_DESC_SZ + data;
     if (n > len) n = len;
     long bad = copy_fop_to_user(ubuf, frame, n);
     kfree(frame);
+    stat_maybe_print();
     return bad ? -EFAULT : (ssize_t)n;
 }
 
@@ -762,6 +902,10 @@ static void tx_reclaim(int q)
 {
     txq_t *t = &g.tx[q];
     while (t->inflight && !(tx_desc(q, t->tail)[0] & TXDW0_OWN)) {
+        uint32_t lat = (uint32_t)(kernel_ticks - t->push_tick[t->tail]);
+        if (lat > t->lat_max) t->lat_max = lat;
+        if (lat >= 10) t->lat_10++;
+        t->lat_hist[lat < 1 ? 0 : lat < 2 ? 1 : lat < 5 ? 2 : lat < 10 ? 3 : lat < 50 ? 4 : lat < 200 ? 5 : 6]++;
         t->tail = (t->tail + 1) % TX_COUNT;
         t->inflight--;
         t->done++;
@@ -795,6 +939,10 @@ static ssize_t tx_push(const void *ubuf, size_t len)
     uint64_t pa = t->buf.phys + (uint64_t)slot * TX_BUF;
     memcpy(t->buf.virt + (uint64_t)slot * TX_BUF, b + 41, flen);
     for (int k = 1; k < TXD_CTRL_WORDS; k++) d[k] = w[k];
+    if (q == Q_BE && txrpt_every && ++st.be_n % txrpt_every == 0) {
+        d[2] = w[2] | TXDW2_SPE_RPT;
+        st.rpt_asked++;
+    }
     d[TXD_BUF]   = (uint32_t)pa;                                /* r92ce_tx_postsetup */
     d[TXD_BUF64] = (uint32_t)(pa >> 32);
     dma_wmb();
@@ -804,6 +952,7 @@ static ssize_t tx_push(const void *ubuf, size_t len)
      * (the DESA registers read back the current descriptor), and the status bits. */
     uint32_t desa = rd4(q_desa[q]), hisr = rd4(R_HISR);
     wr2(R_PCIE_CTRL_REG, (uint16_t)(1u << q_kick[q]));
+    t->push_tick[slot] = kernel_ticks;
     t->cur = (slot + 1) % TX_COUNT;
     t->inflight++;
     uint32_t n = ++t->pushed, done = t->done, full = t->full;
@@ -816,12 +965,22 @@ static ssize_t tx_push(const void *ubuf, size_t len)
         kprintf(KERN_INFO "rtw8723: tx q%d #%u done %u full %u slot %u w0 %08x w1 %08x w3 %08x "
                 "w4 %08x w7 %08x buf %08x desa %08x hisr %08x\n",
                 q, n, done, full, slot, w[0], w[1], w[3], w[4], w[7], (uint32_t)pa, desa, hisr);
+    stat_maybe_print();
     return (ssize_t)len;
 }
 
 /* Timer tick: wake a poller once the head descriptor is ours. One memory read. */
 static void rtw_tick(void)
 {
+    if (g.rings_up)
+        for (int q = 0; q < NQ; q++) {
+            /* Runs on CPU0 in the timer interrupt. Every other holder of this lock
+             * takes it with interrupts off, so it is never held here on CPU0. */
+            spin_lock(&g.tx[q].lock);
+            tx_reclaim(q);                  /* completion time to the millisecond */
+            if (g.tx[q].inflight && (tx_desc(q, g.tx[q].cur)[0] & TXDW0_OWN)) g.tx[q].full_ticks++;
+            spin_unlock(&g.tx[q].lock);
+        }
     if (!g.rx_waiting || !g.rings_up) return;
     if (!(rx_desc(g.rx_cur)[0] & RXDW0_OWN)) {
         g.rx_waiting = 0;
@@ -945,6 +1104,21 @@ static int rtw_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
         if (copy_from_user(g.nd.mac, u, 6)) return -EFAULT;
         g.link = 1;
         return 0;
+    case RTW_TXRPT: {
+        struct rtw_txrpt *out = kmalloc(sizeof *out);
+        if (!out) return -ENOMEM;
+        uint32_t every;
+        if (copy_from_user(&every, u, sizeof every)) { kfree(out); return -EFAULT; }
+        uint64_t fl = spin_lock_irq(&g.rx_lock);
+        if (every != RTW_TXRPT_KEEP) txrpt_every = every;
+        memcpy(out, &rr, sizeof *out);
+        memset(&rr, 0, sizeof rr);
+        out->every = txrpt_every;
+        spin_unlock_irq(&g.rx_lock, fl);
+        int e = copy_to_user(u, out, sizeof *out) ? -EFAULT : 0;
+        kfree(out);
+        return e;
+    }
     case RTW_RXDBG: {
         uint32_t o[8] = {0};
         if (g.rings_up) {
@@ -995,6 +1169,7 @@ static int wlan_tx(netdev_t *dev, skb_t *skb)
     if (!g.link) { skb_free(skb); return -1; }
     uint64_t f = spin_lock_irq(&g.txq_lock);
     if (g.txq_n == WLAN_TXQ_MAX) {
+        st.wtx_drop++;
         spin_unlock_irq(&g.txq_lock, f);
         skb_free(skb);
         return -1;
@@ -1073,6 +1248,10 @@ void rtw8723_init(void)
 {
     if (pci_find(VENDOR_REALTEK, DEVICE_8723BE, &g.bus, &g.dev, &g.fn) != 0)
         return;     /* no card: the normal case in QEMU */
+    if (cmdline_has("rtw8723.off")) {    /* A/B for boot problems: card left untouched */
+        kprintf(KERN_INFO "rtw8723: off (rtw8723.off), card at %02x:%02x.%u not touched\n", g.bus, g.dev, g.fn);
+        return;
+    }
 
     /* D0 (PCI PM spec: PMCSR at cap + 4, bits 1:0) in case the last OS left D3hot.
      * Leaving D3hot may reset config space, so the BARs are put back if they changed. */
@@ -1135,6 +1314,13 @@ void rtw8723_init(void)
     set1(R_CR, CR_MACRXEN | CR_MACTXEN, 0);
     pci_write16(g.bus, g.dev, g.fn, PCI_COMMAND,
                 (uint16_t)(cmd0 | PCI_CMD_MEM | PCI_CMD_MASTER | PCI_CMD_INTX_OFF));
+
+    char kv[12];
+    if (cmdline_get("rtw8723.txrpt", kv, sizeof kv)) {
+        uint32_t v = 0;
+        for (const char *c = kv; *c >= '0' && *c <= '9'; c++) v = v * 10 + (uint32_t)(*c - '0');
+        txrpt_every = v;
+    }
 
     g.rx_lock = (spinlock_t)SPINLOCK_INIT;
     g.txq_lock = (spinlock_t)SPINLOCK_INIT;
