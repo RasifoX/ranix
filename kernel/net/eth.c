@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/net/eth.h>
+#include <kernel/net/socket.h>
 #include <kernel/net/arp.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/ipv6.h>
@@ -15,6 +16,7 @@ void eth_rx(netdev_t *dev, skb_t *skb)
     if (skb->len < (uint16_t)sizeof(eth_hdr_t)) { skb_free(skb); return; }
     eth_hdr_t *eh = (eth_hdr_t *)skb->data;
     uint16_t type = ntohs(eh->type);
+    sock_packet_deliver(dev, skb->data, skb->len);   /* AF_PACKET sockets see it first */
     skb_pull(skb, sizeof(eth_hdr_t));
 
     if      (type == ETH_P_ARP)  arp_rx(dev, skb);

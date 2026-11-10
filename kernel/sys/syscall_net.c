@@ -324,6 +324,7 @@ static long unix_send_wait(socket_t *s, const uint8_t *kb, size_t len, int nonbl
 
 static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
                         const void *uaddr, uint32_t addrlen, int fop);
+static long packet_sendto(socket_t *s, const void *buf, size_t len, const uint8_t *ka, uint32_t alen, int fop);
 
 static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
 {
@@ -355,6 +356,7 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
         }
         return tcp_stream_tx(s, buf, len, file->flags & O_NONBLOCK, 1);
     }
+    if (s->domain == AF_PACKET) return packet_sendto(s, buf, len, NULL, 0, 1);
     if (s->type == SOCK_DGRAM && s->remote_port)   /* a connected UDP socket */
         return sock_sendto(s, file->flags & O_NONBLOCK, buf, len, NULL, 0, 1);   /* splice/sendfile pass kernel memory */
     return -ENOSYS;
@@ -431,21 +433,23 @@ static short ifr_flags(const netdev_t *d)
     return f;
 }
 
-/* CAP_NET_ADMIN over this network namespace (Linux ns_capable(net->user_ns)):
+/* A capability over this network namespace (Linux ns_capable(net->user_ns)):
  * the machine's, or for a namespace made inside a user namespace, the caller's
  * own set there (a rootless container sets up its loopback). */
-static int net_admin_ok(void)
+static int net_cap_ok(int cap)
 {
     process_t *p = task_current();
-    if (capable_task(p, CAP_NET_ADMIN)) return 1;
+    if (capable_task(p, cap)) return 1;
     net_namespace_t *ns = current_net_ns();
     user_namespace_t *own = ns && ns->owner ? ns->owner : &init_user_ns;
     user_namespace_t *mine = p->user_ns ? p->user_ns : &init_user_ns;
     if (own == &init_user_ns) return 0;
     for (user_namespace_t *u = own; u; u = u->parent)
-        if (u == mine) return cap_has(p->cap_effective, CAP_NET_ADMIN);
+        if (u == mine) return cap_has(p->cap_effective, cap);
     return 0;
 }
+
+static int net_admin_ok(void) { return net_cap_ok(CAP_NET_ADMIN); }
 
 /* SIOCSIFMTU: used for IPv4 fragmentation; no device here carries more than
  * 1500, and IPv6 needs 1280 (EINVAL outside). Other set ioctls stay refused
@@ -784,12 +788,66 @@ static void unix_reg_remove(socket_t *s)
     spin_unlock_irq(&unix_reg_lock, f);
 }
 
+/* struct sockaddr_ll */
+typedef struct {
+    uint16_t sll_family, sll_protocol;
+    int32_t  sll_ifindex;
+    uint16_t sll_hatype;
+    uint8_t  sll_pkttype, sll_halen;
+    uint8_t  sll_addr[8];
+} sockaddr_ll_t;
+
+static netdev_t *packet_dev(socket_t *s, int ifindex)
+{
+    return ifindex > 0 ? net_dev_in(s->net_ns, ifindex - 1) : NULL;
+}
+
+/* AF_PACKET send: SOCK_RAW passes a whole frame, SOCK_DGRAM gets an Ethernet
+ * header for sll_addr and sll_protocol. The interface is the address's or the
+ * bound one; a frame the device cannot carry is EMSGSIZE. */
+static long packet_sendto(socket_t *s, const void *buf, size_t len, const uint8_t *ka, uint32_t alen, int fop)
+{
+    sockaddr_ll_t a;
+    memset(&a, 0, sizeof(a));
+    if (ka) {
+        if (alen < 12) return -EINVAL;
+        memcpy(&a, ka, alen < sizeof(a) ? alen : sizeof(a));
+        if (a.sll_family != AF_PACKET) return -EINVAL;
+    }
+    netdev_t *dev = packet_dev(s, a.sll_ifindex ? a.sll_ifindex : s->pk_ifindex);
+    if (!dev) return ka && a.sll_ifindex ? -ENODEV : -ENXIO;
+    size_t hdr = s->type == SOCK_DGRAM ? 14 : 0;
+    if (s->type == SOCK_RAW && len < 14) return -EINVAL;
+    if (len + hdr > netdev_mtu(dev) + 14 || len + hdr > SKB_DATA_MAX) return -EMSGSIZE;
+    skb_t *skb;
+    if (s->type == SOCK_DGRAM) {
+        uint16_t proto = a.sll_protocol ? a.sll_protocol : s->pk_proto;
+        skb = eth_alloc(dev, a.sll_addr, ntohs(proto));
+        if (!skb) return -ENOMEM;
+        uint8_t *d = skb->data + skb->len;   /* after the header eth_alloc pushed */
+        if ((fop ? copy_fop_from_user(d, buf, len) : copy_from_user(d, buf, len)) != 0) { skb_free(skb); return -EFAULT; }
+        skb->len = (uint16_t)(skb->len + len);
+    } else {
+        skb = skb_alloc();
+        if (!skb) return -ENOMEM;
+        if ((fop ? copy_fop_from_user(skb->data, buf, len) : copy_from_user(skb->data, buf, len)) != 0) { skb_free(skb); return -EFAULT; }
+        skb->len = (uint16_t)len;
+    }
+    int r = netdev_tx(dev, skb);
+    return r < 0 ? r : (long)len;
+}
+
 static long sys_socket(int domain, int type, int proto)
 {
     int sflags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     type &= SOCK_TYPE_MASK;
-    if (domain != AF_INET && domain != AF_INET6 && domain != AF_UNIX && domain != AF_NETLINK)
+    if (domain != AF_INET && domain != AF_INET6 && domain != AF_UNIX && domain != AF_NETLINK &&
+        domain != AF_PACKET)
         return -EAFNOSUPPORT;
+    if (domain == AF_PACKET) {   /* every frame on the wire: CAP_NET_RAW, as Linux */
+        if (type != SOCK_RAW && type != SOCK_DGRAM) return -ESOCKTNOSUPPORT;
+        if (!net_cap_ok(CAP_NET_RAW)) return -EPERM;
+    }
     if (type != SOCK_DGRAM && type != SOCK_STREAM && type != SOCK_RAW) return -EINVAL;
     if (domain == AF_NETLINK) {
         if (type == SOCK_STREAM) return -ESOCKTNOSUPPORT;
@@ -803,7 +861,8 @@ static long sys_socket(int domain, int type, int proto)
     if (!s) return -ENOMEM;
     if (sock_own(s) != 0) { sock_free(s); return -ENOMEM; }
     s->dev = net_default_dev();
-    if (type == SOCK_RAW || domain == AF_NETLINK) sock_register(s);
+    if (domain == AF_PACKET) s->pk_proto = (uint16_t)proto;   /* the ethertype, network order */
+    if (type == SOCK_RAW || domain == AF_NETLINK || domain == AF_PACKET) sock_register(s);
     int fd = sock_to_fd(s, sflags);
     if (fd < 0) { sock_free(s); return fd; }
     return fd;
@@ -846,6 +905,18 @@ static long sys_bind(int fd, const void *uaddr, uint32_t addrlen)
         if (copy_from_user(&a, uaddr, sizeof(a)) != 0) return -EFAULT;
         if (a.nl_family != AF_NETLINK) return -EINVAL;
         return netlink_bind(s, a.nl_pid, a.nl_groups);
+    }
+
+    if (s->domain == AF_PACKET) {   /* sockaddr_ll: the interface and the ethertype */
+        sockaddr_ll_t a;
+        memset(&a, 0, sizeof(a));
+        if (addrlen < 12) return -EINVAL;
+        if (copy_from_user(&a, uaddr, addrlen < sizeof(a) ? addrlen : sizeof(a)) != 0) return -EFAULT;
+        if (a.sll_family != AF_PACKET) return -EINVAL;
+        if (a.sll_ifindex && !packet_dev(s, a.sll_ifindex)) return -ENODEV;
+        s->pk_ifindex = a.sll_ifindex;
+        if (a.sll_protocol) s->pk_proto = a.sll_protocol;
+        return 0;
     }
 
     uint16_t family = 0;
@@ -1376,6 +1447,7 @@ static long sock_sendto(socket_t *s, int nonblock, const void *buf, size_t len,
         k_iovec v = { (void *)buf, len };
         return nl_sendv(s, &v, 1, uaddr, addrlen);
     }
+    if (s->domain == AF_PACKET) return packet_sendto(s, buf, len, kaddr, addrlen, fop);
     /* AF_UNIX send()/sendto() delivers through the peer's queue, not the IP
      * stack. Without this an AF_UNIX datagram socket (s->dev is set like any
      * socket) falls into the udp_tx path below and is shipped as a bogus UDP
@@ -1531,6 +1603,17 @@ static void recv_dgram_name(socket_t *s, skb_t *skb, void *uaddr, uint32_t *klen
 {
     if (!klen) {
         /* no name wanted */
+    } else if (uaddr && s->domain == AF_PACKET) {
+        sockaddr_ll_t a;
+        memset(&a, 0, sizeof(a));
+        a.sll_family   = AF_PACKET;
+        a.sll_protocol = skb->ll_proto;
+        a.sll_ifindex  = skb->ll_ifindex;
+        a.sll_hatype   = skb->ll_loop ? 772 /* ARPHRD_LOOPBACK */ : 1 /* ARPHRD_ETHER */;
+        a.sll_pkttype  = skb->ll_pkttype;
+        a.sll_halen    = 6;
+        memcpy(a.sll_addr, skb->ll_src, 6);
+        sock_name_put(uaddr, &a, sizeof(a), klen);
     } else if (uaddr && s->v4mapped) {
         sockaddr_in6_t sa6;
         memset(&sa6, 0, sizeof(sa6));
@@ -2011,6 +2094,17 @@ static long sys_getsockname(int fd, void *uaddr, uint32_t *uaddrlen)
     if (!s) return sock_fd_err(fd);
     if (s->domain == AF_NETLINK) return nl_name_to_user(s, uaddr, uaddrlen, 0);
     if (s->domain == AF_UNIX) return sock_name_unix(s, uaddr, uaddrlen);
+    if (s->domain == AF_PACKET) {
+        sockaddr_ll_t a;
+        memset(&a, 0, sizeof(a));
+        a.sll_family = AF_PACKET; a.sll_protocol = s->pk_proto; a.sll_ifindex = s->pk_ifindex;
+        netdev_t *d = packet_dev(s, s->pk_ifindex);
+        if (d) { a.sll_hatype = d == &d->net_ns->lo ? 772 : 1; a.sll_halen = 6; memcpy(a.sll_addr, d->mac, 6); }
+        uint32_t kl;
+        if (!uaddrlen || copy_from_user(&kl, uaddrlen, sizeof(kl)) != 0) return -EFAULT;
+        if (sock_name_put(uaddr, &a, sizeof(a), &kl)) return -EFAULT;
+        return copy_to_user(uaddrlen, &kl, sizeof(kl)) ? -EFAULT : 0;
+    }
     if (s->domain == AF_INET6) return sock_name6(&s->local_ip6, s->local_port, uaddr, uaddrlen);
     if (s->v4mapped) {
         in6_addr_t a;
@@ -2163,6 +2257,15 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 	if (lv == SO_SOL_SOCKET && opt == SO_BINDTODEVICE)
 		return sock_bind_to_device(s, val, len);
 
+	/* SOL_PACKET: no rings here, so only TPACKET_V1, the version without one */
+	if (s->domain == AF_PACKET && lv == 263 /* SOL_PACKET */) {
+		if (opt != 10 /* PACKET_VERSION */) return -ENOPROTOOPT;
+		int v;
+		if (len < sizeof(v)) return -EINVAL;
+		if (copy_from_user(&v, val, sizeof(v)) != 0) return -EFAULT;
+		return v == 0 /* TPACKET_V1 */ ? 0 : -EINVAL;
+	}
+
 	/* the level is the protocol's to answer first: AF_UNIX knows only
 	 * SOL_SOCKET; inet knows its own and IP's, and nothing else (Linux) */
 	if (lv != SO_SOL_SOCKET && s->domain == AF_UNIX) return -EOPNOTSUPP;
@@ -2236,6 +2339,13 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 	uint32_t ulen;
 	if (copy_from_user(&ulen, len, sizeof(ulen)) != 0) return -EFAULT;
 	if ((int32_t)ulen < 0) return -EINVAL;
+	if (s->domain == AF_PACKET && lv == 263 /* SOL_PACKET */) {
+		if (opt != 10 /* PACKET_VERSION */) return -ENOPROTOOPT;
+		int v = 0;   /* TPACKET_V1 */
+		uint32_t n = ulen < sizeof(v) ? ulen : sizeof(v);
+		if (copy_to_user(val, &v, n) != 0 || copy_to_user(len, &n, sizeof(n)) != 0) return -EFAULT;
+		return 0;
+	}
 	/* a level the socket's protocol does not know is EOPNOTSUPP here (it is
 	 * ENOPROTOOPT for setsockopt: Linux's own asymmetry) */
 	if (lv != SO_SOL_SOCKET && lv != SOL_RANIX_FILTER &&

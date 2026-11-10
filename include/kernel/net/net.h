@@ -53,6 +53,12 @@ typedef struct skb {
     /* AF_UNIX sender, for SCM_CREDENTIALS when the receiver set SO_PASSCRED */
     int32_t     cred_pid;
     uint32_t    cred_uid, cred_gid;
+    /* AF_PACKET: what recvfrom's sockaddr_ll says about the frame */
+    uint16_t    ll_proto;       /* ethertype, network order */
+    uint8_t     ll_pkttype;     /* PACKET_HOST, _BROADCAST, _MULTICAST, _OTHERHOST */
+    uint8_t     ll_loop;        /* came in on a loopback device */
+    int32_t     ll_ifindex;
+    uint8_t     ll_src[6];
 } skb_t;
 
 #define SKB_TRUESIZE(skb) ((long)sizeof(skb_t) + (long)(skb)->ext_len)

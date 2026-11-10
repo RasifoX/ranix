@@ -17,6 +17,7 @@ typedef struct process process_t;
 #define AF_INET     2
 #define AF_INET6    10
 #define AF_NETLINK  16
+#define AF_PACKET   17
 #define NETLINK_ROUTE 0
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
@@ -179,6 +180,8 @@ typedef struct socket {
     uint8_t   unix_seqpacket;   /* AF_UNIX SOCK_SEQPACKET (kept as SOCK_DGRAM): EOF when the peer goes */
     uint8_t   rd_shut;          /* TCP shutdown(SHUT_RD): reads end, poll says POLLRDHUP */
     uint8_t   so_no_check;      /* SO_NO_CHECK (UDP sends no checksum here either way) */
+    uint16_t  pk_proto;         /* AF_PACKET: ethertype taken, network order (0: none, 0x0300: all) */
+    int32_t   pk_ifindex;       /* AF_PACKET: bound interface, 0 = any */
 
     /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;
@@ -212,6 +215,9 @@ socket_t *sock_alloc(int domain, int type, int proto);
 netdev_t *sock_route4(socket_t *s, uint32_t dst);
 void      sock_free(socket_t *s);
 void      sock_hold(socket_t *s);   /* refcount++ */
+struct netdev;
+void      sock_packet_deliver(struct netdev *dev, const uint8_t *frame, uint16_t len);   /* AF_PACKET tap */
+int       net_dev_ifindex(struct netdev *dev);   /* 1-based, in its namespace; 0 if gone */
 void      sock_put(socket_t *s);    /* refcount--; frees the socket at 0 (NULL-safe) */
 
 /* UDP delivery hook (ns = the receiving device's network namespace) */

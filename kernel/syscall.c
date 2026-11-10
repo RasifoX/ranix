@@ -28,6 +28,7 @@
 #include <drivers/serial/uart.h>
 #include <kernel/board.h>
 #include <kernel/net/socket.h>
+#include <kernel/net/eth.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/icmp.h>
 #include <kernel/net/ip.h>
