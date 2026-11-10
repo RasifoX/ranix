@@ -52,10 +52,18 @@ void pci_write8(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint8_t v)
 
 int pci_find(uint16_t vendor, uint16_t device, uint8_t *rbus, uint8_t *rdev, uint8_t *rfn)
 {
+	return pci_find_nth(vendor, device, 0, rbus, rdev, rfn);
+}
+
+/* The n-th (from 0) function-0 device with this vendor:device, in bus order:
+ * a second NIC of the same model is n = 1. */
+int pci_find_nth(uint16_t vendor, uint16_t device, int n,
+                 uint8_t *rbus, uint8_t *rdev, uint8_t *rfn)
+{
 	for (int b = 0; b < 256; b++) {
 		for (int d = 0; d < 32; d++) {
 			uint32_t id = pci_read32((uint8_t)b, (uint8_t)d, 0, PCI_VENDOR_ID);
-			if ((id & 0xFFFF) == vendor && (id >> 16) == device) {
+			if ((id & 0xFFFF) == vendor && (id >> 16) == device && n-- == 0) {
 				*rbus = (uint8_t)b;
 				*rdev = (uint8_t)d;
 				*rfn  = 0;
@@ -138,6 +146,7 @@ void pci_write32(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint32_t v) { (void
 void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint16_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
 void pci_write8(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint8_t v) { (void)b;(void)d;(void)f;(void)r;(void)v; }
 int pci_find(uint16_t v, uint16_t d, uint8_t *rb, uint8_t *rd, uint8_t *rf) { (void)v;(void)d;(void)rb;(void)rd;(void)rf; return -1; }
+int pci_find_nth(uint16_t v, uint16_t d, int n, uint8_t *rb, uint8_t *rd, uint8_t *rf) { (void)v;(void)d;(void)n;(void)rb;(void)rd;(void)rf; return -1; }
 int pci_find_class(uint8_t c, uint8_t s, uint8_t p, uint8_t *rb, uint8_t *rd, uint8_t *rf) { (void)c;(void)s;(void)p;(void)rb;(void)rd;(void)rf; return -1; }
 
 #endif

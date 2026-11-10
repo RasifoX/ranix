@@ -626,6 +626,7 @@ check "c-netlink"     "OK" "$(timeout 30 /bin/test_netlink 2>/dev/null | tail -1
 check "ip-addr"       "yes" "$(ip a 2>&1 | grep -q 'inet 127.0.0.1/8' && echo yes)"
 check "ip-link"       "yes" "$(ip link 2>&1 | grep -q 'LOOPBACK' && echo yes)"
 check "ip-route-err"  "0"   "$(ip r >/dev/null 2>&1; echo $?)"
+check "net-eth1"      "1"   "$(ip -4 addr show eth1 2>/dev/null | grep -c 'inet 10.0.3.15/24')"
 check "proc-irqs"     "yes" "$(grep -q 'CPU0' /proc/interrupts && echo yes)"
 check "c-eintr"      "OK"  "$(timeout 30 /bin/test_eintr 2>/dev/null | tail -1)"
 check "c-execstress" "OK" "$(timeout 60 /bin/test_execstress 2>/dev/null | tail -1)"

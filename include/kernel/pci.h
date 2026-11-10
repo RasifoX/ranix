@@ -18,6 +18,7 @@ void     pci_write8(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint8_t v
 
 // Returns 0 on success, fills *bus/*dev/*fn
 int pci_find(uint16_t vendor, uint16_t device, uint8_t *bus, uint8_t *devn, uint8_t *fn);
+int pci_find_nth(uint16_t vendor, uint16_t device, int n, uint8_t *bus, uint8_t *devn, uint8_t *fn);
 int pci_find_class(uint8_t cls, uint8_t sub, uint8_t prog, uint8_t *bus, uint8_t *devn, uint8_t *fn);
 
 /* capability list walk (feature discovery) */
