@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /* ── AF_NETLINK / NETLINK_ROUTE ──────────────────────────────────────────────
- * A read-only rtnetlink view of one namespace's netdevs: enough for `ip a`,
- * `ip r`, `ip link` and getifaddrs(). A request is answered in full during the
- * send, so "dump state" is just datagrams on the socket's receive queue. There
- * are no notifications: multicast groups can be joined but nothing is sent.
+ * An rtnetlink view of one namespace's netdevs: enough for `ip a`, `ip r`,
+ * `ip link` and getifaddrs(). Root (CAP_NET_ADMIN) may also change two things:
+ * IPv4 routes (`ip route add|del|replace|change`) and a link's up/down state
+ * (`ip link set X up|down`); every other change is refused as unsupported.
+ * A request is answered in full during the send, so "dump state" is just
+ * datagrams on the socket's receive queue. There are no notifications:
+ * multicast groups can be joined but nothing is sent.
  * Replies come from the socket's namespace, not the caller's: an fd that crossed
  * setns() keeps describing the namespace it was opened in.
  * ───────────────────────────────────────────────────────────────────────── */
@@ -38,7 +41,10 @@ typedef struct {
 #define NLF_MULTI   0x002
 #define NLF_ACK     0x004
 #define NLF_CAPPED  0x100       /* our error messages echo only the header */
-#define NLF_DUMP    0x300
+#define NLF_DUMP    0x300       /* on a GET; on a NEW the same bits mean: */
+#define NLF_REPLACE 0x100
+#define NLF_EXCL    0x200
+#define NLF_CREATE  0x400
 
 #define NLT_ERROR     2
 #define NLT_DONE      3
@@ -46,9 +52,11 @@ typedef struct {
 
 #define RTM_NEWLINK   16
 #define RTM_GETLINK   18
+#define RTM_SETLINK   19
 #define RTM_NEWADDR   20
 #define RTM_GETADDR   22
 #define RTM_NEWROUTE  24
+#define RTM_DELROUTE  25
 #define RTM_GETROUTE  26
 #define RTM_KIND_GET  2         /* every rtnetlink type is NEW, DEL, GET, SET in turn */
 
@@ -95,6 +103,9 @@ typedef struct {
 #define RTN_UNICAST_     1
 #define RTN_LOCAL_       2
 #define RTM_F_CLONED_ 0x200
+#define RTNH_F_ONLINK_   0x04
+#define TABLE_UNSPEC     0
+#define PROTO_UNSPEC     0
 #define RTNH_F_LINKDOWN_ 0x10
 
 #define NL_MTU      1500        /* what SIOCGIFMTU reports for every device */
@@ -229,7 +240,7 @@ static void nl_done(nl_out_t *o)
 /* ── netdev → messages ───────────────────────────────────────────────────── */
 
 static int dev_is_lo(const netdev_t *d) { return d == &d->net_ns->lo; }
-static int dev_up(const netdev_t *d)    { return d->link_check ? d->link_up : 1; }
+static int dev_up(const netdev_t *d)    { return netdev_usable(d); }   /* carrier, running */
 
 static uint8_t mask_prefix(uint32_t mask)
 {
@@ -246,7 +257,7 @@ static void nl_link(nl_out_t *o, netdev_t *d, int ifindex, uint16_t flags)
     nl_link_t m = { 0 };
     m.type   = lo ? ARPHRD_LOOPBACK_ : ARPHRD_ETHER_;
     m.index  = ifindex;
-    m.flags  = IF_UP | (lo ? IF_LOOPBACK : IF_BROADCAST | IF_MULTICAST);
+    m.flags  = (d->admin_down ? 0 : IF_UP) | (lo ? IF_LOOPBACK : IF_BROADCAST | IF_MULTICAST);
     if (up) m.flags |= IF_RUNNING | IF_LOWER_UP;
     m.change = 0xffffffffu;
 
@@ -440,6 +451,120 @@ static int nl_get_route(nl_out_t *o, const uint8_t *body, size_t blen)
     return 0;
 }
 
+/* ── changes (root only) ─────────────────────────────────────────────────── */
+
+/* The route an RTM_NEWROUTE/RTM_DELROUTE names, in route4_t terms */
+static int nl_parse_route(nl_out_t *o, const uint8_t *body, size_t blen, route4_t *r)
+{
+    net_namespace_t *ns = o->s->net_ns;
+    nl_route_t req;
+    if (blen < sizeof(req)) return -EINVAL;
+    memcpy(&req, body, sizeof(req));
+    if (req.family != AF_INET) return req.family == AF_INET6 ? -EOPNOTSUPP : -EAFNOSUPPORT;
+    if (req.dst_len > 32) return -EINVAL;
+
+    const uint8_t *at = body + sizeof(req);
+    size_t alen = blen - sizeof(req);
+    uint16_t n = 0;
+    uint32_t v, table = req.table;
+    const void *a;
+    if ((a = nl_find(at, alen, RTA_TABLE, &n)) && n == 4) memcpy(&table, a, 4);
+    if (table != TABLE_UNSPEC && table != TABLE_MAIN) return -EOPNOTSUPP;   /* one table */
+
+    memset(r, 0, sizeof(*r));
+    r->mask  = req.dst_len ? ~0u << (32 - req.dst_len) : 0;
+    r->proto = req.protocol;
+    if ((a = nl_find(at, alen, RTA_DST, &n)) && n == 4)      { memcpy(&v, a, 4); r->dst = ntohl(v) & r->mask; }
+    if ((a = nl_find(at, alen, RTA_GATEWAY, &n)) && n == 4)  { memcpy(&v, a, 4); r->gw = ntohl(v); }
+    if ((a = nl_find(at, alen, RTA_PRIORITY, &n)) && n == 4) memcpy(&r->metric, a, 4);
+    if ((a = nl_find(at, alen, RTA_PREFSRC, &n)) && n == 4)  { memcpy(&v, a, 4); r->src = ntohl(v); }
+    if ((a = nl_find(at, alen, RTA_OIF, &n)) && n == 4) {
+        memcpy(&v, a, 4);
+        if (v == 0 || !(r->dev = net_dev_in(ns, (int)v - 1))) return -ENODEV;
+    }
+    return req.flags & RTNH_F_ONLINK_ ? 1 : 0;
+}
+
+/* RTM_NEWROUTE: `ip route add|replace|change|append`. Only plain unicast
+ * routes in the main table; the gateway must be on a link we have a route on
+ * (or the request says "onlink"); a preferred source must be the device's own
+ * address, since a Ranix device has one IPv4 address. */
+static int nl_new_route(nl_out_t *o, const nl_hdr_t *h, const uint8_t *body, size_t blen)
+{
+    net_namespace_t *ns = o->s->net_ns;
+    route4_t r;
+    int onlink = nl_parse_route(o, body, blen, &r);
+    if (onlink < 0) return onlink;
+    if (((const nl_route_t *)body)->type != RTN_UNICAST_) return -EOPNOTSUPP;
+
+    if (r.gw) {
+        uint32_t nh;
+        netdev_t *via = route4_lookup(ns, r.gw, r.dev, &nh);
+        int ok = via && via != &ns->lo && nh == r.gw && via->ip != r.gw;
+        if (!ok && !(onlink && r.dev)) return -ENETUNREACH;
+        if (!r.dev) r.dev = via;
+    }
+    if (!r.dev) return -EINVAL;                          /* neither gateway nor device */
+    if (dev_is_lo(r.dev)) return -EOPNOTSUPP;            /* loopback is not routed */
+    if (r.src && r.src != r.dev->ip) return -EINVAL;
+    if (!r.src) r.src = r.gw ? 0 : r.dev->ip;
+
+    int mode = RT_ADD;
+    if (h->flags & NLF_REPLACE) mode = (h->flags & NLF_CREATE) ? RT_REPLACE : RT_CHANGE;
+    else if (!(h->flags & NLF_CREATE)) mode = RT_CHANGE;
+    return route4_add(&r, mode);
+}
+
+/* RTM_DELROUTE: `ip route del`; fields left out match anything */
+static int nl_del_route(nl_out_t *o, const uint8_t *body, size_t blen)
+{
+    route4_t r;
+    int rc = nl_parse_route(o, body, blen, &r);
+    if (rc < 0) return rc;
+    return route4_del(o->s->net_ns, &r);
+}
+
+/* RTM_NEWLINK/RTM_SETLINK on an existing device: only IFF_UP changes. A new
+ * device (NEWLINK + CREATE for a name we lack) cannot be made here. */
+static int nl_set_link(nl_out_t *o, const nl_hdr_t *h, const uint8_t *body, size_t blen)
+{
+    net_namespace_t *ns = o->s->net_ns;
+    nl_link_t req;
+    if (blen < sizeof(req)) return -EINVAL;
+    memcpy(&req, body, sizeof(req));
+
+    const uint8_t *at = body + sizeof(req);
+    size_t alen = blen - sizeof(req);
+    uint16_t nlen = 0;
+    const char *name = nl_find(at, alen, IFLA_IFNAME, &nlen);
+    netdev_t *d = NULL;
+    if (req.index > 0) {
+        d = net_dev_in(ns, req.index - 1);
+    } else if (name && nlen) {
+        netdev_t *e;
+        for (int i = 0; (e = net_dev_in(ns, i)); i++)
+            if (strlen(e->name) + 1 == nlen && memcmp(e->name, name, nlen) == 0) d = e;
+    } else if (h->type == RTM_SETLINK) {
+        return -EINVAL;
+    }
+    if (!d) return (h->type == RTM_NEWLINK && (h->flags & NLF_CREATE)) ? -EOPNOTSUPP : -ENODEV;
+
+    /* any attribute but the name would ask for a change we do not make */
+    while (alen >= sizeof(nl_attr_t)) {
+        nl_attr_t a;
+        memcpy(&a, at, sizeof(a));
+        if (a.len < sizeof(a) || a.len > alen) return -EINVAL;
+        if (a.type != IFLA_IFNAME) return -EOPNOTSUPP;
+        uint32_t adv = (a.len + 3u) & ~3u;
+        if (adv >= alen) break;
+        at += adv; alen -= adv;
+    }
+    if (!req.flags && !req.change) return 0;
+    /* change == 0 means "all of flags", as on Linux */
+    if (req.change && !(req.change & IF_UP)) return 0;
+    return net_set_admin_up(d, (req.flags & IF_UP) != 0);
+}
+
 static void nl_dump(nl_out_t *o, uint16_t type, int family)
 {
     netdev_t *d;
@@ -450,7 +575,7 @@ static void nl_dump(nl_out_t *o, uint16_t type, int family)
             nl_link(o, d, i + 1, NLF_MULTI);
         } else if (type == RTM_GETADDR) {
             nl_dump_addrs(o, d, i + 1, family);
-        } else if (family != AF_INET) {
+        } else if (family != AF_INET && !d->admin_down) {
             nl_dump_routes6(o, d, i + 1);
         }
     }
@@ -463,8 +588,12 @@ static void nl_handle(nl_out_t *o, const nl_hdr_t *h, const uint8_t *body, size_
 
     if ((h->flags & NLF_REQUEST) && h->type >= NLT_RT_FIRST) {
         if (((h->type - NLT_RT_FIRST) & 3) != RTM_KIND_GET) {
-            /* nothing here changes state yet: say so rather than pretend */
-            err = capable_task(task_current(), CAP_NET_ADMIN) ? -95 : -1;
+            if (!capable_task(task_current(), CAP_NET_ADMIN)) err = -EPERM;
+            else if (h->type == RTM_NEWROUTE) err = nl_new_route(o, h, body, blen);
+            else if (h->type == RTM_DELROUTE) err = nl_del_route(o, body, blen);
+            else if (h->type == RTM_NEWLINK || h->type == RTM_SETLINK)
+                err = nl_set_link(o, h, body, blen);
+            else err = -EOPNOTSUPP;   /* addresses, deleting links: not here */
         } else if (h->type != RTM_GETLINK && h->type != RTM_GETADDR && h->type != RTM_GETROUTE) {
             err = -95; /* EOPNOTSUPP */
         } else if ((h->flags & NLF_DUMP) == NLF_DUMP) {

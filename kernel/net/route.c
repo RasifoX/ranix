@@ -10,8 +10,9 @@
  *   connected  dev's own subnet, from its address and mask (proto kernel)
  *   DHCP       default via the gateway the kernel's DHCP client learned (proto boot)
  *   static     whatever root added with `ip route add` (proto static)
- * The first two follow the device (route4_sync_dev); static routes stay until
- * root deletes them or the device goes down.
+ * The first two are "automatic": they follow the device (route4_sync_dev).
+ * Root's routes stay until root deletes them or the device goes down; setting
+ * the device up again brings back only the automatic ones, as on Linux.
  *
  * Lookup walks the whole table: the longest matching prefix wins, then the
  * lower metric, then the older entry. That is O(n) per packet, and n is a
@@ -39,7 +40,7 @@ static void drop_where(netdev_t *dev, int only_auto)
 {
     for (int i = 0; i < ROUTE4_MAX; i++) {
         if (!used[i] || table[i].dev != dev) continue;
-        if (only_auto && table[i].proto == RT_PROTO_STATIC) continue;
+        if (only_auto && !table[i].automatic) continue;
         used[i] = 0;
     }
 }
@@ -55,10 +56,11 @@ static int find_same(const route4_t *r)
 }
 
 /* table_lock held */
-static int put(const route4_t *r, int replace)
+static int put(const route4_t *r, int mode)
 {
     int i = find_same(r);
-    if (i >= 0 && !replace) return -EEXIST;
+    if (i >= 0 && mode == RT_ADD) return -EEXIST;
+    if (i < 0 && mode == RT_CHANGE) return -ENOENT;
     if (i < 0)
         for (i = 0; i < ROUTE4_MAX && used[i]; i++) ;
     if (i == ROUTE4_MAX) return -ENOBUFS;
@@ -69,28 +71,28 @@ static int put(const route4_t *r, int replace)
     return 0;
 }
 
-int route4_add(const route4_t *r, int replace)
+int route4_add(const route4_t *r, int mode)
 {
     if (!r->dev) return -ENODEV;
     if (r->dev->admin_down) return -ENETDOWN;
     uint64_t f = spin_lock_irq(&table_lock);
-    int rc = put(r, replace);
+    int rc = put(r, mode);
     spin_unlock_irq(&table_lock, f);
     return rc;
 }
 
-int route4_del(const route4_t *r)
+int route4_del(net_namespace_t *ns, const route4_t *r)
 {
     int rc = -ESRCH;
     uint64_t f = spin_lock_irq(&table_lock);
     for (int i = 0; i < ROUTE4_MAX; i++) {
         route4_t *t = &table[i];
-        if (!used[i] || t->dst != (r->dst & r->mask) || t->mask != r->mask) continue;
+        if (!used[i] || t->dev->net_ns != ns) continue;
+        if (t->dst != (r->dst & r->mask) || t->mask != r->mask) continue;
         if (r->dev    && t->dev    != r->dev)    continue;
         if (r->gw     && t->gw     != r->gw)     continue;
         if (r->metric && t->metric != r->metric) continue;
         if (r->proto  && t->proto  != r->proto)  continue;
-        if (!r->dev && t->dev->net_ns != current_net_ns()) continue;
         used[i] = 0;
         rc = 0;
         break;
@@ -117,14 +119,14 @@ void route4_sync_dev(netdev_t *dev)
     uint64_t f = spin_lock_irq(&table_lock);
     drop_where(dev, 1);
     if (!dev->admin_down && dev->ip) {
-        route4_t c = { .dst = dev->ip & dev->mask, .mask = dev->mask,
-                       .src = dev->ip, .proto = RT_PROTO_KERNEL, .dev = dev };
-        put(&c, 1);
+        route4_t c = { .dst = dev->ip & dev->mask, .mask = dev->mask, .src = dev->ip,
+                       .proto = RT_PROTO_KERNEL, .automatic = 1, .dev = dev };
+        put(&c, RT_REPLACE);
         /* a gateway outside the device's own subnet could never be reached */
         if (dev->gw && (dev->gw & dev->mask) == (dev->ip & dev->mask)) {
-            route4_t d = { .gw = dev->gw, .proto = RT_PROTO_BOOT, .dev = dev,
+            route4_t d = { .gw = dev->gw, .proto = RT_PROTO_BOOT, .automatic = 1, .dev = dev,
                            .metric = RT_DHCP_METRIC_BASE + (uint32_t)net_ifindex(dev) };
-            put(&d, 1);
+            put(&d, RT_REPLACE);
         }
     }
     spin_unlock_irq(&table_lock, f);

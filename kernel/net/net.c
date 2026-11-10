@@ -8,6 +8,7 @@
 #include <kernel/net/ipv6.h>
 #include <kernel/net/ndp.h>
 #include <kernel/net/route.h>
+#include <kernel/errno.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
@@ -228,6 +229,11 @@ void netdev_count_tx(netdev_t *dev, uint32_t len)
 
 int netdev_tx(netdev_t *dev, skb_t *skb)
 {
+    if (dev->admin_down) {                /* root took it down: nothing leaves */
+        skb_free(skb);
+        atomic_fetch_add64(&dev->tx_dropped, 1);
+        return -ENETDOWN;
+    }
     uint32_t len = skb->len;              /* dev->tx frees the skb */
     int rc = dev->tx(dev, skb);
     if (rc < 0) atomic_fetch_add64(&dev->tx_dropped, 1);
@@ -284,8 +290,10 @@ void net_poll(void)
 
         if (dev->rx_claimed) continue;
         skb_t *skb;
-        while ((skb = netdev_rx_dequeue(dev)) != NULL)
+        while ((skb = netdev_rx_dequeue(dev)) != NULL) {
+            if (dev->admin_down) { skb_free(skb); continue; }   /* nothing arrives either */
             eth_rx(dev, skb);
+        }
     }
     net_ns_reap();
 
@@ -410,6 +418,27 @@ netdev_t *net_route_dev6(const in6_addr_t *dst)
 {
     if (in6_eq(dst, &in6addr_loopback)) return &current_net_ns()->lo;
     return net_default_dev();
+}
+
+/* `ip link set dev X up|down` (SIOCSIFFLAGS, RTM_NEWLINK). Down: every route
+ * through the device goes and its traffic stops both ways. Up: its connected
+ * route and DHCP default come back (route4_sync_dev); root's own routes do
+ * not, as on Linux. A device with a carrier watcher is marked carrier-less so
+ * the watcher looks again and renews the lease: the cable may have moved.
+ * Loopback cannot be taken down: half the system talks to itself through it. */
+int net_set_admin_up(netdev_t *d, int up)
+{
+    if (!up && d == &d->net_ns->lo) return -EOPNOTSUPP;
+    if (up == !d->admin_down) return 0;
+    d->admin_down = !up;
+    if (up) {
+        if (d->link_check) d->link_up = 0;
+        route4_sync_dev(d);
+    } else {
+        route4_flush_dev(d);
+    }
+    kprintf(KERN_INFO "%s: set %s by root\n", d->name, up ? "up" : "down");
+    return 0;
 }
 
 /* ── init ────────────────────────────────────────────────── */

@@ -112,22 +112,13 @@ static int put_str(char *o, const char *s)
 	return i;
 }
 
-static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
+/* /sys/class/net/<dev>/{address,mtu,operstate} */
+static int sysfs_net_fill(int type, int dev, char *tmp)
 {
-	sysfs_priv_t *pr = f->inode->priv;
-	if (!pr) return -1;
-
-	uint64_t phys = (uint64_t)buddy_alloc(0);
-	if (!phys) return -1;
-	char *tmp = (char *)PHYS_TO_VIRT(phys);
+	netdev_t *d = net_dev(dev);
 	int n = 0;
-
-	switch (pr->type) {
-	case SF_OSTYPE:    n = put_str(tmp, "Ranix\n");  break;
-	case SF_OSRELEASE: n = put_str(tmp, "6.6.0-ranix\n");  break;
-	case SF_HOSTNAME:  n = put_str(tmp, current_uts()->nodename); tmp[n++] = '\n'; break;
+	switch (type) {
 	case SF_NET_ADDR: {
-		netdev_t *d = net_dev(pr->dev);
 		if (d) {
 			const char *h = "0123456789abcdef";
 			for (int i = 0; i < 6; i++) {
@@ -139,6 +130,68 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		}
 		break;
 	}
+	case SF_NET_MTU:   n = put_str(tmp, "1500\n"); break;
+	case SF_NET_STATE: {
+		n = put_str(tmp, d && !netdev_usable(d) ? "down\n" : "up\n");
+		break;
+	}
+	}
+	return n;
+}
+
+/* /sys/bus/pci/devices/<bdf>/{vendor,device,caps} */
+static int sysfs_pci_fill(int type, int bdf, char *tmp)
+{
+	int n = 0;
+	switch (type) {
+	case SF_PCI_VENDOR:
+	case SF_PCI_DEVICE: {
+		uint16_t v = pci_read16((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
+		                        (uint8_t)(bdf & 7), type == SF_PCI_VENDOR ? PCI_VENDOR_ID : PCI_DEVICE_ID);
+		const char *h = "0123456789abcdef";
+		tmp[n++] = '0'; tmp[n++] = 'x';
+		tmp[n++] = h[(v >> 12) & 15]; tmp[n++] = h[(v >> 8) & 15];
+		tmp[n++] = h[(v >> 4) & 15];  tmp[n++] = h[v & 15];
+		tmp[n++] = '\n';
+		break;
+	}
+	case SF_PCI_CAPS: {
+		uint8_t ids[32];
+		int cnt = pci_cap_ids((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
+		                      (uint8_t)(bdf & 7), ids, 32);
+		const char *h = "0123456789abcdef";
+		for (int i = 0; i < cnt; i++) {
+			if (i) tmp[n++] = ' ';
+			tmp[n++] = h[(ids[i] >> 4) & 15];
+			tmp[n++] = h[ids[i] & 15];
+		}
+		tmp[n++] = '\n';
+		break;
+	}
+	}
+	return n;
+}
+
+static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
+{
+	sysfs_priv_t *pr = f->inode->priv;
+	if (!pr) return -1;
+
+	uint64_t phys = (uint64_t)buddy_alloc(0);
+	if (!phys) return -1;
+	char *tmp = (char *)PHYS_TO_VIRT(phys);
+	int n = 0;
+
+	switch (pr->type) {
+	case SF_NET_ADDR: case SF_NET_MTU: case SF_NET_STATE:
+		n = sysfs_net_fill(pr->type, pr->dev, tmp);
+		break;
+	case SF_PCI_VENDOR: case SF_PCI_DEVICE: case SF_PCI_CAPS:
+		n = sysfs_pci_fill(pr->type, pr->dev, tmp);
+		break;
+	case SF_OSTYPE:    n = put_str(tmp, "Ranix\n");  break;
+	case SF_OSRELEASE: n = put_str(tmp, "6.6.0-ranix\n");  break;
+	case SF_HOSTNAME:  n = put_str(tmp, current_uts()->nodename); tmp[n++] = '\n'; break;
 	case SF_BLK_RO: {
 		block_device_t *b = block_device_get(pr->dev);
 		n = put_str(tmp, b && b->ro ? "1\n" : "0\n");
@@ -154,8 +207,6 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		if (b) n = block_device_ids(b, tmp, 4096);
 		break;
 	}
-	case SF_NET_MTU:   n = put_str(tmp, "1500\n"); break;
-	case SF_NET_STATE: n = put_str(tmp, "up\n");   break;
 	case SF_BLK_SIZE: {
 		block_device_t *b = block_device_get(pr->dev);
 		if (b) { n = put_u64(tmp, b->size_blocks); tmp[n++] = '\n'; }
@@ -197,32 +248,6 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	}
 	case SF_NR_HUGEPAGES:  n = put_u64(tmp, (uint64_t)huge2m_nr_total()); tmp[n++] = '\n'; break;
 	case SF_FREE_HUGEPAGES: n = put_u64(tmp, (uint64_t)huge2m_nr_free()); tmp[n++] = '\n'; break;
-	case SF_PCI_VENDOR:
-	case SF_PCI_DEVICE: {
-		int bdf = pr->dev;
-		uint16_t v = pci_read16((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
-		                        (uint8_t)(bdf & 7), pr->type == SF_PCI_VENDOR ? PCI_VENDOR_ID : PCI_DEVICE_ID);
-		const char *h = "0123456789abcdef";
-		tmp[n++] = '0'; tmp[n++] = 'x';
-		tmp[n++] = h[(v >> 12) & 15]; tmp[n++] = h[(v >> 8) & 15];
-		tmp[n++] = h[(v >> 4) & 15];  tmp[n++] = h[v & 15];
-		tmp[n++] = '\n';
-		break;
-	}
-	case SF_PCI_CAPS: {
-		int bdf = pr->dev;
-		uint8_t ids[32];
-		int cnt = pci_cap_ids((uint8_t)((bdf >> 8) & 0xff), (uint8_t)((bdf >> 3) & 0x1f),
-		                      (uint8_t)(bdf & 7), ids, 32);
-		const char *h = "0123456789abcdef";
-		for (int i = 0; i < cnt; i++) {
-			if (i) tmp[n++] = ' ';
-			tmp[n++] = h[(ids[i] >> 4) & 15];
-			tmp[n++] = h[ids[i] & 15];
-		}
-		tmp[n++] = '\n';
-		break;
-	}
 	default:           n = 0; break;
 	}
 
