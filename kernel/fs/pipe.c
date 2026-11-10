@@ -25,6 +25,8 @@ typedef struct {
     uint32_t      tail;
     uint32_t      readers;
     uint32_t      writers;
+    uint32_t      r_opens;     /* opens of each end so far: an opener waiting for the */
+    uint32_t      w_opens;     /* other end sees one that came and already went (Linux) */
     spinlock_t    lock;
     void         *cg;          /* cgroup paying for the buffer */
     wait_queue_t  rd_wait;
@@ -312,22 +314,25 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 
     int acc = flags & 3;   /* O_RDONLY=0 O_WRONLY=1 O_RDWR=2 */
     uint64_t f = spin_lock_irq(&pipe->lock);
-    if (acc != O_WRONLY) pipe->readers++;
-    if (acc != O_RDONLY) pipe->writers++;
+    if (acc != O_WRONLY) { pipe->readers++; pipe->r_opens++; }
+    if (acc != O_RDONLY) { pipe->writers++; pipe->w_opens++; }
+    uint32_t r_seen = pipe->r_opens, w_seen = pipe->w_opens;
     wake_up(&pipe->open_wait);
     spin_unlock_irq(&pipe->lock, f);
 
+    /* Wait for the other end to have opened, not to be open now: a writer that
+     * opened, wrote and closed before this reader ran still ends the wait. */
     if (acc == O_RDONLY) {
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
-            if (pipe->writers > 0 || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
-            if (task_has_actionable_signal()) { spin_unlock_irq(&pipe->lock, f); return -EINTR; }
+            if (pipe->writers > 0 || pipe->w_opens != w_seen || (file->flags & O_NONBLOCK)) { spin_unlock_irq(&pipe->lock, f); break; }
+            if (task_has_actionable_signal()) { pipe->readers--; spin_unlock_irq(&pipe->lock, f); return -EINTR; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
         }
     } else if (acc == O_WRONLY) {
         for (;;) {
             f = spin_lock_irq(&pipe->lock);
-            if (pipe->readers > 0) { spin_unlock_irq(&pipe->lock, f); break; }
+            if (pipe->readers > 0 || pipe->r_opens != r_seen) { spin_unlock_irq(&pipe->lock, f); break; }
             if (file->flags & O_NONBLOCK) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -ENXIO; }
             if (task_has_actionable_signal()) { pipe->writers--; spin_unlock_irq(&pipe->lock, f); return -EINTR; }
             sleep_on_locked(&pipe->open_wait, &pipe->lock, f);
