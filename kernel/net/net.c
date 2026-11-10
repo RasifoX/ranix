@@ -7,6 +7,7 @@
 #include <kernel/net/eth.h>
 #include <kernel/net/ipv6.h>
 #include <kernel/net/ndp.h>
+#include <kernel/net/route.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/kprintf.h>
@@ -177,6 +178,7 @@ void net_register(netdev_t *dev)
     if (!dev->net_ns) dev->net_ns = current_net_ns();
     devs[ndevs++] = dev;
     spin_unlock_irq(&devs_lock, df);
+    route4_sync_dev(dev);   /* a driver's static address is routed at once */
     kprintf(KERN_INFO "net: registered %s ip=%u.%u.%u.%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
         dev->name,
         (dev->ip >> 24) & 0xff, (dev->ip >> 16) & 0xff,
@@ -194,6 +196,14 @@ netdev_t *net_dev_in(net_namespace_t *ns, int idx)
 }
 
 netdev_t *net_dev(int idx) { return net_dev_in(current_net_ns(), idx); }
+
+int net_ifindex(const netdev_t *dev)
+{
+    netdev_t *d;
+    for (int i = 0; (d = net_dev_in(dev->net_ns, i)); i++)
+        if (d == dev) return i + 1;
+    return 0;
+}
 
 netdev_t *net_dev_by_ip(uint32_t ip)
 {
@@ -370,15 +380,15 @@ static int lo_tx(netdev_t *dev, skb_t *skb)
     return 0;
 }
 
-/* Default device for a new socket: a real NIC if one exists, else loopback.
- * (127/8 traffic loops back regardless of which device carries it — ip_tx.) */
+/* Default device for a new socket, before it has a destination: a usable NIC
+ * with an address if one exists, else loopback. Sending re-routes per packet
+ * (net_route_dev); this only gives the socket a device to start from. */
 netdev_t *net_default_dev(void)
 {
     net_namespace_t *ns = current_net_ns();
-    /* With the cable out, a Wi-Fi link with an address carries the traffic */
     for (int i = 0; i < ndevs; i++) {
         netdev_t *d = devs[i];
-        if (d->net_ns == ns && (d->ip >> 24) != 127 && d->ip && (d->link_up || !d->link_check))
+        if (d->net_ns == ns && (d->ip >> 24) != 127 && d->ip && netdev_usable(d))
             return d;
     }
     for (int i = 0; i < ndevs; i++)
@@ -386,14 +396,14 @@ netdev_t *net_default_dev(void)
     return &ns->lo;   /* a namespace always has its own loopback */
 }
 
-/* Egress device for a destination. 127/8 must go out the loopback device so the
- * source address is 127.0.0.1 too — sending it from a NIC's address produces an
- * asymmetric tuple the in-stack loopback then mishandles. Our own NIC address is
- * already looped by ip_tx (dst == dev->ip), so only 127/8 needs redirecting. */
+/* Egress device for a destination: the routing table's choice (route.c).
+ * 127/8 goes out the loopback device so the source address is 127.0.0.1 too.
+ * No route gives the loopback device, which callers read as "unreachable". */
 netdev_t *net_route_dev(uint32_t dst_ip)
 {
-    if ((dst_ip >> 24) == 127) return &current_net_ns()->lo;
-    return net_default_dev();
+    uint32_t nh;
+    netdev_t *d = route4_lookup(current_net_ns(), dst_ip, NULL, &nh);
+    return d ? d : &current_net_ns()->lo;
 }
 
 netdev_t *net_route_dev6(const in6_addr_t *dst)
@@ -454,6 +464,7 @@ static void net_dhcp_one(netdev_t *d, int can_sleep)
 
     uint32_t dns = 0;
     if (dhcp_configure(d, &dns, can_sleep) == 0) {
+        route4_sync_dev(d);   /* new lease: its subnet and gateway */
         /* Renew halfway: a router that reassigns an expired address cuts the
          * machine off while its own view of the network still looks fine. */
         uint32_t half = dhcp_last_lease ? dhcp_last_lease / 2 : 1800;
@@ -502,6 +513,7 @@ static void net_link_thread(void)
         for (int i = 0; i < ndevs; i++) {
             netdev_t *d = devs[i];
             if (!d->poll || !d->link_check || (d->ip >> 24) == 127) continue;
+            if (d->admin_down) continue;   /* root took it down: no DHCP, no events */
             int up = d->link_check(d);
             if (up && !d->link_up) {
                 kprintf(KERN_INFO "%s: link up, renewing address configuration\n", d->name);
