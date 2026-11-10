@@ -235,6 +235,72 @@ int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int
 
 /* ── ICMP delivery to RAW sockets ───────────────────────── */
 
+/* ── AF_PACKET ───────────────────────────────────────────
+ * Every frame a device takes in is offered to the packet sockets of its
+ * namespace that ask for its ethertype (or ETH_P_ALL) on that interface (or
+ * any): SOCK_RAW gets the whole frame, SOCK_DGRAM what follows the Ethernet
+ * header. No rings (PACKET_RX_RING); a socket that is not read drops after
+ * PK_QUEUE_MAX frames rather than growing without end. */
+#define PK_QUEUE_MAX 256
+#define PK_MATCH_MAX 16
+
+int net_dev_ifindex(struct netdev *dev)
+{
+    for (int i = 0; ; i++) {
+        netdev_t *d = net_dev_in(dev->net_ns, i);
+        if (!d) return 0;
+        if (d == dev) return i + 1;
+    }
+}
+
+static void packet_queue(socket_t *s, netdev_t *dev, int ifindex, const uint8_t *frame, uint16_t len)
+{
+    uint16_t skip = s->type == SOCK_DGRAM ? 14 : 0;
+    if (len <= skip || len - skip > SKB_DATA_MAX) return;
+    uint64_t f = spin_lock_irq(&s->recv_lock);
+    int n = 0;
+    for (skb_t *q = s->recv_head; q && n < PK_QUEUE_MAX; q = q->next) n++;
+    spin_unlock_irq(&s->recv_lock, f);
+    if (n >= PK_QUEUE_MAX) return;
+    skb_t *skb = skb_alloc();
+    if (!skb) return;
+    memcpy(skb->data, frame + skip, len - skip);
+    skb->len = (uint16_t)(len - skip);
+    memcpy(&skb->ll_proto, frame + 12, 2);
+    memcpy(skb->ll_src, frame + 6, 6);
+    skb->ll_ifindex = ifindex;
+    skb->ll_loop = dev == &dev->net_ns->lo;
+    const uint8_t *dst = frame;
+    int bcast = dst[0] == 0xff && dst[1] == 0xff && dst[2] == 0xff && dst[3] == 0xff && dst[4] == 0xff && dst[5] == 0xff;
+    skb->ll_pkttype = bcast ? 1 : (dst[0] & 1) ? 2 : memcmp(dst, dev->mac, 6) == 0 ? 0 : 3;
+    if (sock_charge_skb(s, skb) != 0) { skb_free(skb); return; }
+    sock_queue_skb(s, skb);
+}
+
+void sock_packet_deliver(struct netdev *dev, const uint8_t *frame, uint16_t len)
+{
+    if (len < 14) return;
+    uint16_t type;
+    memcpy(&type, frame + 12, 2);
+    socket_t *m[PK_MATCH_MAX];
+    int n = 0, ifindex = 0;
+    uint64_t f = spin_lock_irq(&gsock_lock);
+    for (int i = 0; i < gsock_cap && n < PK_MATCH_MAX; i++) {
+        socket_t *s = gsock[i];
+        if (!s || s->domain != AF_PACKET || s->net_ns != dev->net_ns) continue;
+        if (s->pk_proto != htons(0x0003) && s->pk_proto != type) continue;
+        sock_hold(s);
+        m[n++] = s;
+    }
+    spin_unlock_irq(&gsock_lock, f);
+    if (n) ifindex = net_dev_ifindex(dev);
+    for (int i = 0; i < n; i++) {
+        if (!m[i]->pk_ifindex || m[i]->pk_ifindex == ifindex)
+            packet_queue(m[i], dev, ifindex, frame, len);
+        sock_put(m[i]);
+    }
+}
+
 void sock_icmp_deliver(struct net_namespace *ns, uint32_t src_ip, const void *data, uint16_t len)
 {
     uint64_t f = spin_lock_irq(&gsock_lock);
