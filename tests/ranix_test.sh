@@ -192,6 +192,7 @@ check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && ech
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
 check "dmesg-format"     "0"       "$(dmesg 2>/dev/null | grep -v -c -E '^\[ *[0-9]+\.[0-9]{6}\] [a-z%][a-z0-9_-]{1,15}: [ -~]+$')"
 check "c-klog"           "OK"      "$(timeout 20 /bin/test_klog 2>/dev/null | tail -1)"
+check "c-newmount"       "OK"      "$(timeout 20 /bin/test_newmount 2>/dev/null | tail -1)"
 # hung-task detector (khungtaskd): the boot self-test drives it against a
 # synthetic blocked task and emits a marker. Prove DETECTION works (the loud
 # report fired) without any task actually wedging the kernel.
