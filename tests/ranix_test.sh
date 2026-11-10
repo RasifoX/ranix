@@ -462,6 +462,7 @@ check "c-poll"       "OK"  "$(timeout 8 /bin/test_poll 2>/dev/null)"
 check "c-timerfd"    "OK"  "$(timeout 8 /bin/test_timerfd 2>/dev/null)"
 check "c-eventfd"    "OK"  "$(timeout 8 /bin/test_eventfd 2>/dev/null)"
 check "c-drm"        "OK"  "$(timeout 40 /bin/test_drm 2>/dev/null | tail -1)"
+check "c-getfbperm"   "OK"  "$(timeout 30 /bin/test_getfbperm 2>/dev/null | tail -1)"
 check "c-i915"       "OK"  "$(timeout 60 /bin/test_i915 2>/dev/null | tail -1)"
 # virtio-gpu KMS back end (the VM has -device virtio-gpu-pci,xres=1280,yres=720; OK without one)
 check "c-virtio-gpu" "OK"  "$(timeout 40 /bin/test_virtio_gpu 1280x720 2>/dev/null | tail -1)"
