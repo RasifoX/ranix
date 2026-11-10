@@ -12,7 +12,7 @@ static cpu_context_t early_cpu_ctx;
 void arch_halt(void)  { __asm__ volatile("wfi"); }
 
 void arch_idle_deep(volatile int *flag, int deep) { (void)deep; arch_idle_halt(flag); }
-void arch_tick_slow(int slow) { (void)slow; }
+/* arch_tick_slow: the generic timer driver (drivers/irqchip/arm-timer) */
 int arch_idle_get(void) { return 0; }
 int arch_idle_set(int n) { (void)n; return -22; }
 int  arch_fw_lock(uint32_t timeout_ms) { (void)timeout_ms; return 0; }

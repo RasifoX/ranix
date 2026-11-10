@@ -12,14 +12,25 @@
 static volatile uint64_t ticks = 0;
 static uint32_t timer_hz = 100;
 
+/* This CPU's tick period in counter units: TICK_SLOW times longer while the
+ * scheduler has it slowed (sched_tick then adds TICK_SLOW to kernel_ticks, so
+ * the hardware must really slow down, or idle time runs ten times fast). */
+static uint64_t tick_period(int slow) {
+    uint64_t freq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    return freq / timer_hz * (slow ? TICK_SLOW : 1);
+}
+
 void timer_handler(void) {
     ticks++;
 
-    uint64_t freq;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
-    uint64_t next;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(next));
-    next += freq / timer_hz;
+    /* the next tick from this one's due time, not from when the handler ran:
+     * no drift; a CPU that fell behind catches up without a burst */
+    uint64_t due, now;
+    __asm__ volatile("mrs %0, cntv_cval_el0" : "=r"(due));
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    uint64_t next = due + tick_period(arch_get_cpu_ctx()->tick_slow);
+    if (next <= now) next = now + tick_period(arch_get_cpu_ctx()->tick_slow);
     __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(next));
 
     /* Only the BSP advances global time + runs the global walk (kernel_ticks,
@@ -58,6 +69,13 @@ void timer_init(uint32_t hz) {
 }
 
 uint64_t timer_ticks(void) { return ticks; }
+
+/* this CPU's timer: TICK_SLOW times slower, or back to normal at once */
+void arch_tick_slow(int slow) {
+    uint64_t now;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(now + tick_period(slow)));
+}
 
 void timer_secondary_init(void) {
     timer_enable_el0_counter();
