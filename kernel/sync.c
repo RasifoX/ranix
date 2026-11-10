@@ -563,7 +563,25 @@ void sleep_on_locked(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags)
 
 /* The same, but also woken by the deadline sweep at tick `deadline` (0: none):
  * for waiters whose event may come without a wake_up (a device that is polled). */
+static void sleep_on_locked_end(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags,
+                                uint64_t deadline, uint64_t end_ns);
+
 void sleep_on_locked_until(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags, uint64_t deadline)
+{
+	sleep_on_locked_end(q, lock, irq_flags, deadline, 0);
+}
+
+/* The same to a CLOCK_MONOTONIC instant: the one-shot timer ends it then, the
+ * tick deadline after it is the backstop. */
+void sleep_on_locked_until_ns(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags, uint64_t end_ns)
+{
+	uint64_t now = mono_ns(), tick_ns = 1000000000ULL / TIMER_HZ;
+	uint64_t span = end_ns > now ? end_ns - now : 0;
+	sleep_on_locked_end(q, lock, irq_flags, kernel_ticks + (span + tick_ns - 1) / tick_ns + 1, end_ns);
+}
+
+static void sleep_on_locked_end(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags,
+                                uint64_t deadline, uint64_t end_ns)
 {
 	process_t *curr = task_current();
 	if (!curr || curr->pid == 0) {
@@ -582,11 +600,13 @@ void sleep_on_locked_until(wait_queue_t *q, spinlock_t *lock, uint64_t irq_flags
 	while (t) { if (t == curr) { found = 1; break; } t = t->wait_next; }
 	if (!found) { curr->wait_next = q->tasks; q->tasks = curr; }
 	if (deadline) { curr->wake_deadline = deadline; sched_note_wake_deadline(deadline); }
+	if (end_ns) sched_note_wake_ns(end_ns);
 	spin_unlock_irq(&q->lock, f);
 	spin_unlock_irq(lock, irq_flags);
 	arch_yield();
 
 	if (deadline) curr->wake_deadline = 0;
+	curr->wake_ns = 0;
 	f = spin_lock_irq(&q->lock);
 	wq_unlink_locked(q, curr);
 	spin_unlock_irq(&q->lock, f);

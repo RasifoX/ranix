@@ -6,8 +6,9 @@
  * POSIX per-process timers (timer_create and friends). Expiry runs in one kernel
  * thread, not the tick: posting a real-time signal allocates. Times are kept on
  * the monotonic clock, so an absolute CLOCK_REALTIME time is converted when set;
- * a later settimeofday does not move an armed timer. Resolution is one tick.
- * With nothing armed the thread sleeps a second, so arming must wake it: the
+ * a later settimeofday does not move an armed timer. The thread sleeps to the
+ * earliest expiry on the one-shot timer (a tick where there is none); with
+ * nothing armed it sleeps a second, so arming must wake it: the
  * kick flag and the wait queue, both under ptimer_lock, make that wakeup one a
  * thread between its scan and its sleep cannot miss.
  */
@@ -47,6 +48,22 @@ static uint64_t ptimer_now(void)
 	return (uint64_t)s * NS + (uint64_t)n;
 }
 
+/* The timer service: POSIX timers and timerfds expire here, the thread sleeping
+ * to the earliest of them on the one-shot timer, so they fire when set rather
+ * than on a tick. Started by the first timer_create or armed timerfd. */
+static void ptimer_thread(void);
+
+static void ptimer_service_kick(void)
+{
+	uint64_t f = spin_lock_irq(&ptimer_lock);
+	int start = !ptimer_started;
+	ptimer_started = 1;
+	ptimer_kick = 1;
+	spin_unlock_irq(&ptimer_lock, f);
+	if (start) proc_create("ptimer", ptimer_thread);
+	else       wake_up(&ptimer_wq);
+}
+
 static void ptimer_thread(void)
 {
 	for (;;) {
@@ -54,14 +71,13 @@ static void ptimer_thread(void)
 		ptimer_kick = 0;
 		spin_unlock_irq(&ptimer_lock, f);
 		uint64_t now = ptimer_now();
-		int armed = 0;
+		uint64_t soonest = timerfd_run_due(now);
 		for (int i = 0; i < PTIMER_MAX; i++) {
 			uint64_t f = spin_lock_irq(&ptimer_lock);
 			ptimer_t *t = &ptimers[i];
 			ptimer_t c;
 			int fire = 0;
 			if (t->used && t->next_ns) {
-				armed = 1;
 				if (t->next_ns <= now) {
 					fire = t->notify != SIGEV_NONE_;
 					if (t->interval_ns) {
@@ -73,6 +89,7 @@ static void ptimer_thread(void)
 					}
 				}
 			}
+			if (t->used && t->next_ns && t->next_ns < soonest) soonest = t->next_ns;
 			c = *t;
 			spin_unlock_irq(&ptimer_lock, f);
 			if (!fire) continue;
@@ -90,8 +107,8 @@ static void ptimer_thread(void)
 			spin_unlock_irq(&ptimer_lock, f);
 			continue;
 		}
-		sleep_on_locked_until(&ptimer_wq, &ptimer_lock, f,
-		                      kernel_ticks + (armed ? 1 : TIMER_HZ));
+		if (soonest == ~0ULL) sleep_on_locked_until(&ptimer_wq, &ptimer_lock, f, kernel_ticks + TIMER_HZ);
+		else                  sleep_on_locked_until_ns(&ptimer_wq, &ptimer_lock, f, soonest);
 	}
 }
 
@@ -133,13 +150,7 @@ static long sys_timer_create(int clk, const void *usev, int *uid)
 			ev.tid = global;
 		}
 	}
-	{
-		uint64_t f = spin_lock_irq(&ptimer_lock);
-		int start = !ptimer_started;
-		ptimer_started = 1;
-		spin_unlock_irq(&ptimer_lock, f);
-		if (start) proc_create("ptimer", ptimer_thread);
-	}
+	ptimer_service_kick();
 	uint64_t f = spin_lock_irq(&ptimer_lock);
 	ptimer_t *t = NULL;
 	for (int i = 0; i < PTIMER_MAX && !t; i++)

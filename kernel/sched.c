@@ -280,7 +280,7 @@ void tick_notify(void)
 {
 	/* sched_tick always runs on every CPU */
 	sched_tick();
-	/* Global callbacks (tcp_tick, timerfd_tick) run on CPU0 only */
+	/* Global callbacks (tcp_tick) run on CPU0 only */
 	if (arch_get_cpu_ctx()->cpu_id == 0) {
 		/* sched_tick ran above; its slot depends on who registered first */
 		for (int i = 0; i < tick_cb_cnt; i++)
@@ -689,7 +689,6 @@ void sched_init(void)
 
 	tick_register(tcp_tick);
 
-	tick_register(timerfd_tick);
 }
 
 /* Charge the running process's CPU-time interval timers for this tick.
