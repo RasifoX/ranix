@@ -171,6 +171,8 @@ else ifeq ($(ARCH),x86_64)
         drivers/watchdog/wdog_core.c \
         drivers/input/ps2/ps2.c \
         drivers/input/ps2/synaptics.c \
+        drivers/input/ec_hotkey.c \
+        drivers/input/ec_keys.c \
         drivers/block/virtio_blk.c \
         drivers/block/ahci.c \
         drivers/block/nvme.c \

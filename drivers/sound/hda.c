@@ -6,8 +6,19 @@
  * Intel High Definition Audio, from the Intel HD Audio specification. One codec,
  * one output stream, playback only. The codec's widget graph is walked from each
  * connected output pin back to a converter, and everything on the way is powered
- * and unmuted. Programs use /dev/dsp, the OSS interface: ioctls set rate, format
- * and channels, write() plays. /sys/kernel/volume is the output level, 0 to 100.
+ * and unmuted; the mixers' other inputs (the analog loopback, where the
+ * microphones are) are muted, or they hum in the speakers. Programs use /dev/dsp,
+ * the OSS interface: ioctls set rate, format and channels, write() plays.
+ *
+ * /sys/kernel/volume is the output level, 0 to 100, on the curve other systems
+ * use (amplitude ~ level cubed: 50 is -18 dB, 15 is -49 dB), set on the first
+ * amplifier with steps; the others stay at 0 dB and only mute at 0.
+ *
+ * Nothing interrupts: a kernel thread looks every HDA_WATCH_MS. It wipes what has
+ * been heard, so a writer that stops (a paused video) is followed by silence and
+ * not by its last second played over and over; after HDA_IDLE_MS of nothing it
+ * stops the stream. It also mutes the speakers while headphones are plugged in
+ * (ranix.hda_automute=0 leaves them on). /proc/hwdiag "sound hda" shows it all.
  */
 #include <kernel/pci.h>
 #include <kernel/hal.h>
@@ -26,6 +37,8 @@
 #include <kernel/mm/vm.h>
 #include <kernel/time.h>
 #include <kernel/errno.h>
+#include <kernel/hwdiag.h>
+#include <kernel/cmdline.h>
 
 
 #define R_GCAP      0x00
@@ -70,6 +83,8 @@
 #define V_PIN_CTL     0x707
 #define V_EAPD        0x70C
 #define V_PIN_CFG     0xF1C
+#define V_PIN_SENSE   0xF09
+#define V_EXEC_SENSE  0x709
 #define V_SET_FMT     0x2     /* 4-bit verb, 16-bit payload */
 #define V_SET_AMP     0x3
 #define P_NODES       0x04
@@ -78,6 +93,9 @@
 #define P_OUT_AMP     0x12
 #define P_IN_AMP      0x0D
 #define P_CONN_LEN    0x0E
+#define P_PIN_CAP     0x0C
+#define PINCAP_DETECT 0x04          /* presence detect */
+#define PINCAP_TRIG   0x08          /* sense needs a trigger first */
 #define W_OUT 0
 #define W_MIX 2
 #define W_SEL 3
@@ -88,6 +106,11 @@
 #define RING      (CHUNK * NCHUNK)
 #define MAXW      96
 #define MAXDAC    4
+#define MAXPIN    8
+#define HDA_WATCH_MS 20
+#define HDA_IDLE_MS  250            /* this long with nothing to play: the stream stops */
+#define PIN_OUT   0x40
+#define PIN_HP    0xC0
 
 static volatile uint8_t *regs;
 static uint32_t *corb;
@@ -96,17 +119,22 @@ static int rirb_rp, corb_n, rirb_n;
 static int codec = -1, afg;
 static int dacs[MAXDAC], ndac;
 static int ampnodes[MAXDAC * 4], namp;
-static uint32_t amp_steps[MAXDAC * 4];
+static uint32_t amp_caps[MAXDAC * 4];
+static int spk[MAXPIN], nspk, hp[MAXPIN], nhp, hp_in = -1;   /* hp_in: headphones seen, -1 not yet */
+static int automute = 1;
+static uint32_t idle_stops;
 static volatile uint8_t *sd;
 static uint8_t *ring;
 static uint64_t ring_phys, bdl_phys;
 static spinlock_t lock = SPINLOCK_INIT;
+static spinlock_t verb_lock = SPINLOCK_INIT;   /* one verb in the rings at a time: keys, sysfs, the watch */
 static uint32_t wpos;            /* next byte to write, modulo RING */
 static uint64_t written, played; /* totals, bytes */
 static uint64_t accepted;        /* bytes taken from the writer: its own clock never jumps */
 static uint32_t frag_bytes = CHUNK, frag_count = NCHUNK - 1;   /* what the program asked for */
 static uint32_t lastpos;
-static int running, opened;
+static int running, opened, held;  /* held: SETTRIGGER stopped output, the data waits */
+static uint64_t idle_since;      /* ticks: when the ring last ran dry, 0 while it plays */
 static uint32_t rate = 48000;
 static int volume = 80;
 static int chans = 2, bits16 = 1;
@@ -135,6 +163,7 @@ static uint32_t cmd(int nid, uint32_t verb)
 {
 	if (cmd_dead >= 3) return 0xFFFFFFFFu;
 	uint32_t c = ((uint32_t)codec << 28) | ((uint32_t)nid << 20) | verb;
+	uint64_t fl = spin_lock_irq(&verb_lock);
 	int wp = (R16(R_CORBWP) + 1) & (corb_n - 1);
 	int was = R16(R_RIRBWP) & 0xFF;
 	corb[wp] = c;
@@ -144,11 +173,14 @@ static uint32_t cmd(int nid, uint32_t verb)
 		int now = R16(R_RIRBWP) & 0xFF;
 		if (now != was) {
 			rirb_rp = now;
-			return (uint32_t)rirb[now & (rirb_n - 1)];
+			uint32_t r = (uint32_t)rirb[now & (rirb_n - 1)];
+			spin_unlock_irq(&verb_lock, fl);
+			return r;
 		}
 		(void)inb(0x80);
 	}
 	cmd_dead++;
+	spin_unlock_irq(&verb_lock, fl);
 	return 0xFFFFFFFFu;
 }
 
@@ -214,9 +246,11 @@ static int conn_list(int nid, int *out, int cap)
 
 static void note_amp(int nid, uint32_t caps)
 {
+	for (int i = 0; i < namp; i++)
+		if (ampnodes[i] == nid) return;      /* two pins share a mixer: one entry */
 	if (namp < (int)(sizeof(ampnodes) / sizeof(ampnodes[0]))) {
 		ampnodes[namp] = nid;
-		amp_steps[namp++] = (caps >> 8) & 0x7F;
+		amp_caps[namp++] = caps;
 	}
 }
 
@@ -255,7 +289,8 @@ static int path(int nid, int depth)
 		if (!path(list[i], depth + 1)) continue;
 		if (n > 1 && type != W_MIX) verb12(nid, V_CONN_SEL, (uint32_t)i);
 		verb12(nid, V_POWER, 0);
-		if (type == W_MIX && (caps & 2)) set_amp(nid, 1, i, 0, 0);   /* input amp of this leg */
+		if (type == W_MIX && (caps & 2))         /* this leg in, the others (loopback) out */
+			for (int j = 0; j < n; j++) set_amp(nid, 1, j, 0, j != i);
 		if (type != W_PIN && (caps & 4)) {
 			uint32_t ac = param(nid, P_OUT_AMP);
 			if (!ac) ac = param(afg, P_OUT_AMP);
@@ -290,7 +325,9 @@ static int codec_init(void)
 		if (dev != 0 && dev != 1 && dev != 2) continue;   /* line out, speaker, headphone */
 		if (!path(i, 0)) continue;
 		verb12(i, V_POWER, 0);
-		verb12(i, V_PIN_CTL, dev == 2 ? 0xC0 : 0x40);
+		verb12(i, V_PIN_CTL, dev == 2 ? PIN_HP : PIN_OUT);
+		if (dev == 1 && nspk < MAXPIN) spk[nspk++] = i;
+		if (dev == 2 && nhp < MAXPIN && (param(i, P_PIN_CAP) & PINCAP_DETECT)) hp[nhp++] = i;
 		verb12(i, V_EAPD, 2);
 		if (caps & 4) {                          /* the pin's output amp, unmuted */
 			uint32_t ac = param(i, P_OUT_AMP);
@@ -359,7 +396,8 @@ static void start(void)
  * zeros, which hda_write keeps clean, until close stops it. */
 static void kick(void)
 {
-	if (running && !(SR8(SD_CTL) & SD_RUN)) SW8(SD_CTL, SD_RUN);
+	idle_since = 0;
+	if (running && !held && !(SR8(SD_CTL) & SD_RUN)) SW8(SD_CTL, SD_RUN);
 }
 
 static ssize_t hda_write(vfs_file_t *f, const void *buf, size_t len)
@@ -406,7 +444,7 @@ static void drain(void)
 	for (int i = 0; i < 4 * TIMER_HZ; i++) {
 		uint64_t fl = spin_lock_irq(&lock);
 		track();
-		int left = running && written > played;
+		int left = running && !held && written > played;
 		spin_unlock_irq(&lock, fl);
 		if (!left || task_has_actionable_signal()) break;
 		task_sleep_until(kernel_ticks + 1);
@@ -417,6 +455,8 @@ static void stop(void)
 {
 	uint64_t fl = spin_lock_irq(&lock);
 	accepted = 0;                    /* a reset starts ALSA's pointer over at zero */
+	held = 0;
+	idle_since = 0;
 	if (running) {
 		SW8(SD_CTL, SR8(SD_CTL) & ~SD_RUN);
 		running = 0;
@@ -442,6 +482,7 @@ static void stop(void)
 #define DSP_GETODELAY   0x80045017u
 #define DSP_GETOSPACE   0x8010500Cu
 #define DSP_GETOPTR     0x800C5012u
+#define PCM_ENABLE_OUTPUT 2
 #define AFMT_S16_LE  0x10
 
 static int hda_ioctl(vfs_file_t *f, uint32_t c, uint64_t arg)
@@ -491,10 +532,23 @@ static int hda_ioctl(vfs_file_t *f, uint32_t c, uint64_t arg)
 		v = (int)(n << 16 | sel);
 		return copy_to_user((void *)arg, &v, 4) ? -14 : 0;
 	}
-	case DSP_SETTRIGGER: case DSP_NONBLOCK: case DSP_POST:
+	case DSP_SETTRIGGER: {               /* ALSA's oss plugin: start and stop (pause) */
+		if (copy_from_user(&v, (void *)arg, 4)) return -14;
+		uint64_t fl = spin_lock_irq(&lock);
+		held = !(v & PCM_ENABLE_OUTPUT);
+		if (held && running) {
+			track();
+			SW8(SD_CTL, SR8(SD_CTL) & ~SD_RUN);
+		} else if (!held && written > played) {
+			kick();
+		}
+		spin_unlock_irq(&lock, fl);
+		return 0;
+	}
+	case DSP_NONBLOCK: case DSP_POST:
 		return 0;
 	case DSP_GETTRIGGER:
-		v = 2;
+		v = held ? 0 : PCM_ENABLE_OUTPUT;
 		return copy_to_user((void *)arg, &v, 4) ? -14 : 0;
 	case DSP_GETODELAY: {
 		uint64_t fl = spin_lock_irq(&lock);
@@ -576,13 +630,99 @@ static vfs_fops_t hda_fops = {
 	.open = hda_open, .write = hda_write, .ioctl = hda_ioctl, .close = hda_close, .poll = hda_poll,
 };
 
+/* Level to centi-dB: 6000 * log10(v / 100), every 5, in between a straight line */
+static const int16_t CURVE[21] = {-9600, -7806, -6000, -4943, -4194, -3612, -3137, -2736, -2388, -2081, -1806,
+                                  -1558, -1331, -1123, -929, -750, -581, -423, -275, -134, 0};
+
+static int hda_level_cdb(int v)
+{
+	if (v <= 0) return CURVE[0];
+	if (v >= 100) return 0;
+	int a = CURVE[v / 5], b = CURVE[v / 5 + 1];
+	return a + (b - a) * (v % 5) / 5;
+}
+
+/* The step for a level on an amplifier: its top step is 100, each step is
+ * (stepsize + 1) quarter dB. Never below step 0. */
+static int amp_gain(uint32_t caps, int v)
+{
+	int top = (int)((caps >> 8) & 0x7F), cdb_step = (int)(((caps >> 16) & 0x7F) + 1) * 25;
+	int g = top + (hda_level_cdb(v) - cdb_step / 2) / cdb_step;
+	return g < 0 ? 0 : g;
+}
+
+/* Headphones in: the speakers go quiet, as on any laptop; out: they come back */
+static void jack_check(void)
+{
+	if (!nhp || !nspk || !automute) return;
+	int in = 0;
+	for (int i = 0; i < nhp; i++) {
+		if (param(hp[i], P_PIN_CAP) & PINCAP_TRIG) verb12(hp[i], V_EXEC_SENSE, 0);
+		uint32_t r = verb12(hp[i], V_PIN_SENSE, 0);
+		if (r != 0xFFFFFFFFu && (r & 0x80000000u)) in = 1;
+	}
+	if (in == hp_in) return;
+	hp_in = in;
+	for (int i = 0; i < nspk; i++) verb12(spk[i], V_PIN_CTL, in ? 0 : PIN_OUT);
+}
+
+/* One look: wipe what was heard, stop a stream that has run dry, mind the jack */
+static void hda_watch_once(void)
+{
+	static int n;
+	uint64_t fl = spin_lock_irq(&lock);
+	if (running && !held) {
+		track();
+		if (written > played) idle_since = 0;
+		else if (!idle_since) idle_since = kernel_ticks ? kernel_ticks : 1;
+		else if (kernel_ticks - idle_since >= (uint64_t)HDA_IDLE_MS * TIMER_HZ / 1000) {
+			SW8(SD_CTL, SR8(SD_CTL) & ~SD_RUN);
+			running = 0;
+			idle_since = 0;
+			idle_stops++;
+		}
+	}
+	spin_unlock_irq(&lock, fl);
+	if (n++ % (500 / HDA_WATCH_MS) == 0) jack_check();
+}
+
+static void hda_watch(void)
+{
+	for (;;) {
+		task_sleep_until(kernel_ticks + (uint64_t)HDA_WATCH_MS * TIMER_HZ / 1000);
+		hda_watch_once();
+	}
+}
+
+static void hda_diag(hw_out_t *o)
+{
+	hw_begin(o, "sound", "hda");
+	hw_kv(o, "codec", codec);
+	hw_kv(o, "dacs", (uint64_t)ndac);
+	hw_kv(o, "speakers", (uint64_t)nspk);
+	hw_kv(o, "headphones", (uint64_t)nhp);
+	hw_kv(o, "hp_in", hp_in < 0 ? 0 : (uint64_t)hp_in);
+	hw_kv(o, "automute", (uint64_t)automute);
+	hw_kv(o, "volume", (uint64_t)volume);
+	hw_kv(o, "running", (uint64_t)running);
+	hw_kv(o, "held", (uint64_t)held);
+	hw_kv(o, "idle_stops", idle_stops);
+	hw_kv(o, "dead_verbs", (uint64_t)cmd_dead);
+	hw_end(o);
+}
+
 int  sound_volume(void) { return volume; }
 void sound_set_volume(int v)
 {
 	if (!regs) return;
 	volume = v < 0 ? 0 : v > 100 ? 100 : v;
-	for (int i = 0; i < namp; i++)
-		set_amp(ampnodes[i], 0, 0, (int)(amp_steps[i] * (uint32_t)volume / 100), volume == 0);
+	int master = -1;
+	for (int i = 0; i < namp && master < 0; i++)
+		if ((amp_caps[i] >> 8) & 0x7F) master = i;
+	for (int i = 0; i < namp; i++) {
+		int g = i == master ? amp_gain(amp_caps[i], volume) : (int)(amp_caps[i] & 0x7F);
+		set_amp(ampnodes[i], 0, 0, g, volume == 0);
+	}
 }
 
 void hda_init(void)
@@ -645,7 +785,12 @@ void hda_init(void)
 		bdl[i * 4 + 2] = CHUNK;
 		bdl[i * 4 + 3] = 0;
 	}
+	char ov[4];
+	if (cmdline_get("ranix.hda_automute", ov, sizeof(ov)) && !strcmp(ov, "0")) automute = 0;
 	sound_set_volume(volume);
+	jack_check();
+	hwdiag_register(hda_diag);
 	devfs_register_device_gid("dsp", S_IFCHR | 0660, DEVFS_GID_AUDIO, 0x0E03, &hda_fops);
+	proc_create("hda_watch", hda_watch);
 	kprintf(KERN_INFO "hda: codec %d (0x%08x), %d output converter(s), /dev/dsp\n", codec, vendor, ndac);
 }

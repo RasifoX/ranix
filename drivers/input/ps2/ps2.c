@@ -115,7 +115,12 @@ static void kbd_byte(uint8_t sc)
                 [0x1C] = 96, [0x1D] = 97, [0x35] = 98, [0x38] = 100, [0x47] = 102, [0x48] = 103,
                 [0x49] = 104, [0x4B] = 105, [0x4D] = 106, [0x4F] = 107, [0x50] = 108, [0x51] = 109,
                 [0x52] = 110, [0x53] = 111, [0x5B] = 125, [0x5C] = 126, [0x5D] = 127,
-                [0x37] = 99 /* KEY_SYSRQ: Print Screen */};
+                [0x37] = 99 /* KEY_SYSRQ: Print Screen */,
+                /* media keys: their evdev names, or a program reads 'd', 'c', 'b' */
+                [0x20] = 113 /* KEY_MUTE */, [0x2E] = 114 /* KEY_VOLUMEDOWN */, [0x30] = 115 /* KEY_VOLUMEUP */,
+                [0x22] = 164 /* KEY_PLAYPAUSE */, [0x24] = 166 /* KEY_STOPCD */,
+                [0x19] = 163 /* KEY_NEXTSONG */, [0x10] = 165 /* KEY_PREVIOUSSONG */,
+                [0x5E] = 116 /* KEY_POWER */, [0x5F] = 142 /* KEY_SLEEP */, [0x63] = 143 /* KEY_WAKEUP */};
             uint8_t code = E0[sc & 0x7F];
             input_report_key(code ? code : sc & 0x7F, pressed);
         }
