@@ -6,6 +6,7 @@
 #include <uapi/vdso.h>
 #include <kernel/capabilities.h>
 #include <kernel/proc.h>
+#include <kernel/tick.h>
 #include <kernel/nsproxy.h>
 #include <kernel/cgroup.h>
 #include <kernel/elf.h>
