@@ -11,10 +11,11 @@
  * E0 20, so the volume changes and programs see KEY_VOLUMEDOWN and friends;
  * the brightness keys move the backlight by a tenth.
  *
- * Doors: none. Only a board with a table in ec_hotkey.c is polled (now the
+ * Doors: none. Off by default: the poll is new traffic to an EC that is still
+ * a suspect in this machine's power cuts, so it runs only with ranix.ec_keys=1
+ * on the command line, and only on a board with a table in ec_hotkey.c (now the
  * Casper, matched by casper_ec.c); everywhere else the EC ports are not touched.
- * ranix.ec_keys=0 on the command line turns it off. /proc/hwdiag "input
- * ec_keys" counts what was seen.
+ * /proc/hwdiag "input ec_keys" counts what was seen.
  */
 #include <uapi/types.h>
 #include <asm/io.h>
@@ -114,7 +115,7 @@ void ec_keys_init(void)
 {
 	char v[8];
 	if (!casper_ec_board()) return;
-	if (cmdline_get("ranix.ec_keys", v, sizeof(v)) && !strcmp(v, "0")) return;
+	if (!cmdline_get("ranix.ec_keys", v, sizeof(v)) || strcmp(v, "1")) return;   /* off unless asked */
 	hwdiag_register(ec_keys_diag);
 	proc_create("ec_keys", ec_keys_thread);
 	kprintf(KERN_INFO "ec_keys: Casper Fn keys from EC events, every %d ms\n", POLL_MS);
