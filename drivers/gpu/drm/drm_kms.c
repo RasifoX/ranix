@@ -31,6 +31,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/lib/string.h>
 #include <kernel/proc.h>
+#include <kernel/capabilities.h>
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 #include <kernel/pci.h>
@@ -973,12 +974,16 @@ int drm_ioctl_closefb(drm_filep_t *fp, void *d)
 	return fb_remove(fp, c->fb_id, 0);
 }
 
+/* GETFB describes any framebuffer, but a handle to its pixels goes only to the DRM
+ * master or CAP_SYS_ADMIN, as on Linux; everyone else gets handle 0. Without this
+ * any opener of the card (the video group) could read another program's screen. */
 static int getfb_common(drm_filep_t *fp, uint32_t id, drm_fb_t **out, uint32_t *handle)
 {
 	drm_fb_t *fb = fb_lookup(id);
 	if (!fb) return -ENOENT_;
 	*out = fb;
 	*handle = 0;
+	if (fp != drm_master && !capable_task(task_current(), CAP_SYS_ADMIN)) return 0;
 	return drm_gem_handle_new(fp, fb->obj, handle);
 }
 
