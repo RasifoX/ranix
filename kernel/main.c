@@ -9,6 +9,7 @@
 #include <kernel/driver.h>
 #include <kernel/fdt.h>
 #include <kernel/hal.h>
+#include <kernel/tick.h>
 #include <kernel/irq.h>
 #include <kernel/kprintf.h>
 #include <kernel/mm/heap.h>
@@ -505,7 +506,7 @@ static void boot_cpu_idle_loop(void)
 		}
 		net_poll();
 		if (!c->need_resched)
-			arch_idle_deep(&c->need_resched, c->tick_slow);   /* checks and sleeps as one */
+			sched_idle_wait(&c->need_resched, c->tick_slow);   /* checks and sleeps as one */
 	}
 }
 
