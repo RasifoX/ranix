@@ -22,6 +22,6 @@ void    rtc_init(void);                          /* read the RTC into the wall c
 int64_t arch_rtc_read(void);                     /* board code: RTC as Unix seconds */
 void    arch_rtc_write(int64_t epoch_sec);
 
-void timerfd_tick(void);                         /* kernel/sys/syscall_event.c */
+uint64_t timerfd_run_due(uint64_t now_ns);       /* kernel/sys/syscall_event.c: fire due timerfds, next end or ~0 */
 
 #endif

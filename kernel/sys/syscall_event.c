@@ -135,14 +135,12 @@ typedef struct {
     int        clockid;
     int        flags;
     uint64_t   interval_ns;  /* 0 = one-shot */
-    uint64_t   expire_tick;  /* absolute kernel_ticks, 0 = disarmed */
+    uint64_t   expire_ns;    /* absolute CLOCK_MONOTONIC ns, 0 = disarmed */
     uint64_t   expirations;  /* accumulated un-read expirations */
     spinlock_t lock;
     wait_queue_t rd_wait;
 } timerfd_t;
 
-/* Called from sched_tick — check all timerfds */
-void timerfd_tick(void);
 
 static timerfd_t **timerfd_table;
 static int         timerfd_cap;
@@ -181,27 +179,33 @@ static void timerfd_unregister(timerfd_t *t)
     spin_unlock_irq(&timerfd_lock, f);
 }
 
-void timerfd_tick(void)
+/* From the timer service thread (kernel/sys/syscall_timer.c): count the due
+ * expirations, wake readers and pollers, and say when the next one is due. */
+uint64_t timerfd_run_due(uint64_t now)
 {
+    uint64_t soonest = ~0ULL;
     uint64_t f = spin_lock_irq(&timerfd_lock);
     for (int i = 0; i < timerfd_cap; i++) {
         timerfd_t *t = timerfd_table[i];
-        if (!t || !t->expire_tick) continue;
-        if (kernel_ticks < t->expire_tick) continue;
-
+        if (!t || !t->expire_ns) continue;
         uint64_t tf2 = spin_lock_irq(&t->lock);
-        t->expirations++;
-        if (t->interval_ns) {
-            uint64_t ticks = (t->interval_ns * TIMER_HZ + 999999999UL) / 1000000000UL;
-            if (!ticks) ticks = 1;
-            t->expire_tick += ticks;
-        } else {
-            t->expire_tick = 0;
+        if (t->expire_ns <= now) {
+            if (t->interval_ns) {   /* every period gone by counts, as Linux */
+                uint64_t late = (now - t->expire_ns) / t->interval_ns;
+                t->expirations += late + 1;
+                t->expire_ns += (late + 1) * t->interval_ns;
+            } else {
+                t->expirations++;
+                t->expire_ns = 0;
+            }
+            wake_up(&t->rd_wait);
+            poll_notify();   /* a poll or epoll on it, not only a read */
         }
-        wake_up(&t->rd_wait);
+        if (t->expire_ns && t->expire_ns < soonest) soonest = t->expire_ns;
         spin_unlock_irq(&t->lock, tf2);
     }
     spin_unlock_irq(&timerfd_lock, f);
+    return soonest;
 }
 
 static ssize_t timerfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
@@ -321,11 +325,11 @@ static long sys_timerfd_settime(int fd, int flags,
     uint64_t new_value_ns    = (uint64_t)kn.it_value.tv_sec    * 1000000000UL
                                + (uint64_t)kn.it_value.tv_nsec;
 
+    uint64_t now = mono_ns();
     if (uold) {
         linux_itimerspec_t ko = {{0,0},{0,0}};
-        /* return old value (approximate — we store absolute tick) */
-        if (t->expire_tick > kernel_ticks) {
-            uint64_t rem_ns = ((t->expire_tick - kernel_ticks) * 1000000000UL) / TIMER_HZ;
+        if (t->expire_ns > now) {
+            uint64_t rem_ns = t->expire_ns - now;
             ko.it_value.tv_sec  = (int64_t)(rem_ns / 1000000000UL);
             ko.it_value.tv_nsec = (int64_t)(rem_ns % 1000000000UL);
         }
@@ -338,18 +342,23 @@ static long sys_timerfd_settime(int fd, int flags,
     t->interval_ns = new_interval_ns;
     t->expirations = 0;
     if (new_value_ns == 0) {
-        t->expire_tick = 0;  /* disarm */
-    } else {
-        uint64_t ticks = (new_value_ns * TIMER_HZ + 999999999UL) / 1000000000UL;
-        if (!ticks) ticks = 1;
-        if (flags & 1 /* TFD_TIMER_ABSTIME */) {
-            /* absolute: convert from ns-since-boot to ticks */
-            t->expire_tick = (new_value_ns * TIMER_HZ + 999999999UL) / 1000000000UL;
-        } else {
-            t->expire_tick = kernel_ticks + ticks;
+        t->expire_ns = 0;  /* disarm */
+    } else if (flags & 1 /* TFD_TIMER_ABSTIME */) {
+        /* an instant on the timer's own clock; CLOCK_REALTIME moves onto the
+         * monotonic one (a later settimeofday does not move it) */
+        uint64_t at = new_value_ns;
+        if (t->clockid == CLOCK_REALTIME) {
+            int64_t rs, rn; real_time(&rs, &rn);
+            uint64_t real_now = (uint64_t)rs * 1000000000UL + (uint64_t)rn;
+            at = at > real_now ? now + (at - real_now) : now;
         }
+        t->expire_ns = at ? at : 1;
+    } else {
+        t->expire_ns = now + new_value_ns;
     }
+    int armed = t->expire_ns != 0;
     spin_unlock_irq(&t->lock, lf);
+    if (armed) ptimer_service_kick();
     return 0;
 }
 
@@ -359,9 +368,10 @@ static long sys_timerfd_gettime(int fd, linux_itimerspec_t *ucur)
     if (!t) return -EBADF;
 
     linux_itimerspec_t ko = {{0,0},{0,0}};
+    uint64_t now = mono_ns();
     uint64_t lf = spin_lock_irq(&t->lock);
-    if (t->expire_tick > kernel_ticks) {
-        uint64_t rem_ns = ((t->expire_tick - kernel_ticks) * 1000000000UL) / TIMER_HZ;
+    if (t->expire_ns > now) {
+        uint64_t rem_ns = t->expire_ns - now;
         ko.it_value.tv_sec  = (int64_t)(rem_ns / 1000000000UL);
         ko.it_value.tv_nsec = (int64_t)(rem_ns % 1000000000UL);
     }
