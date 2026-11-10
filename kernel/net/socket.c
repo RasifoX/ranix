@@ -174,11 +174,26 @@ static void unix_skb_cred(skb_t *skb)
 
 /* The sender pays, not the receiver: a session must not be able to fill a host
  * process's queue for free. -11 when its budget is spent; returns what it took. */
+/* A datagram (or seqpacket) receiver holds at most UNIX_DGRAM_QLEN messages,
+ * as Linux's net.unix.max_dgram_qlen: past that a sender gets EAGAIN (and a
+ * blocking one waits) instead of queueing until memory runs out. */
+#define UNIX_DGRAM_QLEN 512
+static int unix_peer_full(socket_t *peer)
+{
+    if (peer->type == SOCK_STREAM) return 0;
+    int n = 0;
+    uint64_t f = spin_lock_irq(&peer->recv_lock);
+    for (skb_t *q = peer->recv_head; q && n < UNIX_DGRAM_QLEN; q = q->next) n++;
+    spin_unlock_irq(&peer->recv_lock, f);
+    return n >= UNIX_DGRAM_QLEN;
+}
+
 int unix_send(socket_t *s, const void *data, uint16_t len)
 {
     socket_t *peer = s->unix_peer;
     if (!peer || s->unix_wr_shut) return -EPIPE;
     if (!len) return 0;
+    if (unix_peer_full(peer)) return -EAGAIN;
     /* a datagram (or seqpacket) is one message, whole: a stream is cut to skbs */
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
@@ -203,6 +218,7 @@ int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int
 {
     socket_t *peer = s->unix_peer;
     if (!peer || s->unix_wr_shut) return -EPIPE;
+    if (unix_peer_full(peer)) return -EAGAIN;
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
     if (!skb) return -ENOMEM;
