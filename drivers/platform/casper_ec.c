@@ -227,6 +227,8 @@ static void put_bytes(kout_t *o, const char *key, int have, const uint8_t *v)
 	kout_c(o, '\n');
 }
 
+int casper_ec_board(void) { return E.board; }
+
 int casper_ec_status(char *buf, size_t cap)
 {
 	kout_t o;

@@ -76,6 +76,7 @@ void board_drivers_register(void)
 	hda_init();
 	rtw8723_init();
 	casper_ec_init();          /* one laptop's EC; off unless asked for */
+	ec_keys_init();            /* its Fn keys; needs casper_ec_init first */
 }
 
 board_config_t *board_get_config(void) { return &config; }
