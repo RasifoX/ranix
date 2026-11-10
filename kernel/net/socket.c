@@ -60,6 +60,23 @@ void sock_unregister(socket_t *s)
     spin_unlock_irq(&gsock_lock, f);
 }
 
+/* Egress for an IPv4 destination from socket s. SO_BINDTODEVICE fixes the
+ * device. Otherwise a socket whose local address belongs to one device leaves
+ * through that device when it has a route there: with cable and Wi-Fi on one
+ * subnet, a connection made to (or bound to) eth0's address keeps using eth0
+ * and eth0's address both ways. Without such a route the main table decides. */
+netdev_t *sock_route4(socket_t *s, uint32_t dst)
+{
+    if (s->bound_dev) return net_route_dev(dst, s->bound_dev);
+    netdev_t *lo = &current_net_ns()->lo;
+    netdev_t *own = (s->local_ip && (s->local_ip >> 24) != 127) ? net_dev_by_ip(s->local_ip) : NULL;
+    if (own) {
+        netdev_t *d = net_route_dev(dst, own);
+        if (d != lo) return d;
+    }
+    return net_route_dev(dst, NULL);
+}
+
 socket_t *sock_alloc(int domain, int type, int proto)
 {
     socket_t *s = kmalloc(sizeof(*s));

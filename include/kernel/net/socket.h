@@ -206,6 +206,9 @@ typedef struct socket {
 
 /* Kernel socket API */
 socket_t *sock_alloc(int domain, int type, int proto);
+/* IPv4 egress device for dst from this socket (bound device, else the device
+ * of its local address, else the table); the namespace's lo = unreachable */
+netdev_t *sock_route4(socket_t *s, uint32_t dst);
 void      sock_free(socket_t *s);
 void      sock_hold(socket_t *s);   /* refcount++ */
 void      sock_put(socket_t *s);    /* refcount--; frees the socket at 0 (NULL-safe) */

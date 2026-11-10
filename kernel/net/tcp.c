@@ -989,6 +989,11 @@ static void tcp_no_socket(netdev_t *dev, skb_t *skb, const tcp_rxkey_t *key, tcp
         net_ns_put(ns->net_ns);
         ns->net_ns      = net_ns_get(dev->net_ns);
         ns->dev         = dev;
+        if (!v6) {   /* answers leave the device of the address the SYN was for */
+            netdev_t *e;
+            for (int i = 0; (e = net_dev_in(dev->net_ns, i)); i++)
+                if (e->ip == key->dst4 && e != &dev->net_ns->lo) ns->dev = e;
+        }
         if (v6) { ns->local_ip6 = key->dst6; ns->remote_ip6 = key->src6; }
         else    { ns->local_ip  = key->dst4; ns->remote_ip  = src_ip;    }
         ns->local_port  = dst_port;
@@ -1271,7 +1276,7 @@ uint32_t tcp_get_info(socket_t *s, void *buf, uint32_t buflen)
 int tcp_connect(socket_t *s)
 {
     s->dev = (s->domain == AF_INET6) ? net_route_dev6(&s->remote_ip6, s->bound_dev)
-                                     : net_route_dev(s->remote_ip, s->bound_dev);
+                                     : sock_route4(s, s->remote_ip);
     uint32_t isn = tcp_isn();   /* before tcp_lock: the generator takes its own */
     uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();

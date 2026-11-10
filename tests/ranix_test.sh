@@ -644,6 +644,9 @@ A0=$(txp eth0); A1=$(txp eth1); PI=$(ping -c 3 -W 1 -I eth1 10.0.2.2 2>&1); B0=$
 check "ping-I-eth1"   "yes" "$([ $((B1-A1)) -ge 3 ] && [ $((B0-A0)) -eq 0 ] && echo yes || echo "eth0 +$((B0-A0)) eth1 +$((B1-A1))")"
 [ $((B1-A1)) -ge 3 ] || echo "$PI" | sed 's/^/  ping-I: /'
 check "ping-I-reply"  "0"   "$(ping -c 2 -W 2 -I eth1 10.0.3.2 >/dev/null 2>&1; echo $?)"
+SN=$(timeout 120 /bin/test_samenet 2>&1); echo "$SN" | grep -v "^OK$" | sed 's/^/  samenet: /'
+check "c-samenet"     "OK"  "$(echo "$SN" | tail -1)"
+check "ip-route-samenet" "2" "$(ip route | grep -c '^10.0.2.0/24 dev')"
 check "proc-irqs"     "yes" "$(grep -q 'CPU0' /proc/interrupts && echo yes)"
 check "c-eintr"      "OK"  "$(timeout 30 /bin/test_eintr 2>/dev/null | tail -1)"
 check "c-execstress" "OK" "$(timeout 60 /bin/test_execstress 2>/dev/null | tail -1)"
