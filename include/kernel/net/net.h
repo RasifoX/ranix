@@ -137,8 +137,10 @@ netdev_t *net_dev_by_ip(uint32_t ip);
 int       net_ifindex(const netdev_t *dev);   /* 1-based, within its namespace */
 int       net_set_admin_up(netdev_t *dev, int up);   /* root's link up/down */
 netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
-netdev_t *net_route_dev(uint32_t dst_ip);  /* egress device for a destination */
-netdev_t *net_route_dev6(const in6_addr_t *dst);
+/* Egress device for a destination; oif != NULL (SO_BINDTODEVICE) restricts the
+ * choice to that device. No route: the namespace's loopback = unreachable. */
+netdev_t *net_route_dev(uint32_t dst_ip, netdev_t *oif);
+netdev_t *net_route_dev6(const in6_addr_t *dst, netdev_t *oif);
 
 /* A device can carry traffic: root has not set it down and it has a carrier
  * (a device without a carrier watcher always has one). */

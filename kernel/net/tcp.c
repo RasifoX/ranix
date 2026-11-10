@@ -1270,8 +1270,8 @@ uint32_t tcp_get_info(socket_t *s, void *buf, uint32_t buflen)
 
 int tcp_connect(socket_t *s)
 {
-    s->dev = (s->domain == AF_INET6) ? net_route_dev6(&s->remote_ip6)
-                                     : net_route_dev(s->remote_ip);
+    s->dev = (s->domain == AF_INET6) ? net_route_dev6(&s->remote_ip6, s->bound_dev)
+                                     : net_route_dev(s->remote_ip, s->bound_dev);
     uint32_t isn = tcp_isn();   /* before tcp_lock: the generator takes its own */
     uint64_t tl = spin_lock_irq(&tcp_lock);
     if (!s->local_port) s->local_port = alloc_port();

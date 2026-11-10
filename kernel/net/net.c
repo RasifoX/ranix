@@ -407,16 +407,18 @@ netdev_t *net_default_dev(void)
 /* Egress device for a destination: the routing table's choice (route.c).
  * 127/8 goes out the loopback device so the source address is 127.0.0.1 too.
  * No route gives the loopback device, which callers read as "unreachable". */
-netdev_t *net_route_dev(uint32_t dst_ip)
+netdev_t *net_route_dev(uint32_t dst_ip, netdev_t *oif)
 {
     uint32_t nh;
-    netdev_t *d = route4_lookup(current_net_ns(), dst_ip, NULL, &nh);
+    netdev_t *d = route4_lookup(current_net_ns(), dst_ip, oif, &nh);
     return d ? d : &current_net_ns()->lo;
 }
 
-netdev_t *net_route_dev6(const in6_addr_t *dst)
+/* IPv6 has no table yet: the bound device, else the default one */
+netdev_t *net_route_dev6(const in6_addr_t *dst, netdev_t *oif)
 {
     if (in6_eq(dst, &in6addr_loopback)) return &current_net_ns()->lo;
+    if (oif) return oif;
     return net_default_dev();
 }
 
