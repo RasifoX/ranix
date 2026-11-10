@@ -110,9 +110,15 @@ static vfs_fops_t urandom_fops = {
 };
 
 /* ── /dev/kmsg ───────────────────────────────────────────────── */
-/* Reads walk the kernel log ring a line at a time, then EOF until more is logged,
- * so `dmesg` shows the boot log; writes append
- * to the same ring via kprintf (the printk(3)/logger path). */
+/* Each read returns one log line as one record, "level,seq,usec,flags;text\n"
+ * (util-linux dmesg parses this), then EOF until more is logged. The file
+ * position counts bytes ever logged (kprintf_read_line), so it survives the
+ * ring wrapping; a reader the ring overtook gets EPIPE once and goes on from
+ * the oldest line, as on Linux. A buffer too small for the record is EINVAL
+ * and the position stays. A line longer than KMSG_TEXT_MAX is cut, so a
+ * 1024-byte buffer always holds a record. Each write is one line. */
+
+#define KMSG_TEXT_MAX 976
 
 static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 {
@@ -121,20 +127,15 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN))
 			return -EPERM;
 	}
-	size_t total = kprintf_log_len();
-	if ((size_t)f->pos >= total) return 0;
-	char *tmp = kmalloc(total ? total : 1);
-	if (!tmp) return -ENOMEM;
-	size_t got = kprintf_read_log(tmp, total);
-	if ((size_t)f->pos >= got) { kfree(tmp); return 0; }
-	/* One record a read, "level,seq,usec,flags;text\n": util-linux dmesg parses this. */
-	char *l = tmp + f->pos, *end = l;
-	char *stop = tmp + got;
-	while (end < stop && *end != '\n') end++;
-	size_t ll = (size_t)(end - l);
+	char text[KMSG_TEXT_MAX];
+	uint64_t pos = (uint64_t)f->pos;
+	long ll = kprintf_read_line(&pos, text, sizeof(text));
+	if (ll == -EAGAIN) return 0;
+	if (ll < 0) { f->pos = (off_t)pos; return ll; }   /* EPIPE: moved on */
+	const char *l = text;
 	uint64_t us = 0;
 	if (ll > 15 && l[0] == '[') {                  /* "[    1.234000] text" */
-		size_t i = 1;
+		long i = 1;
 		uint64_t sec = 0, frac = 0;
 		while (i < ll && l[i] == ' ') i++;
 		while (i < ll && l[i] >= '0' && l[i] <= '9') sec = sec * 10 + (uint64_t)(l[i++] - '0');
@@ -151,7 +152,7 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 	head[h++] = '6'; head[h++] = ',';
 	char dig[24];
 	int nd;
-	uint64_t vals[2] = {(uint64_t)f->pos, us};
+	uint64_t vals[2] = {pos, us};   /* seq: where the record ends, rising */
 	for (int k = 0; k < 2; k++) {
 		uint64_t v = vals[k];
 		nd = 0;
@@ -160,27 +161,28 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 		head[h++] = ',';
 	}
 	head[h++] = '-'; head[h++] = ';';
-	if (h + ll + 1 > len) { kfree(tmp); return -EINVAL; }
+	if (h + (size_t)ll + 1 > len) return -EINVAL;   /* f->pos unchanged */
 	char nl = '\n';
 	if (copy_fop_to_user(buf, head, h) != 0 ||
-	    copy_fop_to_user((char *)buf + h, l, ll) != 0 ||
-	    copy_fop_to_user((char *)buf + h + ll, &nl, 1) != 0) { kfree(tmp); return -EFAULT; }
-	f->pos += (off_t)(end - (tmp + f->pos)) + 1;
-	kfree(tmp);
-	return (ssize_t)(h + ll + 1);
+	    copy_fop_to_user((char *)buf + h, l, (size_t)ll) != 0 ||
+	    copy_fop_to_user((char *)buf + h + ll, &nl, 1) != 0) return -EFAULT;
+	f->pos = (off_t)pos;
+	return (ssize_t)(h + (size_t)ll + 1);
 }
 
 static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	(void)f;
-	char kb[256];
+	char kb[256], last = 0;
 	size_t done = 0;
 	while (done < len) {
 		size_t n = len - done < sizeof(kb) ? len - done : sizeof(kb);
 		if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) break;
 		for (size_t i = 0; i < n; i++) kprintf(KERN_CONT "%c", kb[i]);
 		done += n;
+		last = kb[n - 1];
 	}
+	if (done && last != '\n') kprintf(KERN_CONT "\n");   /* a write is one line */
 	return (ssize_t)done;
 }
 

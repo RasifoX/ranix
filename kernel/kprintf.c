@@ -17,6 +17,7 @@
 #include <kernel/sync.h>
 #include <asm/context.h>
 #include <kernel/time.h>
+#include <kernel/errno.h>
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
@@ -38,6 +39,7 @@ void kprintf_set_fb(void) { fb_ready = 1; }
 static char   log_buf[LOG_BUF_SIZE];
 static size_t log_head = 0;
 static size_t log_len  = 0;
+static uint64_t log_total = 0;   /* bytes ever logged: /dev/kmsg positions count these */
 
 /* The newest max bytes of the log, as syslog(2) READ_ALL gives them: a reader
  * with a small buffer wants what just happened, not the boot banner. */
@@ -56,6 +58,39 @@ size_t kprintf_read_log(char *dst, size_t max)
 }
 
 size_t kprintf_log_len(void) { return log_len; }
+
+/* One whole line of the log, for /dev/kmsg. *pos counts bytes ever logged, so
+ * it means the same line however often the ring has wrapped since. The line
+ * (without its '\n') goes to dst, cut at max bytes, and *pos moves past it.
+ * Returns its length as copied, -EAGAIN when no whole line follows *pos yet,
+ * or -EPIPE when the ring has overwritten *pos: *pos then moves to the oldest
+ * whole line, so the next read goes on from there (a fresh reader, *pos 0,
+ * just starts there). Only the one line is copied, under the log lock. */
+long kprintf_read_line(uint64_t *pos, char *dst, size_t max)
+{
+    uint64_t flags = spin_lock_irq(&kprintf_lock);
+    uint64_t oldest = log_total - log_len;
+    if (*pos < oldest) {
+        /* past a wrap the oldest byte may sit inside a line: skip to the next */
+        uint64_t p = oldest;
+        while (p < log_total && log_buf[p % LOG_BUF_SIZE] != '\n') p++;
+        int fresh = (*pos == 0);
+        *pos = p < log_total ? p + 1 : p;
+        if (!fresh) { spin_unlock_irq(&kprintf_lock, flags); return -EPIPE; }
+    }
+    long rc = -EAGAIN;
+    uint64_t end = *pos;
+    while (end < log_total && log_buf[end % LOG_BUF_SIZE] != '\n') end++;
+    if (end < log_total) {                       /* a whole line */
+        size_t n = 0;
+        for (uint64_t p = *pos; p < end && n < max; p++)
+            dst[n++] = log_buf[p % LOG_BUF_SIZE];
+        *pos = end + 1;
+        rc = (long)n;
+    }
+    spin_unlock_irq(&kprintf_lock, flags);
+    return rc;
+}
 
 static int console_level = KLOG_INFO;
 static int line_level    = KLOG_INFO;   /* of the line being written */
@@ -81,6 +116,7 @@ static void _emit(char c)
     log_buf[log_head] = c;
     log_head = (log_head + 1) % LOG_BUF_SIZE;
     if (log_len < LOG_BUF_SIZE) log_len++;
+    log_total++;
     pstore_putc(c);
 }
 

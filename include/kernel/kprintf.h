@@ -31,6 +31,7 @@ void   kprintf_set_fb(void);
 void   kprintf_flush(void);
 size_t kprintf_read_log(char *dst, size_t max);
 size_t kprintf_log_len(void);
+long   kprintf_read_line(uint64_t *pos, char *dst, size_t max);   /* /dev/kmsg */
 
 /* /proc/sys/kernel/dmesg_restrict (procfs.c): when set, only a privileged task
  * may read the kernel log ring; the boot log carries addresses and device
