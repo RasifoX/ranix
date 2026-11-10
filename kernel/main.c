@@ -487,11 +487,13 @@ static void start_init(void)
 	}
 }
 
-/* cpu0 after boot: poll the network, run woken tasks, sleep when idle. */
+/* cpu0 after boot: run woken tasks, poll the network, sleep when idle. A task
+ * the timer woke runs before the network poll, not after it: under a
+ * hypervisor every device register read is a VM exit, and the poll cost the
+ * woken task some hundred microseconds. The net_rx thread polls as well. */
 static void boot_cpu_idle_loop(void)
 {
 	while (1) {
-		net_poll();
 		/* Non-preemptible kernel: cpu0's idle yields voluntarily when a task
 		 * became runnable here (irq_handler preempts only user space). */
 		cpu_context_t *c = arch_get_cpu_ctx();
@@ -499,9 +501,11 @@ static void boot_cpu_idle_loop(void)
 			sched_bsp_wake();
 			c->need_resched = 0;
 			yield();
-		} else {
-			arch_idle_deep(&c->need_resched, c->tick_slow);   /* checks and sleeps as one */
+			continue;
 		}
+		net_poll();
+		if (!c->need_resched)
+			arch_idle_deep(&c->need_resched, c->tick_slow);   /* checks and sleeps as one */
 	}
 }
 
