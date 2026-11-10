@@ -31,6 +31,8 @@ typedef struct {
     wait_queue_t  wr_wait;
     wait_queue_t  open_wait;   /* FIFO open rendezvous (wait for the other end) */
     vfs_file_t   *async_rd;    /* the read end that asked for O_ASYNC, told when data comes */
+    uint64_t      in_gen;      /* data arrived or the last writer left: an EPOLLIN edge */
+    uint64_t      out_gen;     /* a page came free or the last reader left: an EPOLLOUT edge */
 } pipe_t;
 
 /* /proc/sys/fs/pipe-max-size: what F_SETPIPE_SZ grants without CAP_SYS_RESOURCE */
@@ -39,6 +41,13 @@ unsigned long pipe_max_size = 1048576;
 /* A new pipe holds 64 KB, as on Linux; without CAP_SYS_RESOURCE no more than
  * pipe-max-size allows. If 64 KB of contiguous memory is not there, one page. */
 #define PIPE_DEF_ORDER 4
+/* writable for poll: a page free (Linux's page slots, POSIX's PIPE_BUF). Under pipe->lock. */
+static int pipe_writable(const pipe_t *pipe)
+{
+    uint32_t free = pipe->size - pipe->count;
+    return free >= PIPE_BUF_SIZE || free == pipe->size;
+}
+
 static void *pipe_buffer_alloc(pipe_t *pipe)
 {
     int order = PIPE_DEF_ORDER;
@@ -98,7 +107,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
             continue;
         }
 
-        int was_full = avail == pipe->size;
+        int was_writable = pipe_writable(pipe);
         uint32_t n = avail < (len - read) ? avail : (len - read);
         if (n > PIPE_BUF_SIZE) n = PIPE_BUF_SIZE;   /* kbuf's size */
         for (uint32_t i = 0; i < n; i++) {
@@ -106,10 +115,13 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
             pipe->tail = (pipe->tail + 1) % pipe->size;
         }
         pipe->count -= n;
+        /* the read that makes it writable again is the writer's edge */
+        int now_writable = !was_writable && pipe_writable(pipe);
+        if (now_writable) pipe->out_gen++;
 
         wake_up(&pipe->wr_wait);
         spin_unlock_irq(&pipe->lock, f);
-        if (was_full) poll_notify_key(pipe);   /* an epoll/poll writer waits on poll_wq, not wr_wait */
+        if (now_writable) poll_notify_key(pipe);   /* an epoll/poll writer waits on poll_wq, not wr_wait */
 
         if (copy_fop_to_user(p + read, kbuf, n) != 0) {
             ret = read ? (ssize_t)read : -14; /* EFAULT */
@@ -178,6 +190,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
                 pipe->head = (pipe->head + 1) % pipe->size;
             }
             pipe->count += n;
+            pipe->in_gen++;
 
             wake_up(&pipe->rd_wait);
             vfs_file_t *async_rd = pipe->async_rd;
@@ -199,8 +212,8 @@ static int pipe_close(vfs_file_t *file)
     pipe_t *pipe = (pipe_t *)file->inode->priv;
     uint64_t f = spin_lock_irq(&pipe->lock);
 
-    if ((file->flags & 3) == O_RDONLY) pipe->readers--;
-    else                               pipe->writers--;
+    if ((file->flags & 3) == O_RDONLY) { if (--pipe->readers == 0) pipe->out_gen++; }
+    else                               { if (--pipe->writers == 0) pipe->in_gen++; }
     if (pipe->async_rd == file) pipe->async_rd = NULL;
 
     wake_up(&pipe->rd_wait);
@@ -220,6 +233,14 @@ static int pipe_close(vfs_file_t *file)
     return 0;
 }
 
+static void pipe_poll_gens(vfs_file_t *file, uint64_t *in_gen, uint64_t *out_gen)
+{
+    pipe_t *pipe = (pipe_t *)file->inode->priv;
+    if (!pipe) { *in_gen = *out_gen = 0; return; }
+    *in_gen  = __atomic_load_n(&pipe->in_gen, __ATOMIC_RELAXED);
+    *out_gen = __atomic_load_n(&pipe->out_gen, __ATOMIC_RELAXED);
+}
+
 static int pipe_poll(vfs_file_t *file)
 {
     pipe_t *pipe = (pipe_t *)file->inode->priv;
@@ -236,7 +257,7 @@ static int pipe_poll(vfs_file_t *file)
     if (acc != O_RDONLY) {
         /* writable with a page free, as Linux's page-sized slots give (and
          * POSIX's PIPE_BUF): a half-read full pipe is not writable yet */
-        if (free >= PIPE_BUF_SIZE || free == pipe->size) r |= 0x0004; /* POLLOUT */
+        if (free >= PIPE_BUF_SIZE || free == pipe->size) r |= 0x0004; /* POLLOUT, as pipe_writable */
         if (pipe->readers == 0) r |= 0x0008; /* POLLERR: write end with no reader */
     }
     return r;
@@ -260,6 +281,7 @@ static vfs_fops_t pipe_fops = {
     .write = pipe_write,
     .close = pipe_close,
     .poll  = pipe_poll,
+    .poll_gens = pipe_poll_gens,
     .ioctl = pipe_ioctl,
 };
 
@@ -320,9 +342,9 @@ static int fifo_close(vfs_file_t *file)
     if (!pipe) return 0;
     uint64_t f = spin_lock_irq(&pipe->lock);
     int acc = file->flags & 3;
-    if (acc != O_WRONLY && pipe->readers > 0) pipe->readers--;
+    if (acc != O_WRONLY && pipe->readers > 0 && --pipe->readers == 0) pipe->out_gen++;
     if (pipe->async_rd == file) pipe->async_rd = NULL;
-    if (acc != O_RDONLY && pipe->writers > 0) pipe->writers--;
+    if (acc != O_RDONLY && pipe->writers > 0 && --pipe->writers == 0) pipe->in_gen++;
     wake_up(&pipe->rd_wait);
     wake_up(&pipe->wr_wait);
     wake_up(&pipe->open_wait);
@@ -338,6 +360,7 @@ static vfs_fops_t fifo_fops = {
     .write = pipe_write,
     .close = fifo_close,
     .poll  = pipe_poll,
+    .poll_gens = pipe_poll_gens,
     .ioctl = pipe_ioctl,
 };
 
@@ -450,6 +473,7 @@ long pipe_fcntl_size(vfs_file_t *file, int set, unsigned long arg)
     pipe->order  = order;
     pipe->tail   = 0;
     pipe->head   = pipe->count % size;
+    pipe->out_gen++;
     wake_up(&pipe->wr_wait);
     spin_unlock_irq(&pipe->lock, f);
     buddy_free(VIRT_TO_PHYS((uint64_t)old), old_order);
