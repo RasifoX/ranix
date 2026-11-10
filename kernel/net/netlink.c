@@ -14,6 +14,7 @@
 #include <kernel/net/socket.h>
 #include <kernel/net/net.h>
 #include <kernel/net/ipv6.h>
+#include <kernel/net/route.h>
 #include <kernel/capabilities.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
@@ -67,6 +68,7 @@ typedef struct {
 #define RTA_DST      1
 #define RTA_OIF      4
 #define RTA_GATEWAY  5
+#define RTA_PRIORITY 6
 #define RTA_PREFSRC  7
 #define RTA_TABLE   15
 
@@ -93,6 +95,7 @@ typedef struct {
 #define RTN_UNICAST_     1
 #define RTN_LOCAL_       2
 #define RTM_F_CLONED_ 0x200
+#define RTNH_F_LINKDOWN_ 0x10
 
 #define NL_MTU      1500        /* what SIOCGIFMTU reports for every device */
 #define NL_MSG_MAX  128         /* longest single message built below */
@@ -300,12 +303,13 @@ static void nl_dump_addrs(nl_out_t *o, netdev_t *d, int ifindex, int family)
 }
 
 static void nl_route4(nl_out_t *o, uint16_t flags, nl_route_t m, int ifindex,
-                      uint32_t dst, uint32_t gw, uint32_t src)
+                      uint32_t dst, uint32_t gw, uint32_t src, uint32_t metric)
 {
     nl_begin(o, RTM_NEWROUTE, flags);
     nl_put(o, &m, sizeof(m));
     nl_attr_u32(o, RTA_TABLE, m.table);
     if (m.dst_len) nl_attr_ip(o, RTA_DST, dst);
+    if (metric)    nl_attr_u32(o, RTA_PRIORITY, metric);
     if (gw)        nl_attr_ip(o, RTA_GATEWAY, gw);
     if (src)       nl_attr_ip(o, RTA_PREFSRC, src);
     nl_attr_u32(o, RTA_OIF, (uint32_t)ifindex);
@@ -326,20 +330,22 @@ static void nl_route6(nl_out_t *o, uint8_t dst_len, const void *dst, const void 
     nl_end(o);
 }
 
-static void nl_dump_routes4(nl_out_t *o, netdev_t *d, int ifindex)
+/* The IPv4 table (route.c), then loopback's local 127/8 route */
+static void nl_dump_routes4(nl_out_t *o)
 {
-    if (!d->ip) return;
-    nl_route_t m = { .family = AF_INET, .dst_len = mask_prefix(d->mask),
-                     .table = TABLE_MAIN, .protocol = PROTO_KERNEL,
-                     .scope = SCOPE_LINK, .type = RTN_UNICAST_ };
-    if (dev_is_lo(d)) {
-        m.table = TABLE_LOCAL; m.scope = SCOPE_HOST; m.type = RTN_LOCAL_;
+    net_namespace_t *ns = o->s->net_ns;
+    route4_t r;
+    for (int i = 0; route4_get(ns, i, &r) == 0 && !o->err; i++) {
+        nl_route_t m = { .family = AF_INET, .dst_len = mask_prefix(r.mask),
+                         .table = TABLE_MAIN, .protocol = r.proto,
+                         .scope = r.gw ? SCOPE_UNIVERSE : SCOPE_LINK, .type = RTN_UNICAST_ };
+        if (r.dev->link_check && !r.dev->link_up) m.flags = RTNH_F_LINKDOWN_;
+        nl_route4(o, NLF_MULTI, m, net_ifindex(r.dev), r.dst, r.gw, r.src, r.metric);
     }
-    nl_route4(o, NLF_MULTI, m, ifindex, d->ip & d->mask, 0, d->ip);
-    if (d->gw) {
-        m.dst_len = 0; m.protocol = PROTO_BOOT; m.scope = SCOPE_UNIVERSE;
-        nl_route4(o, NLF_MULTI, m, ifindex, 0, d->gw, 0);
-    }
+    netdev_t *lo = &ns->lo;
+    nl_route_t m = { .family = AF_INET, .dst_len = mask_prefix(lo->mask), .table = TABLE_LOCAL,
+                     .protocol = PROTO_KERNEL, .scope = SCOPE_HOST, .type = RTN_LOCAL_ };
+    nl_route4(o, NLF_MULTI, m, net_ifindex(lo), lo->ip & lo->mask, 0, lo->ip, 0);
 }
 
 static void nl_dump_routes6(nl_out_t *o, netdev_t *d, int ifindex)
@@ -397,8 +403,9 @@ static int nl_get_link(nl_out_t *o, const uint8_t *body, size_t blen)
     return -ENODEV;
 }
 
-/* RTM_GETROUTE for one destination (`ip route get`): IPv4, same choice as
- * net_route_dev, but against the socket's namespace */
+/* RTM_GETROUTE for one destination (`ip route get`): IPv4, the same choice
+ * net_route_dev makes (route4_lookup), against the socket's namespace;
+ * RTA_OIF in the request restricts it to that device, as SO_BINDTODEVICE does. */
 static int nl_get_route(nl_out_t *o, const uint8_t *body, size_t blen)
 {
     net_namespace_t *ns = o->s->net_ns;
@@ -407,51 +414,44 @@ static int nl_get_route(nl_out_t *o, const uint8_t *body, size_t blen)
     memcpy(&req, body, sizeof(req));
     if (req.family != AF_INET) return -EOPNOTSUPP;
 
-    uint32_t dst = 0;
-    uint16_t dlen = 0;
-    const void *a = nl_find(body + sizeof(req), blen - sizeof(req), RTA_DST, &dlen);
-    if (a && dlen == 4) { memcpy(&dst, a, 4); dst = ntohl(dst); }
+    uint32_t dst = 0, oifx = 0;
+    uint16_t alen = 0;
+    const uint8_t *attrs = body + sizeof(req);
+    size_t attrs_len = blen - sizeof(req);
+    const void *a = nl_find(attrs, attrs_len, RTA_DST, &alen);
+    if (a && alen == 4) { memcpy(&dst, a, 4); dst = ntohl(dst); }
+    a = nl_find(attrs, attrs_len, RTA_OIF, &alen);
+    if (a && alen == 4) memcpy(&oifx, a, 4);
+    netdev_t *oif = NULL;
+    if (oifx && !(oif = net_dev_in(ns, (int)oifx - 1))) return -ENODEV;
 
     nl_route_t m = { .family = AF_INET, .dst_len = 32, .table = TABLE_MAIN,
                      .protocol = PROTO_BOOT, .scope = SCOPE_UNIVERSE,
                      .type = RTN_UNICAST_, .flags = RTM_F_CLONED_ };
-    netdev_t *d, *hit = NULL;
-    int hit_i = 0;
-
-    for (int i = 0; (d = net_dev_in(ns, i)); i++) {
-        if (d->ip && d->ip == dst) {            /* one of ours: looped back */
-            m.table = TABLE_LOCAL; m.scope = SCOPE_HOST; m.type = RTN_LOCAL_;
-            for (int j = 0; (d = net_dev_in(ns, j)); j++)
-                if (d == &ns->lo) nl_route4(o, 0, m, j + 1, dst, 0, dst);
-            return 0;
-        }
+    uint32_t nh;
+    netdev_t *d = route4_lookup(ns, dst, oif, &nh);
+    if (!d) return -ENETUNREACH;
+    if (d == &ns->lo || d->ip == dst) {         /* one of ours: looped back */
+        m.table = TABLE_LOCAL; m.scope = SCOPE_HOST; m.type = RTN_LOCAL_;
+        nl_route4(o, 0, m, net_ifindex(&ns->lo), dst, 0, d == &ns->lo ? ns->lo.ip : dst, 0);
+        return 0;
     }
-    for (int i = 0; (d = net_dev_in(ns, i)); i++) {
-        if (d->ip && (dst & d->mask) == (d->ip & d->mask)) {
-            if (dev_is_lo(d)) {
-                m.table = TABLE_LOCAL; m.scope = SCOPE_HOST; m.type = RTN_LOCAL_;
-            }
-            nl_route4(o, 0, m, i + 1, dst, 0, d->ip);
-            return 0;
-        }
-        if (!hit && d->gw) { hit = d; hit_i = i + 1; }
-    }
-    if (!hit) return -ENETUNREACH;
-    nl_route4(o, 0, m, hit_i, dst, hit->gw, hit->ip);
+    nl_route4(o, 0, m, net_ifindex(d), dst, nh != dst ? nh : 0, d->ip, 0);
     return 0;
 }
 
 static void nl_dump(nl_out_t *o, uint16_t type, int family)
 {
     netdev_t *d;
+    if (type == RTM_GETROUTE && family != AF_INET6) nl_dump_routes4(o);
+    if (type == RTM_GETROUTE && family == AF_INET) { nl_done(o); return; }
     for (int i = 0; (d = net_dev_in(o->s->net_ns, i)) && !o->err; i++) {
         if (type == RTM_GETLINK) {
             nl_link(o, d, i + 1, NLF_MULTI);
         } else if (type == RTM_GETADDR) {
             nl_dump_addrs(o, d, i + 1, family);
-        } else {
-            if (family != AF_INET6) nl_dump_routes4(o, d, i + 1);
-            if (family != AF_INET)  nl_dump_routes6(o, d, i + 1);
+        } else if (family != AF_INET) {
+            nl_dump_routes6(o, d, i + 1);
         }
     }
     nl_done(o);

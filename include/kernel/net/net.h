@@ -88,6 +88,7 @@ typedef struct netdev {
     void      (*poll)(struct netdev *);   /* hardware poll, set by driver */
     int       (*link_check)(struct netdev *); /* 1=carrier up, 0=down; NULL=always up */
     int         link_up;                  /* current carrier state (link watcher) */
+    int         admin_down;               /* root set it down (`ip link set X down`) */
     uint64_t    renew_tick;               /* when to renew the DHCP lease, 0 = none */
     void       *priv;
 
@@ -133,9 +134,17 @@ void net_register(netdev_t *dev);
 netdev_t *net_dev(int idx);          /* idx-th device in the current namespace */
 netdev_t *net_dev_in(net_namespace_t *ns, int idx);
 netdev_t *net_dev_by_ip(uint32_t ip);
+int       net_ifindex(const netdev_t *dev);   /* 1-based, within its namespace */
 netdev_t *net_default_dev(void);     /* real NIC if present, else loopback */
 netdev_t *net_route_dev(uint32_t dst_ip);  /* egress device for a destination */
 netdev_t *net_route_dev6(const in6_addr_t *dst);
+
+/* A device can carry traffic: root has not set it down and it has a carrier
+ * (a device without a carrier watcher always has one). */
+static inline int netdev_usable(const netdev_t *d)
+{
+    return !d->admin_down && (d->link_up || !d->link_check);
+}
 
 /* Called from scheduler tick / idle loop — drains RX queues */
 void net_poll(void);

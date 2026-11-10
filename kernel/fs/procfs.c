@@ -19,6 +19,7 @@
 #include <kernel/net/socket.h>
 #include <kernel/net/net.h>
 #include <kernel/net/ipv6.h>
+#include <kernel/net/route.h>
 #include <kernel/block.h>
 #include <kernel/hal.h>
 
@@ -2608,26 +2609,29 @@ static int fill_net_udp(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* Linux prints each address as the raw network-order word in hex */
+static void pb_route_hex(pb_t *b, uint32_t host)
+{
+	pb_hex8(b, ((host & 0xFF) << 24) | (((host >> 8) & 0xFF) << 16) |
+	           (((host >> 16) & 0xFF) << 8) | ((host >> 24) & 0xFF));
+}
+
+/* /proc/net/route: the IPv4 table (route.c) of the reader's namespace */
 static int fill_net_route(char *buf, size_t sz)
 {
 	pb_t b = {buf, sz};
 	pb_str(&b, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
-	netdev_t *dev = net_dev(0);
-	if (dev) {
-		/* default route */
-		pb_str(&b, "eth0\t00000000\t");
-		uint32_t gw = dev->gw;
-		pb_hex8(&b, ((gw & 0xFF) << 24) | (((gw >> 8) & 0xFF) << 16) |
-		             (((gw >> 16) & 0xFF) << 8) | ((gw >> 24) & 0xFF));
-		pb_str(&b, "\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
-		/* local subnet */
-		pb_str(&b, "eth0\t");
-		uint32_t net = dev->ip & dev->mask;
-		pb_hex8(&b, ((net & 0xFF) << 24) | (((net >> 8) & 0xFF) << 16) |
-		             (((net >> 16) & 0xFF) << 8) | ((net >> 24) & 0xFF));
-		pb_str(&b, "\t00000000\t0001\t0\t0\t0\t");
-		pb_hex8(&b, ((dev->mask & 0xFF) << 24) | (((dev->mask >> 8) & 0xFF) << 16) |
-		             (((dev->mask >> 16) & 0xFF) << 8) | ((dev->mask >> 24) & 0xFF));
+	route4_t r;
+	for (int i = 0; route4_get(current_net_ns(), i, &r) == 0; i++) {
+		pb_str(&b, r.dev->name);
+		pb_char(&b, '\t');
+		pb_route_hex(&b, r.dst);
+		pb_char(&b, '\t');
+		pb_route_hex(&b, r.gw);
+		pb_str(&b, r.gw ? "\t0003\t0\t0\t" : "\t0001\t0\t0\t");   /* RTF_UP, RTF_GATEWAY */
+		pb_u64(&b, r.metric);
+		pb_char(&b, '\t');
+		pb_route_hex(&b, r.mask);
 		pb_str(&b, "\t0\t0\t0\n");
 	}
 	return (int)(sz - b.rem);

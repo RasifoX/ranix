@@ -1008,6 +1008,12 @@ static long connect_set_peer(socket_t *s, const uint8_t *ka, uint32_t addrlen, u
         memcpy(&sa, ka, sizeof(sa));
         s->remote_ip   = ntohl(sa.sin_addr);
         s->remote_port = ntohs(sa.sin_port);
+        if (s->domain == AF_INET && s->type == SOCK_DGRAM) {
+            /* the route's device names the source getsockname reports */
+            netdev_t *d = net_route_dev(s->remote_ip);
+            if (d == &current_net_ns()->lo && (s->remote_ip >> 24) != 127) return -ENETUNREACH;
+            s->dev = d;
+        }
         if (s->domain == AF_INET6 && s->type == SOCK_DGRAM) {
             /* getaddrinfo keeps one socket for both families, then asserts that the
              * source of an IPv4 peer reads back as ::ffff:a.b.c.d */
@@ -1232,6 +1238,7 @@ static long sendto_udp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip,
     /* first send to an unresolved peer triggers ARP and is dropped; poll RX
      * for the reply and retry so the datagram actually goes out */
     netdev_t *txdev = net_route_dev(dst_ip);
+    if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     /* the first send to an unresolved next-hop triggers ARP and is dropped;
      * wait (time-based, not a microsecond-fast count) for the ARP reply so
      * the datagram actually goes out — a real round-trip takes real ms */
@@ -1251,6 +1258,8 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
 {
     long r = -38;
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMP: single skb */
+    netdev_t *txdev = net_route_dev(dst_ip);
+    if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     if (len >= sizeof(icmp_hdr_t)) {
         icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
         ih->checksum = 0;
@@ -1265,7 +1274,7 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
             if (!skb) { r = -12; break; }
             memcpy(skb->data, kbuf, len);
             skb->len = (uint16_t)len;
-            int rc = ip_tx(s->dev, skb, dst_ip, 1 /* IPPROTO_ICMP */);
+            int rc = ip_tx(txdev, skb, dst_ip, 1 /* IPPROTO_ICMP */);
             if (rc >= 0) { r = (long)len; break; }
             if (rc != -1) { r = rc; break; }
             net_poll();  /* drain RX — ARP reply may arrive */

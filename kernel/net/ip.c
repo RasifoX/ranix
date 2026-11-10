@@ -9,6 +9,7 @@
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/netfilter.h>
+#include <kernel/net/route.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
 #include <kernel/sync.h>
@@ -189,9 +190,14 @@ static int ip_xmit(netdev_t *dev, skb_t *skb, uint32_t dst_ip)
         netdev_rx_enqueue(dev, skb);
         return 0;
     }
-    uint32_t nexthop = dst_ip;
-    if ((dst_ip & dev->mask) != (dev->ip & dev->mask))
-        nexthop = dev->gw;
+    if (dev->admin_down) { skb_free(skb); return -ENETDOWN; }
+    /* the next hop is the routing table's, among the routes through this
+     * device; with none, only the device's own subnet is reachable */
+    uint32_t nexthop;
+    if (!route4_lookup(dev->net_ns, dst_ip, dev, &nexthop)) {
+        if ((dst_ip & dev->mask) != (dev->ip & dev->mask)) { skb_free(skb); return -ENETUNREACH; }
+        nexthop = dst_ip;
+    }
     uint8_t dst_mac[6];
     if (arp_lookup(dev, nexthop, dst_mac) != 0) { arp_hold(dev, nexthop, skb); return 0; }
     eth_hdr_t *eh = (eth_hdr_t *)skb_push(skb, sizeof(eth_hdr_t));
