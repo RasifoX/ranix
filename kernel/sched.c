@@ -1110,8 +1110,9 @@ void task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags) {
  * Per CPU and touched only by that CPU with interrupts off: a sleeper arms on
  * the CPU it sleeps from (under sched_lock), and that CPU's timer interrupt
  * fires it. Entries are not removed on an early wake; a popped one counts only
- * for the same task, still sleeping, with the same end. Full: the tick
- * deadline, armed as well, still ends the sleep. */
+ * for the same task, still sleeping, with the same end. Full: stale entries are
+ * dropped (hr_compact); still full, the tick deadline, armed as well, ends the
+ * sleep. */
 #define HR_CAP 64
 static struct hr_q { struct dh_ent e[HR_CAP]; int n; } hrq[MAX_CPUS];
 int hrtimer_on;
@@ -1124,8 +1125,35 @@ uint64_t hrtimer_next(void)
 	return q->n ? q->e[0].d : ~0ULL;
 }
 
+/* Full: drop the entries that can no longer fire (their task woke early and
+ * left them, or is gone) and repeats (a task that sleeps again to the same end,
+ * as the timer thread does towards a far timer), then rebuild the heap. Without
+ * this a far end woken early 64 times filled the queue until it came due, and
+ * every fine sleep on the CPU ended on the tick meanwhile. */
+static void hr_compact(struct hr_q *q)
+{
+	int m = 0;
+	for (int i = 0; i < q->n; i++) {
+		struct dh_ent e = q->e[i];
+		process_t *t = e.t;
+		if (e.pid <= 0 || e.pid >= proc_cnt || proctab[e.pid] != t) continue;
+		if (t->wake_ns != e.d || t->state != PROC_SLEEPING) continue;
+		int dup = 0;
+		for (int j = 0; j < m && !dup; j++) dup = q->e[j].t == t && q->e[j].d == e.d;
+		if (!dup) q->e[m++] = e;
+	}
+	q->n = 0;
+	for (int i = 0; i < m; i++) {   /* re-insert in place: slot n <= i is already read */
+		struct dh_ent e = q->e[i];
+		int k = q->n++;
+		while (k > 0 && q->e[(k - 1) / 2].d > e.d) { q->e[k] = q->e[(k - 1) / 2]; k = (k - 1) / 2; }
+		q->e[k] = e;
+	}
+}
+
 static int hr_push(struct hr_q *q, process_t *t, uint64_t d)
 {
+	if (q->n >= HR_CAP) hr_compact(q);
 	if (q->n >= HR_CAP) return -1;
 	int i = q->n++;
 	while (i > 0 && q->e[(i - 1) / 2].d > d) { q->e[i] = q->e[(i - 1) / 2]; i = (i - 1) / 2; }
