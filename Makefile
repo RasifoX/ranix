@@ -139,9 +139,12 @@ else ifeq ($(ARCH),x86_64)
     ARCH_CFLAGS = -mno-sse -mno-avx -mno-red-zone -m64 -mcmodel=kernel
     LINKER      = arch/x86_64/linker.ld
     QEMU_CMD    = qemu-system-x86_64 -cpu max -device isa-debug-exit,iobase=0x501,iosize=1
-    # two NICs on two slirp networks (eth0 10.0.2.15, eth1 10.0.3.15): routing tests
-    QEMU_NET    = -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-                  -netdev user,id=n1,net=10.0.3.0/24 -device virtio-net-pci,netdev=n1
+    # three NICs for the routing tests: eth0 10.0.2.15 and eth1 10.0.3.15 on two
+    # subnets; eth2 10.0.2.16 on eth0's subnet behind its own slirp (cable and
+    # Wi-Fi at home). Only eth0's slirp echoes TCP at 10.0.2.100:7 (cat).
+    QEMU_NET    = -netdev user,id=n0,guestfwd=tcp:10.0.2.100:7-cmd:cat -device virtio-net-pci,netdev=n0 \
+                  -netdev user,id=n1,net=10.0.3.0/24 -device virtio-net-pci,netdev=n1 \
+                  -netdev user,id=n2,net=10.0.2.0/24,dhcpstart=10.0.2.16 -device virtio-net-pci,netdev=n2
     QEMU_KERNEL = $(TARGET)
     SRCS_ARCH = \
         arch/x86_64/cpu.c \

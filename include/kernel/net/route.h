@@ -52,9 +52,10 @@ void route4_flush_dev(netdev_t *dev);
  * that device (SO_BINDTODEVICE). NULL = no route. */
 netdev_t *route4_lookup(net_namespace_t *ns, uint32_t dst, netdev_t *oif, uint32_t *nexthop);
 
-/* Default-route metric for a device's DHCP gateway: 100 + its interface index,
- * so the device registered first (eth0 before wlan0) wins a tie, as before the
- * table existed, and `ip route add default ... metric 50` still overrides it. */
+/* Metric of a device's automatic routes (connected and DHCP default): 100 + its
+ * interface index, so the device registered first (eth0 before wlan0) wins a
+ * tie, as before the table existed, two devices on one subnet both keep their
+ * connected route, and `ip route add ... metric 50` still overrides them. */
 #define RT_DHCP_METRIC_BASE 100
 
 #endif

@@ -467,7 +467,7 @@ void virtio_net_init(void)
 #define VIO_NET_MAC       0x14   /* 6 bytes, device-specific region */
 
 #define VNET_Q_PCI  64
-#define VNET_PCI_MAX 2   /* eth0, eth1: a second NIC lets QEMU test routing */
+#define VNET_PCI_MAX 3   /* eth0..eth2: more NICs let QEMU test routing */
 
 /* One virtio-net PCI function: its rings, its buffers, its netdev. */
 typedef struct {

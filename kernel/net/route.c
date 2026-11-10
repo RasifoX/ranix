@@ -45,12 +45,15 @@ static void drop_where(netdev_t *dev, int only_auto)
     }
 }
 
-/* Slot of the route with this dst/mask/metric, or -1; table_lock held. */
+/* Slot of the route with this dst/mask/metric, or -1; table_lock held. An
+ * automatic route is only ever the same as its own device's: two devices on
+ * one subnet each keep their connected route. */
 static int find_same(const route4_t *r)
 {
     for (int i = 0; i < ROUTE4_MAX; i++)
         if (used[i] && table[i].dst == r->dst && table[i].mask == r->mask &&
-            table[i].metric == r->metric && table[i].dev->net_ns == r->dev->net_ns)
+            table[i].metric == r->metric && table[i].dev->net_ns == r->dev->net_ns &&
+            (!r->automatic || table[i].dev == r->dev))
             return i;
     return -1;
 }
@@ -119,13 +122,17 @@ void route4_sync_dev(netdev_t *dev)
     uint64_t f = spin_lock_irq(&table_lock);
     drop_where(dev, 1);
     if (!dev->admin_down && dev->ip) {
+        /* the connected route carries the device's metric as well: with two
+         * devices on one subnet (cable and Wi-Fi at home) both routes stay,
+         * and the one registered first is preferred, as for the default */
+        uint32_t metric = RT_DHCP_METRIC_BASE + (uint32_t)net_ifindex(dev);
         route4_t c = { .dst = dev->ip & dev->mask, .mask = dev->mask, .src = dev->ip,
-                       .proto = RT_PROTO_KERNEL, .automatic = 1, .dev = dev };
+                       .metric = metric, .proto = RT_PROTO_KERNEL, .automatic = 1, .dev = dev };
         put(&c, RT_REPLACE);
         /* a gateway outside the device's own subnet could never be reached */
         if (dev->gw && (dev->gw & dev->mask) == (dev->ip & dev->mask)) {
             route4_t d = { .gw = dev->gw, .proto = RT_PROTO_BOOT, .automatic = 1, .dev = dev,
-                           .metric = RT_DHCP_METRIC_BASE + (uint32_t)net_ifindex(dev) };
+                           .metric = metric };
             put(&d, RT_REPLACE);
         }
     }

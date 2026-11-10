@@ -1017,14 +1017,14 @@ static long connect_set_peer(socket_t *s, const uint8_t *ka, uint32_t addrlen, u
         s->remote_port = ntohs(sa.sin_port);
         if (s->domain == AF_INET && s->type == SOCK_DGRAM) {
             /* the route's device names the source getsockname reports */
-            netdev_t *d = net_route_dev(s->remote_ip, s->bound_dev);
+            netdev_t *d = sock_route4(s, s->remote_ip);
             if (d == &current_net_ns()->lo && (s->remote_ip >> 24) != 127) return -ENETUNREACH;
             s->dev = d;
         }
         if (s->domain == AF_INET6 && s->type == SOCK_DGRAM) {
             /* getaddrinfo keeps one socket for both families, then asserts that the
              * source of an IPv4 peer reads back as ::ffff:a.b.c.d */
-            netdev_t *d = net_route_dev(s->remote_ip, s->bound_dev);
+            netdev_t *d = sock_route4(s, s->remote_ip);
             uint32_t ip = htonl(d ? d->ip : 0);
             uint8_t *b = (uint8_t *)&s->local_ip6;
             memset(b, 0, 10);
@@ -1092,7 +1092,7 @@ static long sys_connect(int fd, const void *uaddr, uint32_t addrlen)
     /* a namespace with only loopback has no way to this peer; the SYN would loop
      * back to nobody and connect would sleep forever */
     if (s->domain == AF_INET && (s->remote_ip >> 24) != 127 &&
-        net_route_dev(s->remote_ip, s->bound_dev) == &current_net_ns()->lo)
+        sock_route4(s, s->remote_ip) == &current_net_ns()->lo)
         return -ENETUNREACH;
     /* fail fast on an unreachable IPv6 peer (no on-link prefix, no router) so an
      * AF_UNSPEC client falls back to IPv4 instead of blocking on a dropped SYN */
@@ -1244,7 +1244,7 @@ static long sendto_udp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip,
     sock_register(s);
     /* first send to an unresolved peer triggers ARP and is dropped; poll RX
      * for the reply and retry so the datagram actually goes out */
-    netdev_t *txdev = net_route_dev(dst_ip, s->bound_dev);
+    netdev_t *txdev = sock_route4(s, dst_ip);
     if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     /* the first send to an unresolved next-hop triggers ARP and is dropped;
      * wait (time-based, not a microsecond-fast count) for the ARP reply so
@@ -1265,7 +1265,7 @@ static long sendto_icmp4(socket_t *s, uint8_t *kbuf, size_t len, uint32_t dst_ip
 {
     long r = -38;
     if (len > SKB_DATA_MAX) len = SKB_DATA_MAX;   /* raw ICMP: single skb */
-    netdev_t *txdev = net_route_dev(dst_ip, s->bound_dev);
+    netdev_t *txdev = sock_route4(s, dst_ip);
     if (txdev == &current_net_ns()->lo && (dst_ip >> 24) != 127) return -ENETUNREACH;
     if (len >= sizeof(icmp_hdr_t)) {
         icmp_hdr_t *ih = (icmp_hdr_t *)kbuf;
