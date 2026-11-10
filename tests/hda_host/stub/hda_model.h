@@ -21,6 +21,7 @@
 #define VM_DEVICE 32
 #define DEVFS_GID_AUDIO 18
 #define ENOTTY 25
+#define EFAULT 14
 #define PHYS_TO_VIRT(p) ((uint64_t)(uintptr_t)(p))
 typedef struct { int x; } spinlock_t;
 #define SPINLOCK_INIT { 0 }
@@ -54,6 +55,8 @@ int copy_to_user(void *dst, const void *src, size_t n);
 typedef struct { char *p; size_t rem; } hw_out_t;
 typedef void (*hwdiag_fn)(hw_out_t *);
 void hwdiag_register(hwdiag_fn fn);
+int sound_volume(void);
+void sound_set_volume(int v);
 void hw_begin(hw_out_t *o, const char *cls, const char *name);
 void hw_kv(hw_out_t *o, const char *key, uint64_t v);
 void hw_end(hw_out_t *o);

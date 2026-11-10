@@ -219,8 +219,15 @@ static void kbd_byte(uint8_t sc)
  * motion, taps and scrolling of them; ranix.touchpad=rel keeps it in mouse mode.
  * /dev/input/mice hands out whole packets, 3 bytes each, in arrival order.
  * A wheel step is a packet with both overflow bits set, so a reader that knows
- * nothing of it sees no motion: byte 1 the signed steps, byte 2 WHEEL_MARK. */
+ * nothing of it sees no motion: byte 1 the signed steps, byte 2 WHEEL_MARK.
+ * Two-finger scrolling also goes as it happens, in 120ths of a notch, the same
+ * way: byte 2 SCROLL_V (up) or SCROLL_H (right), byte 1 the signed amount;
+ * SCROLL_STOP when the fingers lift. A reader that takes these drops the
+ * touchpad's notches (WHEEL_MARK) so nothing scrolls twice. */
 #define WHEEL_MARK 0x57
+#define SCROLL_V    0x59
+#define SCROLL_H    0x5A
+#define SCROLL_STOP 0x5B
 #define AUX_BUF 768                     /* bytes, a multiple of 3 */
 static uint8_t aux_buf[AUX_BUF];
 static int aux_head, aux_tail;
@@ -266,6 +273,19 @@ static void syn_emit(int dx, int dy, int wheel, int buttons)
     } while (dx || dy);
 }
 
+static void syn_scroll(int v120, int h120, int stop)   /* aux_lock held */
+{
+    if (stop) { aux_put((uint8_t)(0xC8 | syn.buttons), 0, SCROLL_STOP); return; }
+    for (int k = 0; k < 2; k++) {
+        int v = k ? h120 : v120;
+        while (v) {
+            int part = v > 127 ? 127 : v < -127 ? -127 : v;
+            aux_put((uint8_t)(0xC8 | syn.buttons), (uint8_t)part, k ? SCROLL_H : SCROLL_V);
+            v -= part;
+        }
+    }
+}
+
 /* Header bits fix bytes 0 and 3 of the six: 10xx0xxx and 11xx0xxx */
 static void syn_byte(uint8_t b)
 {
@@ -285,6 +305,7 @@ static void syn_byte(uint8_t b)
             r[0] = (uint8_t)now; r[1] = (uint8_t)(now >> 8);
             memcpy(r + 2, syn_pkt, 6);
         }
+        syn.scroll = syn_scroll;
         syn_packet(&syn, syn_pkt, kernel_ticks * (1000 / TIMER_HZ), syn_emit);
     }
     spin_unlock_irq(&aux_lock, f);

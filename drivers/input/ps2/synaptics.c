@@ -17,11 +17,72 @@
 #define CLICK_MS  90      /* a finger rocks as the pad is pressed: hold the pointer */
 #define BTN_LEFT  1
 #define BTN_RIGHT 2
+#define BTN_MIDDLE 4
+#define LOCK_AT   24      /* pad units of two-finger travel before the axis is picked */
 /* Lower right corner of a pad that is one big button */
 #define RZONE_X   4200
 #define RZONE_Y   2100
 
 int syn_tap = 1;          /* a touch is a click: the laptop default, off in Settings */
+int syn_tap3 = 1;         /* three fingers: the middle button, as libinput does; off: the right */
+int syn_middle = 1;       /* left and right pressed together: the middle button */
+
+int syn_option(const char *k, unsigned long n)
+{
+	static const struct { const char *name; int *v; } O[] = {{"tap ", &syn_tap}, {"tap3 ", &syn_tap3},
+	                                                         {"middle ", &syn_middle}};
+	for (unsigned i = 0; i < sizeof O / sizeof O[0]; i++) {
+		unsigned long l = 0;
+		while (O[i].name[l]) l++;
+		if (n < l + 1 || (k[l] != '0' && k[l] != '1')) continue;
+		unsigned long j = 0;
+		while (j < l && k[j] == O[i].name[j]) j++;
+		if (j < l) continue;
+		*O[i].v = k[l] == '1';
+		return 0;
+	}
+	return -1;
+}
+
+/* Two fingers: the page moves with them, a pixel at a time, both ways. The axis
+ * the fingers mostly travel along is picked once and kept, so a vertical scroll
+ * does not drift sideways. Wheel notches still go out for readers that know only
+ * those (s->sy). */
+static void two_fingers(syn_t *s, int dx, int dy, int btn, syn_emit_t emit)
+{
+	s->sy += dy;
+	int steps = s->sy / SCROLL;
+	s->sy -= steps * SCROLL;
+	if (steps) emit(0, 0, steps, btn);
+	if (!s->scroll) return;
+	if (!s->lock) {
+		s->ax += dx < 0 ? -dx : dx;
+		s->ay += dy < 0 ? -dy : dy;
+		if (s->ax + s->ay < LOCK_AT) {           /* not yet: kept for when it is */
+			s->fx += dx * 120;
+			s->fy += dy * 120;
+			return;
+		}
+		s->lock = s->ay >= 2 * s->ax ? 1 : s->ax >= 2 * s->ay ? 2 : 3;
+	}
+	if (s->lock != 2) s->fy += dy * 120;
+	else s->fy = 0;
+	if (s->lock != 1) s->fx += dx * 120;
+	else s->fx = 0;
+	int v = s->fy / SCROLL, h = s->fx / SCROLL;
+	s->fy -= v * SCROLL;
+	s->fx -= h * SCROLL;
+	if (v || h) {
+		s->scroll(v, h, 0);
+		s->scrolled = 1;
+	}
+}
+
+static void scroll_end(syn_t *s)
+{
+	if (s->scrolled && s->scroll) s->scroll(0, 0, 1);
+	s->scrolled = s->lock = s->ax = s->ay = s->fx = s->fy = 0;
+}
 
 void syn_packet(syn_t *s, const uint8_t p[6], uint64_t ms, syn_emit_t emit)
 {
@@ -36,15 +97,19 @@ void syn_packet(syn_t *s, const uint8_t p[6], uint64_t ms, syn_emit_t emit)
 
 	int btn = 0;
 	if (click) {
-		if (s->down && (fingers >= 2 || s->maxf >= 2)) btn = BTN_RIGHT;
+		int many = fingers > s->maxf ? fingers : s->maxf;
+		if (s->down && many >= 3) btn = syn_tap3 ? BTN_MIDDLE : BTN_RIGHT;
+		else if (s->down && many >= 2) btn = BTN_RIGHT;
 		else btn = (x > RZONE_X && y < RZONE_Y && s->down) ? BTN_RIGHT : BTN_LEFT;
 	}
 	if (rclick) btn |= BTN_RIGHT;
+	if (syn_middle && (p[0] & 3) == 3 && ((p[0] ^ p[3]) & 3) == 0) btn = BTN_MIDDLE;   /* both buttons */
 	if (btn && !s->clicked) s->click_t = ms;
 	if (btn) s->clicked = 1;
 	if (s->dragging) btn |= BTN_LEFT;
 
 	if (z < (s->down ? Z_UP : Z_DOWN)) {
+		scroll_end(s);
 		if (s->down) {
 			int taps = syn_tap && !s->clicked && !s->dragging && ms - s->t0 <= TAP_MS && s->moved < TAP_MOVE;
 			s->down = 0;
@@ -53,7 +118,7 @@ void syn_packet(syn_t *s, const uint8_t p[6], uint64_t ms, syn_emit_t emit)
 				btn &= ~BTN_LEFT;
 			}
 			if (taps) {
-				int b = s->maxf >= 2 ? BTN_RIGHT : BTN_LEFT;
+				int b = s->maxf >= 3 ? (syn_tap3 ? BTN_MIDDLE : BTN_RIGHT) : s->maxf >= 2 ? BTN_RIGHT : BTN_LEFT;
 				emit(0, 0, 0, b);
 				emit(0, 0, 0, 0);
 				s->buttons = 0;
@@ -101,12 +166,10 @@ void syn_packet(syn_t *s, const uint8_t p[6], uint64_t ms, syn_emit_t emit)
 	s->moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
 
 	if (fingers >= 2 && !btn) {
-		s->sy += dy;
-		int steps = s->sy / SCROLL;
-		s->sy -= steps * SCROLL;
-		if (steps) emit(0, 0, steps, btn);
+		two_fingers(s, dx, dy, btn, emit);
 		return;
 	}
+	if (s->scrolled) scroll_end(s);           /* one finger left: the scroll is over */
 	if (s->clicked && ms - s->click_t < CLICK_MS) dx = dy = 0;
 	/* Noise on a resting finger stays put; once it travels, nothing is thrown away */
 	if (!s->moving) {

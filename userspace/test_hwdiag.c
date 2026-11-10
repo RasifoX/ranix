@@ -68,9 +68,9 @@ static int check_format(void)
 	for (char *l = buf + 9; *l; ) {
 		char *e = strchr(l, '\n');
 		if (!e) { printf("hwdiag-fail unterminated line\n"); return -1; }
-		static const char *cls[] = { "thermal ", "power ", "net ", "disk ", "usb " };
+		static const char *cls[] = { "thermal ", "power ", "net ", "disk ", "usb ", "sound ", "input " };
 		int ok = 0;
-		for (unsigned i = 0; i < 5; i++) if (!strncmp(l, cls[i], strlen(cls[i]))) ok = 1;
+		for (unsigned i = 0; i < sizeof cls / sizeof cls[0]; i++) if (!strncmp(l, cls[i], strlen(cls[i]))) ok = 1;
 		if (!ok) { printf("hwdiag-fail class %.20s\n", l); return -1; }
 		char *p = strchr(l, ' ') + 1;            /* name */
 		char *sp = memchr(p, ' ', (size_t)(e - p));

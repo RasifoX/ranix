@@ -37,7 +37,7 @@
 
 /* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
 #pragma weak ps2_aux_report
-#pragma weak syn_tap
+#pragma weak syn_option
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
        SF_BLK_SIZE, SF_BLK_STAT, SF_BLK_RO, SF_BLK_RO_DENIED, SF_BLK_ID, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
@@ -310,10 +310,9 @@ static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 		int e = backlight_set((int)pct);
 		return e ? e : (ssize_t)len;
 	}
-	if (pr->type == SF_TOUCHPAD) {           /* "tap 0" or "tap 1" */
+	if (pr->type == SF_TOUCHPAD) {           /* "tap 0|1", "tap3 0|1", "middle 0|1" (synaptics.h) */
 		if (!sysfs_may_turn(SF_TOUCHPAD)) return -1;
-		if (n < 5 || memcmp(kbuf, "tap ", 4) != 0 || !&syn_tap) return -EINVAL;
-		syn_tap = kbuf[4] == '1';
+		if (!syn_option || syn_option(kbuf, n) != 0) return -EINVAL;
 		return (ssize_t)len;
 	}
 	if (pr->type == SF_KEYMAP) {

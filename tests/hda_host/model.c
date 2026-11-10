@@ -22,7 +22,7 @@
 
 volatile uint64_t kernel_ticks;
 static uint8_t R[0x4000] __attribute__((aligned(4096)));
-static vfs_fops_t *dsp;
+static vfs_fops_t *dsp, *mixer;
 static void (*thread_fn)(void);
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL " __VA_ARGS__); printf("\n"); } } while (0)
@@ -102,7 +102,7 @@ static uint32_t verb(uint32_t c)
 }
 
 /* ---- the controller: registers in memory, CORB/RIRB served on each port 0x80 read ---- */
-static int corb_done, rirb_wp;
+static int corb_done, rirb_wp, rirb_count, sts_set;
 #define REG16(o) (*(volatile uint16_t *)(R + (o)))
 #define REG32(o) (*(volatile uint32_t *)(R + (o)))
 
@@ -112,11 +112,22 @@ uint8_t inb(uint16_t port)
 	uint32_t *cq = (uint32_t *)(uintptr_t)((uint64_t)REG32(0x44) << 32 | REG32(0x40));
 	uint64_t *rq = (uint64_t *)(uintptr_t)((uint64_t)REG32(0x54) << 32 | REG32(0x50));
 	if (REG16(0x58) & 0x8000) { REG16(0x58) = 0; rirb_wp = 0; }
+	/* QEMU's controller: after RINTCNT responses it sends no more until RIRBSTS's
+	 * RINTFL is cleared, and it sets RINTFL only when RIRBCTL asks for it (bit 0).
+	 * Write-1-to-clear seen here as: the driver wrote over the 0x01 we left. */
+	int cnt = REG16(0x5A) & 0xFF ? REG16(0x5A) & 0xFF : 256;
+	if (sts_set && R[0x5D] != 0x01) {
+		sts_set = 0;
+		R[0x5D] = 0;
+		if (rirb_count == cnt) rirb_count = 0;
+	}
 	while (corb_done != (REG16(0x48) & 0xFF)) {
+		if (rirb_count == cnt) return 0;
 		corb_done = (corb_done + 1) & 0xFF;
 		rirb_wp = (rirb_wp + 1) & 0xFF;
 		rq[rirb_wp] = verb(cq[corb_done]);
 		REG16(0x58) = (uint16_t)rirb_wp;
+		if (++rirb_count == cnt && (R[0x5C] & 1)) { R[0x5D] = 0x01; sts_set = 1; }   /* RINTFL */
 	}
 	return 0;
 }
@@ -166,7 +177,7 @@ void pci_write16(uint8_t b, uint8_t d, uint8_t f, uint8_t r, uint16_t v) { (void
 void *ioremap(uint64_t p, size_t n, uint32_t fl) { (void)p; (void)n; (void)fl; return R; }
 void *buddy_alloc(int order) { return aligned_alloc(4096, (size_t)4096 << order); }
 int devfs_register_device_gid(const char *n, uint32_t m, int g, uint32_t dv, vfs_fops_t *f)
-{ (void)n; (void)m; (void)g; (void)dv; dsp = f; return 0; }
+{ (void)m; (void)g; (void)dv; if (!strcmp(n, "mixer")) mixer = f; else dsp = f; return 0; }
 pid_t proc_create(const char *n, void (*fn)(void)) { (void)n; thread_fn = fn; return 1; }
 int task_has_actionable_signal(void) { return 0; }
 int copy_fop_from_user(void *d, const void *s, size_t n) { memcpy(d, s, n); return 0; }
@@ -246,6 +257,26 @@ int main(void)
 	advance(1000);
 	CHECK(W[0x14].pinctl == 0x40, "headphones out: speaker pin on (%x)", W[0x14].pinctl);
 	CHECK(thread_fn != NULL, "the watch thread is started");
+
+	/* /dev/mixer: one level, both sides, shared with /sys/kernel/volume */
+	CHECK(mixer != NULL, "/dev/mixer registered");
+	if (mixer) {
+		vfs_file_t mf = {0};
+		int m = 0;
+		CHECK(mixer->open(&in, &mf, 0) == 0, "mixer open");
+		CHECK(mixer->ioctl(&mf, 0x80044DFEu, (uint64_t)(uintptr_t)&m) == 0 && m == 0x11, "devmask vol+pcm (%x)", m);
+		sound_set_volume(40);
+		CHECK(mixer->ioctl(&mf, 0x80044D00u, (uint64_t)(uintptr_t)&m) == 0 && m == (40 | 40 << 8), "read volume (%x)", m);
+		m = 70 | 70 << 8;
+		CHECK(mixer->ioctl(&mf, 0xC0044D04u, (uint64_t)(uintptr_t)&m) == 0 && m == (70 | 70 << 8), "write pcm");
+		CHECK(sound_volume() == 70 && W[0x02].og == amp_gain(W[0x02].outamp, 70), "pcm write sets the level");
+		m = 30 | 50 << 8;
+		mixer->ioctl(&mf, 0xC0044D00u, (uint64_t)(uintptr_t)&m);
+		CHECK(sound_volume() == 40 && m == (40 | 40 << 8), "two sides meet in one level (%d)", sound_volume());
+		char info[92];
+		CHECK(mixer->ioctl(&mf, 0x805C4D65u, (uint64_t)(uintptr_t)info) == 0 && !strcmp(info, "hda"), "mixer info");
+		CHECK(mixer->ioctl(&mf, 0x80044D01u, (uint64_t)(uintptr_t)&m) == -ENOTTY, "no bass control");
+	}
 	CHECK(diag != NULL, "/proc/hwdiag has a sound line");
 
 	printf(fails ? "FAIL %d\n" : "OK\n", fails);

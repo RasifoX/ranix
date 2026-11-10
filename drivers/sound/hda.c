@@ -19,6 +19,10 @@
  * not by its last second played over and over; after HDA_IDLE_MS of nothing it
  * stops the stream. It also mutes the speakers while headphones are plugged in
  * (ranix.hda_automute=0 leaves them on). /proc/hwdiag "sound hda" shows it all.
+ *
+ * /dev/mixer is the OSS mixer over the same level: "vol" (master) and "pcm" are
+ * one control, 0-100 per side; programs (amixer, ALSA's ctl_oss, a player's
+ * own slider) read and set it. Same group and mode as /dev/dsp.
  */
 #include <kernel/pci.h>
 #include <kernel/hal.h>
@@ -174,6 +178,7 @@ static uint32_t cmd(int nid, uint32_t verb)
 		if (now != was) {
 			rirb_rp = now;
 			uint32_t r = (uint32_t)rirb[now & (rirb_n - 1)];
+			W8(R_RIRBSTS, 0x05);              /* "a response came", cleared: see rings_init */
 			spin_unlock_irq(&verb_lock, fl);
 			return r;
 		}
@@ -216,7 +221,10 @@ static int rings_init(void)
 	W16(R_RIRBWP, 0x8000);
 	W16(R_RINTCNT, 1);
 	rirb_rp = 0;
-	W8(R_RIRBCTL, 2);                        /* DMA on, no interrupt */
+	/* DMA on, and the "response came" flag on too (RINTCTL), which raises nothing
+	 * while INTCTL is 0: QEMU's controller sends no more responses after RINTCNT
+	 * of them until that flag is set and cleared again (cmd clears it) */
+	W8(R_RIRBCTL, 3);
 	W8(R_CORBCTL, 2);
 	spin(100000);
 	return 0;
@@ -711,6 +719,62 @@ static void hda_diag(hw_out_t *o)
 	hw_end(o);
 }
 
+/* ---- /dev/mixer: OSS mixer ioctls ---- */
+#define MIX_VOLUME      0
+#define MIX_PCM         4
+#define MIX_DEVS        ((1u << MIX_VOLUME) | (1u << MIX_PCM))
+#define MIXR(dev)       (0x80044D00u | (dev))
+#define MIXW(dev)       (0xC0044D00u | (dev))
+#define MIX_RECSRC      0xFF
+#define MIX_DEVMASK     0xFE
+#define MIX_RECMASK     0xFD
+#define MIX_CAPS        0xFC
+#define MIX_STEREODEVS  0xFB
+#define MIX_INFO        0x805C4D65u     /* struct mixer_info, 92 bytes */
+#define MIX_OLD_INFO    0x80304D65u     /* struct _old_mixer_info, 48 bytes */
+#define OSS_GETVERSION  0x80044D76u
+static int mix_changes;                 /* mixer_info.modify_counter */
+
+static int mixer_ioctl(vfs_file_t *f, uint32_t c, uint64_t arg)
+{
+	(void)f;
+	int v = 0;
+	switch (c) {
+	case MIXR(MIX_DEVMASK): case MIXR(MIX_STEREODEVS): v = MIX_DEVS; break;
+	case MIXR(MIX_RECMASK): case MIXR(MIX_RECSRC): case MIXR(MIX_CAPS): v = 0; break;
+	case MIXR(MIX_VOLUME): case MIXR(MIX_PCM): v = volume | volume << 8; break;
+	case MIXW(MIX_VOLUME): case MIXW(MIX_PCM): {
+		if (copy_from_user(&v, (void *)arg, 4)) return -EFAULT;
+		int l = v & 0xFF, r = (v >> 8) & 0xFF;
+		l = l > 100 ? 100 : l;
+		r = r > 100 ? 100 : r;
+		sound_set_volume((l + r + 1) / 2);   /* one level: the two sides meet */
+		mix_changes++;
+		v = volume | volume << 8;
+		break;
+	}
+	case MIXW(MIX_RECSRC):                  /* nothing records: no source can be picked */
+		v = 0;
+		break;
+	case OSS_GETVERSION: v = 0x030802; break;
+	case MIX_INFO: case MIX_OLD_INFO: {
+		char info[92];
+		memset(info, 0, sizeof info);
+		memcpy(info, "hda", 3);              /* id[16], then name[32] */
+		memcpy(info + 16, "HD Audio", 8);
+		if (c == MIX_INFO) memcpy(info + 48, &mix_changes, 4);
+		return copy_to_user((void *)arg, info, c == MIX_INFO ? 92 : 48) ? -EFAULT : 0;
+	}
+	default:
+		return -ENOTTY;
+	}
+	return copy_to_user((void *)arg, &v, 4) ? -EFAULT : 0;
+}
+
+static int mixer_open(vfs_inode_t *in, vfs_file_t *f, int flags) { (void)in; (void)f; (void)flags; return 0; }
+static int mixer_close(vfs_file_t *f) { (void)f; return 0; }
+static vfs_fops_t mixer_fops = { .open = mixer_open, .ioctl = mixer_ioctl, .close = mixer_close };
+
 int  sound_volume(void) { return volume; }
 void sound_set_volume(int v)
 {
@@ -791,6 +855,7 @@ void hda_init(void)
 	jack_check();
 	hwdiag_register(hda_diag);
 	devfs_register_device_gid("dsp", S_IFCHR | 0660, DEVFS_GID_AUDIO, 0x0E03, &hda_fops);
+	devfs_register_device_gid("mixer", S_IFCHR | 0660, DEVFS_GID_AUDIO, 0x0E00, &mixer_fops);
 	proc_create("hda_watch", hda_watch);
-	kprintf(KERN_INFO "hda: codec %d (0x%08x), %d output converter(s), /dev/dsp\n", codec, vendor, ndac);
+	kprintf(KERN_INFO "hda: codec %d (0x%08x), %d output converter(s), /dev/dsp, /dev/mixer\n", codec, vendor, ndac);
 }
