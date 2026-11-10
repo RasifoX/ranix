@@ -14,6 +14,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/proc.h>
 #include <kernel/sync.h>
+#include <kernel/user_namespace.h>
 #include <kernel/nsproxy.h>
 #include <kernel/cgroup.h>
 #include <kernel/time.h>
@@ -137,6 +138,7 @@ static void net_ns_reap(void)
         net_namespace_t *next = ns->dying_next;
         skb_t *skb;
         while ((skb = netdev_rx_dequeue(&ns->lo)) != NULL) skb_free(skb);
+        if (ns->owner) user_ns_put(ns->owner);
         kfree(ns);
         ns = next;
     }
@@ -149,6 +151,7 @@ net_namespace_t *net_ns_create(void)
     memset(ns, 0, sizeof(*ns));
     ns->refcount = 1;
     ns->inum     = ns_inum_alloc();
+    ns->owner = user_ns_get(current_user_ns());   /* unshare(USER|NET): the new user ns */
     memcpy(ns->lo.name, "lo", 3);
     ns->lo.ip      = 0x7f000001;       /* 127.0.0.1, isolated to this ns */
     ns->lo.mask    = 0xff000000;

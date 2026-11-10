@@ -103,7 +103,11 @@ typedef struct netdev {
     skb_t      *rx_tail;
 
     struct net_namespace *net_ns;     /* owning network namespace */
+    uint16_t    mtu;                  /* SIOCSIFMTU; 0 = the default, 1500 */
 } netdev_t;
+
+/* the device's IPv4 MTU: 1280..1500 (no device here carries more) */
+static inline unsigned netdev_mtu(const netdev_t *d) { return d->mtu ? d->mtu : 1500; }
 
 /* ── network namespace ───────────────────────────────────────
  * Each holds its own set of devices (a fresh ns has only its private
@@ -119,6 +123,7 @@ typedef struct net_namespace {
     netdev_t      lo;                 /* this namespace's private loopback */
     unix_bind_t   unix_reg[UNIX_REG_MAX];
     struct net_namespace *dying_next; /* net_ns_put to net_poll */
+    struct user_namespace *owner;     /* its creator's user ns: whose CAP_NET_ADMIN counts (NULL: init) */
 } net_namespace_t;
 
 extern net_namespace_t init_net_ns;

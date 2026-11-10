@@ -212,7 +212,7 @@ static int ip_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
                       uint32_t dst_ip, uint8_t proto)
 {
     uint16_t id = htons(ip_id++);
-    uint32_t maxdata = (IP_MTU - sizeof(ip_hdr_t)) & ~7u;   /* 8-byte aligned */
+    uint32_t maxdata = (netdev_mtu(dev) - sizeof(ip_hdr_t)) & ~7u;   /* 8-byte aligned */
     int rc = 0;
     for (uint32_t off = 0; off < plen; off += maxdata) {
         uint32_t chunk = plen - off < maxdata ? plen - off : maxdata;
@@ -243,7 +243,7 @@ int ip_tx(netdev_t *dev, skb_t *skb, uint32_t dst_ip, uint8_t proto)
     if (nf_out_v4(dev->ip, dst_ip, proto, skb->data, skb->len) == NF_DROP)
     { skb_free(skb); return -1; }
 
-    if (sizeof(ip_hdr_t) + skb->len > IP_MTU) {
+    if (sizeof(ip_hdr_t) + skb->len > netdev_mtu(dev)) {
         int rc = ip_tx_frag(dev, skb->data, skb->len, dst_ip, proto);
         skb_free(skb);
         return rc;

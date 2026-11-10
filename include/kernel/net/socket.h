@@ -178,6 +178,7 @@ typedef struct socket {
     uint8_t   v6only;           /* IPV6_V6ONLY: a "::" listener takes no IPv4 */
     uint8_t   unix_seqpacket;   /* AF_UNIX SOCK_SEQPACKET (kept as SOCK_DGRAM): EOF when the peer goes */
     uint8_t   rd_shut;          /* TCP shutdown(SHUT_RD): reads end, poll says POLLRDHUP */
+    uint8_t   so_no_check;      /* SO_NO_CHECK (UDP sends no checksum here either way) */
 
     /* AF_UNIX: peer socket for socketpair() and path-based connections */
     struct socket *unix_peer;

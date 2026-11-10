@@ -431,6 +431,38 @@ static short ifr_flags(const netdev_t *d)
     return f;
 }
 
+/* CAP_NET_ADMIN over this network namespace (Linux ns_capable(net->user_ns)):
+ * the machine's, or for a namespace made inside a user namespace, the caller's
+ * own set there (a rootless container sets up its loopback). */
+static int net_admin_ok(void)
+{
+    process_t *p = task_current();
+    if (capable_task(p, CAP_NET_ADMIN)) return 1;
+    net_namespace_t *ns = current_net_ns();
+    user_namespace_t *own = ns && ns->owner ? ns->owner : &init_user_ns;
+    user_namespace_t *mine = p->user_ns ? p->user_ns : &init_user_ns;
+    if (own == &init_user_ns) return 0;
+    for (user_namespace_t *u = own; u; u = u->parent)
+        if (u == mine) return cap_has(p->cap_effective, CAP_NET_ADMIN);
+    return 0;
+}
+
+/* SIOCSIFMTU: used for IPv4 fragmentation; no device here carries more than
+ * 1500, and IPv6 needs 1280 (EINVAL outside). Other set ioctls stay refused
+ * (SIOCSIFFLAGS is in sock_ioctl_ifreq). */
+static int sock_ioctl_ifset(uint32_t cmd, uint64_t arg)
+{
+    if (!net_admin_ok()) return -EPERM;
+    if (cmd != SIOCSIFMTU) return -EOPNOTSUPP;
+    struct ifreq r;
+    if (copy_from_user(&r, (void *)(uintptr_t)arg, sizeof(r))) return -EFAULT;
+    netdev_t *d = ifr_dev(&r);
+    if (!d) return -ENODEV;
+    if (r.u.ifru_mtu < 1280 || r.u.ifru_mtu > 1500) return -EINVAL;
+    d->mtu = (uint16_t)r.u.ifru_mtu;
+    return 0;
+}
+
 static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
 {
     struct ifreq r;
@@ -456,7 +488,7 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
         break;
     case SIOCGIFMTU:
         memset(&r.u, 0, sizeof(r.u));
-        r.u.ifru_mtu = 1500;
+        r.u.ifru_mtu = (int)netdev_mtu(d);
         break;
     case SIOCGIFINDEX: {
         memset(&r.u, 0, sizeof(r.u));
@@ -472,8 +504,9 @@ static int sock_ioctl_ifreq(uint32_t cmd, uint64_t arg)
         break;
     case SIOCSIFFLAGS:
         /* only IFF_UP acts; the other bits describe the device, they are not
-         * switches here. Root only: this cuts or restores a network. */
-        if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
+         * switches here. CAP_NET_ADMIN over the namespace: this cuts or
+         * restores a network (a user namespace's root has its own netns'). */
+        if (!net_admin_ok()) return -EPERM;
         return net_set_admin_up(d, (r.u.ifru_flags & IFF_UP) != 0);
     case SIOCGIFHWADDR:
         memset(&r.u, 0, sizeof(r.u));
@@ -529,7 +562,7 @@ static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
         return sock_ioctl_ifreq(cmd, arg);
     case SIOCSIFADDR: case SIOCSIFNETMASK: case SIOCSIFMTU:
     case SIOCSIFNAME:  case SIOCSIFHWADDR: case SIOCSIFTXQLEN:
-        return capable_task(task_current(), CAP_NET_ADMIN) ? -95 : -1;
+        return sock_ioctl_ifset(cmd, arg);
     case SIOCGIFCONF:
         return sock_ioctl_ifconf(arg);
     case FIONREAD: {                        /* bytes queued for reading */
@@ -2023,6 +2056,7 @@ static long sys_getpeername(int fd, void *uaddr, uint32_t *addrlen)
 #define SO_SNDBUF       7
 #define SO_RCVBUF       8
 #define SO_KEEPALIVE    9
+#define SO_NO_CHECK     11
 #define SO_REUSEPORT   15
 #define SO_RCVTIMEO    20
 #define SO_SNDTIMEO    21
@@ -2147,6 +2181,7 @@ static long sys_setsockopt(int fd, int lv, int opt, const void *val, uint32_t le
 		case SO_REUSEADDR:  s->so_reuseaddr = iv ? 1 : 0; return 0;
 		case SO_REUSEPORT:  s->so_reuseport = iv ? 1 : 0; return 0;
 		case SO_KEEPALIVE:  s->so_keepalive = iv ? 1 : 0; return 0;
+		case SO_NO_CHECK:   s->so_no_check = iv ? 1 : 0; return 0;   /* UDP goes without a checksum here anyway */
 		case SO_RCVBUF:     s->so_rcvbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
 		case SO_SNDBUF:     s->so_sndbuf = (uint32_t)(iv < 0 ? 0 : iv); return 0;
 		case 32: case 33:   /* SO_SNDBUFFORCE, SO_RCVBUFFORCE: past the limits, for the admin */
@@ -2275,6 +2310,7 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 		case SO_REUSEADDR:  out = s->so_reuseaddr; break;
 		case SO_REUSEPORT:  out = s->so_reuseport; break;
 		case SO_KEEPALIVE:  out = s->so_keepalive; break;
+		case SO_NO_CHECK:   out = s->so_no_check; break;
 		case SO_PASSCRED:   out = s->so_passcred; break;
 		case SO_OOBINLINE:  out = s->so_oobinline; break;
 		case SO_BROADCAST:  out = s->so_broadcast; break;
