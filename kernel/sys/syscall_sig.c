@@ -164,8 +164,10 @@ static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_t
 		linux_timespec_t k;
 		if (copy_from_user(&k, uto, sizeof(k)) != 0) return -EFAULT;
 		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000L) return -EINVAL;
-		uint64_t t = (uint64_t)k.tv_sec * TIMER_HZ + (uint64_t)k.tv_nsec / (1000000000 / TIMER_HZ);
-		end = kernel_ticks + (t || !k.tv_nsec ? t : 1);
+		/* an instant on CLOCK_MONOTONIC, decided on the clock, ended by the one-shot timer */
+		uint64_t span = (uint64_t)k.tv_sec >= (uint64_t)-1 / 4 / 1000000000ULL ? (uint64_t)-1 / 4
+		              : (uint64_t)k.tv_sec * 1000000000ULL + (uint64_t)k.tv_nsec;
+		end = mono_ns() + span;
 	}
 	process_t *p = task_current();
 	uint64_t blocked = p->sig_mask;
@@ -192,8 +194,9 @@ static long sys_rt_sigtimedwait(const uint64_t *uset, void *uinfo, const linux_t
 			break;
 		}
 		if (task_has_actionable_signal()) { ret = -4; break; }
-		if (uto && kernel_ticks >= end) { ret = -11; break; }
-		task_sleep_until(uto ? end : (uint64_t)-1 / 2);
+		if (uto && mono_ns() >= end) { ret = -11; break; }
+		if (uto) task_sleep_until_ns(end);
+		else     task_sleep_until((uint64_t)-1 / 2);
 	}
 	p->sig_mask = blocked;
 	return ret;

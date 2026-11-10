@@ -402,14 +402,15 @@ static long futex_wait(process_t *self, void *mm, uint32_t *key, uint32_t *uaddr
 	 * per-tick blanket poll either way. */
 	self->sleeping_on_queue = 1;
 	if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
-	             sched_note_wake_deadline(self->wake_deadline); }
+	             sched_note_wake_deadline(self->wake_deadline);
+	             if (end_ns > 0) sched_note_wake_ns((uint64_t)end_ns); }   /* the one-shot timer ends it */
 	spin_unlock_irq(&sched_lock, fs);
 	spin_unlock_irq(&futex_lock, f);
 
 	for (;;) {
 		arch_yield();
 		f = spin_lock_irq(&futex_lock);
-		if (q.woken) { self->wake_deadline = 0; spin_unlock_irq(&futex_lock, f); return 0; }
+		if (q.woken) { self->wake_deadline = 0; self->wake_ns = 0; spin_unlock_irq(&futex_lock, f); return 0; }
 		/* Only a signal that will actually be delivered interrupts the wait.
 		 * An ignored (SIG_IGN) or non-fatal-default pending signal must not —
 		 * a process that ignores SIGPIPE would otherwise get a spurious EINTR
@@ -421,6 +422,7 @@ static long futex_wait(process_t *self, void *mm, uint32_t *key, uint32_t *uaddr
 		if (timed) { int64_t s, n; mono_time(&s, &n); tmo = (s * 1000000000LL + n) >= end_ns; }
 		if (sig || vchg || tmo) {
 			self->wake_deadline = 0;
+			self->wake_ns = 0;
 			futex_unlink(&q);
 			spin_unlock_irq(&futex_lock, f);
 			return sig ? -4 : (tmo ? -110 : -11);
@@ -429,7 +431,8 @@ static long futex_wait(process_t *self, void *mm, uint32_t *key, uint32_t *uaddr
 		self->state = PROC_SLEEPING;
 		self->sleeping_on_queue = 1;
 		if (timed) { self->wake_deadline = futex_deadline_ticks(end_ns);
-		             sched_note_wake_deadline(self->wake_deadline); }
+		             sched_note_wake_deadline(self->wake_deadline);
+		             if (end_ns > 0) sched_note_wake_ns((uint64_t)end_ns); }
 		spin_unlock_irq(&sched_lock, fs);
 		spin_unlock_irq(&futex_lock, f);
 	}
