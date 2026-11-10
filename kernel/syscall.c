@@ -1114,8 +1114,19 @@ void syscall_handle(arch_context_t *ctx)
 	}
 	if (!sec_skip && !syscall_files(n, sargs, &ret) && !syscall_process(ctx, n, sargs, &ret) &&
 	    !syscall_time_net(n, sargs, &ret) && !syscall_events_ipc(n, sargs, &ret)) {
-		kprintf(KERN_WARN "syscall: unimplemented %ld (pid=%u)\n",
-		        n, task_current()->pid);
+		if (n >= 428 && n <= 433) {
+			/* The new mount API (open_tree, move_mount, fsopen, fsconfig, fsmount,
+			 * fspick; one number on every arch). Ranix has only mount(2), and
+			 * libmount falls back to it on ENOSYS, so each mount(8) asked. Said once. */
+			static int said;
+			if (!said) {
+				said = 1;
+				kprintf(KERN_INFO "syscall: new mount API (428-433) not provided, ENOSYS\n");
+			}
+		} else {
+			kprintf(KERN_WARN "syscall: unimplemented %ld (pid=%u)\n",
+			        n, task_current()->pid);
+		}
 		ret = -ENOSYS;
 	}
 
