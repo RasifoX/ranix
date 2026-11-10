@@ -366,6 +366,7 @@ void       yield(void);
 void       task_sleep(void);
 void       task_sleep_until(uint64_t deadline);
 void       task_sleep_until_ns(uint64_t end_ns);   /* to a CLOCK_MONOTONIC instant (or a signal) */
+void       sched_note_wake_ns(uint64_t end_ns);    /* about to sleep, IRQs off: also end at end_ns */
 void       task_sleep_interruptible(void);
 /* Sleep once if cond still holds, tested under sched_lock with interrupts off.
  * Whoever makes it false and then wakes the task cannot fall between the test and

@@ -110,7 +110,32 @@ static int fd_poll_bits(int fd)
 	return bits;
 }
 
+/* A wait's end on CLOCK_MONOTONIC: WAIT_FOREVER for none, a past instant (0)
+ * for "do not wait". Ends are checked on the clock, not on the tick, so a
+ * one-shot timer can end the wait when it was asked to. */
+#define WAIT_FOREVER (~0ULL)
+static uint64_t wait_end_after(uint64_t span_ns)
+{
+	uint64_t now = mono_ns();
+	return span_ns >= WAIT_FOREVER - 1 - now ? WAIT_FOREVER - 1 : now + span_ns;
+}
+static int wait_over(uint64_t end) { return end != WAIT_FOREVER && mono_ns() >= end; }
+static uint64_t wait_end_ms(int ms) { return ms < 0 ? WAIT_FOREVER : ms == 0 ? 0 : wait_end_after((uint64_t)ms * 1000000ULL); }
+static uint64_t wait_end_ts(const linux_timespec_t *k)
+{
+	if (!k->tv_sec && !k->tv_nsec) return 0;
+	if ((uint64_t)k->tv_sec >= WAIT_FOREVER / 2 / 1000000000ULL) return WAIT_FOREVER - 1;
+	return wait_end_after((uint64_t)k->tv_sec * 1000000000ULL + (uint64_t)k->tv_nsec);
+}
+
+static long do_poll(linux_pollfd_t *fds, uint64_t nfds, uint64_t end);
+
 static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
+{
+	return do_poll(fds, nfds, wait_end_ms(timeout_ms));
+}
+
+static long do_poll(linux_pollfd_t *fds, uint64_t nfds, uint64_t end)
 {
 	/* nfds is unbounded user input: bound it before the size multiplication */
 	if (nfds > FD_MAX) return -EINVAL;
@@ -125,9 +150,6 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 		}
 	}
 
-	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
-	                  : (timeout_ms == 0) ? 0
-	                  : kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
 	int ready = 0;
 	while (1) {
 		poll_arm_scan();
@@ -148,9 +170,9 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 			if (bits & POLLNVAL) kfds[i].revents |= POLLNVAL;
 			if (kfds[i].revents) ready++;
 		}
-		if (ready > 0 || kernel_ticks >= deadline) break;
+		if (ready > 0 || wait_over(end)) break;
 		if (task_has_actionable_signal()) { kfree(kfds); return -EINTR; }
-		poll_block(deadline);
+		poll_block_ns(end);
 	}
 
 	if (nfds && copy_to_user(fds, kfds, nfds * sizeof(linux_pollfd_t)) != 0) ready = -14;
@@ -158,7 +180,7 @@ static long sys_poll(linux_pollfd_t *fds, uint64_t nfds, int timeout_ms)
 	return ready;
 }
 
-static long select_until(int nfds, uint64_t *readfds, uint64_t *writefds, uint64_t deadline)
+static long select_until(int nfds, uint64_t *readfds, uint64_t *writefds, uint64_t end)
 {
 	if (nfds < 0) return -EINVAL;
 
@@ -178,9 +200,9 @@ static long select_until(int nfds, uint64_t *readfds, uint64_t *writefds, uint64
 			if ((rfds & (1ULL << i)) && (bits & POLLIN))  { rres |= (1ULL << i); ready++; }
 			if ((wfds & (1ULL << i)) && (bits & POLLOUT)) { wres |= (1ULL << i); ready++; }
 		}
-		if (ready > 0 || kernel_ticks >= deadline) break;
+		if (ready > 0 || wait_over(end)) break;
 		if (task_has_actionable_signal()) return -EINTR;
-		poll_block(deadline);
+		poll_block_ns(end);
 	}
 
 	if (nfds && readfds  && copy_to_user(readfds,  &rres, 8) != 0) return -EFAULT;
@@ -192,18 +214,15 @@ static long sys_select(int nfds, uint64_t *readfds, uint64_t *writefds,
                        uint64_t *exceptfds, linux_timeval_t *timeout)
 {
 	(void)exceptfds;
-	uint64_t deadline = (uint64_t)-1;
+	uint64_t end = WAIT_FOREVER;
 	if (timeout) {
 		linux_timeval_t tv;
 		if (copy_from_user(&tv, timeout, sizeof(tv)) != 0) return -EFAULT;
 		if (tv.tv_sec < 0 || tv.tv_usec < 0) return -EINVAL;
-		if (tv.tv_sec || tv.tv_usec)
-			deadline = kernel_ticks + (uint64_t)tv.tv_sec * TIMER_HZ +
-			           (uint64_t)tv.tv_usec * TIMER_HZ / 1000000 + 1;
-		else
-			deadline = 0;
+		linux_timespec_t k = { tv.tv_sec, tv.tv_usec * 1000 };
+		end = wait_end_ts(&k);
 	}
-	return select_until(nfds, readfds, writefds, deadline);
+	return select_until(nfds, readfds, writefds, end);
 }
 
 /* pselect6 / ppoll */
@@ -237,40 +256,35 @@ static long sys_pselect6(int nfds, uint64_t *r, uint64_t *w, uint64_t *e,
 	struct { const void *set; size_t len; } sa = { NULL, 0 };
 	if (sigarg && copy_from_user(&sa, sigarg, sizeof(sa)) != 0) return -EFAULT;
 	(void)e;
-	uint64_t deadline = (uint64_t)-1;
+	uint64_t end = WAIT_FOREVER;
 	if (ts) {
 		linux_timespec_t k;
 		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
 		if (k.tv_sec < 0 || k.tv_nsec < 0) return -EINVAL;
-		deadline = k.tv_sec || k.tv_nsec
-		         ? kernel_ticks + (uint64_t)k.tv_sec * TIMER_HZ +
-		           (uint64_t)k.tv_nsec * TIMER_HZ / 1000000000 + 1
-		         : 0;
+		end = wait_end_ts(&k);
 	}
 	if (sa.set) {
 		long m = wait_mask_enter(sa.set);
 		if (m) return m;
 	}
-	return wait_mask_leave(select_until(nfds, r, w, deadline));
+	return wait_mask_leave(select_until(nfds, r, w, end));
 }
 
 static long sys_ppoll(linux_pollfd_t *fds, uint64_t nfds,
                       linux_timespec_t *ts, void *sigmask)
 {
-	int timeout_ms = -1;
-	if (ts) {
+	uint64_t end = WAIT_FOREVER;
+	if (ts) {   /* in nanoseconds: under a millisecond is not "no wait" */
 		linux_timespec_t k;
 		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
 		if (k.tv_sec < 0 || k.tv_nsec < 0) return -EINVAL;
-		/* a long timeout must not wrap into a negative (infinite) one */
-		timeout_ms = k.tv_sec >= 0x7fffffffL / 1000 ? 0x7fffffff
-		           : (int)(k.tv_sec * 1000 + k.tv_nsec / 1000000);
+		end = wait_end_ts(&k);
 	}
 	if (sigmask) {
 		long m = wait_mask_enter(sigmask);
 		if (m) return m;
 	}
-	return wait_mask_leave(sys_poll(fds, nfds, timeout_ms));
+	return wait_mask_leave(do_poll(fds, nfds, end));
 }
 
 /* ── epoll ───────────────────────────────────────────────── */
@@ -453,7 +467,7 @@ static long sys_epoll_ctl(int epfd, int op, int fd, linux_epoll_event_t *uevent)
 }
 
 static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxevents,
-                              int timeout_ms)
+                              uint64_t end)
 {
 	if (!uevents || maxevents <= 0) return -EINVAL;
 	if (!access_ok(uevents, (size_t)maxevents * sizeof(linux_epoll_event_t))) return -EFAULT;
@@ -462,10 +476,6 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 	vfs_file_t *held;
 	epoll_t *ep = epfd_get(epfd, &held);
 	if (!ep) return epfd_errno(epfd);
-
-	uint64_t deadline = (timeout_ms < 0) ? (uint64_t)-1
-	                  : (timeout_ms == 0) ? 0
-	                  : kernel_ticks + (uint64_t)timeout_ms * TIMER_HZ / 1000 + 1;
 
 	linux_epoll_event_t *kev = kmalloc((size_t)maxevents * sizeof(*kev));
 	if (!kev) { fput(held); return -ENOMEM; }
@@ -527,9 +537,9 @@ static long epoll_wait_events(int epfd, linux_epoll_event_t *uevents, int maxeve
 			spin_unlock_irq(&ep->lock, f);
 		}
 		if (last >= 0) ep->next = (last + 1) % EPOLL_MAX_WATCH;
-		if (ready > 0 || kernel_ticks >= deadline) break;
+		if (ready > 0 || wait_over(end)) break;
 		if (task_has_actionable_signal()) { kfree(kev); fput(held); return -EINTR; }
-		poll_block(deadline);
+		poll_block_ns(end);
 	}
 
 	if (ready && copy_to_user(uevents, kev, (size_t)ready * sizeof(*kev)) != 0) ready = -14;
@@ -545,23 +555,26 @@ static long sys_epoll_pwait(int epfd, linux_epoll_event_t *uevents, int maxevent
 		long m = wait_mask_enter(sigmask);
 		if (m) return m;
 	}
-	return wait_mask_leave(epoll_wait_events(epfd, uevents, maxevents, timeout_ms));
+	return wait_mask_leave(epoll_wait_events(epfd, uevents, maxevents, wait_end_ms(timeout_ms)));
 }
 
-/* epoll_pwait2: a timespec instead of milliseconds (NULL waits forever). Rounded
- * up to whole ms, so a short wait never turns into a poll. */
+/* epoll_pwait2: a timespec instead of milliseconds (NULL waits forever), kept
+ * in nanoseconds, so a short wait is neither a poll nor rounded to a tick. */
 static long sys_epoll_pwait2(int epfd, linux_epoll_event_t *uevents, int maxevents,
                              const linux_timespec_t *ts, void *sigmask)
 {
-	int ms = -1;
-	if (ts) {
+	uint64_t end = WAIT_FOREVER;
+	if (ts) {   /* in nanoseconds, not rounded to milliseconds */
 		linux_timespec_t k;
 		if (copy_from_user(&k, ts, sizeof(k)) != 0) return -EFAULT;
 		if (k.tv_sec < 0 || k.tv_nsec < 0 || k.tv_nsec >= 1000000000) return -EINVAL;
-		uint64_t t = (uint64_t)k.tv_sec * 1000 + ((uint64_t)k.tv_nsec + 999999) / 1000000;
-		ms = t > 0x7fffffff ? 0x7fffffff : (int)t;
+		end = wait_end_ts(&k);
 	}
-	return sys_epoll_pwait(epfd, uevents, maxevents, ms, sigmask);
+	if (sigmask) {
+		long m = wait_mask_enter(sigmask);
+		if (m) return m;
+	}
+	return wait_mask_leave(epoll_wait_events(epfd, uevents, maxevents, end));
 }
 
 /* ── symlink / readlink ───────────────────────────────────── */

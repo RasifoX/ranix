@@ -113,6 +113,7 @@ void poll_arm_scan(void);
 void poll_notify_key(const void *key);
 void poll_note_key(const void *key);
 void poll_block(uint64_t deadline);
+void poll_block_ns(uint64_t end_ns);   /* to a CLOCK_MONOTONIC instant, ~0 = none */
 
 /* lock diagnostics (sync.c) */
 extern volatile int spin_diag_on;

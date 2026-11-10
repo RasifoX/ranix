@@ -691,7 +691,21 @@ void poll_arm(void)
 	c->poll_seen_any = __atomic_load_n(&poll_gen, __ATOMIC_SEQ_CST);
 }
 
-void poll_block(uint64_t deadline)
+static void poll_block_until(uint64_t deadline, uint64_t end_ns);
+
+void poll_block(uint64_t deadline) { poll_block_until(deadline, ~0ULL); }
+
+/* To a CLOCK_MONOTONIC instant (~0: no end): a one-shot timer ends it then,
+ * the tick deadline after it is the backstop. */
+void poll_block_ns(uint64_t end_ns)
+{
+	if (end_ns == ~0ULL) { poll_block_until((uint64_t)-1, end_ns); return; }
+	uint64_t now = mono_ns(), tick_ns = 1000000000ULL / TIMER_HZ;
+	if (now >= end_ns) return;
+	poll_block_until(kernel_ticks + (end_ns - now + tick_ns - 1) / tick_ns + 1, end_ns);
+}
+
+static void poll_block_until(uint64_t deadline, uint64_t end_ns)
 {
 	process_t *c = task_current();
 	uint64_t cap = kernel_ticks + TIMER_HZ / 10;  /* backstop re-check */
@@ -714,11 +728,13 @@ void poll_block(uint64_t deadline)
 	c->sleeping_on_queue = 1;
 	c->wake_deadline = d;
 	sched_note_wake_deadline(d);
+	if (d == deadline && end_ns != ~0ULL) sched_note_wake_ns(end_ns);   /* past the backstop: armed next time */
 	spin_unlock_irq(&poll_wq.lock, f);
 
 	arch_yield();
 
 	c->wake_deadline = 0;
+	c->wake_ns = 0;
 	f = spin_lock_irq(&poll_wq.lock);
 	for (process_t **pp = &poll_wq.tasks; *pp; pp = &(*pp)->wait_next)
 		if (*pp == c) { *pp = c->wait_next; c->wait_next = NULL; break; }
