@@ -467,13 +467,14 @@ void virtio_net_init(void)
 #define VIO_NET_MAC       0x14   /* 6 bytes, device-specific region */
 
 #define VNET_Q_PCI  64
+#define VNET_PCI_MAX 2   /* eth0, eth1: a second NIC lets QEMU test routing */
 
-static uint8_t g_pci_vring_rx[3 * 4096] __attribute__((aligned(4096)));
-static uint8_t g_pci_vring_tx[3 * 4096] __attribute__((aligned(4096)));
-static uint8_t g_pci_rx_bufs[VNET_Q_PCI][VNET_BUF_SZ] __attribute__((aligned(64)));
-static uint8_t g_pci_tx_buf[VNET_BUF_SZ]               __attribute__((aligned(64)));
-
+/* One virtio-net PCI function: its rings, its buffers, its netdev. */
 typedef struct {
+    uint8_t        vring_rx[3 * 4096] __attribute__((aligned(4096)));
+    uint8_t        vring_tx[3 * 4096] __attribute__((aligned(4096)));
+    uint8_t        rx_bufs[VNET_Q_PCI][VNET_BUF_SZ] __attribute__((aligned(64)));
+    uint8_t        tx_buf[VNET_BUF_SZ]               __attribute__((aligned(64)));
     uint16_t       iobase;
     uint16_t       qsz;       /* actual device queue size */
     uint32_t       irq;
@@ -485,10 +486,11 @@ typedef struct {
     vring_avail_t *tx_avail;
     vring_used_t  *tx_used;
     uint16_t       tx_last;
+    netdev_t       dev;
 } vnet_pci_priv_t;
 
-static vnet_pci_priv_t g_pci_priv;
-static netdev_t        g_pci_dev;
+static vnet_pci_priv_t g_pci[VNET_PCI_MAX];
+static int             g_pci_n;
 
 static int vnet_pci_tx(netdev_t *dev, skb_t *skb)
 {
@@ -496,14 +498,14 @@ static int vnet_pci_tx(netdev_t *dev, skb_t *skb)
 
     if (skb->len + VNET_HDR_SZ_PCI > VNET_BUF_SZ) { skb_free(skb); return -1; }
 
-    memset(g_pci_tx_buf, 0, VNET_HDR_SZ_PCI);
-    memcpy(g_pci_tx_buf + VNET_HDR_SZ_PCI, skb->data, skb->len);
+    memset(p->tx_buf, 0, VNET_HDR_SZ_PCI);
+    memcpy(p->tx_buf + VNET_HDR_SZ_PCI, skb->data, skb->len);
     uint32_t total = (uint32_t)(VNET_HDR_SZ_PCI + skb->len);
     skb_free(skb);
 
     uint16_t qsz = p->qsz ? p->qsz : VNET_Q_PCI;
     uint16_t di = 0;   /* always use descriptor slot 0 for single TX */
-    p->tx_desc[di].addr  = VIRT_TO_PHYS((uint64_t)g_pci_tx_buf);
+    p->tx_desc[di].addr  = VIRT_TO_PHYS((uint64_t)p->tx_buf);
     p->tx_desc[di].len   = total;
     p->tx_desc[di].flags = 0;
 
@@ -536,7 +538,7 @@ static void vnet_pci_poll(netdev_t *dev)
         uint32_t rcv_len = u->len;
 
         if (desc_id < VNET_Q_PCI && rcv_len > VNET_HDR_SZ_PCI) {
-            uint8_t *pkt = g_pci_rx_bufs[desc_id] + VNET_HDR_SZ_PCI;
+            uint8_t *pkt = p->rx_bufs[desc_id] + VNET_HDR_SZ_PCI;
             uint32_t pkt_len = rcv_len - (uint32_t)VNET_HDR_SZ_PCI;
             skb_t *skb = skb_alloc();
             if (skb) {
@@ -560,10 +562,12 @@ static void vnet_pci_poll(netdev_t *dev)
 }
 
 /* Top half: reading the ISR acks/clears the line; the drain runs in the RX
- * softirq thread (vnet_pci_poll via net_poll's single-runner guard). */
+ * softirq thread (vnet_pci_poll via net_poll's single-runner guard). Two NICs
+ * may share a line, so every instance's ISR is read. */
 static void vnet_pci_irq_handler(void)
 {
-    inb((uint16_t)(g_pci_priv.iobase + VIO_ISR));
+    for (int i = 0; i < g_pci_n; i++)
+        inb((uint16_t)(g_pci[i].iobase + VIO_ISR));
     net_rx_wake();
 }
 
@@ -598,14 +602,10 @@ static uint16_t setup_pci_queue(uint16_t iobase, int qidx,
     return qsz;
 }
 
-void virtio_net_pci_init(void)
+/* Bring up the n-th virtio-net function as eth<n>. Only eth0 takes the QEMU
+ * slirp static default and the ip= cmdline; eth1 waits for DHCP. */
+static void virtio_net_pci_one(int n, uint8_t bus, uint8_t devn, uint8_t fn)
 {
-    uint8_t bus, devn, fn;
-    if (pci_find(0x1AF4, 0x1000, &bus, &devn, &fn) != 0) {
-        kprintf(KERN_DEBUG "virtio_net: not found on pci\n");
-        return;
-    }
-
     uint16_t cmd = pci_read16(bus, devn, fn, PCI_COMMAND);
     pci_write16(bus, devn, fn, PCI_COMMAND, cmd | PCI_CMD_IO | PCI_CMD_MASTER);
 
@@ -621,26 +621,27 @@ void virtio_net_pci_init(void)
     feat &= ~(1u << 15);   /* no MRG_RXBUF → 10-byte header */
     outl((uint16_t)(iobase + VIO_DRV_FEATURES), feat);
 
-    vnet_pci_priv_t *p = &g_pci_priv;
+    vnet_pci_priv_t *p = &g_pci[n];
+    netdev_t *dev = &p->dev;
     p->iobase = iobase;
-    p->qsz = setup_pci_queue(iobase, 0, &p->rx_desc, &p->rx_avail, &p->rx_used, g_pci_vring_rx);
-    setup_pci_queue(iobase, 1, &p->tx_desc, &p->tx_avail, &p->tx_used, g_pci_vring_tx);
+    p->qsz = setup_pci_queue(iobase, 0, &p->rx_desc, &p->rx_avail, &p->rx_used, p->vring_rx);
+    setup_pci_queue(iobase, 1, &p->tx_desc, &p->tx_avail, &p->tx_used, p->vring_tx);
 
     outb((uint16_t)(iobase + VIO_STATUS),
          VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_OK);
 
     /* read MAC */
     for (int i = 0; i < 6; i++)
-        g_pci_dev.mac[i] = inb((uint16_t)(iobase + VIO_NET_MAC + i));
+        dev->mac[i] = inb((uint16_t)(iobase + VIO_NET_MAC + i));
 
     kprintf(KERN_INFO "virtio_net: pci iobase=0x%x mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
             iobase,
-            g_pci_dev.mac[0], g_pci_dev.mac[1], g_pci_dev.mac[2],
-            g_pci_dev.mac[3], g_pci_dev.mac[4], g_pci_dev.mac[5]);
+            dev->mac[0], dev->mac[1], dev->mac[2],
+            dev->mac[3], dev->mac[4], dev->mac[5]);
 
     /* pre-fill RX descriptors */
     for (int i = 0; i < VNET_Q_PCI; i++) {
-        p->rx_desc[i].addr  = VIRT_TO_PHYS((uint64_t)g_pci_rx_bufs[i]);
+        p->rx_desc[i].addr  = VIRT_TO_PHYS((uint64_t)p->rx_bufs[i]);
         p->rx_desc[i].len   = VNET_BUF_SZ;
         p->rx_desc[i].flags = VRING_DESC_F_WRITE;
         p->rx_avail->ring[i] = (uint16_t)i;
@@ -650,22 +651,39 @@ void virtio_net_pci_init(void)
     __asm__ volatile("" ::: "memory");
     outw((uint16_t)(iobase + VIO_QUEUE_NOTIFY), 0);
 
-    memcpy(g_pci_dev.name, "eth0", 5);
-    g_pci_dev.ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u; /* QEMU slirp default */
-    g_pci_dev.gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
-    g_pci_dev.mask = 0xffffff00u;
-    parse_ip_cmdline(&g_pci_dev);
-    g_pci_dev.tx   = vnet_pci_tx;
-    g_pci_dev.poll = vnet_pci_poll;   /* also the IRQ fallback: net_rx polls every ~10ms */
-    g_pci_dev.priv = p;
-    g_pci_dev.rx_lock = (spinlock_t)SPINLOCK_INIT;
-    net_register(&g_pci_dev);
+    memcpy(dev->name, "eth0", 5);
+    dev->name[3] = (char)('0' + n);
+    if (n == 0) {
+        dev->ip   = (10u<<24)|(0u<<16)|(2u<<8)|15u; /* QEMU slirp default */
+        dev->gw   = (10u<<24)|(0u<<16)|(2u<<8)|2u;
+        dev->mask = 0xffffff00u;
+        parse_ip_cmdline(dev);
+    }
+    dev->tx   = vnet_pci_tx;
+    dev->poll = vnet_pci_poll;   /* also the IRQ fallback: net_rx polls every ~10ms */
+    dev->priv = p;
+    dev->rx_lock = (spinlock_t)SPINLOCK_INIT;
+    g_pci_n = n + 1;             /* before the IRQ: the handler walks g_pci[0..n] */
+    net_register(dev);
 
     uint8_t line = (uint8_t)pci_read16(bus, devn, fn, PCI_INT_LINE);
     if (line < 16) {
         p->irq = 0x20 + line;
         irq_register(p->irq, vnet_pci_irq_handler);
         irqchip_enable_irq(p->irq);
+    }
+}
+
+void virtio_net_pci_init(void)
+{
+    uint8_t bus, devn, fn;
+    for (int n = 0; n < VNET_PCI_MAX; n++) {
+        if (pci_find_nth(0x1AF4, 0x1000, n, &bus, &devn, &fn) != 0) break;
+        virtio_net_pci_one(n, bus, devn, fn);
+    }
+    if (!g_pci_n) {
+        kprintf(KERN_DEBUG "virtio_net: not found on pci\n");
+        return;
     }
     g_init_done = 1;
 }
