@@ -157,7 +157,7 @@ void arch_timer_reprogram(void)
 {
 	uint64_t cpu = arch_get_cpu_ctx()->cpu_id;
 	if (!lapic_oneshot[cpu]) return;
-	uint64_t now = mono_ns(), due = tick_due_ns[cpu], hr = hrtimer_next();
+	uint64_t now = mono_ns(), due = tick_due_ns[cpu], hr = hrtimer_program_at(now);
 	uint64_t at = hr < due ? hr : due;
 	uint64_t delta = at > now ? at - now : 0;
 	if (delta < 2000) delta = 2000;   /* not sooner than the interrupt can be taken */

@@ -45,7 +45,7 @@ static uint64_t ns_to_cnt(uint64_t ns) {   /* rounded up: never before the insta
 
 void arch_timer_reprogram(void) {
     uint64_t at = tick_due[arch_get_cpu_ctx()->cpu_id];
-    uint64_t hr = hrtimer_next();
+    uint64_t hr = hrtimer_program_at(mono_ns());
     if (hr != ~0ULL) { uint64_t h = ns_to_cnt(hr); if (h < at) at = h; }
     __asm__ volatile("msr cntv_cval_el0, %0; isb" :: "r"(at));
 }

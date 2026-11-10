@@ -1163,8 +1163,11 @@ static void hr_wake_here(process_t *t)
 	me->need_resched = 1;
 }
 
+static void hr_early_learn(uint64_t now);
+
 void hrtimer_run(uint64_t now)
 {
+	hr_early_learn(now);
 	struct hr_q *q = hr_mine();
 	if (!q->n || q->e[0].d > now) return;
 	uint64_t f = spin_lock_irq(&sched_lock);
@@ -1191,6 +1194,62 @@ void sched_note_wake_ns(uint64_t end)
 	process_t *c = task_current();
 	c->wake_ns = end;
 	if (hr_push(hr_mine(), c, end) == 1) arch_timer_reprogram();
+}
+
+/* The idle loop's wait. A fine wakeup due within hr_early_ns is waited for by
+ * spinning, interrupts on, as Linux's poll idle state and a KVM guest's
+ * haltpoll do: a halted CPU has to be woken first (in a guest, its host
+ * thread rescheduled, a few hundred microseconds on a busy host), a spinning
+ * one takes the interrupt at once. Further off, or none: halt as before. */
+/* How far ahead: the latest an early interrupt itself has come lately (a
+ * maximum that decays by 1/16 per interrupt; a mean missed the tail) + 50 us,
+ * between 50 us and 1 ms. On hardware that stays near 50 us; a guest on a busy
+ * host (its vCPU thread rescheduled) learned 400 us and more. */
+#define EARLY_MIN 50000ULL
+#define EARLY_MAX 1000000ULL
+static uint64_t hr_early_ns = 300000ULL;     /* learned below */
+static uint64_t hr_early_late = 250000ULL;   /* decaying maximum of that lateness */
+static uint64_t hr_early_at[MAX_CPUS];      /* this CPU's early interrupt, 0 = none set */
+
+/* When this CPU's timer should go off for its earliest fine wakeup: ahead of
+ * it, so an idle CPU is awake (spinning in sched_idle_wait) when it comes; the
+ * early interrupt only sets the timer again for the end itself. A halted CPU
+ * is otherwise woken late (in a guest, measured 260 us). */
+uint64_t hrtimer_program_at(uint64_t now)
+{
+	uint64_t next = hrtimer_next(), cpu = arch_get_cpu_ctx()->cpu_id;
+	hr_early_at[cpu] = 0;
+	if (next == ~0ULL) return next;
+	if (next <= now + hr_early_ns) return next;
+	hr_early_at[cpu] = next - hr_early_ns;
+	return hr_early_at[cpu];
+}
+
+/* From the timer interrupt: an early interrupt came this late; learn from it. */
+static void hr_early_learn(uint64_t now)
+{
+	uint64_t cpu = arch_get_cpu_ctx()->cpu_id, at = hr_early_at[cpu];
+	if (!at || now < at) return;
+	hr_early_at[cpu] = 0;
+	uint64_t late = now - at;
+	if (late > EARLY_MAX) late = EARLY_MAX;
+	hr_early_late -= hr_early_late / 16;
+	if (late > hr_early_late) hr_early_late = late;
+	uint64_t e = hr_early_late + EARLY_MIN;
+	hr_early_ns = e > EARLY_MAX ? EARLY_MAX : e;
+}
+
+void sched_idle_wait(volatile int *flag, int deep)
+{
+	uint64_t next = hrtimer_on ? hrtimer_next() : ~0ULL;
+	if (next != ~0ULL) {
+		uint64_t now = mono_ns();
+		if (next > now && next - now <= hr_early_ns) {
+			while (!*flag && mono_ns() < next + 50000) cpu_relax();
+			return;
+		}
+	}
+	arch_idle_deep(flag, deep);
 }
 
 /* Sleep to a CLOCK_MONOTONIC instant (or a signal). With a one-shot timer the

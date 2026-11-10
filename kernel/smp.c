@@ -4,6 +4,7 @@
  */
 #include <kernel/smp.h>
 #include <kernel/hal.h>
+#include <kernel/tick.h>
 #include <kernel/proc.h>
 #include <kernel/sched.h>
 #include <kernel/irq.h>
@@ -233,7 +234,7 @@ static void ap_idle_once(cpu_context_t *c)
 		}
 		arch_yield();
 	} else {
-		arch_idle_deep(&c->need_resched, c->tick_slow);
+		sched_idle_wait(&c->need_resched, c->tick_slow);
 	}
 }
 
