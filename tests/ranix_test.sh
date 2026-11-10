@@ -572,6 +572,11 @@ check "usb-read"     "RANIX-USB-DISK-OK" "$(dd if=/dev/usb0 bs=512 skip=2 count=
 printf RANIXUSBWRITE | dd of=/dev/usb0 bs=512 seek=4000 count=1 2>/dev/null
 check "usb-write"    "RANIXUSBWRITE" "$(dd if=/dev/usb0 bs=512 skip=4000 count=1 2>/dev/null | dd bs=1 count=13 2>/dev/null)"
 fi
+# USB serial: QEMU's usb-serial (FTDI) on the xHCI bus is /dev/ttyUSB0, 0660 root:dialout;
+# its far end is a FIFO that loops every byte back (x86_64 test target, make test).
+if [ "$(uname -m)" = "x86_64" ]; then
+check "c-userial"    "OK"           "$(timeout 40 /bin/test_userial 2>&1 | tail -1)"
+fi
 # NVMe: namespace 1 enumerates and its sectors read/write over the NVM
 # READ/WRITE command path (x86_64 test target, qemu -device nvme).
 if [ -b /dev/nvme0n1 ]; then

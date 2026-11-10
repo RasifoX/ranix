@@ -54,9 +54,10 @@ static int ctrl_xfer(usb_dev_t *d, uint8_t rtype, uint8_t req, uint16_t val,
 #define XFER_STALL  (-1)
 #define XFER_ERROR  (-2)   /* timeout or a transaction error: the endpoint needs a stop */
 
-/* Queue one TD and wait for it. A TRB may not cross a 64 KB boundary, so a long
- * buffer becomes a chain. *got is how many bytes moved. */
-static int bulk_xfer(usb_dev_t *d, int in, uint64_t phys, uint32_t len, uint32_t *got)
+/* Queue one TD and wait for it, at most ms. A TRB may not cross a 64 KB boundary, so
+ * a long buffer becomes a chain. *got is how many bytes moved. */
+static int bulk_xfer_ms(usb_dev_t *d, int in, uint64_t phys, uint32_t len, uint32_t *got,
+                        uint32_t ms)
 {
 	xhci_t *x = d->x;
 	ring_t *r = in ? &d->ep_in : &d->ep_out;
@@ -84,7 +85,7 @@ static int bulk_xfer(usb_dev_t *d, int in, uint64_t phys, uint32_t len, uint32_t
 	event_t ev;
 	/* A short packet is reported at the TRB it hit; the controller may then report the
 	 * end of the TD too, or not. Wait briefly so a late event does not meet the next TD. */
-	while (evt_next(x, &ev, short_seen ? 5 : XFER_MS)) {
+	while (evt_next(x, &ev, short_seen ? 5 : ms)) {
 		if (TRB_GET_TYPE(ev.control) != TRB_EVT_TRANSFER) continue;
 		if ((ev.control >> 24) != d->slot || ((ev.control >> 16) & 0x1F) != (uint32_t)dci) continue;
 		int mine = 0;
@@ -117,6 +118,11 @@ static int bulk_xfer(usb_dev_t *d, int in, uint64_t phys, uint32_t len, uint32_t
 		return XFER_OK;
 	}
 	return XFER_ERROR;
+}
+
+static int bulk_xfer(usb_dev_t *d, int in, uint64_t phys, uint32_t len, uint32_t *got)
+{
+	return bulk_xfer_ms(d, in, phys, len, got, XFER_MS);
 }
 
 /* After a stall the endpoint is Halted, after a timeout it still holds our TD: either

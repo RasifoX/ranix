@@ -18,9 +18,13 @@
 #include <kernel/fs/mbr.h>
 #include <kernel/time.h>
 #include <kernel/input.h>
+#include <kernel/input_dev.h>
 #include <drivers/input/ps2.h>
 #include <kernel/tick.h>
 #include <kernel/init.h>
+#include <kernel/fs/devfs.h>
+#include <kernel/capabilities.h>
+#include <kernel/errno.h>
 
 /*
  * xHCI host controller + USB enumeration + bulk-only mass-storage. Polling, no
@@ -45,12 +49,16 @@
  * Files, one job each: xhci.c (this one: controller bring-up, the usbd thread, the
  * tick, diagnostics), xhci_hw.h (registers), xhci_ring.c (rings, events, commands),
  * xhci_xfer.c (control and bulk transfers), usb_storage.c (mass storage), usb_hid.c
- * (keyboards and mice), usb_enum.c (enumeration, hubs), usb_port.c (plug, unplug).
+ * (keyboards and mice), usb_serial.c (serial ports: CDC-ACM, CH341, CP210x, FTDI;
+ * the chip arithmetic is userial_proto.c), usb_enum.c (enumeration, hubs),
+ * usb_port.c (plug, unplug).
  */
 
 #if defined(__x86_64__)
 
 #include "xhci_hw.h"
+#include "userial_proto.h"
+#include "../input/hidjoy.h"
 
 typedef struct {
 	trb_t   *trb;
@@ -92,6 +100,8 @@ typedef struct {
 #define HID_KBD   1
 #define HID_MOUSE 2
 #define HID_HUB   3
+#define HID_JOY   4           /* a HID joystick or gamepad: /dev/input/eventN, jsN */
+#define HID_XPAD  5           /* an Xbox 360 style (XInput) pad, vendor class */
 
 /* Where a mouse report keeps its fields, in bits. */
 typedef struct {
@@ -113,6 +123,8 @@ typedef struct {
 	uint8_t *buf;
 	uint64_t buf_phys;
 	mouse_map_t map;
+	hidjoy_t *joy;             /* HID_JOY: where its values sit */
+	struct input_dev *idev;    /* HID_JOY, HID_XPAD: its evdev node */
 	uint8_t  prev[8];          /* keyboard: last report */
 	uint8_t  buttons;
 } hid_ep_t;
@@ -155,6 +167,10 @@ typedef struct usb_dev {
 	uint32_t  route;
 	uint8_t   tt_slot, tt_port;
 	uint8_t   is_hub, hub_ports;
+	struct userial *ser;       /* a serial port, NULL if not one */
+	uint8_t   ser_reset, ser_resets;
+	uint16_t  vid, pid, bcd;   /* from the device descriptor */
+	uint8_t   iproduct;        /* its product string's index */
 	uint32_t  hub_tried;
 	volatile uint32_t hub_change;
 } usb_dev_t;
@@ -184,6 +200,7 @@ static volatile uint64_t rep_at;
 #define REP_EVERY_MS 33u
 
 static void hid_event(usb_dev_t *d, hid_ep_t *h, uint32_t status);
+static void ser_rx_event(usb_dev_t *d, uint32_t status);
 
 static inline uint64_t tsc(void)
 {
@@ -235,6 +252,7 @@ static void dma_free(uint64_t *phys)
 #include "xhci_xfer.c"
 #include "usb_storage.c"
 #include "usb_hid.c"
+#include "usb_serial.c"
 #include "usb_enum.c"
 #include "usb_port.c"
 
@@ -322,6 +340,7 @@ static void usbd_thread(void)
 			usb_dev_t *d = &g_devs[i];
 			for (int k = 0; d->used && !d->gone && k < d->nhid; k++)
 				if (d->hid[k].needs_reset) hid_recover(d, &d->hid[k]);
+			if (d->used && !d->gone && d->ser && d->ser_reset) ser_recover(d);
 			if (d->used && d->is_hub && d->hub_change) {
 				uint32_t ch = __atomic_exchange_n(&d->hub_change, 0, __ATOMIC_SEQ_CST);
 				for (uint32_t p = 1; p <= d->hub_ports; p++)
@@ -397,8 +416,9 @@ static void xhci_diag(hw_out_t *o)
 		usb_dev_t *ud = dev_on_port(i);
 		if (ud) {
 			hw_kv(o, "disk", ud->is_disk);
+			if (ud->ser) hw_ks(o, "serial", ud->ser->name);
 			for (int k = 0; k < ud->nhid; k++)
-				hw_ks(o, "hid", ud->hid[k].kind == HID_KBD ? "keyboard" : ud->hid[k].kind == HID_HUB ? "hub" : "mouse");
+				hw_ks(o, "hid", hid_kind_name(ud->hid[k].kind));
 		}
 		hw_kv(o, "overcurrent_now", !!(psc & PORTSC_OCA));
 		hw_kv(o, "overcurrent_seen", !!(psc & PORTSC_OCC));

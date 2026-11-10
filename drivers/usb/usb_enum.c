@@ -4,7 +4,7 @@
  */
 /*
  * Enumeration: a new device gets a slot, an address and a configuration, and
- * becomes a disk, a keyboard or mouse, or a hub. dev_release undoes it.
+ * becomes a disk, a serial port, a keyboard or mouse, or a hub. dev_release undoes it.
  *
  * Part of the xHCI driver: compiled inside drivers/usb/xhci.c (a textual include,
  * like kernel/sys/syscall_*.c), so it shares that file's static types and state
@@ -16,6 +16,8 @@
 static void dev_release(usb_dev_t *d)
 {
 	xhci_t *x = d->x;
+	for (int i = 0; i < d->nhid; i++)          /* a pad that failed half way: its node goes */
+		if (d->hid[i].idev || d->hid[i].joy) joy_release(&d->hid[i]);
 	if (d->slot) {
 		cmd_exec(x, 0, TRB_TYPE(TRB_DISABLE_SLOT) | ((uint32_t)d->slot << 24), 0);
 		x->dcbaa[d->slot] = 0;
@@ -254,6 +256,10 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 	uint16_t vid = (uint16_t)(dd[8] | dd[9] << 8);
 	uint16_t pid = (uint16_t)(dd[10] | dd[11] << 8);
 	uint8_t  serial_idx = dd[16], devclass = dd[4];
+	d->vid = vid;
+	d->pid = pid;
+	d->bcd = (uint16_t)(dd[12] | dd[13] << 8);
+	d->iproduct = dd[15];
 	kprintf(KERN_INFO "xhci: port %d device %04x:%04x class %u\n", port + 1, vid, pid, dd[4]);
 	if (port < MAX_PORTS && !parent) {
 		x->pinfo[port].vid = vid;
@@ -286,6 +292,11 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 
 	msc_desc_t m;
 	cfg_parse(d->dma, total, &m);
+	us_desc_t u;
+	if (!m.found && us_match(vid, pid, d->dma, total, &u) != US_NONE) {
+		if (serial_attach(d, &u, cfgval) != 0) goto fail;
+		return 0;
+	}
 	if (!m.found) {
 		if (m.uas_only)
 			kprintf(KERN_WARN "xhci: port %d disk offers UAS only, not supported\n", port + 1);

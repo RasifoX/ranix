@@ -257,6 +257,7 @@ typedef struct devfs_entry {
 	struct devfs_entry *next;
 	void               *priv;
 	gid_t               gid;     /* owning group; uid is always root */
+	int                 hidden;  /* hardware gone: not looked up, not listed */
 } devfs_entry_t;
 
 /* ── /dev/stdin, /dev/stdout, /dev/stderr fd-proxy devices ──── */
@@ -334,16 +335,29 @@ void devfs_register_device_priv(const char *name, mode_t mode, dev_t rdev,
 	e->fops = fops;
 	e->priv = priv;
 	e->gid  = 0;
+	e->hidden = 0;
 	e->next = devfs_list;
 	devfs_list = e;
+}
+
+void devfs_register_device_gid_priv(const char *name, mode_t mode, gid_t gid, dev_t rdev,
+                                    vfs_fops_t *fops, void *priv)
+{
+	devfs_register_device_priv(name, mode, rdev, fops, priv);
+	for (devfs_entry_t *e = devfs_list; e; e = e->next)
+		if (strcmp(e->name, name) == 0) { e->gid = gid; return; }
 }
 
 void devfs_register_device_gid(const char *name, mode_t mode, gid_t gid, dev_t rdev,
                                vfs_fops_t *fops)
 {
-	devfs_register_device_priv(name, mode, rdev, fops, NULL);
+	devfs_register_device_gid_priv(name, mode, gid, rdev, fops, NULL);
+}
+
+void devfs_set_hidden(const char *name, int hidden)
+{
 	for (devfs_entry_t *e = devfs_list; e; e = e->next)
-		if (strcmp(e->name, name) == 0) { e->gid = gid; return; }
+		if (strcmp(e->name, name) == 0) { e->hidden = hidden; return; }
 }
 
 void devfs_register_device(const char *name, mode_t mode, dev_t rdev, vfs_fops_t *fops)
@@ -416,7 +430,7 @@ static vfs_inode_t *devfs_subdir_lookup(vfs_inode_t *dir, const char *name)
 	for (devfs_entry_t *e = devfs_list; e; e = e->next) {
 		if (strncmp(e->name, ref, (size_t)plen) == 0 && e->name[plen] == '/' &&
 		    strcmp(e->name + plen + 1, name) == 0)
-			return devfs_inode_for(e);
+			return e->hidden ? NULL : devfs_inode_for(e);
 	}
 	return NULL;
 }
@@ -428,6 +442,7 @@ static int devfs_subdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 	uint32_t count = 0;
 	uint64_t ino = 0xd100;
 	for (devfs_entry_t *e = devfs_list; e; e = e->next, ino++) {
+		if (e->hidden) continue;
 		if (strncmp(e->name, ref, (size_t)plen) == 0 && e->name[plen] == '/') {
 			if (count == idx) {
 				const char *shortname = e->name + plen + 1;
@@ -543,7 +558,7 @@ static vfs_inode_t *devfs_lookup(vfs_inode_t *dir, const char *name)
 	}
 	for (devfs_entry_t *e = devfs_list; e; e = e->next)
 		if (strcmp(e->name, name) == 0)
-			return devfs_inode_for(e);
+			return e->hidden ? NULL : devfs_inode_for(e);
 	return NULL;
 }
 
@@ -582,6 +597,7 @@ static int devfs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	for (devfs_entry_t *e = devfs_list; e; e = e->next, ino++) {
 		int slash = -1;
 		for (int j = 0; e->name[j]; j++) if (e->name[j] == '/') { slash = j; break; }
+		if (slash < 0 && e->hidden) continue;   /* hidden: not listed (a directory still is) */
 		if (slash >= 0) {
 			/* Only emit subdir entry for the first device under that prefix */
 			int is_first = 1;

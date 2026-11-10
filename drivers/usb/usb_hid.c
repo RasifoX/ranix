@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /*
- * USB keyboards and mice (HID boot and report protocol), fed from interrupt
- * endpoints that stay queued all the time.
+ * USB keyboards and mice (HID boot and report protocol), joysticks and gamepads
+ * (HID report protocol, and Xbox 360 style XInput pads), fed from interrupt
+ * endpoints that stay queued all the time. Keyboards and mice feed the system's
+ * input (event0, mice); a joystick or gamepad gets its own /dev/input/eventN and
+ * jsN (drivers/input/input_dev.c), its reports read by drivers/input/hidjoy.c.
  *
  * Part of the xHCI driver: compiled inside drivers/usb/xhci.c (a textual include,
  * like kernel/sys/syscall_*.c), so it shares that file's static types and state
@@ -96,6 +99,85 @@ static void mouse_report(hid_ep_t *h, const uint8_t *r, uint32_t len)
 	input_usb_mouse(dx, -dy, w, b);
 }
 
+static const char *hid_kind_name(int kind)
+{
+	return kind == HID_KBD ? "keyboard" : kind == HID_HUB ? "hub" : kind == HID_JOY ? "joystick" :
+	       kind == HID_XPAD ? "xinput pad" : "mouse";
+}
+
+/* ---- joysticks and gamepads ---- */
+
+#define MAX_JOY 8
+static hidjoy_t g_joy[MAX_JOY];
+static uint8_t  g_joy_used[MAX_JOY];
+
+/* A string descriptor in ASCII ('?' for the rest), "" when there is none. */
+static void usb_string(usb_dev_t *d, uint8_t index, char *out, uint32_t max)
+{
+	out[0] = 0;
+	if (!index || ctrl_xfer(d, 0x80, 6, 0x0300, 0, 4, 1) != 0) return;
+	uint16_t lang = (uint16_t)(d->dma[2] | d->dma[3] << 8);
+	if (ctrl_xfer(d, 0x80, 6, (uint16_t)(0x0300 | index), lang, 254, 1) != 0) return;
+	uint32_t n = d->dma[0] > 254 ? 254 : d->dma[0], o = 0;
+	for (uint32_t i = 2; i + 1 < n && o + 1 < max; i += 2)
+		out[o++] = d->dma[i + 1] || d->dma[i] < 32 || d->dma[i] > 126 ? '?' : (char)d->dma[i];
+	out[o] = 0;
+}
+
+static void joy_emit(void *ctx, uint16_t type, uint16_t code, int32_t value)
+{
+	input_dev_report(ctx, type, code, value);
+}
+
+/* Its evdev node, once the report layout (h->joy) or the XInput kind is known. */
+static int joy_node(usb_dev_t *d, hid_ep_t *h)
+{
+	static input_dev_info_t info;          /* 1.4 KB; the controller lock is held */
+	hj_caps_t c;
+	if (h->kind == HID_XPAD) hj_xpad_caps(&c);
+	else hj_caps(h->joy, &c);
+	memset(&info, 0, sizeof info);
+	usb_string(d, d->iproduct, info.name, sizeof info.name);
+	if (!info.name[0]) memcpy(info.name, "USB gamepad", 12);
+	info.bustype = 0x03;                   /* BUS_USB */
+	info.vendor = d->vid;
+	info.product = d->pid;
+	info.version = d->bcd;
+	memcpy(info.keybits, c.keybits, sizeof c.keybits);
+	info.absbits = c.absbits;
+	memcpy(info.absmin, c.absmin, sizeof info.absmin);
+	memcpy(info.absmax, c.absmax, sizeof info.absmax);
+	info.joystick = 1;
+	h->idev = input_dev_add(&info);
+	if (!h->idev) return -1;
+	kprintf(KERN_INFO "xhci: port %d %s \"%s\"\n", d->port + 1, hid_kind_name(h->kind), info.name);
+	return 0;
+}
+
+/* The report descriptor in d->dma (len bytes): a joystick's? Then keep its layout
+ * in a free slot and make h one. 1 if so. */
+static int joy_take(usb_dev_t *d, hid_ep_t *h, uint32_t len)
+{
+	for (int i = 0; i < MAX_JOY; i++) {
+		if (g_joy_used[i]) continue;
+		if (!hj_parse(d->dma, len, &g_joy[i])) return 0;
+		g_joy_used[i] = 1;
+		h->joy = &g_joy[i];
+		h->kind = HID_JOY;
+		return 1;
+	}
+	return 0;
+}
+
+static void joy_release(hid_ep_t *h)
+{
+	input_dev_gone(h->idev);
+	h->idev = 0;
+	for (int i = 0; i < MAX_JOY; i++)
+		if (h->joy == &g_joy[i]) g_joy_used[i] = 0;
+	h->joy = 0;
+}
+
 static void hid_queue(usb_dev_t *d, hid_ep_t *h)
 {
 	ring_push(&h->ring, h->buf_phys, h->len, TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_ISP);
@@ -118,6 +200,10 @@ static void hid_event(usb_dev_t *d, hid_ep_t *h, uint32_t status)
 		__atomic_fetch_or(&d->hub_change, m, __ATOMIC_SEQ_CST);
 	} else if (h->kind == HID_KBD) {
 		if (got >= 8) kbd_report(h, h->buf);
+	} else if (h->kind == HID_JOY || h->kind == HID_XPAD) {
+		if (h->kind == HID_JOY) hj_report(h->joy, h->buf, got, joy_emit, h->idev);
+		else hj_xpad_report(h->buf, got, joy_emit, h->idev);
+		input_dev_sync(h->idev);
 	} else {
 		mouse_report(h, h->buf, got);
 	}
@@ -192,8 +278,10 @@ static int mouse_parse(const uint8_t *p, uint32_t n, mouse_map_t *m)
 	return have_x;
 }
 
-/* The HID interfaces of a configuration. Non-boot interfaces wait for a look at their
- * report descriptor: most of them are a keyboard's media keys, which are left alone. */
+/* The HID interfaces of a configuration, and an XInput pad's (vendor class 0xFF,
+ * subclass 0x5D, protocol 1). Non-boot interfaces wait for a look at their report
+ * descriptor: a mouse, a joystick or gamepad, or (most often) a keyboard's media
+ * keys, which are left alone. */
 static void hid_scan(usb_dev_t *d, const uint8_t *c, uint32_t total)
 {
 	hid_ep_t *h = 0;
@@ -202,12 +290,13 @@ static void hid_scan(usb_dev_t *d, const uint8_t *c, uint32_t total)
 		if (blen < 2 || blen > total - i) break;
 		if (btype == 4 && blen >= 9) {
 			h = 0;
-			if (c[i + 5] == 3 && c[i + 3] == 0) {
+			int xpad = c[i + 5] == 0xFF && c[i + 6] == 0x5D && c[i + 7] == 0x01;
+			if ((c[i + 5] == 3 || xpad) && c[i + 3] == 0) {
 				h = &d->hid[d->nhid];
 				memset(h, 0, sizeof(*h));
 				h->iface = c[i + 2];
 				h->proto = c[i + 7];
-				h->kind = h->proto == 1 ? HID_KBD : HID_MOUSE;
+				h->kind = xpad ? HID_XPAD : h->proto == 1 && c[i + 5] == 3 ? HID_KBD : HID_MOUSE;
 			}
 		} else if (btype == 5 && blen >= 7 && h && (c[i + 2] & 0x80) && (c[i + 3] & 3) == 3) {
 			h->addr = c[i + 2];
@@ -255,12 +344,18 @@ static int hid_attach(usb_dev_t *d, uint32_t speed)
 		if (src.kind == HID_KBD) {
 			ctrl_xfer(d, 0x21, 0x0B, 0, src.iface, 0, 0);   /* boot protocol */
 			ctrl_xfer(d, 0x21, 0x0A, 0, src.iface, 0, 0);   /* report on change only */
+		} else if (src.kind == HID_XPAD) {
+			if (joy_node(d, &src) != 0) continue;
 		} else {
 			/* the descriptor's length is in the HID descriptor, but 1024 is plenty
 			 * and a short answer is fine */
 			memset(d->dma, 0, 1024);
-			int ok = ctrl_xfer(d, 0x81, 6, 0x2200, src.iface, 1024, 1) == 0 &&
-			         mouse_parse(d->dma, 1024, &src.map);
+			int got = ctrl_xfer(d, 0x81, 6, 0x2200, src.iface, 1024, 1) == 0;
+			int ok = got && mouse_parse(d->dma, 1024, &src.map);
+			if (!ok && got && joy_take(d, &src, 1024)) {
+				if (joy_node(d, &src) != 0) { joy_release(&src); continue; }
+				ok = 1;
+			}
 			if (!ok) {
 				/* boot protocol has no wheel, and a media interface has no X: only
 				 * trust it on an interface that says it is a boot mouse */
@@ -276,8 +371,7 @@ static int hid_attach(usb_dev_t *d, uint32_t speed)
 		src.len = src.mps > 512 ? 512 : src.mps;
 		*h = src;
 		keep++;
-		kprintf(KERN_INFO "xhci: port %d %s\n", d->port + 1,
-		        h->kind == HID_KBD ? "keyboard" : "mouse");
+		kprintf(KERN_INFO "xhci: port %d %s\n", d->port + 1, hid_kind_name(h->kind));
 	}
 	d->nhid = (uint8_t)keep;
 	if (!keep) return 0;

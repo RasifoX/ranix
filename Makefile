@@ -177,6 +177,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/block/ahci.c \
         drivers/block/nvme.c \
         drivers/usb/xhci.c \
+        drivers/usb/userial_proto.c \
         drivers/net/virtio_net.c \
         drivers/virtio/virtio_pci.c \
         drivers/net/rtl8168.c \
@@ -220,7 +221,9 @@ SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c))
     drivers/video/fbdev.c \
     drivers/video/backlight.c \
     $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/gpu/drm/virtio/*.c drivers/thermal/*.c drivers/platform/*.c) \
-    drivers/input/input_core.c
+    drivers/input/input_core.c \
+    drivers/input/input_dev.c \
+    drivers/input/hidjoy.c
 
 SRCS_C   = $(SRCS_KERNEL) $(SRCS_NET) $(SRCS_ARCH) $(SRCS_DRIVERS)
 
@@ -976,7 +979,8 @@ ifeq ($(ARCH),x86_64)
 # -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
 test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
-	@rm -f $(TEST_LOG)
+	@rm -f $(TEST_LOG) $(BUILD_DIR)/userial
+	@mkfifo $(BUILD_DIR)/userial
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) $(QEMU_NET) -smp 4 -m 3G -display none \
 	    -serial file:$(TEST_LOG) -boot d -cdrom ranix.iso \
 	    -drive id=d0,file=$(BUILD_DIR)/gpt-test.img,format=raw,if=none \
@@ -984,6 +988,8 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-
 	    -drive id=u0,file=$(BUILD_DIR)/usb-test.img,format=raw,if=none \
 	    -device qemu-xhci,id=xhci,streams=off \
 	    -device usb-storage,bus=xhci.0,drive=u0 \
+	    -chardev pipe,id=ser0,path=$(BUILD_DIR)/userial \
+	    -device usb-serial,bus=xhci.0,chardev=ser0 \
 	    -drive file=$(BUILD_DIR)/nvme-test.img,if=none,id=nvm0,format=raw \
 	    -device nvme,drive=nvm0,serial=ranix0 \
 	    $(TEST_GPU) \

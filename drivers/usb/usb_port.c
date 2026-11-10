@@ -54,10 +54,13 @@ static void dev_unplug(usb_dev_t *d)
 		if (h->kind == HID_KBD) {      /* nothing may stay held down */
 			static const uint8_t none[8];
 			kbd_report(h, none);
+		} else if (h->kind == HID_JOY || h->kind == HID_XPAD) {
+			joy_release(h);            /* its nodes hidden, readers told */
 		} else if (h->buttons) {
 			input_usb_mouse(0, 0, 0, 0);
 		}
 	}
+	if (d->ser) ser_unplug(d);         /* the name stays, hidden */
 	if (d->disk) {                     /* the name stays, reading nothing */
 		usb_disk_t *k = d->disk;
 		k->dev = NULL;
