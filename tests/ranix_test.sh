@@ -420,6 +420,7 @@ check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail 
 check "c-peercred"    "OK"            "$(timeout 10 /bin/test_peercred 2>&1 | tail -1)"
 check "c-inputsrc"     "OK"            "$(timeout 20 /bin/test_inputsrc 2>&1 </dev/null | tail -1)"
 check "c-mediakeys"    "OK"            "$(timeout 20 /bin/test_mediakeys 2>&1 </dev/null | tail -1)"
+check "c-prtsc"        "OK"            "$(timeout 20 /bin/test_prtsc 2>&1 </dev/null | tail -1)"
 check "c-usercred"    "OK"            "$(timeout 10 /bin/test_usercred 2>&1 | tail -1)"
 check "c-credctl"     "OK"            "$(timeout 15 /bin/test_credctl 2>&1 | tail -1)"
 check "c-nettcp"      "OK"            "$(timeout 10 /bin/test_nettcp 2>&1 | tail -1)"

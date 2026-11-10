@@ -136,7 +136,9 @@ static void kbd_byte(uint8_t sc)
             case 0x49: tty_input_str("\033[5~"); break;
             case 0x51: tty_input_str("\033[6~"); break;
             case 0x53: tty_input_str("\033[3~"); break;
-            case 0x37: tty_input_str("\033[32~"); break;   /* Print Screen: the desk takes it */
+            case 0x37:                                       /* Print Screen: the desk takes it */
+                tty_input_str(alt_pressed ? "\033[32;3~" : shift_pressed ? "\033[32;2~" : "\033[32~");
+                break;
             case 0x52: tty_input_str(shift_pressed ? "\033[2;2~" : "\033[2~"); break;   /* Insert */
             /* the laptop's own sound keys */
             case 0x20: { static int muted_at;
@@ -156,7 +158,8 @@ static void kbd_byte(uint8_t sc)
     int pressed = !(sc & 0x80);
     uint8_t key = sc & 0x7F;
 
-    input_report_key(key, pressed);
+    /* Alt+Print Screen comes as SysRq (0x54, no E0): the same key to programs */
+    input_report_key(key == 0x54 ? 99 : key, pressed);
     input_sync();
 
     switch (key) {
@@ -171,6 +174,7 @@ static void kbd_byte(uint8_t sc)
     if (!pressed) return;
 
     switch (key) {                      /* function keys, as xterm spells them */
+    case 0x54: tty_input_str("\033[32;3~"); return;   /* Alt+Print Screen: the window, to the desk */
     case 0x3B: tty_input_str("\033OP"); return;
     case 0x3C: tty_input_str("\033OQ"); return;
     case 0x3D: tty_input_str("\033OR"); return;
