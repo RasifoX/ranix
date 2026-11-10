@@ -8,6 +8,8 @@
 #include <kernel/driver.h>
 #include <kernel/tick.h>
 #include <kernel/hal.h>
+#include <kernel/time.h>
+#include <kernel/smp.h>
 
 static volatile uint64_t ticks = 0;
 static uint32_t timer_hz = 100;
@@ -15,30 +17,56 @@ static uint32_t timer_hz = 100;
 /* This CPU's tick period in counter units: TICK_SLOW times longer while the
  * scheduler has it slowed (sched_tick then adds TICK_SLOW to kernel_ticks, so
  * the hardware must really slow down, or idle time runs ten times fast). */
-static uint64_t tick_period(int slow) {
+static uint64_t cnt_freq(void) {
     uint64_t freq;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
-    return freq / timer_hz * (slow ? TICK_SLOW : 1);
+    return freq;
+}
+
+static uint64_t tick_period(int slow) {
+    return cnt_freq() / timer_hz * (slow ? TICK_SLOW : 1);
+}
+
+static inline uint64_t cnt_now(void) {
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+/* The compare register is a one-shot: it is set for whichever comes first,
+ * this CPU's next tick (kept at absolute times, no drift) or its earliest fine
+ * wakeup (hrtimer_next, CLOCK_MONOTONIC ns = the counter scaled). */
+static uint64_t tick_due[MAX_CPUS];
+
+static uint64_t ns_to_cnt(uint64_t ns) {   /* rounded up: never before the instant */
+    uint64_t f = cnt_freq();
+    return ns / 1000000000ULL * f + ((ns % 1000000000ULL) * f + 999999999ULL) / 1000000000ULL;
+}
+
+void arch_timer_reprogram(void) {
+    uint64_t at = tick_due[arch_get_cpu_ctx()->cpu_id];
+    uint64_t hr = hrtimer_next();
+    if (hr != ~0ULL) { uint64_t h = ns_to_cnt(hr); if (h < at) at = h; }
+    __asm__ volatile("msr cntv_cval_el0, %0; isb" :: "r"(at));
 }
 
 void timer_handler(void) {
     ticks++;
-
-    /* the next tick from this one's due time, not from when the handler ran:
-     * no drift; a CPU that fell behind catches up without a burst */
-    uint64_t due, now;
-    __asm__ volatile("mrs %0, cntv_cval_el0" : "=r"(due));
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
-    uint64_t next = due + tick_period(arch_get_cpu_ctx()->tick_slow);
-    if (next <= now) next = now + tick_period(arch_get_cpu_ctx()->tick_slow);
-    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(next));
-
-    /* Only the BSP advances global time + runs the global walk (kernel_ticks,
-     * sleeper wakeups, itimers). Secondary cores do scheduler accounting only —
-     * otherwise every core bumps kernel_ticks and wall-clock runs N× fast on an
-     * N-core SMP (the printk timestamps were ~4-5x real on the Pi). Mirrors x86. */
-    if (arch_get_cpu_ctx()->cpu_id == 0) tick_notify();
-    else                                 tick_notify_local();
+    cpu_context_t *c = arch_get_cpu_ctx();
+    uint64_t now = cnt_now(), *due = &tick_due[c->cpu_id];
+    uint64_t tol = cnt_freq() / 50000;   /* 20 us: a few us early is the tick */
+    if (now + tol >= *due) {
+        *due += tick_period(c->tick_slow);
+        if (*due <= now) *due = now + tick_period(c->tick_slow);   /* fell behind: no burst */
+        /* Only the BSP advances global time + runs the global walk (kernel_ticks,
+         * sleeper wakeups, itimers). Secondary cores do scheduler accounting only —
+         * otherwise every core bumps kernel_ticks and wall-clock runs N× fast on an
+         * N-core SMP (the printk timestamps were ~4-5x real on the Pi). Mirrors x86. */
+        if (c->cpu_id == 0) tick_notify();
+        else                tick_notify_local();
+    }
+    hrtimer_run(mono_ns());
+    arch_timer_reprogram();
 }
 
 /* Allow EL0 to read the virtual + physical counters (CNTKCTL_EL1.EL0VCTEN|
@@ -55,11 +83,9 @@ void timer_init(uint32_t hz) {
     timer_hz = hz;
     timer_enable_el0_counter();
 
-    uint64_t freq, count;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(count));
-    count += freq / hz;
-    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(count));
+    tick_due[arch_get_cpu_ctx()->cpu_id] = cnt_now() + tick_period(0);
+    hrtimer_on = 1;
+    arch_timer_reprogram();
     __asm__ volatile("msr cntv_ctl_el0,  %0" :: "r"((uint64_t)1));
 
     board_config_t *cfg = board_get_config();
@@ -72,18 +98,14 @@ uint64_t timer_ticks(void) { return ticks; }
 
 /* this CPU's timer: TICK_SLOW times slower, or back to normal at once */
 void arch_tick_slow(int slow) {
-    uint64_t now;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
-    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(now + tick_period(slow)));
+    tick_due[arch_get_cpu_ctx()->cpu_id] = cnt_now() + tick_period(slow);
+    arch_timer_reprogram();
 }
 
 void timer_secondary_init(void) {
     timer_enable_el0_counter();
-    uint64_t freq, count;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(count));
-    count += freq / timer_hz;
-    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(count));
+    tick_due[arch_get_cpu_ctx()->cpu_id] = cnt_now() + tick_period(0);
+    arch_timer_reprogram();
     __asm__ volatile("msr cntv_ctl_el0,  %0" :: "r"((uint64_t)1));
 }
 

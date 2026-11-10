@@ -1107,6 +1107,106 @@ void task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags) {
 	arch_yield();
 }
 
+/* ── fine wakeups ────────────────────────────────────────────────────────────
+ * Per CPU and touched only by that CPU with interrupts off: a sleeper arms on
+ * the CPU it sleeps from (under sched_lock), and that CPU's timer interrupt
+ * fires it. Entries are not removed on an early wake; a popped one counts only
+ * for the same task, still sleeping, with the same end. Full: the tick
+ * deadline, armed as well, still ends the sleep. */
+#define HR_CAP 64
+static struct hr_q { struct dh_ent e[HR_CAP]; int n; } hrq[MAX_CPUS];
+int hrtimer_on;
+
+static struct hr_q *hr_mine(void) { return &hrq[arch_get_cpu_ctx()->cpu_id]; }
+
+uint64_t hrtimer_next(void)
+{
+	struct hr_q *q = hr_mine();
+	return q->n ? q->e[0].d : ~0ULL;
+}
+
+static int hr_push(struct hr_q *q, process_t *t, uint64_t d)
+{
+	if (q->n >= HR_CAP) return -1;
+	int i = q->n++;
+	while (i > 0 && q->e[(i - 1) / 2].d > d) { q->e[i] = q->e[(i - 1) / 2]; i = (i - 1) / 2; }
+	q->e[i] = (struct dh_ent){ t, d, (int)t->pid };
+	return i == 0;   /* 1: the new earliest */
+}
+
+static struct dh_ent hr_pop(struct hr_q *q)
+{
+	struct dh_ent top = q->e[0], last = q->e[--q->n];
+	int i = 0;
+	for (;;) {
+		int a = 2 * i + 1, b = a + 1, m = i;
+		uint64_t md = last.d;
+		if (a < q->n && q->e[a].d < md) { m = a; md = q->e[a].d; }
+		if (b < q->n && q->e[b].d < md) m = b;
+		if (m == i) break;
+		q->e[i] = q->e[m];
+		i = m;
+	}
+	if (q->n) q->e[i] = last;
+	return top;
+}
+
+/* The timer woke this CPU for t; if it is idle and t may run here, run it here.
+ * pick_cpu would hand it to the first idle CPU, which then has to be woken by
+ * an IPI as well: under a hypervisor that is a second halted vCPU to bring back,
+ * a few hundred microseconds on a busy host. */
+static void hr_wake_here(process_t *t)
+{
+	cpu_context_t *me = arch_get_cpu_ctx();
+	int idle = (!me->current || !me->current->pid) && !cpu_rq_len(me);
+	if (!idle || !cpu_allowed(t, (int)me->cpu_id)) { runqueue_add(t); return; }
+	cpu_rq_add(me, t);
+	me->need_resched = 1;
+}
+
+void hrtimer_run(uint64_t now)
+{
+	struct hr_q *q = hr_mine();
+	if (!q->n || q->e[0].d > now) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	while (q->n && q->e[0].d <= now) {
+		struct dh_ent e = hr_pop(q);
+		process_t *t = e.t;
+		if (e.pid <= 0 || e.pid >= proc_cnt || proctab[e.pid] != t) continue;
+		if (t->wake_ns != e.d || t->state != PROC_SLEEPING) continue;
+		t->wake_ns = 0;
+		t->wake_deadline = 0;   /* the tick backstop has nothing left to do */
+		t->state = PROC_READY;
+		if (!t->on_cpu) hr_wake_here(t);
+		arch_get_cpu_ctx()->need_resched = 1;
+	}
+	spin_unlock_irq(&sched_lock, f);
+}
+
+/* Sleep to a CLOCK_MONOTONIC instant (or a signal). With a one-shot timer the
+ * CPU's timer is set for it; the tick deadline (rounded up, +1) stays as the
+ * backstop, and is the only end without one. */
+void task_sleep_until_ns(uint64_t end)
+{
+	uint64_t now = mono_ns();
+	if (now >= end) return;
+	uint64_t tick_ns = 1000000000ULL / TIMER_HZ;
+	uint64_t backstop = kernel_ticks + (end - now + tick_ns - 1) / tick_ns + 1;
+	if (!hrtimer_on) { task_sleep_until(backstop); return; }
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *c = task_current();
+	c->wake_ns            = end;
+	c->wake_deadline      = backstop;
+	c->sleeping_on_queue  = 1;
+	c->state              = PROC_SLEEPING;
+	sched_note_wake_deadline(backstop);
+	if (hr_push(hr_mine(), c, end) == 1) arch_timer_reprogram();
+	spin_unlock_irq(&sched_lock, f);
+	arch_yield();
+	c->wake_ns = 0;
+	c->wake_deadline = 0;
+}
+
 /* Sleep until tick `deadline` (or a signal). Woken by the deadline sweep in
  * sched_tick, not the per-tick blanket wake — no churn while sleeping. */
 void task_sleep_until(uint64_t deadline) {
