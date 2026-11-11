@@ -93,6 +93,10 @@ static void t_match(void)
 	CHECK("ftdi eps", d.ep_in == 0x81 && d.ep_out == 0x02 && d.mps_in == 64);
 	CHECK("kbd no", us_match(0x046D, 0xC31C, kbd, sizeof kbd, &d) == US_NONE);
 	CHECK("ecm no", us_match(0x0525, 0xA4A1, ecm, sizeof ecm, &d) == US_NONE);
+	uint8_t rndis[sizeof uno];
+	memcpy(rndis, uno, sizeof uno);
+	rndis[9 + 7] = 0xFF;          /* the same interfaces with protocol 0xFF are RNDIS, a network */
+	CHECK("rndis is not serial", us_match(0x0525, 0xA4A2, rndis, sizeof rndis, &d) == US_NONE);
 	CHECK("known id, wrong shape", us_match(0x1A86, 0x7523, kbd, sizeof kbd, &d) == US_NONE);
 	/* every truncation of every descriptor is safe and never matches half a device */
 	int bad = 0;
@@ -181,7 +185,7 @@ static void t_requests(void)
 	CHECK("acm dtr rts", n == 1 && has(r, n, 0x21, 0x22, 3, 2));
 	n = us_modem_reqs(&acm, 0, 0, r);
 	CHECK("acm drop", has(r, n, 0x21, 0x22, 0, 2));
-	CHECK("acm break", us_break_reqs(&acm, 1, r) == 1 && has(r, 1, 0x21, 0x23, 0xFFFF, 2));
+	CHECK("acm break", us_break_reqs(&acm, &l, 1, r) == 1 && has(r, 1, 0x21, 0x23, 0xFFFF, 2));
 	l.baud = 0;
 	CHECK("B0 no line", us_line_reqs(&acm, &l, r) == 0);
 
@@ -195,7 +199,9 @@ static void t_requests(void)
 	n = us_modem_reqs(&ch, 1, 0, r);
 	CHECK("ch341 dtr low-active", n == 1 && r[0].req == 0xA4 && r[0].val == (uint16_t)~0x20);
 	CHECK("ch341 open", us_open_reqs(&ch, r) == 2 && r[0].req == 0x5F && r[0].len == 2 && r[1].req == 0xA1);
-	CHECK("ch341 no break", us_break_reqs(&ch, 1, r) < 0);
+	CHECK("ch341 break is read-modify-write", us_break_reqs(&ch, &l, 1, r) == US_BREAK_RMW);
+	CHECK("ch341 break on", us_ch341_break(0xFF, 0xC3, 1) == (0xFE | 0x83 << 8));
+	CHECK("ch341 break off", us_ch341_break(0xFE, 0x83, 0) == (0xFF | 0xC3 << 8));
 
 	l = (us_line_t){ .baud = 115200, .bits = 8, .rtscts = 1 };
 	n = us_line_reqs(&cp, &l, r);
@@ -217,6 +223,8 @@ static void t_requests(void)
 	CHECK("ftdi flow off", has(r, n, 0x40, 2, 0, 0));
 	n = us_modem_reqs(&ft, 1, 1, r);
 	CHECK("ftdi modem", has(r, n, 0x40, 1, 0x0303, 0));
+	CHECK("ftdi break keeps 8O1", us_break_reqs(&ft, &l, 1, r) == 1 && has(r, 1, 0x40, 4, 0x4108, 0));
+	CHECK("ftdi break off", us_break_reqs(&ft, &l, 0, r) == 1 && has(r, 1, 0x40, 4, 0x0108, 0));
 }
 
 static void t_rx(void)

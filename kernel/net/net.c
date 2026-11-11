@@ -503,7 +503,7 @@ static void net_dhcp_one(netdev_t *d, int can_sleep)
          * machine off while its own view of the network still looks fine. */
         uint32_t half = dhcp_last_lease ? dhcp_last_lease / 2 : 1800;
         d->renew_tick = kernel_ticks + (uint64_t)(half ? half : 60) * TIMER_HZ;
-        if (dns) write_resolv_conf(dns);
+        if (dns && !d->keep_dns) write_resolv_conf(dns);
     } else {
         kprintf(KERN_WARN "dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,
                 (d->ip >> 24) & 0xff, (d->ip >> 16) & 0xff,
@@ -521,6 +521,8 @@ static void net_dhcp_one(netdev_t *d, int can_sleep)
 }
 
 /* Configure every real NIC. Run after the drivers register and the VFS is up. */
+volatile int net_boot_done;
+
 void net_dhcp_all(void)
 {
     for (int i = 0; i < ndevs; i++) {
@@ -533,6 +535,7 @@ void net_dhcp_all(void)
          * watcher, so configure them synchronously at boot. */
         if (!d->link_check) net_dhcp_one(d, 0);   /* boot path: must not sleep */
     }
+    net_boot_done = 1;
 }
 
 /* Carrier watcher: link hotplug. A NIC driver exposes link_check(); on a

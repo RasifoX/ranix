@@ -44,6 +44,19 @@ int syn_option(const char *k, unsigned long n)
 	return -1;
 }
 
+int syn_options(char *out, int cap)
+{
+	const int v[3] = {syn_tap, syn_tap3, syn_middle};
+	static const char *const K[3] = {"tap ", " tap3 ", " middle "};
+	int n = 0;
+	for (int i = 0; i < 3; i++) {
+		for (const char *k = K[i]; *k && n < cap - 3; k++) out[n++] = *k;
+		if (n < cap - 2) out[n++] = (char)('0' + (v[i] != 0));
+	}
+	out[n++] = '\n';
+	return n;
+}
+
 /* Two fingers: the page moves with them, a pixel at a time, both ways. The axis
  * the fingers mostly travel along is picked once and kept, so a vertical scroll
  * does not drift sideways. Wheel notches still go out for readers that know only

@@ -170,17 +170,43 @@ static ssize_t kmsg_read(vfs_file_t *f, void *buf, size_t len)
 	return (ssize_t)(h + (size_t)ll + 1);
 }
 
+/* "<N>" at the start of a write is its level, as on Linux: 0-3 an error,
+ * 4 a warning, 5-6 info, 7 debug. The console level and the boot screen
+ * treat the line like the kernel's own (an error shows on the screen). */
+static int kmsg_level(const char *kb, size_t n)
+{
+	if (n < 3 || kb[0] != '<' || kb[1] < '0' || kb[1] > '7' || kb[2] != '>') return -1;
+	int l = kb[1] - '0';
+	return l <= 3 ? KLOG_ERR : l == 4 ? KLOG_WARN : l <= 6 ? KLOG_INFO : KLOG_DEBUG;
+}
+
+/* Every line of a write may start with its own "<N>"; a line with only the
+ * prefix logs an empty line at that level. */
 static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	(void)f;
+	static const char *const lvfmt[] = { "", KERN_ERR "%c", KERN_WARN "%c", KERN_INFO "%c", KERN_DEBUG "%c" };
 	char kb[256], last = 0;
 	size_t done = 0;
+	int bol = 1;                                 /* at the start of a line */
 	while (done < len) {
 		size_t n = len - done < sizeof(kb) ? len - done : sizeof(kb);
 		if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) break;
-		for (size_t i = 0; i < n; i++) kprintf(KERN_CONT "%c", kb[i]);
+		for (size_t i = 0; i < n; i++) {
+			int lv = bol ? kmsg_level(kb + i, n - i) : -1;
+			if (lv > 0) {
+				i += 3;
+				/* opens the line at its level; a bare prefix is an empty line */
+				last = i < n ? kb[i] : '\n';
+				kprintf(lvfmt[lv], last);
+				if (i >= n) { bol = 1; continue; }
+			} else {
+				last = kb[i];
+				kprintf(KERN_CONT "%c", last);
+			}
+			bol = kb[i] == '\n';
+		}
 		done += n;
-		last = kb[n - 1];
 	}
 	if (done && last != '\n') kprintf(KERN_CONT "\n");   /* a write is one line */
 	return (ssize_t)done;

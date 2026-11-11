@@ -144,6 +144,9 @@ int main(void)
 	WANT(mpresses == 0 && presses == 1 && rpresses == 1);
 	WANT(syn_option("middle 1", 8) == 0);
 	WANT(syn_option("tap 0", 5) == 0 && syn_tap == 0 && syn_option("tap 1\n", 6) == 0 && syn_tap == 1);
+	char ob[64];
+	WANT(syn_option("tap3 0", 6) == 0 && syn_options(ob, sizeof ob) == 22 && !memcmp(ob, "tap 1 tap3 0 middle 1\n", 22));
+	WANT(syn_option("tap3 1", 6) == 0);
 	WANT(syn_option("tap 2", 5) == -1 && syn_option("bogus 1", 7) == -1 && syn_option("tap", 3) == -1);
 	puts("OK");
 	return 0;

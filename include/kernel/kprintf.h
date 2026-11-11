@@ -25,6 +25,7 @@
 
 void   kprintf(const char *fmt, ...);
 void   klog_setup(void);           /* once the command line is known */
+void   klog_set_console_level(int level);
 void   kpanic(const char *msg) __attribute__((noreturn));
 void   panic_report(const char *msg, arch_context_t *ctx) __attribute__((noreturn));
 void   kprintf_set_fb(void);

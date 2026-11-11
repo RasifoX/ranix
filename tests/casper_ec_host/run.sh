@@ -5,7 +5,8 @@
 set -e
 D=$(cd "$(dirname "$0")" && pwd)
 O=$(mktemp -d)
-${CC:-gcc} -std=gnu11 -Wall -Wextra -g -I"$D/stub" "$D/model.c" "$D/../../drivers/platform/casper_ec.c" -o "$O/casper_ec_model"
+${CC:-gcc} -std=gnu11 -Wall -Wextra -g -I"$D/stub" "$D/model.c" "$D/../../drivers/platform/casper_ec.c" "$D/../../drivers/input/ec_hotkey.c" \
+    "$D/../../drivers/platform/casper_power.c" "$D/../../drivers/platform/casper_bat.c" -o "$O/casper_ec_model"
 rc=0; "$O/casper_ec_model" || rc=$?
 rm -rf "$O"
 exit $rc

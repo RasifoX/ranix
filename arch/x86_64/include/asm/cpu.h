@@ -36,7 +36,14 @@ void mb2_get_reserved(uint64_t *base, uint32_t *size);
 
 /* acpi.c */
 int  acpi_detect_cpus(void);
-void acpi_button_start(void);
+void acpi_button_start(void);   /* acpi_events.c: power button, and the SCI with ranix.sci=1 */
+typedef struct {
+	uint16_t pm1a_evt, pm1a_cnt, sci_int;
+	uint8_t  pm1_len, gpe0_len, acpi_enable;
+	uint32_t gpe0_blk, smi_cmd, dsdt_len;
+	const uint8_t *dsdt;
+} acpi_ev_info_t;
+int  acpi_events_info(acpi_ev_info_t *o);   /* acpi.c: from the FADT; -1 without PM1 */
 void acpi_poweroff(void);
 void acpi_reset(void);
 

@@ -81,7 +81,14 @@ int us_open_reqs(const us_desc_t *d, us_req_t *r);
 int us_close_reqs(const us_desc_t *d, us_req_t *r);
 int us_line_reqs(const us_desc_t *d, const us_line_t *l, us_req_t *r);
 int us_modem_reqs(const us_desc_t *d, int dtr, int rts, us_req_t *r);
-int us_break_reqs(const us_desc_t *d, int on, us_req_t *r);   /* -1: the chip has none */
+/* Break on or off. FTDI keeps the line setting in the same request, so l is
+ * needed. CH341 returns US_BREAK_RMW: its break bit shares a register pair
+ * (0x18, 0x05) with the transmitter, so the caller reads the pair (READ_REG
+ * 0x95, value 0x1805), computes the new one with us_ch341_break and writes it
+ * (WRITE_REG 0x9A, value 0x1805). */
+#define US_BREAK_RMW (-2)
+int us_break_reqs(const us_desc_t *d, const us_line_t *l, int on, us_req_t *r);
+uint16_t us_ch341_break(uint8_t reg18, uint8_t reg05, int on);
 
 /* Bytes received into buf: the payload is moved to the front and its length
  * returned. FTDI starts each packet with two status bytes; *msr gets the modem

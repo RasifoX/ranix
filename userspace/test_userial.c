@@ -114,7 +114,7 @@ static int t_defaults(int fd)
 	struct termios t;
 	if (!isatty(fd) || tcgetattr(fd, &t)) return fail("isatty");
 	if (cfgetospeed(&t) != B9600 || (t.c_cflag & CSIZE) != CS8 || !(t.c_cflag & CREAD) ||
-	    !(t.c_cflag & HUPCL) || !(t.c_lflag & ICANON) || (t.c_lflag & ECHO))
+	    !(t.c_cflag & HUPCL) || (t.c_lflag & (ICANON | ECHO | ISIG)) != (ICANON | ECHO | ISIG))
 		return printf("userial-fail defaults c=%o l=%o\n", t.c_cflag, t.c_lflag), 1;
 	if (wires(fd) != (TIOCM_DTR | TIOCM_RTS)) return fail("open-raises-dtr");
 	return 0;
@@ -126,7 +126,8 @@ static int t_loop(int fd)
 	if (raw(fd, B115200, 0, 10)) return fail("raw");
 	struct termios t;
 	tcgetattr(fd, &t);
-	if (cfgetospeed(&t) != B115200 || t.c_lflag || (t.c_oflag & OPOST)) return fail("raw-readback");
+	if (cfgetospeed(&t) != B115200 || (t.c_lflag & (ICANON | ECHO | ISIG)) || (t.c_oflag & OPOST))
+		return fail("raw-readback");   /* cfmakeraw leaves ECHOE/ECHOK/ECHOCTL, as on Linux */
 	struct pollfd p = { fd, POLLOUT, 0 };
 	if (poll(&p, 1, 0) != 1 || !(p.revents & POLLOUT)) return fail("pollout");
 	const char *m = "ranix-serial-0123456789\n";

@@ -10,9 +10,17 @@
 #include <kernel/board.h>
 #include <kernel/sync.h>
 #include <kernel/tick.h>
+#include <kernel/cmdline.h>
+#include <kernel/tty/splash.h>
 
-#define FONT_W  8
-#define FONT_H  16
+/* The glyphs are Spleen 8x16. On a big screen (2560x1440 and up) each glyph
+ * pixel is drawn as a 2x2 block, so the text stays as large to the eye as on
+ * a laptop; ranix.fontscale=1..3 chooses by hand. */
+#define GLYPH_W 8
+#define GLYPH_H 16
+static u32 _scale = 1;
+#define FONT_W  (GLYPH_W * _scale)
+#define FONT_H  (GLYPH_H * _scale)
 
 static fb_info_t *_fb;
 static u32  _cols, _rows;
@@ -34,6 +42,10 @@ static volatile int  _blink_dirty     = 0;
 /* KD_GRAPHICS: a program owns the pixels. Text still lands in the shadow and
  * reaches the screen when text mode comes back. */
 static int           _graphics        = 0;
+
+/* Covered: the boot screen (splash.c) owns the pixels. Text lands in the
+ * shadow as always and shows when the cover is lifted (Esc, an error). */
+static int           _covered         = 0;
 
 /* color state */
 static u32 _def_fg = 0xFFFFFFFF;
@@ -85,7 +97,7 @@ static void flush_all(void)
 /* LOCK HELD */
 static void cursor_erase_from_fb(void)
 {
-    if (!_cursor_on_fb || !_fb || _graphics) return;
+    if (!_cursor_on_fb || !_fb || _graphics || _covered) return;
     u32 px = _cursor_fb_col * FONT_W;
     u32 py = _cursor_fb_row * FONT_H;
     for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
@@ -99,7 +111,7 @@ static void cursor_erase_from_fb(void)
 /* LOCK HELD */
 static void cursor_draw_on_fb(void)
 {
-    if (!_cursor_visible || !_fb || !_blink_state || _graphics) return;
+    if (!_cursor_visible || !_fb || !_blink_state || _graphics || _covered) return;
     u32 px = _cur_col * FONT_W;
     u32 py = _cur_row * FONT_H;
     for (u32 y = 0; y < FONT_H && py + y < _fb->height; y++) {
@@ -114,7 +126,7 @@ static void cursor_draw_on_fb(void)
 /* LOCK HELD */
 static void dirty_flush_locked(void)
 {
-    if (!_fb || _graphics) return;
+    if (!_fb || _graphics || _covered) return;
     if (_cursor_visible) {
         u32 py = _cur_row * FONT_H;
         if (py < _dirty_y0) _dirty_y0 = py;
@@ -151,9 +163,9 @@ static void draw_glyph(u32 col, u32 row, u32 cp)
     u32 py = row * FONT_H;
     for (u32 y = 0; y < FONT_H; y++) {
         u32 *line = (u32 *)(shadow + (py + y) * _fb->pitch);
-        u8 bits = glyph[y];
+        u8 bits = glyph[y / _scale];
         for (u32 x = 0; x < FONT_W; x++)
-            line[px + x] = (bits & (0x80 >> x)) ? _cur_fg : _cur_bg;
+            line[px + x] = (bits & (0x80 >> (x / _scale))) ? _cur_fg : _cur_bg;
     }
     if (py < _dirty_y0) _dirty_y0 = py;
     if (py + FONT_H > _dirty_y1) _dirty_y1 = py + FONT_H;
@@ -324,9 +336,19 @@ static void execute_csi(char cmd)
 
 void fb_tty_tick(void);
 
+/* 1 below 2560x1440, 2 from there; ranix.fontscale=N (1-3) overrides. */
+static u32 pick_scale(const fb_info_t *fb)
+{
+    char b[4];
+    if (cmdline_get("ranix.fontscale", b, sizeof(b)) && b[0] >= '1' && b[0] <= '3' && !b[1])
+        return (u32)(b[0] - '0');
+    return (fb->width >= 2560 && fb->height >= 1440) ? 2 : 1;
+}
+
 void fb_tty_init(fb_info_t *fb)
 {
     _fb       = fb;
+    _scale    = pick_scale(fb);
     _cols     = fb->width  / FONT_W;
     _rows     = fb->height / FONT_H;
     _cur_col  = 0;
@@ -354,8 +376,19 @@ void fb_tty_init(fb_info_t *fb)
     if (!shadow) return;
     _cursor_visible = 1;
     _blink_state = 1;
-    fb_tty_clear();
+    /* Quiet boot: the boot screen paints next, and a black frame in between
+     * would flicker. The shadow is cleared all the same. */
+    _covered = splash_wanted();
+    fb_tty_clear_shadow();
     tick_register(fb_tty_tick);
+}
+
+const u8 *fb_tty_glyph(u32 cp) { return spleen_lookup(cp); }
+
+void fb_tty_get_font(int *w, int *h)
+{
+    if (w) *w = (int)FONT_W;
+    if (h) *h = (int)FONT_H;
 }
 
 void fb_tty_get_size(int *cols, int *rows)
@@ -470,32 +503,109 @@ void fb_tty_write(const char *buf, size_t len)
     spin_unlock_irq(&fb_tty_lock, f);
 }
 
+/* What programs wrote to the console (prompts, fsck questions), the newest
+ * CON_RING bytes: the boot screen's reveal puts them back under the kernel log,
+ * so a prompt written behind the cover is not lost. */
+#define CON_RING 2048
+static char     con_ring[CON_RING];
+static uint64_t con_total;
+
+void fb_tty_console_write(const char *buf, size_t len)
+{
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    for (size_t i = 0; i < len; i++) con_ring[(con_total + i) % CON_RING] = buf[i];
+    con_total += len;
+    spin_unlock_irq(&fb_tty_lock, f);
+    fb_tty_write(buf, len);
+}
+
+/* The newest console bytes, oldest first, at most cap: their count */
+size_t fb_tty_console_tail(char *out, size_t cap)
+{
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    size_t n = con_total < CON_RING ? (size_t)con_total : CON_RING;
+    if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) out[i] = con_ring[(con_total - n + i) % CON_RING];
+    spin_unlock_irq(&fb_tty_lock, f);
+    return n;
+}
+
 /* LOCK NOT HELD. A panic or a program's exit may land here: text wins. */
 void fb_tty_set_graphics(int on)
 {
     if (!_fb) return;
+    int back = 0, taken = 0;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     if (_graphics && !on) {
         _graphics = 0;
         _cursor_on_fb = 0;
-        flush_all();
-        _dirty_y0 = _fb->height;
-        _dirty_y1 = 0;
-        cursor_draw_on_fb();
+        back = 1;
+        if (!_covered) {
+            flush_all();
+            _dirty_y0 = _fb->height;
+            _dirty_y1 = 0;
+            cursor_draw_on_fb();
+        }
     } else if (on && !_graphics) {
         cursor_erase_from_fb();
         _graphics = 1;
+        taken = 1;
+    }
+    spin_unlock_irq(&fb_tty_lock, f);
+    /* outside the lock: the boot screen paints, or lets the desktop have it */
+    if (taken) splash_display_taken();
+    if (back) splash_display_back();
+}
+
+/* LOCK NOT HELD. on: stop drawing text (the boot screen paints); off: the
+ * text the shadow holds comes back. Not while a program owns the pixels. */
+void fb_tty_set_cover(int on)
+{
+    if (!_fb) return;
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    if (on && !_covered) {
+        cursor_erase_from_fb();
+        _covered = 1;
+    } else if (!on && _covered) {
+        _covered = 0;
+        if (!_graphics) {
+            _cursor_on_fb = 0;
+            flush_all();
+            _dirty_y0 = _fb->height;
+            _dirty_y1 = 0;
+            cursor_draw_on_fb();
+        }
     }
     spin_unlock_irq(&fb_tty_lock, f);
 }
 
+int fb_tty_get_cover(void) { return _covered; }
+
 int fb_tty_get_graphics(void) { return _graphics; }
+
+/* The shadow blank, the cursor home; the screen is left alone. */
+void fb_tty_clear_shadow(void)
+{
+    if (!_fb) return;
+    uint64_t f = spin_lock_irq(&fb_tty_lock);
+    u32 shadow_size = _fb->pitch * _fb->height;
+    u64 bg = (u64)_def_bg | ((u64)_def_bg << 32);
+    u64 *p = (u64 *)shadow;
+    for (u32 i = 0; i < shadow_size / 8; i++) p[i] = bg;
+    _cur_col  = 0;
+    _cur_row  = 0;
+    _dirty_y0 = _fb->height;
+    _dirty_y1 = 0;
+    if (!_covered && !_graphics) { flush_all(); cursor_draw_on_fb(); }
+    spin_unlock_irq(&fb_tty_lock, f);
+}
 
 void fb_tty_clear(void)
 {
     if (!_fb) return;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     _graphics = 0;                 /* the panic path clears to show itself */
+    _covered  = 0;                 /* over the boot screen too */
     u32 shadow_size = _fb->pitch * _fb->height;
     u64 bg = (u64)_def_bg | ((u64)_def_bg << 32);
     u64 *p = (u64 *)shadow;
@@ -533,7 +643,7 @@ void fb_tty_erase_eol(void)
 
 void fb_tty_tick(void)
 {
-    if (!_cursor_visible || !_fb || _graphics) return;
+    if (!_cursor_visible || !_fb || _graphics || _covered) return;
     uint64_t f = spin_lock_irq(&fb_tty_lock);
     if (++_blink_ticks < (TIMER_HZ / 2)) {
         spin_unlock_irq(&fb_tty_lock, f);

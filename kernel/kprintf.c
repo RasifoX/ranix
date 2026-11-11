@@ -12,6 +12,7 @@
 #include <kernel/proc.h>
 #include <kernel/pstore.h>
 #include <kernel/tty/fb_tty.h>
+#include <kernel/tty/splash.h>
 #include <kernel/watchdog.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
@@ -29,7 +30,27 @@ static int at_line_start   = 1;
 static spinlock_t kprintf_lock = SPINLOCK_INIT;
 static volatile int kprintf_unlocked;   /* panic: the lock's holder may be wedged */
 
-void kprintf_set_fb(void) { fb_ready = 1; }
+/* Lines that went to the console before the framebuffer console existed (the
+ * shadow needs the heap). They are drawn first, so the screen starts with the
+ * first kernel message, as the serial line does. Console level applies. */
+#define EARLY_CON_SIZE 8192
+static char   early_con[EARLY_CON_SIZE];
+static size_t early_con_len;
+static uint32_t early_con_lost;   /* bytes past the buffer: the screen says so */
+
+void kprintf_set_fb(void)
+{
+    uint64_t flags = spin_lock_irq(&kprintf_lock);
+    if (early_con_len) fb_tty_write(early_con, early_con_len);
+    if (early_con_lost) {
+        static const char m[] = "[... earlier lines not shown here; dmesg has them all]\n";
+        fb_tty_write(m, sizeof(m) - 1);
+    }
+    early_con_len = 0;
+    fb_ready = 1;
+    spin_unlock_irq(&kprintf_lock, flags);
+    fb_tty_flush();
+}
 
 
 /* ── kernel log ring buffer ───────────────────────────────── */
@@ -96,10 +117,13 @@ static int console_level = KLOG_INFO;
 static int line_level    = KLOG_INFO;   /* of the line being written */
 static int console_on    = 1;           /* that line goes to the console too */
 
+/* The boot screen shows the whole log when asked (splash.c). */
+void klog_set_console_level(int level) { console_level = level; }
+
 void klog_setup(void)
 {
     char b[8];
-    if (cmdline_has("quiet")) console_level = KLOG_WARN;
+    if (cmdline_has("quiet") && !cmdline_has("ranix.verbose")) console_level = KLOG_WARN;
     if (cmdline_get("ranix.loglevel", b, sizeof(b)) && b[0] >= '0' && b[0] <= '9' && !b[1])
         console_level = b[0] - '0';
 }
@@ -112,6 +136,10 @@ static void _emit(char c)
         uart_putc(c);
         if (fb_ready)
             fb_tty_putchar(c);
+        else if (early_con_len < EARLY_CON_SIZE)
+            early_con[early_con_len++] = c;
+        else
+            early_con_lost++;
     }
     log_buf[log_head] = c;
     log_head = (log_head + 1) % LOG_BUF_SIZE;
@@ -243,7 +271,10 @@ void kprintf(const char *fmt, ...)
         spin_unlock_irq(&kprintf_lock, flags);
         return;
     }
-    if (!cont || at_line_start) line_level = level;
+    if (!cont || at_line_start) {
+        line_level = level;
+        if (level <= KLOG_ERR) splash_error_line();   /* an error is never hidden */
+    }
     console_on = !locked || line_level <= console_level;
 
     while (*fmt) {
@@ -392,6 +423,7 @@ static void panic_enter(const char *msg)
         for (;;) arch_halt();
     }
     kprintf_unlocked = 1;
+    splash_panic();              /* no CPU's tick may paint over the panic screen */
     panic_reset_begin(msg);      /* before anything that can wedge or fault */
     suppress_ts = 1;
 }

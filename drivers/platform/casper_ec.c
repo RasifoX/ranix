@@ -30,6 +30,11 @@
  * Two deliberate differences from the AML: a failed read aborts (EC0._INI would
  * go on and write 0xFF to 0x04A0), and the global lock wait is bounded.
  *
+ * This file is the one way into the EC: the OS flags above, the shared RAM the
+ * battery lives in (ECW1, read only), the event query on ports 0x62/0x66 and the
+ * pin read the lid needs (RPIN). All of it under one lock, ec_lock, so two
+ * readers never talk to the EC at once (casper_power.c and ec_keys.c ask here).
+ *
  * Doors: /sys/kernel/ranix_ec (0600, root): reading shows the state; writing
  * "on", "off" or "read" acts. "off" puts back the bits "on" changed, as they
  * were read before. ranix.ec_osflags=1 on the command line turns it on at boot.
@@ -49,9 +54,15 @@
 #include <kernel/hal.h>
 #include <kernel/init.h>
 #include <kernel/lib/string.h>
+#ifdef __x86_64__
+#include <asm/io.h>
+#endif
 #include "casper_ec.h"
+#include "../input/ec_hotkey.h"
 
 #define EC_MAILBOX      0xFEFF0700ULL   /* EC0.ECW2, SystemMemory, 0x80 bytes */
+#define EC_RAM1         0xFEFF0380ULL   /* EC0.ECW1: power, battery, heat; read only here */
+#define CMD_PIN         0x87            /* RPIN: CDT2 = port << 4 | pin, answer in EDA1 */
 #define EC_MAILBOX_LEN  0x80
 #define MB_ESEM         0x00
 #define MB_CMD1         0x01
@@ -81,6 +92,8 @@ static struct {
 	int board;                         /* 1 when this is the board the DSDT is from */
 	const char *why;                   /* why not, for the node */
 	volatile uint8_t *mb;
+	volatile uint8_t *ram1;
+	uint32_t ram_reads, queries, pins, stale;
 	int on;
 	int have_old, have_now;
 	uint8_t old[NITEMS], now[NITEMS];
@@ -229,6 +242,70 @@ static void put_bytes(kout_t *o, const char *key, int have, const uint8_t *v)
 
 int casper_ec_board(void) { return E.board; }
 
+/* ECW1, bytes 0..len-1: one pass under the global lock, as the AML's "Lock" field
+ * would take it per byte. Shared RAM: the EC is not asked to do anything. */
+int casper_ec_ram1(uint8_t *buf, int len)
+{
+	if (!E.board || !E.ram1 || len < 0 || len > EC_MAILBOX_LEN) return -ENODEV;
+	if (mutex_lock_killable(&ec_lock)) return -EINTR;
+	int r = 0;
+	if (arch_fw_lock(FW_LOCK_MS)) { E.lock_busy++; r = -EBUSY; }
+	else {
+		for (int i = 0; i < len; i++) buf[i] = E.ram1[i];
+		arch_fw_unlock();
+		E.ram_reads++;
+	}
+	mutex_unlock(&ec_lock);
+	return r;
+}
+
+#ifdef __x86_64__
+static uint8_t port_in(uint16_t p) { return inb(p); }
+static void port_out(uint16_t p, uint8_t v) { outb(p, v); }
+static void port_wait(void) { for (int i = 0; i < 10; i++) (void)inb(0x80); }   /* ~1 us each */
+static const ec_io_t ports = {port_in, port_out, port_wait};
+
+/* One ACPI EC query (QR_EC on 0x66, the event number on 0x62): its number, or
+ * EC_NONE / EC_BUSY / EC_TIMEOUT (ec_hotkey.h). */
+int casper_ec_event(void)
+{
+	if (!E.board) return EC_NONE;
+	if (mutex_lock_killable(&ec_lock)) return EC_BUSY;
+	static int stuck;
+	int q = ec_query_s(&ports, &stuck);
+	E.queries++;
+	if (q == EC_STALE) { E.stale++; q = EC_BUSY; }
+	mutex_unlock(&ec_lock);
+	return q;
+}
+
+/* An event waits (SCI_EVT): the reader asks again even though no GPE came. */
+int casper_ec_pending(void)
+{
+	if (!E.board) return 0;
+	if (mutex_lock_killable(&ec_lock)) return 0;
+	int p = (inb(EC_SC) & EC_SCI_EVT) != 0;
+	mutex_unlock(&ec_lock);
+	return p;
+}
+#else
+int casper_ec_event(void) { return EC_NONE; }   /* no EC ports on this architecture */
+int casper_ec_pending(void) { return 0; }
+#endif
+
+/* RPIN (port, pin): the AML's way to read a GPIO the EC watches; the lid is
+ * (4, 6). 0 or 1, or -errno. A mailbox command: used only after an EC event. */
+int casper_ec_pin(uint8_t port, uint8_t pin)
+{
+	if (!E.board) return -ENODEV;
+	uint8_t p = port >= 0x41 ? (uint8_t)(port - 0x41) : port, v = 0;
+	if (mutex_lock_killable(&ec_lock)) return -EINTR;
+	int r = ec_cmd(CMD_PIN, (uint16_t)(((p << 4) | (pin & 0x0F)) & 0xFF), 0, &v);
+	E.pins++;
+	mutex_unlock(&ec_lock);
+	return r ? r : (v == 0xFF ? 1 : v != 0);      /* AML: Ones reads as open */
+}
+
 int casper_ec_status(char *buf, size_t cap)
 {
 	kout_t o;
@@ -247,6 +324,10 @@ int casper_ec_status(char *buf, size_t cap)
 	kout_s(&o, " timeouts "); kout_u(&o, E.timeouts);
 	kout_s(&o, " lock_busy "); kout_u(&o, E.lock_busy);
 	kout_s(&o, " last_error "); kout_i(&o, E.last_err);
+	kout_s(&o, "\nram_reads "); kout_u(&o, E.ram_reads);
+	kout_s(&o, " queries "); kout_u(&o, E.queries);
+	kout_s(&o, " pins "); kout_u(&o, E.pins);
+	kout_s(&o, " stale "); kout_u(&o, E.stale);
 	kout_c(&o, '\n');
 	return (int)o.len;
 }
@@ -274,6 +355,7 @@ void casper_ec_init(void)
 	if (!board_matches()) return;
 	E.mb = ioremap(EC_MAILBOX, EC_MAILBOX_LEN, VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
 	if (!E.mb) { E.why = "ioremap"; return; }
+	E.ram1 = ioremap(EC_RAM1, EC_MAILBOX_LEN, VM_READ | VM_NOCACHE | VM_DEVICE);
 	E.board = 1;
 	E.why = "";
 	char v[4];

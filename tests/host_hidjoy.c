@@ -194,8 +194,37 @@ static void t_xpad(void)
 	CHECK("xpad other message", nev == 0);
 }
 
+static void t_gip(void)
+{
+	hj_caps_t c;
+	hj_gip_caps(&c);
+	CHECK("gip caps", key(&c, 0x130) && key(&c, 0x13C) && c.absmax[2] == 1023 && c.absmin[0] == -32768);
+	uint8_t b[16];
+	CHECK("gip power on", hj_gip_init(b, 0, 7) == 5 && b[0] == 0x05 && b[1] == 0x20 && b[2] == 7 && b[3] == 0x01);
+	CHECK("gip led", hj_gip_init(b, 1, 8) == 7 && b[0] == 0x0A && b[2] == 8);
+	CHECK("gip end", hj_gip_init(b, 2, 9) == 0);
+	/* A + menu; dpad down + right, RB; LT 1023, RT 512; LX 32767, LY -32768, RX -1, RY 0 */
+	uint8_t r[18] = { 0x20, 0x00, 0x05, 0x0E, 0x10 | 0x04, 0x02 | 0x08 | 0x20,
+	                  0xFF, 0x03, 0x00, 0x02, 0xFF, 0x7F, 0x00, 0x80, 0xFF, 0xFF, 0, 0 };
+	nev = 0;
+	hj_gip_report(r, sizeof r, emit, 0);
+	CHECK("gip buttons", val(1, 0x130) == 1 && val(1, 0x13b) == 1 && val(1, 0x137) == 1 && val(1, 0x131) == 0);
+	CHECK("gip dpad", val(3, 0x10) == 1 && val(3, 0x11) == 1);
+	CHECK("gip triggers", val(3, 2) == 1023 && val(3, 5) == 512);
+	CHECK("gip sticks", val(3, 0) == 32767 && val(3, 1) == 32767 && val(3, 3) == -1 && val(3, 4) == -1);
+	uint8_t g[6] = { 0x07, 0x20, 0x01, 0x02, 0x01, 0x5B };
+	nev = 0;
+	hj_gip_report(g, sizeof g, emit, 0);
+	CHECK("gip guide", nev == 1 && val(1, 0x13c) == 1);
+	uint8_t hello[4] = { 0x02, 0x20, 0x01, 0x1C };
+	nev = 0;
+	hj_gip_report(hello, sizeof hello, emit, 0);
+	CHECK("gip announce ignored", nev == 0);
+}
+
 int main(void)
 {
+	t_gip();
 	t_f310();
 	t_ds4();
 	t_stick();

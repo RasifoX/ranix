@@ -101,6 +101,7 @@ void multiboot2_parse(uint64_t ptr, uint64_t *mem_size_out)
             /* cmdline string starts right after the 8-byte tag header */
             const char *cl = (const char *)(p + 8);
             cmdline_init(cl);
+            klog_setup();      /* "quiet" from the very first line, as on Linux */
         } else if (tag->type == MB2_TAG_TYPE_MMAP) {
             uint32_t entry_size = *(uint32_t *)(p + 8);
             if (entry_size == 0) break;

@@ -25,11 +25,18 @@ typedef struct {
 	void    (*wait)(void);           /* about 10 microseconds */
 } ec_io_t;
 
-enum { EC_NONE = -1, EC_BUSY = -2, EC_TIMEOUT = -3 };
+enum { EC_NONE = -1, EC_BUSY = -2, EC_TIMEOUT = -3, EC_STALE = -4 };
 /* One event: its number (1-255), or EC_NONE / EC_BUSY / EC_TIMEOUT. */
 int ec_query(const ec_io_t *io);
+/* The same, and a byte left in the output buffer for STALE_POLLS queries in a
+ * row is read and dropped (EC_STALE); *stuck is the caller's count. */
+int ec_query_s(const ec_io_t *io, int *stuck);
 
 enum { ECA_NONE, ECA_MUTE, ECA_VOL_DOWN, ECA_VOL_UP, ECA_BRIGHT_DOWN, ECA_BRIGHT_UP };
 /* What the Casper Nirvana's AML does for event q, as an action. */
 int ec_hotkey_casper(int q);
+
+enum { ECP_NONE, ECP_AC, ECP_BATTERY, ECP_LID };
+/* Which power event q is on the Casper Nirvana (adapter, battery, lid), or ECP_NONE. */
+int ec_power_casper(int q);
 #endif

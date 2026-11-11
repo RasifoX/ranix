@@ -72,7 +72,7 @@ static tty_t tty0 = {
 static void tty_echo_str(tty_t *t, const char *s, int len)
 {
     (void)t;
-    fb_tty_write(s, len);
+    fb_tty_console_write(s, len);
     for (int i = 0; i < len; i++) {
         if (s[i] == '\n') uart_putc('\r');
         uart_putc(s[i]);

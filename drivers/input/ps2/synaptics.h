@@ -32,4 +32,7 @@ extern int syn_middle;   /* both physical buttons together: the middle button */
 void syn_packet(syn_t *s, const uint8_t p[6], uint64_t ms, syn_emit_t emit);
 /* "tap 1", "tap3 0", "middle 1": 0 when set, -1 when not understood */
 int syn_option(const char *k, unsigned long n);
+/* The choices as they are now, one line in the words syn_option takes:
+ * "tap 1 tap3 1 middle 1\n". Returns its length (cap >= 32). */
+int syn_options(char *out, int cap);
 #endif

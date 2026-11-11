@@ -416,6 +416,7 @@ check "c-access"      "OK"            "$(timeout 8 /bin/test_access 2>/dev/null)
 check "c-sigaltstack-size" "OK"     "$(timeout 8 /bin/test_sigaltstack_size 2>/dev/null)"
 check "c-hwdiag"      "OK"            "$(timeout 15 /bin/test_hwdiag 2>&1 | tail -1)"
 check "c-deadline"    "OK"            "$(timeout 8 /bin/test_deadline 2>&1 | tail -1)"
+check "c-splash"      "OK"            "$(timeout 8 /bin/test_splash 2>&1 | tail -1)"
 # Agent+human (arastirma/ajan-insan-ozellikleri.md): kill always wins, rescue channel, claims
 check "c-killwins"    "OK"            "$(timeout 60 /bin/test_killwins 2>&1 | tail -1)"
 check "c-kwatch"      "OK"            "$(timeout 40 /bin/test_killwins kwatch 2>&1 | tail -1)"
@@ -580,6 +581,11 @@ fi
 # its far end is a FIFO that loops every byte back (x86_64 test target, make test).
 if [ "$(uname -m)" = "x86_64" ]; then
 check "c-userial"    "OK"           "$(timeout 40 /bin/test_userial 2>&1 | tail -1)"
+# USB network adapter: QEMU's usb-net (a gadget like the roboRIO's USB port) is usbnet0,
+# leased 172.22.11.x by its DHCP; bytes go round a TCP echo behind it
+check "c-usbnet"     "OK"           "$(timeout 60 /bin/test_usbnet 2>&1 | tail -1)"
+# the same port as a terminal: canonical editing, echo, ^C to its session, break
+check "c-serialtty"  "OK"           "$(timeout 40 /bin/test_serialtty 2>&1 | tail -1)"
 fi
 # NVMe: namespace 1 enumerates and its sectors read/write over the NVM
 # READ/WRITE command path (x86_64 test target, qemu -device nvme).

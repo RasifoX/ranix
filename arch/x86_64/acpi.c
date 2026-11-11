@@ -338,6 +338,12 @@ static void fadt_reset_init(struct rsdp *r)
  * The sleep type for S5 is in the DSDT, in AML: Name (_S5_, Package () {a, b, ...}).
  * A real AML interpreter is not needed to read one constant package. */
 static uint16_t pm1a_cnt, pm1b_cnt, slp_typa, slp_typb;
+static uint16_t sci_int;          /* and these for acpi_events.c */
+static uint32_t gpe0_blk;
+static uint8_t  gpe0_len;
+static const uint8_t *dsdt_aml;
+static uint32_t dsdt_len;
+
 static uint32_t smi_cmd;
 static uint8_t  acpi_enable_val;
 static int      s5_ok;
@@ -364,6 +370,13 @@ static void s5_init(struct rsdp *r)
 	}
 	memcpy(&dsdt, f + 40, 4);
 	memcpy(&smi,  f + 48, 4);
+	memcpy(&sci_int, f + 46, 2);
+	if (((struct sdt_header *)f)->length > 92) {
+		uint32_t g;
+		memcpy(&g, f + 80, 4);
+		if (g && g <= 0xFFFF && f[92] >= 2) { gpe0_blk = g; gpe0_len = f[92]; }
+	}
+	smi_cmd  = smi;
 	memcpy(&a,    f + 64, 4);
 	memcpy(&b,    f + 68, 4);
 	acpi_enable_val = f[52];
@@ -371,6 +384,8 @@ static void s5_init(struct rsdp *r)
 	struct sdt_header *h = (struct sdt_header *)PHYS_TO_VIRT((uint64_t)dsdt);
 	uint32_t len = h->length;
 	const uint8_t *d = (const uint8_t *)h;
+	dsdt_aml = d;
+	dsdt_len = len;
 	for (uint32_t i = sizeof(*h); i + 12 < len; i++) {
 		if (memcmp(d + i, "_S5_", 4) != 0) continue;
 		const uint8_t *p = d + i + 4;
@@ -422,43 +437,23 @@ void acpi_poweroff(void)
 	for (int i = 0; i < 30000000; i++) __asm__ volatile("pause");
 }
 
-/* The power button is a status bit in PM1. Polled: an SCI would need the interrupt
- * routing that lives in AML. Pressed once, the system is told to shut down in order. */
-#define PM1_PWRBTN 0x0100u
+/* What acpi_events.c needs: the PM1 event block, the SCI line, the GPE0 block
+ * and the DSDT, all from the FADT parsed here. 0, or -1 when there is no PM1. */
 
-static void acpi_button_thread(void)
+int acpi_events_info(acpi_ev_info_t *o)
 {
-	for (;;) {
-		task_sleep_until(kernel_ticks + TIMER_HZ / 4);
-		if (!(inw_port(pm1a_evt) & PM1_PWRBTN)) continue;
-		outw_port(pm1a_evt, PM1_PWRBTN);
-		kprintf(KERN_INFO "acpi: power button\n");
-		process_t *init = proc_get(1);
-		if (init) {
-			task_signal(init, 30);     /* SIGPWR */
-			proc_put(init);
-		}
-	}
-}
-
-static void acpi_diag(hw_out_t *o)
-{
-	hw_begin(o, "power", "acpi");
-	hw_kv(o, "s5", s5_ok);
-	hw_kv(o, "sci_en", s5_ok ? inw_port(pm1a_cnt) & 1 : 0);
-	hw_kv(o, "smi_cmd", smi_cmd);
-	hw_kv(o, "acpi_enable", acpi_enable_val);
-	hw_kv(o, "pm1_sts", inw_port(pm1a_evt));
-	hw_kv(o, "pm1_en", inw_port((uint16_t)(pm1a_evt + pm1_len / 2)));
-	hw_end(o);
-}
-
-void acpi_button_start(void)
-{
-	if (!pm1a_evt) return;
-	outw_port(pm1a_evt, PM1_PWRBTN);       /* a press from before does not count */
-	hwdiag_register(acpi_diag);
-	proc_create("acpi_button", acpi_button_thread);
+	if (!pm1a_evt) return -1;
+	o->pm1a_evt = pm1a_evt;
+	o->pm1_len = pm1_len;
+	o->pm1a_cnt = pm1a_cnt;
+	o->sci_int = sci_int;
+	o->gpe0_blk = gpe0_blk;
+	o->gpe0_len = gpe0_len;
+	o->smi_cmd = smi_cmd;
+	o->acpi_enable = acpi_enable_val;
+	o->dsdt = dsdt_aml;
+	o->dsdt_len = dsdt_len;
+	return 0;
 }
 
 void acpi_reset(void)

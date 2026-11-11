@@ -259,3 +259,49 @@ void hj_xpad_report(const uint8_t *r, uint32_t len, hj_emit_t emit, void *ctx)
 	emit(ctx, HJ_EV_ABS, HJ_ABS_RX, le_s16(r + 10));
 	emit(ctx, HJ_EV_ABS, HJ_ABS_RY, ~le_s16(r + 12));
 }
+
+/* ---- Xbox One / Series (GIP) ---- */
+
+/* message 0x20, bytes 4 and 5, bit by bit (dpad bits are axes, 0 here) */
+static const uint16_t gip_btn[16] = {
+	0, 0, 0x13b, 0x13a, 0x130, 0x131, 0x133, 0x134,   /* -, -, menu, view, A, B, X, Y */
+	0, 0, 0, 0, 0x136, 0x137, 0x13d, 0x13e             /* dpad, LB, RB, left and right stick */
+};
+
+void hj_gip_caps(hj_caps_t *c)
+{
+	hj_xpad_caps(c);                  /* the same buttons and sticks */
+	set_abs(c, HJ_ABS_Z, 0, 1023);    /* triggers: 10 bits */
+	set_abs(c, HJ_ABS_RZ, 0, 1023);
+}
+
+uint32_t hj_gip_init(uint8_t *b, int n, uint8_t seq)
+{
+	static const uint8_t power_on[5] = { 0x05, 0x20, 0x00, 0x01, 0x00 };
+	static const uint8_t led_on[7] = { 0x0A, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14 };
+	const uint8_t *m = n == 0 ? power_on : n == 1 ? led_on : 0;
+	uint32_t len = n == 0 ? sizeof power_on : n == 1 ? sizeof led_on : 0;
+	for (uint32_t i = 0; i < len; i++) b[i] = m[i];
+	if (len) b[2] = seq;
+	return len;
+}
+
+void hj_gip_report(const uint8_t *r, uint32_t len, hj_emit_t emit, void *ctx)
+{
+	if (len >= 5 && r[0] == 0x07) {                      /* the Xbox button */
+		emit(ctx, HJ_EV_KEY, 0x13c, r[4] & 1);
+		return;
+	}
+	if (len < 18 || r[0] != 0x20) return;
+	uint32_t b = r[4] | (uint32_t)r[5] << 8;
+	for (int i = 0; i < 16; i++)
+		if (gip_btn[i]) emit(ctx, HJ_EV_KEY, gip_btn[i], (int32_t)(b >> i & 1));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_HAT0X, (b & 0x800 ? 1 : 0) - (b & 0x400 ? 1 : 0));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_HAT0Y, (b & 0x200 ? 1 : 0) - (b & 0x100 ? 1 : 0));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_Z, (r[6] | r[7] << 8) & 0x3FF);
+	emit(ctx, HJ_EV_ABS, HJ_ABS_RZ, (r[8] | r[9] << 8) & 0x3FF);
+	emit(ctx, HJ_EV_ABS, HJ_ABS_X, le_s16(r + 10));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_Y, ~le_s16(r + 12));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_RX, le_s16(r + 14));
+	emit(ctx, HJ_EV_ABS, HJ_ABS_RY, ~le_s16(r + 16));
+}

@@ -33,4 +33,14 @@ int         arch_fw_lock(uint32_t timeout_ms);
 void        arch_fw_unlock(void);
 int         arch_fw_oem(char oem[7], char table[9]);
 void        casper_ec_init(void);
+/* and what drivers/platform/casper_power.c needs (the power scenarios) */
+typedef struct { char *p; size_t rem; } hw_out_t;
+typedef void (*hwdiag_fn)(hw_out_t *o);
+void        hwdiag_register(hwdiag_fn fn);
+void        hw_begin(hw_out_t *o, const char *cls, const char *name);
+void        hw_kv(hw_out_t *o, const char *key, uint64_t v);
+void        hw_end(hw_out_t *o);
+#define SW_LID 0x00
+void        input_report_switch(uint16_t code, int32_t value);
+void        backlight_unblank(void);
 #endif

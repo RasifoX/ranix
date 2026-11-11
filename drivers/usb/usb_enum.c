@@ -4,7 +4,7 @@
  */
 /*
  * Enumeration: a new device gets a slot, an address and a configuration, and
- * becomes a disk, a serial port, a keyboard or mouse, or a hub. dev_release undoes it.
+ * becomes a disk, a network adapter, a serial port, a keyboard or mouse, or a hub. dev_release undoes it.
  *
  * Part of the xHCI driver: compiled inside drivers/usb/xhci.c (a textual include,
  * like kernel/sys/syscall_*.c), so it shares that file's static types and state
@@ -255,7 +255,7 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 	uint8_t *dd = d->dma;
 	uint16_t vid = (uint16_t)(dd[8] | dd[9] << 8);
 	uint16_t pid = (uint16_t)(dd[10] | dd[11] << 8);
-	uint8_t  serial_idx = dd[16], devclass = dd[4];
+	uint8_t  serial_idx = dd[16], devclass = dd[4], ncfg = dd[17];
 	d->vid = vid;
 	d->pid = pid;
 	d->bcd = (uint16_t)(dd[12] | dd[13] << 8);
@@ -292,6 +292,12 @@ static int enumerate(xhci_t *x, int port, usb_dev_t *parent, int hub_port, uint3
 
 	msc_desc_t m;
 	cfg_parse(d->dma, total, &m);
+	un_desc_t nd;
+	uint8_t ncfgval = cfgval;
+	if (!m.found && usbnet_find(d, ncfg, total, &nd, &ncfgval) != UN_NONE) {
+		if (usbnet_attach(d, &nd, ncfgval) != 0) goto fail;
+		return 0;
+	}
 	us_desc_t u;
 	if (!m.found && us_match(vid, pid, d->dma, total, &u) != US_NONE) {
 		if (serial_attach(d, &u, cfgval) != 0) goto fail;

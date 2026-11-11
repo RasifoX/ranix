@@ -25,6 +25,9 @@
 #include <kernel/fs/devfs.h>
 #include <kernel/capabilities.h>
 #include <kernel/errno.h>
+#include <kernel/cmdline.h>
+#include <kernel/net/net.h>
+#include <kernel/net/ipv6.h>
 
 /*
  * xHCI host controller + USB enumeration + bulk-only mass-storage. Polling, no
@@ -50,7 +53,8 @@
  * tick, diagnostics), xhci_hw.h (registers), xhci_ring.c (rings, events, commands),
  * xhci_xfer.c (control and bulk transfers), usb_storage.c (mass storage), usb_hid.c
  * (keyboards and mice), usb_serial.c (serial ports: CDC-ACM, CH341, CP210x, FTDI;
- * the chip arithmetic is userial_proto.c), usb_enum.c (enumeration, hubs),
+ * the chip arithmetic is userial_proto.c), usb_net.c (network adapters: CDC-ECM,
+ * RNDIS; usbnet_proto.c), usb_enum.c (enumeration, hubs),
  * usb_port.c (plug, unplug).
  */
 
@@ -58,6 +62,7 @@
 
 #include "xhci_hw.h"
 #include "userial_proto.h"
+#include "usbnet_proto.h"
 #include "../input/hidjoy.h"
 
 typedef struct {
@@ -102,6 +107,7 @@ typedef struct {
 #define HID_HUB   3
 #define HID_JOY   4           /* a HID joystick or gamepad: /dev/input/eventN, jsN */
 #define HID_XPAD  5           /* an Xbox 360 style (XInput) pad, vendor class */
+#define HID_GIP   6           /* an Xbox One or Series pad (GIP), vendor class */
 
 /* Where a mouse report keeps its fields, in bits. */
 typedef struct {
@@ -124,7 +130,9 @@ typedef struct {
 	uint64_t buf_phys;
 	mouse_map_t map;
 	hidjoy_t *joy;             /* HID_JOY: where its values sit */
-	struct input_dev *idev;    /* HID_JOY, HID_XPAD: its evdev node */
+	struct input_dev *idev;    /* HID_JOY, HID_XPAD, HID_GIP: its evdev node */
+	uint8_t  out_addr, gip_seq; /* HID_GIP: its interrupt OUT endpoint, message number */
+	uint16_t out_mps;
 	uint8_t  prev[8];          /* keyboard: last report */
 	uint8_t  buttons;
 } hid_ep_t;
@@ -169,6 +177,8 @@ typedef struct usb_dev {
 	uint8_t   is_hub, hub_ports;
 	struct userial *ser;       /* a serial port, NULL if not one */
 	uint8_t   ser_reset, ser_resets;
+	struct usbnet *net;        /* a network adapter, NULL if not one */
+	uint8_t   net_reset, net_resets;
 	uint16_t  vid, pid, bcd;   /* from the device descriptor */
 	uint8_t   iproduct;        /* its product string's index */
 	uint32_t  hub_tried;
@@ -253,6 +263,7 @@ static void dma_free(uint64_t *phys)
 #include "usb_storage.c"
 #include "usb_hid.c"
 #include "usb_serial.c"
+#include "usb_net.c"
 #include "usb_enum.c"
 #include "usb_port.c"
 
@@ -333,6 +344,9 @@ static void usbd_thread(void)
 		event_t ev;
 		while (evt_next(x, &ev, 0))
 			;                              /* evt_next routed what mattered */
+		un_register_pending();
+		if (__atomic_exchange_n(&un_kick, 0, __ATOMIC_SEQ_CST)) un_service();
+		if (__atomic_exchange_n(&ser_kick, 0, __ATOMIC_SEQ_CST)) ser_echo_out();
 		uint64_t ports = __atomic_exchange_n(&x->port_pending, 0, __ATOMIC_SEQ_CST);
 		for (uint32_t i = 0; i < x->nports && i < MAX_PORTS; i++)
 			if (ports >> i & 1) port_service(x, i);
@@ -341,6 +355,7 @@ static void usbd_thread(void)
 			for (int k = 0; d->used && !d->gone && k < d->nhid; k++)
 				if (d->hid[k].needs_reset) hid_recover(d, &d->hid[k]);
 			if (d->used && !d->gone && d->ser && d->ser_reset) ser_recover(d);
+			if (d->used && !d->gone && d->net && d->net_reset) un_recover(d);
 			if (d->used && d->is_hub && d->hub_change) {
 				uint32_t ch = __atomic_exchange_n(&d->hub_change, 0, __ATOMIC_SEQ_CST);
 				for (uint32_t p = 1; p <= d->hub_ports; p++)
@@ -369,7 +384,7 @@ static void xhci_tick(void)
 {
 	xhci_t *x = &g_xhci;
 	if (!usbd_idle || !usbd_task) return;
-	if (ring_has_event(x) || (rep_code && (int64_t)(kernel_ticks - rep_at) >= 0))
+	if (ring_has_event(x) || un_kick || ser_kick || (rep_code && (int64_t)(kernel_ticks - rep_at) >= 0))
 		task_wake(usbd_task);
 }
 
@@ -417,6 +432,7 @@ static void xhci_diag(hw_out_t *o)
 		if (ud) {
 			hw_kv(o, "disk", ud->is_disk);
 			if (ud->ser) hw_ks(o, "serial", ud->ser->name);
+			if (ud->net) hw_ks(o, "net", ud->net->nd.name);
 			for (int k = 0; k < ud->nhid; k++)
 				hw_ks(o, "hid", hid_kind_name(ud->hid[k].kind));
 		}

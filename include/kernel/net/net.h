@@ -96,6 +96,8 @@ typedef struct netdev {
     int         link_up;                  /* current carrier state (link watcher) */
     int         admin_down;               /* root set it down (`ip link set X down`) */
     uint64_t    renew_tick;               /* when to renew the DHCP lease, 0 = none */
+    int         keep_dns;                 /* a gadget's link (USB): its lease does not
+                                           * replace the system's DNS server */
     void       *priv;
 
     /* /proc/net/dev. Atomic: TX runs from syscalls, RX from any polling CPU. */
@@ -159,6 +161,11 @@ static inline int netdev_usable(const netdev_t *d)
 {
     return !d->admin_down && (d->link_up || !d->link_check);
 }
+
+/* Set once the boot's devices are registered and configured (net_dhcp_all). A
+ * hotplugged device found earlier waits for it, so the built-in NICs keep their
+ * interface numbers (and route metrics) whatever is plugged in at boot. */
+extern volatile int net_boot_done;
 
 /* Called from scheduler tick / idle loop — drains RX queues */
 void net_poll(void);

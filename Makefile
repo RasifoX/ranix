@@ -158,6 +158,7 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/mach-pc/board.c \
         arch/x86_64/mach-pc/pstore.c \
         arch/x86_64/acpi.c \
+        arch/x86_64/acpi_events.c \
         arch/x86_64/multiboot2.c
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
@@ -178,6 +179,7 @@ else ifeq ($(ARCH),x86_64)
         drivers/block/nvme.c \
         drivers/usb/xhci.c \
         drivers/usb/userial_proto.c \
+        drivers/usb/usbnet_proto.c \
         drivers/net/virtio_net.c \
         drivers/virtio/virtio_pci.c \
         drivers/net/rtl8168.c \
@@ -293,7 +295,7 @@ PY_VER             = 3.12.3
 PY_XY              = 3.12
 PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
 
-.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest bootscreentest acpieventstest hostpowertest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -981,7 +983,8 @@ TEST_LOG = $(BUILD_DIR)/serial-test.log
 ifeq ($(ARCH),x86_64)
 # -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
-test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
+# hostpowertest first: the Casper EC/battery model runs where QEMU has no such EC
+test: hostpowertest iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
 	@rm -f $(TEST_LOG) $(BUILD_DIR)/userial
 	@mkfifo $(BUILD_DIR)/userial
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) $(QEMU_NET) -smp 4 -m 3G -display none \
@@ -993,6 +996,8 @@ test: iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-
 	    -device usb-storage,bus=xhci.0,drive=u0 \
 	    -chardev pipe,id=ser0,path=$(BUILD_DIR)/userial \
 	    -device usb-serial,bus=xhci.0,chardev=ser0 \
+	    -netdev user,id=un0,net=172.22.11.0/24,host=172.22.11.2,dhcpstart=172.22.11.15,guestfwd=tcp:172.22.11.100:7-cmd:cat \
+	    -device usb-net,bus=xhci.0,netdev=un0,mac=52:54:00:12:34:77 \
 	    -drive file=$(BUILD_DIR)/nvme-test.img,if=none,id=nvm0,format=raw \
 	    -device nvme,drive=nvm0,serial=ranix0 \
 	    $(TEST_GPU) \
@@ -1016,6 +1021,22 @@ endif
 # pivots into a full disk rootfs and / itself persists. Both must print PASS.
 oomboottest:
 	@bash tests/oomboot.sh
+
+# The screen while booting and shutting down (quiet boot screen, Esc, errors,
+# the first message on the classic console): four short QEMU boots.
+bootscreentest: iso
+	@python3 tests/bootscreen.py
+
+# ACPI events in QEMU: the power button polled and through the SCI (two boots)
+acpieventstest: iso
+	@python3 tests/acpievents.py
+
+# Host tests of the power code: Casper battery decode, power_supply text, EC model
+hostpowertest:
+	@mkdir -p $(BUILD_DIR)/host
+	cc -std=gnu11 -Wall -Wextra -DHOST_TEST -I. -Iinclude tests/host_power.c drivers/platform/casper_bat.c kernel/lib/ps_format.c -o $(BUILD_DIR)/host/power && $(BUILD_DIR)/host/power
+	cc -std=gnu11 -Wall -Wextra -I. tests/host_ec_hotkey.c drivers/input/ec_hotkey.c -o $(BUILD_DIR)/host/ec_hotkey && $(BUILD_DIR)/host/ec_hotkey
+	TMPDIR=$(abspath $(BUILD_DIR))/host sh tests/casper_ec_host/run.sh
 
 persisttest:
 	@bash tests/persist.sh

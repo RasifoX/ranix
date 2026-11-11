@@ -55,6 +55,22 @@ int main(void)
 	      ec_hotkey_casper(0x13) == ECA_MUTE, "Casper: Fn+F11/F12 and mute");
 	CHECK(ec_hotkey_casper(0x0E) == ECA_BRIGHT_DOWN && ec_hotkey_casper(0x0F) == ECA_BRIGHT_UP, "Casper: brightness");
 	CHECK(ec_hotkey_casper(0x0A) == ECA_NONE && ec_hotkey_casper(0x50) == ECA_NONE, "Casper: others ignored");
+	/* a byte nobody read keeps OBF set: dropped on the third look, then events flow */
+	int stuck = 0;
+	nq = 0; obf = 1; data = 0x77; ibf_busy = 0;
+	queue[nq++] = 0x0E;
+	reads = data_reads;
+	CHECK(ec_query_s(&io, &stuck) == EC_BUSY && ec_query_s(&io, &stuck) == EC_BUSY, "stale byte: busy twice");
+	CHECK(ec_query_s(&io, &stuck) == EC_STALE && data_reads == reads + 1 && !obf, "stale byte: read and dropped");
+	CHECK(ec_query_s(&io, &stuck) == 0x0E, "then the event comes through");
+	obf = 1; queue[nq++] = 0x13;
+	CHECK(ec_query(&io) == EC_BUSY && ec_query(&io) == EC_BUSY && ec_query(&io) == EC_BUSY && obf,
+	      "plain ec_query never drops a byte");
+	obf = 0;
+	CHECK(ec_power_casper(0xA0) == ECP_AC && ec_power_casper(0xA1) == ECP_BATTERY && ec_power_casper(0xA3) == ECP_BATTERY &&
+	      ec_power_casper(0xA5) == ECP_BATTERY && ec_power_casper(0x81) == ECP_LID, "Casper: adapter, battery, lid");
+	CHECK(ec_power_casper(0x14) == ECP_NONE && ec_hotkey_casper(0xA0) == ECA_NONE && ec_hotkey_casper(0x81) == ECA_NONE,
+	      "Casper: keys and power events do not overlap");
 	printf(fails ? "FAIL %d\n" : "OK\n", fails);
 	return fails != 0;
 }

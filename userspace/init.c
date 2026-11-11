@@ -11,6 +11,7 @@
 #include <sys/mount.h>
 #include <sys/syscall.h>
 #include <string.h>
+#include <signal.h>
 
 #define TIOCSPGRP 0x5410
 
@@ -68,9 +69,19 @@ static void do_poweroff(void)
     _exit(0);
 }
 
+/* The power button (the kernel sends SIGPWR): a test machine says so and goes
+ * on; tests/acpievents.py looks for the line. Without a handler pid 1 would die. */
+static void on_sigpwr(int sig)
+{
+    (void)sig;
+    static const char m[] = "init: SIGPWR (power button)\n";
+    if (write(2, m, sizeof m - 1) < 0) { }
+}
+
 int main(void)
 {
     maybe_switch_root();   /* may not return (re-execs from the disk root) */
+    signal(SIGPWR, on_sigpwr);
 
     close(0); close(1); close(2);
     int tfd = open("/dev/console", O_RDWR);

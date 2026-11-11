@@ -61,6 +61,7 @@ void board_secondary_irq_init(void)
 
 
 #include <drivers/block/sdcard.h>
+#include <drivers/platform/casper_power.h>
 
 void board_drivers_register(void)
 {
@@ -69,14 +70,15 @@ void board_drivers_register(void)
 	virtio_blk_init();
 	ahci_init();
 	xhci_init();
-	acpi_button_start();
 	nvme_init();
 	virtio_net_pci_init();
 	rtl8168_init();
 	hda_init();
 	rtw8723_init();
-	casper_ec_init();          /* one laptop's EC; off unless asked for */
-	ec_keys_init();            /* its Fn keys; needs casper_ec_init first */
+	casper_ec_init();          /* one laptop's EC: the one way into it */
+	casper_power_init();       /* its adapter and battery (EC RAM); needs casper_ec_init */
+	acpi_button_start();       /* power button; the SCI (ranix.sci=1) needs the EC's board known */
+	ec_keys_init();            /* its events (keys, power, lid); off unless asked for */
 }
 
 board_config_t *board_get_config(void) { return &config; }

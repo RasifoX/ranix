@@ -8,6 +8,7 @@
  * file inodes carry a read fop). Currently exposes:
  *   /sys/kernel/{ostype,osrelease,hostname}
  *   /sys/class/net/<dev>/{address,mtu,operstate}   (one dir per registered netdev)
+ *   /sys/class/power_supply/<name>/...              (kernel/power_supply.c)
  * Directory entries are generated on demand from the live netdev list, so lo
  * and eth0 appear automatically.
  * ───────────────────────────────────────────────────────────────────────── */
@@ -22,6 +23,7 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/lib/string.h>
 #include <kernel/net/net.h>
+#include <kernel/power_supply.h>
 #include <kernel/block.h>
 #include <kernel/pci.h>
 #include <kernel/mm/hugetlb.h>
@@ -39,12 +41,13 @@
 /* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
 #pragma weak ps2_aux_report
 #pragma weak syn_option
+#pragma weak syn_options
 
 enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET_STATE,
        SF_BLK_SIZE, SF_BLK_STAT, SF_BLK_RO, SF_BLK_RO_DENIED, SF_BLK_ID, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
        SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
-       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE,
+       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE, SF_LID,
        SF_ZRAM_DISKSIZE, SF_ZRAM_MMSTAT };
 
 static int put_u64(char *o, uint64_t v)
@@ -232,7 +235,11 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case SF_CGROUP_CTRL:  n = put_str(tmp, "cpu memory pids freezer\n"); break;
 	case SF_CGROUP_PROCS: n = put_str(tmp, "1\n"); break;
 	case SF_THP_ENABLED:  n = put_str(tmp, "always [madvise] never\n"); break;
-	case SF_TOUCHPAD: { n = ps2_aux_report ? ps2_aux_report((char *)tmp, 128) : 0; break; }
+	case SF_TOUCHPAD: {                  /* what the pad said, then the choices written to it */
+		n = ps2_aux_report ? ps2_aux_report((char *)tmp, 128) : 0;
+		if (syn_options) n += syn_options((char *)tmp + n, 64);
+		break;
+	}
 	case SF_VOLUME: n = put_u64(tmp, (uint64_t)sound_volume()); tmp[n++] = '\n'; break;
 	case SF_CSTATE: {
 		n = put_u64(tmp, (uint64_t)arch_idle_get()); tmp[n++] = '\n';
@@ -242,6 +249,11 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		int v = backlight_get();
 		if (v < 0) return -ENODEV;
 		n = put_u64(tmp, (uint64_t)v); tmp[n++] = '\n';
+		break;
+	}
+	case SF_LID: {
+		int l = power_lid_get();
+		n = put_str(tmp, l < 0 ? "unknown\n" : l ? "open\n" : "closed\n");
 		break;
 	}
 	case SF_KEYMAP: {
@@ -400,6 +412,7 @@ static vfs_inode_t *sysfs_kernel_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "touchpad") == 0) return sysfs_file_rw(SF_TOUCHPAD, -1);
 	if (strcmp(name, "backlight") == 0) return sysfs_file_rw(SF_BACKLIGHT, -1);
 	if (strcmp(name, "cstate") == 0) return sysfs_file_rw(SF_CSTATE, -1);
+	if (strcmp(name, "lid") == 0) return sysfs_file(SF_LID, -1);   /* read only: open, closed, unknown */
 	if (strcmp(name, "ranix_thermal") == 0) return thermal_sysfs_file();
 	if (strcmp(name, "ranix_ec") == 0) return casper_ec_sysfs_file();
 	for (unsigned i = 0; i < 3; i++)
@@ -631,15 +644,16 @@ static vfs_inode_t *sysfs_class_lookup(vfs_inode_t *dir, const char *name)
 	(void)dir;
 	if (strcmp(name, "net") == 0) return sysfs_dir(&sysfs_net_iops, -1);
 	if (strcmp(name, "drm") == 0) return drm_sysfs_root("class/drm");
+	if (strcmp(name, "power_supply") == 0) return power_supply_sysfs_root();
 	return NULL;
 }
 static int sysfs_class_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "net", "drm" };
-	if (idx >= 2) return -1;
+	const char *names[] = { "net", "drm", "power_supply" };
+	if (idx >= 3) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
-	put_str(out->name, names[idx]); out->name[3] = '\0';
+	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
 }
 

@@ -102,7 +102,7 @@ static void mouse_report(hid_ep_t *h, const uint8_t *r, uint32_t len)
 static const char *hid_kind_name(int kind)
 {
 	return kind == HID_KBD ? "keyboard" : kind == HID_HUB ? "hub" : kind == HID_JOY ? "joystick" :
-	       kind == HID_XPAD ? "xinput pad" : "mouse";
+	       kind == HID_XPAD ? "xinput pad" : kind == HID_GIP ? "xbox one pad" : "mouse";
 }
 
 /* ---- joysticks and gamepads ---- */
@@ -135,6 +135,7 @@ static int joy_node(usb_dev_t *d, hid_ep_t *h)
 	static input_dev_info_t info;          /* 1.4 KB; the controller lock is held */
 	hj_caps_t c;
 	if (h->kind == HID_XPAD) hj_xpad_caps(&c);
+	else if (h->kind == HID_GIP) hj_gip_caps(&c);
 	else hj_caps(h->joy, &c);
 	memset(&info, 0, sizeof info);
 	usb_string(d, d->iproduct, info.name, sizeof info.name);
@@ -200,9 +201,10 @@ static void hid_event(usb_dev_t *d, hid_ep_t *h, uint32_t status)
 		__atomic_fetch_or(&d->hub_change, m, __ATOMIC_SEQ_CST);
 	} else if (h->kind == HID_KBD) {
 		if (got >= 8) kbd_report(h, h->buf);
-	} else if (h->kind == HID_JOY || h->kind == HID_XPAD) {
+	} else if (h->kind == HID_JOY || h->kind == HID_XPAD || h->kind == HID_GIP) {
 		if (h->kind == HID_JOY) hj_report(h->joy, h->buf, got, joy_emit, h->idev);
-		else hj_xpad_report(h->buf, got, joy_emit, h->idev);
+		else if (h->kind == HID_XPAD) hj_xpad_report(h->buf, got, joy_emit, h->idev);
+		else hj_gip_report(h->buf, got, joy_emit, h->idev);
 		input_dev_sync(h->idev);
 	} else {
 		mouse_report(h, h->buf, got);
@@ -281,29 +283,39 @@ static int mouse_parse(const uint8_t *p, uint32_t n, mouse_map_t *m)
 /* The HID interfaces of a configuration, and an XInput pad's (vendor class 0xFF,
  * subclass 0x5D, protocol 1). Non-boot interfaces wait for a look at their report
  * descriptor: a mouse, a joystick or gamepad, or (most often) a keyboard's media
- * keys, which are left alone. */
+ * keys, which are left alone. An Xbox One or Series pad (GIP, vendor class 0xFF,
+ * 0x47, 0xD0) also has an interrupt OUT endpoint, where it is told to start. */
 static void hid_scan(usb_dev_t *d, const uint8_t *c, uint32_t total)
 {
 	hid_ep_t *h = 0;
-	for (uint32_t i = 0; i + 2 <= total && d->nhid < MAX_HID; ) {
+	for (uint32_t i = 0; i + 2 <= total; ) {
 		uint8_t blen = c[i], btype = c[i + 1];
 		if (blen < 2 || blen > total - i) break;
 		if (btype == 4 && blen >= 9) {
 			h = 0;
+			if (d->nhid >= MAX_HID) break;
 			int xpad = c[i + 5] == 0xFF && c[i + 6] == 0x5D && c[i + 7] == 0x01;
-			if ((c[i + 5] == 3 || xpad) && c[i + 3] == 0) {
+			int gip = c[i + 5] == 0xFF && c[i + 6] == 0x47 && c[i + 7] == 0xD0;
+			if ((c[i + 5] == 3 || xpad || gip) && c[i + 3] == 0) {
 				h = &d->hid[d->nhid];
 				memset(h, 0, sizeof(*h));
 				h->iface = c[i + 2];
 				h->proto = c[i + 7];
-				h->kind = xpad ? HID_XPAD : h->proto == 1 && c[i + 5] == 3 ? HID_KBD : HID_MOUSE;
+				h->kind = gip ? HID_GIP : xpad ? HID_XPAD :
+				          h->proto == 1 && c[i + 5] == 3 ? HID_KBD : HID_MOUSE;
 			}
-		} else if (btype == 5 && blen >= 7 && h && (c[i + 2] & 0x80) && (c[i + 3] & 3) == 3) {
-			h->addr = c[i + 2];
-			h->mps = (uint16_t)(c[i + 4] | c[i + 5] << 8) & 0x7FF;
-			h->interval = c[i + 6];
-			if (h->mps) d->nhid++;
-			h = 0;
+		} else if (btype == 5 && blen >= 7 && h && (c[i + 3] & 3) == 3) {
+			uint16_t mps = (uint16_t)(c[i + 4] | c[i + 5] << 8) & 0x7FF;
+			if ((c[i + 2] & 0x80) && !h->addr) {
+				h->addr = c[i + 2];
+				h->mps = mps;
+				h->interval = c[i + 6];
+				if (h->mps) d->nhid++;
+			} else if (!(c[i + 2] & 0x80) && h->kind == HID_GIP && !h->out_addr) {
+				h->out_addr = c[i + 2];            /* a GIP pad is told to start here */
+				h->out_mps = mps;
+			}
+			if (h->kind != HID_GIP) h = 0;
 		}
 		i += blen;
 	}
@@ -333,6 +345,38 @@ static int setup_int_ep(usb_dev_t *d, hid_ep_t *h, uint32_t speed)
 	return dci;
 }
 
+/* A GIP pad's interrupt OUT endpoint, on d->ep_out (a pad is no disk). */
+static int setup_int_out(usb_dev_t *d, hid_ep_t *h, uint32_t speed)
+{
+	int dci = (h->out_addr & 0x0F) * 2;
+	if (ring_init(&d->ep_out) != 0) return -1;
+	uint32_t iv = h->interval, e = 0;
+	if (speed >= 3) e = iv ? (iv - 1 > 15 ? 15 : iv - 1) : 0;
+	else { iv = iv ? iv * 8 : 8; while ((2u << e) <= iv) e++; if (e < 3) e = 3; if (e > 10) e = 10; }
+	uint32_t *ep = ctx_ep(d, dci);
+	ep[0] = e << 16;
+	ep[1] = (3u << 3) | (3u << 1) | ((uint32_t)h->out_mps << 16);   /* interrupt OUT, CErr 3 */
+	ep[2] = (uint32_t)(d->ep_out.phys | d->ep_out.cycle);
+	ep[3] = (uint32_t)(d->ep_out.phys >> 32);
+	ep[4] = (uint32_t)h->out_mps | ((uint32_t)h->out_mps << 16);
+	d->dci_out = dci;
+	d->mps_out = h->out_mps;
+	d->addr_out = h->out_addr;
+	return dci;
+}
+
+/* "Power on" and the light: until then a GIP pad sends nothing. */
+static void gip_start(usb_dev_t *d, hid_ep_t *h)
+{
+	for (int n = 0; ; n++) {
+		uint8_t *b = d->dma + 3584;                    /* after the report buffers */
+		uint32_t len = hj_gip_init(b, n, ++h->gip_seq), got = 0;
+		if (!len) break;
+		if (bulk_xfer_ms(d, 0, d->dma_phys + 3584, len, &got, 500) != XFER_OK)
+			kprintf(KERN_WARN "xhci: port %d xbox one pad: start message %d not taken\n", d->port + 1, n);
+	}
+}
+
 /* After SET_CONFIGURATION: name each interface, open its endpoint, start listening.
  * Returns how many are in use. */
 static int hid_attach(usb_dev_t *d, uint32_t speed)
@@ -344,7 +388,8 @@ static int hid_attach(usb_dev_t *d, uint32_t speed)
 		if (src.kind == HID_KBD) {
 			ctrl_xfer(d, 0x21, 0x0B, 0, src.iface, 0, 0);   /* boot protocol */
 			ctrl_xfer(d, 0x21, 0x0A, 0, src.iface, 0, 0);   /* report on change only */
-		} else if (src.kind == HID_XPAD) {
+		} else if (src.kind == HID_XPAD || src.kind == HID_GIP) {
+			if (src.kind == HID_GIP && !src.out_addr) continue;
 			if (joy_node(d, &src) != 0) continue;
 		} else {
 			/* the descriptor's length is in the HID descriptor, but 1024 is plenty
@@ -385,6 +430,11 @@ static int hid_attach(usb_dev_t *d, uint32_t speed)
 		if (dci < 0) return -1;
 		ic[1] |= 1u << dci;
 		if (dci > maxdci) maxdci = dci;
+		if (d->hid[i].kind != HID_GIP) continue;
+		dci = setup_int_out(d, &d->hid[i], speed);       /* one GIP pad per device */
+		if (dci < 0) return -1;
+		ic[1] |= 1u << dci;
+		if (dci > maxdci) maxdci = dci;
 	}
 	sc[0] = (sc[0] & ~(0x1Fu << 27)) | ((uint32_t)maxdci << 27);
 	if (cmd_exec(x, d->in_ctx_phys, TRB_TYPE(TRB_CONFIGURE_EP) | ((uint32_t)d->slot << 24), 0)
@@ -393,6 +443,7 @@ static int hid_attach(usb_dev_t *d, uint32_t speed)
 		return -1;
 	}
 	for (int i = 0; i < keep; i++) hid_queue(d, &d->hid[i]);
+	for (int i = 0; i < keep; i++) if (d->hid[i].kind == HID_GIP) gip_start(d, &d->hid[i]);
 	return keep;
 }
 

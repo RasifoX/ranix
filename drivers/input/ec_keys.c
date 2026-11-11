@@ -3,22 +3,26 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /*
- * Fn keys that are embedded-controller events, not scancodes. On the Casper
- * Nirvana, Fn+F11/F12 (volume) and the brightness keys reach the OS only as EC
- * events; its firmware's AML turns them into keys, and Ranix runs no AML. This
- * file asks the EC for its events every 50 ms (Ranix takes no SCI) and does what
- * the AML would: the sound keys go into the keyboard path as E0 2E / E0 30 /
- * E0 20, so the volume changes and programs see KEY_VOLUMEDOWN and friends;
- * the brightness keys move the backlight by a tenth.
+ * The EC event reader. On the Casper Nirvana, Fn+F11/F12 (volume), the
+ * brightness keys, the adapter, the battery and the lid reach the OS only as EC
+ * events; its firmware's AML handles them, and Ranix runs no AML. This file asks
+ * the EC for its events (through casper_ec.c, the one way into the EC) and does
+ * what the AML would:
+ *   - the sound keys go into the keyboard path as E0 2E / E0 30 / E0 20, so the
+ *     volume changes and programs see KEY_VOLUMEDOWN and friends;
+ *   - the brightness keys move the backlight by a tenth;
+ *   - adapter, battery and lid events go to casper_power.c.
+ * With the SCI on (ranix.sci=1, arch/x86_64/acpi.c) the EC's GPE wakes this
+ * thread and it asks only then, plus once every SAFETY_S seconds. Without it,
+ * it asks every POLL_MS.
  *
- * Doors: none. Off by default: the poll is new traffic to an EC that is still
- * a suspect in this machine's power cuts, so it runs only with ranix.ec_keys=1
- * on the command line, and only on a board with a table in ec_hotkey.c (now the
- * Casper, matched by casper_ec.c); everywhere else the EC ports are not touched.
+ * Doors: none. Off by default: asking is new traffic to an EC that is still a
+ * suspect in this machine's power cuts, so it runs only with ranix.ec_events=1
+ * (ranix.ec_keys=1 is the old name) on the command line, and only on a board
+ * with a table in ec_hotkey.c (now the Casper, matched by casper_ec.c).
  * /proc/hwdiag "input ec_keys" counts what was seen.
  */
 #include <uapi/types.h>
-#include <asm/io.h>
 #include <kernel/cmdline.h>
 #include <kernel/fb.h>
 #include <kernel/hwdiag.h>
@@ -31,22 +35,21 @@
 #include <kernel/board.h>
 #include <drivers/input/ps2.h>
 #include <drivers/platform/casper_ec.h>
+#include <drivers/platform/casper_power.h>
 #include "ec_hotkey.h"
 
-#define POLL_MS 50
+#define POLL_MS   100
+#define SAFETY_S  10
 #define KEY_BRIGHTNESSDOWN 224
 #define KEY_BRIGHTNESSUP   225
 #define BRIGHT_STEP 10
 
 static struct {
-	uint32_t polls, events, keys, unknown, busy, timeouts;
+	uint32_t polls, events, keys, unknown, busy, timeouts, power, kicks;
 	int last;
+	volatile int kicked;             /* the SCI saw the EC's GPE */
+	int sci;                         /* 1: woken by the SCI, else polling */
 } K;
-
-static uint8_t port_in(uint16_t p) { return inb(p); }
-static void port_out(uint16_t p, uint8_t v) { outb(p, v); }
-static void port_wait(void) { for (int i = 0; i < 10; i++) (void)inb(0x80); }   /* ~1 us each */
-static const ec_io_t io = {port_in, port_out, port_wait};
 
 static void press_e0(uint16_t sc)
 {
@@ -81,22 +84,47 @@ static void act(int a)
 	K.keys++;
 }
 
+/* The SCI handler (acpi.c): the EC raised its GPE. Interrupt context: a flag. */
+void ec_events_kick(void)
+{
+	K.kicked = 1;
+	K.kicks++;
+}
+
+void ec_events_use_sci(void) { K.sci = 1; }
+
 static void ec_keys_thread(void)
 {
+	uint64_t last = kernel_ticks;
+	casper_power_lid_start();
 	for (;;) {
 		task_sleep_until(kernel_ticks + POLL_MS * TIMER_HZ / 1000);
+		if (K.sci && !K.kicked && kernel_ticks - last < (uint64_t)SAFETY_S * TIMER_HZ) continue;
+		K.kicked = 0;
+		last = kernel_ticks;
 		K.polls++;
-		for (int i = 0; i < 8; i++) {           /* a burst of presses drains in one go */
-			int q = ec_query(&io);
+		int i;
+		for (i = 0; i < 8; i++) {               /* a burst of presses drains in one go */
+			int q = casper_ec_event();
 			if (q == EC_BUSY) { K.busy++; break; }
 			if (q == EC_TIMEOUT) { K.timeouts++; break; }
 			if (q == EC_NONE) break;
 			K.events++;
 			K.last = q;
-			act(ec_hotkey_casper(q));
+			int pw = ec_power_casper(q);
+			if (pw != ECP_NONE) { K.power++; casper_power_event(pw); }
+			else act(ec_hotkey_casper(q));
+		}
+		if (K.sci) {
+			acpi_ec_gpe_rearm();
+			/* stopped at 8 with more waiting, or one came while the GPE was off */
+			if (i == 8 || casper_ec_pending()) K.kicked = 1;
 		}
 	}
 }
+
+/* Boards without the x86 SCI code: nothing to turn back on. */
+__attribute__((weak)) void acpi_ec_gpe_rearm(void) {}
 
 static void ec_keys_diag(hw_out_t *o)
 {
@@ -108,6 +136,9 @@ static void ec_keys_diag(hw_out_t *o)
 	hw_kv(o, "unknown", K.unknown);
 	hw_kv(o, "busy", K.busy);
 	hw_kv(o, "timeouts", K.timeouts);
+	hw_kv(o, "power", K.power);
+	hw_kv(o, "sci", (uint64_t)K.sci);
+	hw_kv(o, "kicks", K.kicks);
 	hw_end(o);
 }
 
@@ -115,8 +146,11 @@ void ec_keys_init(void)
 {
 	char v[8];
 	if (!casper_ec_board()) return;
-	if (!cmdline_get("ranix.ec_keys", v, sizeof(v)) || strcmp(v, "1")) return;   /* off unless asked */
+	int on = (cmdline_get("ranix.ec_events", v, sizeof(v)) && !strcmp(v, "1")) ||
+	         (cmdline_get("ranix.ec_keys", v, sizeof(v)) && !strcmp(v, "1"));
+	if (!on) return;                         /* off unless asked */
 	hwdiag_register(ec_keys_diag);
 	proc_create("ec_keys", ec_keys_thread);
-	kprintf(KERN_INFO "ec_keys: Casper Fn keys from EC events, every %d ms\n", POLL_MS);
+	kprintf(KERN_INFO "ec_keys: Casper EC events (keys, adapter, battery, lid), %s\n",
+	        K.sci ? "woken by the SCI" : "asked every 100 ms");
 }

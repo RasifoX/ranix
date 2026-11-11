@@ -26,6 +26,7 @@
 #include <kernel/fs/gpt.h>
 
 #include <kernel/tty/fb_tty.h>
+#include <kernel/tty/splash.h>
 #include <kernel/vfs.h>
 #include <kernel/init.h>
 #include <kernel/sync.h>
@@ -548,7 +549,13 @@ void kernel_main(void)
 	if (global_fb_phys) {
 		global_fb.fb = ioremap(global_fb_phys, fb_sz, VM_READ | VM_WRITE | VM_NOCACHE | VM_DEVICE);
 		fb_tty_init(&global_fb);
+		splash_init(&global_fb);    /* quiet: the boot screen from this first frame */
 		kprintf_set_fb();
+		int cw = 0, ch = 0, cc = 0, cr = 0;
+		fb_tty_get_font(&cw, &ch);
+		fb_tty_get_size(&cc, &cr);
+		kprintf(KERN_INFO "console: %ux%u framebuffer, %dx%d cells, font %dx%d\n",
+		        global_fb.width, global_fb.height, cc, cr, cw, ch);
 	}
 
 	irq_init();
@@ -563,6 +570,7 @@ void kernel_main(void)
 	mount_early_filesystems();
 	initrd_init();
 	WD_BOOT_PROGRESS();
+	splash_progress(5);
 
 	sched_init();
 	mmu_null_guard_selftest();   /* the fault path needs the per-CPU task */
@@ -584,10 +592,13 @@ void kernel_main(void)
 	watchdog_start();
 #endif
 	WD_BOOT_PROGRESS();
+	splash_progress(10);
 	board_drivers_register();
 	WD_BOOT_PROGRESS();
+	splash_progress(25);
 	net_dhcp_all();
 	WD_BOOT_PROGRESS();
+	splash_progress(30);
 	fbdev_init();
 	drm_init();                     /* /dev/dri: KMS on the firmware's mode */
 	thermal_guard_init();           /* package temperature limit until ACPI drives the fan */
@@ -604,6 +615,7 @@ void kernel_main(void)
 	disk_selftest_if_asked();
 
 	WD_BOOT_PROGRESS();
+	splash_progress(40);            /* init carries on: /proc/sys/kernel/ranix_splash */
 
 	start_init();
 

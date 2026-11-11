@@ -55,8 +55,10 @@ typedef struct {
 	uint32_t status, control;
 } event_t;
 
-/* Events nobody is waiting for: HID reports, serial bytes and port changes, wherever
- * they turn up. */
+static int un_event(usb_dev_t *d, uint32_t dci, const event_t *ev);   /* usb_net.c */
+
+/* Events nobody is waiting for: HID reports, serial bytes, network frames and port
+ * changes, wherever they turn up. */
 static int event_route(xhci_t *x, const event_t *ev)
 {
 	uint32_t type = TRB_GET_TYPE(ev->control);
@@ -71,6 +73,8 @@ static int event_route(xhci_t *x, const event_t *ev)
 	for (int i = 0; i < MAX_DEVS; i++) {
 		usb_dev_t *d = &g_devs[i];
 		if (!d->used || d->slot != slot) continue;
+		if (d->net && (d->dci_in == (int)dci || d->dci_out == (int)dci))
+			return un_event(d, dci, ev);
 		if (d->ser && d->dci_in == (int)dci) {
 			ser_rx_event(d, ev->status);
 			return 1;

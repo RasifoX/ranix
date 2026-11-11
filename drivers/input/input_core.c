@@ -11,6 +11,7 @@
 #include <kernel/kout.h>
 #include <kernel/mm/heap.h>
 #include <kernel/time.h>
+#include <kernel/tty/splash.h>
 
 int input_keymap = KEYMAP_US;
 
@@ -74,11 +75,24 @@ void input_report_key(uint16_t code, int32_t value)
 {
     int src = input_source;
     input_activity(src, 0);
+    if (code == 1 && value == 1 && src != INPUT_SRC_INJECTED)
+        splash_key_esc();               /* Esc on a real keyboard: the boot log */
     uint64_t f = spin_lock_irq(&ev_lock);
     if (src == INPUT_SRC_INJECTED)
         ev_put(EV_MSC, MSC_RANIX_SOURCE, 1);
     ev_put(EV_KEY, code, value);
     spin_unlock_irq(&ev_lock, f);
+}
+
+/* A switch (EV_SW), Linux's way to say the lid is shut (SW_LID 1) or open (0).
+ * Not a key press: it does not count as a person using the machine. */
+void input_report_switch(uint16_t code, int32_t value)
+{
+    uint64_t f = spin_lock_irq(&ev_lock);
+    ev_put(EV_SW, code, value);
+    ev_put(EV_SYN, 0, 0);
+    spin_unlock_irq(&ev_lock, f);
+    poll_notify();
 }
 
 void input_sync(void)

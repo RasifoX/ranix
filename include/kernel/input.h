@@ -32,6 +32,10 @@ void input_report_key(uint16_t code, int32_t value);
 extern int input_keymap;
 void input_report_abs(uint16_t code, int32_t value);
 void input_sync(void);
+#define EV_SW   0x05
+#define SW_LID  0x00
+#define KEY_POWER 116
+void input_report_switch(uint16_t code, int32_t value);   /* EV_SW and a SYN: the lid */
 void input_inject_ascii(uint8_t c);
 
 /* Where input came from (docs: arastirma/ajan-insan-ozellikleri.md, item 3).

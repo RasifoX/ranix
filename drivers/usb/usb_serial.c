@@ -19,14 +19,18 @@
  * Arduino; the last close drops them when HUPCL is set. TIOCMGET/TIOCMSET and
  * friends move the wires by hand.
  *
- * Not here: echo, signals and job control (a serial port is not a login console
- * here), software flow control (IXON/IXOFF), break on CH341 and FTDI. Bits that
- * are not done are cleared, so TCGETS shows what the port really does.
+ * The terminal: echo, canonical editing and signal characters work as on Linux
+ * (usb_serial_ldisc.c), and the port can be a session's controlling terminal
+ * (TIOCSCTTY, TIOCSPGRP), so a getty or a shell can run on a board's console.
+ * Not here: software flow control (IXON/IXOFF), IEXTEN's ^W ^V ^R, and stopping
+ * a background reader (SIGTTIN/SIGTTOU). Bits that are not done are cleared, so
+ * TCGETS shows what the port really does.
  *
  * Plug and pull: a node, once made, stays registered (like usb0); it is hidden
  * while nothing is behind it, and a new board takes the first free name of its
  * kind. A board pulled while open leaves its readers at end of file and its
- * writers with EIO; its name is free again after the last close.
+ * writers with EIO, and hangs up its session (SIGHUP); its name is free again
+ * after the last close.
  *
  * Part of the xHCI driver: compiled inside drivers/usb/xhci.c (a textual include,
  * like kernel/sys/syscall_*.c), so it shares that file's static types and state
@@ -42,6 +46,8 @@
 #define US_NCCS   19
 #define US_VTIME  5
 #define US_VMIN   6
+#define US_LINE   4096          /* a canonical line held until it ends */
+#define US_ECHOBUF 512
 
 /* termios bits the port acts on */
 #define US_ISTRIP 0x0020
@@ -72,6 +78,12 @@ typedef struct userial {
 	uint32_t   iflag, oflag, cflag, lflag, ispeed, ospeed;
 	uint8_t    line, cc[US_NCCS];
 	uint16_t   win[4];
+	uint8_t    lbuf[US_LINE];   /* canonical: the line being typed */
+	uint32_t   llen;
+	uint8_t    eof;             /* ^D on an empty line: the next read returns 0 */
+	uint8_t    echo[US_ECHOBUF];
+	uint32_t   eh, et;
+	pid_t      fg_pgrp;         /* foreground group, when a session's terminal */
 } userial_t;
 
 static userial_t g_ser[US_PORTS];
@@ -79,20 +91,28 @@ static vfs_fops_t ser_fops;
 
 static uint32_t ser_avail(const userial_t *s) { return (s->rh - s->rt) % US_RXBUF; }
 static uint32_t ser_room(const userial_t *s)  { return US_RXBUF - 1 - ser_avail(s); }
+static int ser_xmit(userial_t *s, const uint8_t *p, uint32_t n);
 
-/* What a fresh port is: 9600 8N1, CREAD, HUPCL, CLOCAL, ICRNL, OPOST+ONLCR,
- * canonical input (one line per read). Raw programs set their own. */
+#include "usb_serial_ldisc.c"
+
+/* What a fresh port is, as on Linux: 9600 8N1, CREAD, HUPCL, CLOCAL, ICRNL,
+ * OPOST+ONLCR, canonical input with echo and signal characters. Raw programs
+ * set their own. */
 static void ser_defaults(userial_t *s)
 {
 	s->iflag = US_ICRNL;
 	s->oflag = US_OPOST | US_ONLCR;
 	s->cflag = 13 | 0x30 | US_CREAD | US_HUPCL | US_CLOCAL;
-	s->lflag = US_ICANON;
+	s->lflag = US_ISIG | US_ICANON | US_ECHO | US_ECHOE | US_ECHOK | US_ECHOCTL | US_ECHOKE;
 	s->ispeed = s->ospeed = 9600;
 	s->line = 0;
 	memset(s->cc, 0, sizeof s->cc);
 	s->cc[0] = 3; s->cc[1] = 0x1C; s->cc[2] = 0x7F; s->cc[3] = 0x15; s->cc[4] = 4;
 	s->cc[US_VMIN] = 1;
+	s->cc[US_VSUSP] = 0x1A;
+	s->llen = 0;
+	s->eof = 0;
+	s->eh = s->et = 0;
 	memset(s->win, 0, sizeof s->win);
 }
 
@@ -131,21 +151,15 @@ static void ser_queue_rx(usb_dev_t *d)
 	ring_doorbell(d->x, d->slot, (uint32_t)d->dci_in);
 }
 
-/* Received bytes into the buffer, through ISTRIP, IGNCR, ICRNL and INLCR. */
-static void ser_put(userial_t *s, const uint8_t *p, uint32_t n)
+/* Received bytes through the line discipline. The last signal they raised, or 0. */
+static int ser_put(userial_t *s, const uint8_t *p, uint32_t n)
 {
+	int sig = 0;
 	for (uint32_t i = 0; i < n && ser_room(s); i++) {
-		uint8_t c = p[i];
-		if (s->iflag & US_ISTRIP) c &= 0x7F;
-		if (c == '\r') {
-			if (s->iflag & US_IGNCR) continue;
-			if (s->iflag & US_ICRNL) c = '\n';
-		} else if (c == '\n' && (s->iflag & US_INLCR)) {
-			c = '\r';
-		}
-		s->rx[s->rh] = c;
-		s->rh = (s->rh + 1) % US_RXBUF;
+		int g = ser_input(s, p[i]);
+		if (g) sig = g;
 	}
+	return sig;
 }
 
 /* From evt_next, controller lock held: the IN transfer finished. */
@@ -164,10 +178,12 @@ static void ser_rx_event(usb_dev_t *d, uint32_t status)
 	uint32_t n = us_rx_payload(s->desc.kind, s->desc.mps_in, d->dma + US_RXOFF, got, &msr);
 	uint64_t f = spin_lock_irq(&s->lock);
 	s->msr = msr;
-	if (s->opens) ser_put(s, d->dma + US_RXOFF, n);   /* nobody listening: dropped */
+	int sig = s->opens ? ser_put(s, d->dma + US_RXOFF, n) : 0;   /* nobody listening: dropped */
 	int more = ser_room(s) >= US_RXLEN;
 	if (!more) s->rx_paused = 1;
+	pid_t fg = s->fg_pgrp;
 	spin_unlock_irq(&s->lock, f);
+	if (sig && fg > 0) task_signal_pgrp(fg, sig);
 	if (more) ser_queue_rx(d);
 	if (n) {
 		wake_up(&s->rxq);
@@ -265,6 +281,9 @@ static void ser_unplug(usb_dev_t *d)
 	d->ser = NULL;
 	devfs_set_hidden(s->name, 1);
 	kprintf(KERN_INFO "xhci: /dev/%s pulled%s\n", s->name, s->opens ? ", still open" : "");
+	pid_t fg = s->fg_pgrp;
+	s->fg_pgrp = 0;
+	tty_hangup(s, fg);                     /* its session loses its terminal: SIGHUP */
 	wake_up(&s->rxq);
 	poll_notify();
 }
@@ -287,6 +306,9 @@ static int ser_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 		us_req_t q[US_MAXREQ];
 		uint64_t fl = spin_lock_irq(&s->lock);
 		s->rh = s->rt = 0;
+		s->llen = 0;
+		s->eof = 0;
+		s->eh = s->et = 0;
 		spin_unlock_irq(&s->lock, fl);
 		ser_send(d, q, us_open_reqs(&s->desc, q));
 		ser_line(s);
@@ -331,10 +353,12 @@ static int ser_close(vfs_file_t *f)
 static uint32_t ser_ready(const userial_t *s, size_t want)
 {
 	uint32_t n = ser_avail(s);
-	if (s->lflag & US_ICANON) {
-		for (uint32_t i = 0, p = s->rt; i < n; i++, p = (p + 1) % US_RXBUF)
-			if (s->rx[p] == '\n') return i + 1;
-		return n == US_RXBUF - 1 ? n : 0;
+	if (s->lflag & US_ICANON) {          /* the buffer holds ended lines only */
+		for (uint32_t i = 0, p = s->rt; i < n; i++, p = (p + 1) % US_RXBUF) {
+			uint8_t c = s->rx[p];
+			if (c == '\n' || is_cc(s, US_VEOL, c) || is_cc(s, US_VEOL2, c)) return i + 1;
+		}
+		return n;                        /* a line ended by ^D, or left from raw mode */
 	}
 	uint32_t min = s->cc[US_VMIN];
 	if (min > want) min = (uint32_t)want;
@@ -349,7 +373,7 @@ static int ser_wait(userial_t *s, vfs_file_t *f, size_t want, uint64_t *fl)
 	int raw = !(s->lflag & US_ICANON);
 	if (raw && vt && !s->cc[US_VMIN]) end = mono_ns() + vt;   /* overall timer */
 	for (;;) {
-		if (ser_ready(s, want) || !s->dev) return 0;
+		if (ser_ready(s, want) || !s->dev || ((s->lflag & US_ICANON) && s->eof)) return 0;
 		if (raw && !s->cc[US_VMIN] && !vt) return 0;           /* polling read */
 		uint32_t n = ser_avail(s);
 		if (raw && vt && s->cc[US_VMIN] && n > seen) {          /* gap timer */
@@ -378,6 +402,7 @@ static ssize_t ser_read(vfs_file_t *f, void *buf, size_t len)
 		return r;
 	}
 	uint32_t n = ser_ready(s, want);
+	if (!n && (s->lflag & US_ICANON) && s->eof) s->eof = 0;  /* ^D: this read is the end */
 	if (!n && !(s->lflag & US_ICANON)) n = ser_avail(s);   /* VTIME ran out, or gone */
 	if (!n && !s->dev) n = ser_avail(s);                    /* gone: what is left */
 	if (n > want) n = (uint32_t)want;
@@ -447,8 +472,8 @@ static int ser_poll(vfs_file_t *f)
 	if (!s->dev) return 0x0001 | 0x0010;                    /* POLLIN | POLLHUP */
 	uint64_t fl = spin_lock_irq(&s->lock);
 	/* with VTIME a read returns on the first byte, so one byte is readable */
-	int in = (s->lflag & US_ICANON) || !s->cc[US_VTIME] ? ser_ready(s, US_RXBUF) != 0
-	                                                    : ser_avail(s) != 0;
+	int in = (s->lflag & US_ICANON) ? ser_avail(s) != 0 || s->eof :
+	         !s->cc[US_VTIME] ? ser_ready(s, US_RXBUF) != 0 : ser_avail(s) != 0;
 	spin_unlock_irq(&s->lock, fl);
 	return (in ? 0x0001 : 0) | 0x0004;                      /* POLLIN, POLLOUT */
 }

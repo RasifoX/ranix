@@ -168,6 +168,7 @@ static int fill_mounts(char *buf, size_t sz)
 #include <kernel/board.h>
 #include <kernel/fs/procfs.h>
 #include <kernel/errno.h>
+#include <kernel/tty/splash.h>
 
 static int fill_uptime(char *buf, size_t sz)
 {
@@ -618,6 +619,7 @@ typedef struct {
 #define PROC_F_HWDIAG             93
 #define PROC_F_SYS_RANIX_DEADLINE 94
 #define PROC_F_SYS_TAINTED        95
+#define PROC_F_SYS_RANIX_SPLASH   100
 #define PROC_F_SYS_IPC_FIRST      51   /* 51..56: shmmax shmmni shmall msgmax msgmnb msgmni */
 #define PROC_F_SYS_SEM            57
 #define PROC_F_SYS_PIPE_MAX       61
@@ -895,6 +897,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_RANDOMIZE_VA: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_CORE_PATTERN: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,core_pattern); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_KPTR_RESTRICT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)kptr_restrict);  pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_RANIX_SPLASH: n = splash_ctl_read(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_RANIX_DEADLINE: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)(wdog_deadline_left ? wdog_deadline_left() : 0)); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_IPC_FIRST ... PROC_F_SYSVIPC_MSG:
 		n = fill_sysvipc_file(pr->type, tmp, PROCFS_BUF_SIZE); break;
@@ -974,6 +977,14 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		memcpy(core_pattern, tmp, n);
 		core_pattern[n] = '\0';
 		return (ssize_t)len;
+	}
+	if (pr->type == PROC_F_SYS_RANIX_SPLASH) {
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
+		char tmp[16];
+		if (len == 0 || len >= sizeof(tmp)) return -EINVAL;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
+		long r = splash_ctl_write(tmp, len);
+		return r ? (ssize_t)r : (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_RANIX_DEADLINE) {
 		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
@@ -2807,6 +2818,7 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "kptr_restrict",  PROC_F_SYS_KPTR_RESTRICT  },
 	{ "dmesg_restrict", PROC_F_SYS_DMESG_RESTRICT },
 	{ "ranix_deadline", PROC_F_SYS_RANIX_DEADLINE },
+	{ "ranix_splash",   PROC_F_SYS_RANIX_SPLASH },   /* the boot screen (kernel/tty/splash.c) */
 	{ "tainted",        PROC_F_SYS_TAINTED },   /* nothing taints this kernel: always 0 */
 	{ "shmmax",         PROC_F_SYS_IPC_FIRST + 0 },   /* SysV IPC limits, read-only */
 	{ "shmmni",         PROC_F_SYS_IPC_FIRST + 1 },
@@ -2816,7 +2828,7 @@ static procfs_sysfile_t sys_kernel_files[] = {
 	{ "msgmni",         PROC_F_SYS_IPC_FIRST + 5 },
 	{ "sem",            PROC_F_SYS_SEM },
 };
-#define SYS_KERNEL_N 18
+#define SYS_KERNEL_N 19
 
 /* /proc/sys/vm — overcommit_memory lives here in Linux (not under kernel.*) */
 static procfs_sysfile_t sys_vm_files[] = {
@@ -2859,7 +2871,8 @@ static vfs_inode_t *procfs_sysfile_inode(int type)
 	           type == PROC_F_SYS_DMESG_RESTRICT ||
 	           type == PROC_F_SYS_PIPE_MAX ||
 	           type == PROC_F_SYS_SWAPPINESS ||
-	           type == PROC_F_SYS_RANIX_DEADLINE))
+	           type == PROC_F_SYS_RANIX_DEADLINE ||
+	           type == PROC_F_SYS_RANIX_SPLASH))
 		in->mode = S_IFREG | 0644;
 	return in;
 }

@@ -5,7 +5,8 @@
 /*
  * USB serial ports: the terminal ioctls. termios in and out (TCGETS, TCSETS*,
  * and TCGETS2/TCSETS2 for a speed with no Bxxx name, such as 250000), the modem
- * wires (TIOCM*), break, flush, exclusive use and how many bytes wait.
+ * wires (TIOCM*), break, flush, exclusive use, how many bytes wait, and the
+ * controlling terminal (TIOCSCTTY, TIOCGPGRP, TIOCSPGRP, TIOCNOTTY).
  *
  * Part of the xHCI driver: included by drivers/usb/usb_serial.c, which is itself
  * compiled inside drivers/usb/xhci.c, and not built on its own.
@@ -18,6 +19,10 @@
 #define US_TCSBRK   0x5409
 #define US_TCXONC   0x540A
 #define US_TCFLSH   0x540B
+#define US_TIOCSCTTY 0x540E
+#define US_TIOCGPGRP 0x540F
+#define US_TIOCSPGRP 0x5410
+#define US_TIOCNOTTY 0x5422
 #define US_TIOCEXCL 0x540C
 #define US_TIOCNXCL 0x540D
 #define US_TIOCOUTQ 0x5411
@@ -70,13 +75,15 @@ static int ser_set(userial_t *s, const uint8_t *t, int two, int flush)
 	uint64_t f = spin_lock_irq(&s->lock);
 	s->iflag = rd32le(t) & US_IFLAGS;
 	s->oflag = rd32le(t + 4) & (US_OPOST | US_ONLCR);
-	s->lflag = rd32le(t + 12) & US_ICANON;
+	uint32_t lflag = rd32le(t + 12) & US_LFLAGS;
+	if ((s->lflag & US_ICANON) && !(lflag & US_ICANON)) line_commit(s);   /* raw now: the held line is input */
+	s->lflag = lflag;
 	s->line = t[16];
 	memcpy(s->cc, t + 17, US_NCCS);
 	s->cflag = cflag;
 	s->ospeed = us_cflag_baud(cflag, two ? rd32le(t + 40) : s->ospeed);
 	s->ispeed = s->ospeed;
-	if (flush) s->rh = s->rt;
+	if (flush) { s->rh = s->rt; s->llen = 0; s->eof = 0; }
 	spin_unlock_irq(&s->lock, f);
 	if (flush && s->rx_paused) {
 		s->rx_paused = 0;
@@ -132,14 +139,52 @@ static int ser_wires(userial_t *s, uint32_t cmd, uint64_t arg)
 	return r;
 }
 
+/* CH341: its break bit shares two registers with the transmitter; read, change, write. */
+static int ch341_break(usb_dev_t *d, int on)
+{
+	if (ctrl_xfer(d, 0xC0, 0x95, 0x1805, 0, 2, 1) != 0) return -EIO;
+	uint16_t v = us_ch341_break(d->dma[0], d->dma[1], on);
+	return ctrl_xfer(d, 0x40, 0x9A, 0x1805, v, 0, 0) ? -EIO : 0;
+}
+
 static int ser_break(userial_t *s, int on)
 {
 	us_req_t r[US_MAXREQ];
+	us_line_t l;
 	if (mutex_lock_killable(&g_xhci.lock)) return -EINTR;
-	int n = s->dev ? us_break_reqs(&s->desc, on, r) : 0;
-	int rc = !s->dev ? -EIO : n < 0 ? -EOPNOTSUPP : ser_send(s->dev, r, n) ? -EIO : 0;
+	us_line_from_cflag(s->cflag, s->ospeed, &l);
+	int n = s->dev ? us_break_reqs(&s->desc, &l, on, r) : 0;
+	int rc = !s->dev ? -EIO : n == US_BREAK_RMW ? ch341_break(s->dev, on) :
+	         n < 0 ? -EOPNOTSUPP : ser_send(s->dev, r, n) ? -EIO : 0;
 	mutex_unlock(&g_xhci.lock);
 	return rc;
+}
+
+/* The port as a session's controlling terminal: TIOCSCTTY, TIOCGPGRP, TIOCSPGRP,
+ * TIOCNOTTY, with the checks every terminal has (kernel/signal.c). */
+static int ser_ctty(userial_t *s, uint32_t cmd, uint64_t arg)
+{
+	process_t *cur = task_current();
+	if (cmd == US_TIOCSCTTY) {
+		int r = tty_acquire(s, &ser_fops, arg == 1);
+		if (r < 0) return -EPERM;
+		if (r == 0 && cur->pgrp > 0) s->fg_pgrp = cur->pgrp;
+		return 0;
+	}
+	if (cmd == US_TIOCGPGRP) {
+		if (cur->ctty != s) return -ENOTTY;
+		pid_t pg = pid_to_user(s->fg_pgrp);
+		return copy_to_user((void *)(uintptr_t)arg, &pg, sizeof pg) ? -EFAULT : 0;
+	}
+	if (cmd == US_TIOCSPGRP) {
+		pid_t pg, fg;
+		if (copy_from_user(&pg, (const void *)(uintptr_t)arg, sizeof pg)) return -EFAULT;
+		long r = tty_check_fg(s, 1, pg, &fg);
+		if (r == 0) s->fg_pgrp = fg;
+		return (int)r;                     /* -1 EPERM, -3 ESRCH, as for a pty */
+	}
+	if (cur->ctty == s) { cur->ctty = NULL; cur->ctty_fops = NULL; }   /* TIOCNOTTY */
+	return 0;
 }
 
 /* A break of ms milliseconds; the sleep is outside the controller lock. */
@@ -158,6 +203,8 @@ static int ser_flush(userial_t *s, uint64_t which)
 	if (mutex_lock_killable(&g_xhci.lock)) return -EINTR;
 	uint64_t f = spin_lock_irq(&s->lock);
 	s->rh = s->rt;
+	s->llen = 0;
+	s->eof = 0;
 	spin_unlock_irq(&s->lock, f);
 	if (s->dev && s->rx_paused) {
 		s->rx_paused = 0;
@@ -202,6 +249,8 @@ static int ser_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		spin_unlock_irq(&s->lock, fl);
 		return copy_to_user(ua, &n, 4) ? -EFAULT : 0;
 	}
+	case US_TIOCSCTTY: case US_TIOCGPGRP: case US_TIOCSPGRP: case US_TIOCNOTTY:
+		return ser_ctty(s, cmd, arg);
 	case US_TIOCGWINSZ:
 		return copy_to_user(ua, s->win, sizeof s->win) ? -EFAULT : 0;
 	case US_TIOCSWINSZ:

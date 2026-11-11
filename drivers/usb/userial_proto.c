@@ -54,7 +54,7 @@ static int acm_find(const uint8_t *c, uint32_t total, us_desc_t *o)
 		if (blen < 2 || blen > total - i) break;
 		if (btype == 4 && blen >= 9) {
 			in_ctrl = 0;
-			if (c[i + 5] == 2 && c[i + 6] == 2 && ctrl < 0) {
+			if (c[i + 5] == 2 && c[i + 6] == 2 && c[i + 7] != 0xFF && ctrl < 0) {   /* 0xFF: RNDIS */
 				ctrl = c[i + 2];
 				in_ctrl = 1;
 			} else if (c[i + 5] == 0x0A && ctrl >= 0 && data < 0) {
@@ -240,6 +240,12 @@ static int cp210x_line(const us_desc_t *d, const us_line_t *l, us_req_t *r)
 	return 3;
 }
 
+/* FTDI SET_DATA: data bits, parity (bits 8-10), stop bits (11-13), break (14) */
+static uint16_t ftdi_data(const us_line_t *l, int brk)
+{
+	return (uint16_t)(l->bits | l->parity << 8 | (l->stop2 ? 2 : 0) << 11 | (brk ? 1 : 0) << 14);
+}
+
 int us_line_reqs(const us_desc_t *d, const us_line_t *l, us_req_t *r)
 {
 	if (!l->baud) return 0;                        /* B0: only the wires drop */
@@ -260,7 +266,7 @@ int us_line_reqs(const us_desc_t *d, const us_line_t *l, us_req_t *r)
 		int n = 0;
 		if (us_ftdi_divisor(l->baud, &v, &ix) == 0)
 			rq(&r[n++], 0x40, 3, v, ix);
-		rq(&r[n++], 0x40, 4, (uint16_t)(l->bits | l->parity << 8 | (l->stop2 ? 2 : 0) << 11), 0);
+		rq(&r[n++], 0x40, 4, ftdi_data(l, 0), 0);
 		rq(&r[n++], 0x40, 2, 0, l->rtscts ? 0x0100 : 0);
 		return n;
 	}
@@ -280,11 +286,22 @@ int us_modem_reqs(const us_desc_t *d, int dtr, int rts, us_req_t *r)
 	return 0;
 }
 
-int us_break_reqs(const us_desc_t *d, int on, us_req_t *r)
+int us_break_reqs(const us_desc_t *d, const us_line_t *l, int on, us_req_t *r)
 {
 	if (d->kind == US_ACM)   { rq(&r[0], 0x21, 0x23, on ? 0xFFFF : 0, d->ctrl_iface); return 1; }
 	if (d->kind == US_CP210X) { rq(&r[0], 0x41, 0x05, on ? 1 : 0, d->ctrl_iface); return 1; }
+	if (d->kind == US_FTDI)  { rq(&r[0], 0x40, 4, ftdi_data(l, on), 0); return 1; }
+	if (d->kind == US_CH341) return US_BREAK_RMW;
 	return -1;
+}
+
+/* CH341: register 0x18 bit 0 low = break, register 0x05 bit 6 = transmitter on
+ * (the chip holds the line low with the transmitter off). */
+uint16_t us_ch341_break(uint8_t reg18, uint8_t reg05, int on)
+{
+	if (on) { reg18 &= (uint8_t)~0x01; reg05 &= (uint8_t)~0x40; }
+	else    { reg18 |= 0x01; reg05 |= 0x40; }
+	return (uint16_t)(reg18 | reg05 << 8);
 }
 
 /* ---- received bytes ---- */

@@ -16,12 +16,16 @@
  * report), and a report becomes evdev events (EV_KEY, EV_ABS) with Linux's codes,
  * so SDL, GLFW and Wine see the device as they would on Linux. Xbox 360 style
  * pads (XInput: vendor class 0xFF/0x5D/0x01, Logitech F310 in X mode) are not HID
- * and have a fixed 20-byte report, decoded by hj_xpad_report.
+ * and have a fixed 20-byte report, decoded by hj_xpad_report. Xbox One and
+ * Series pads speak GIP (vendor class 0xFF/0x47/0xD0): they stay silent until
+ * the host sends "power on" (hj_gip_init), then report on message 0x20, and
+ * the Xbox button on message 0x07.
  * No hardware here: tests/host_hidjoy.c checks it on the host.
  *
  * Sources, all public: USB HID 1.11 and the HID Usage Tables (report descriptor
  * items, Generic Desktop and Button pages); Linux's input-event-codes.h numbers
- * (an ABI); the free60 project's notes on the Xbox 360 controller report.
+ * (an ABI); the free60 project's notes on the Xbox 360 controller report; for
+ * GIP, the zlib-licensed SDL (hidapi_xboxone.c) and published protocol notes.
  */
 
 #define HJ_EV_KEY 0x01
@@ -81,5 +85,12 @@ void hj_report(const hidjoy_t *j, const uint8_t *r, uint32_t len, hj_emit_t emit
 /* Xbox 360 style (XInput) pads */
 void hj_xpad_caps(hj_caps_t *c);
 void hj_xpad_report(const uint8_t *r, uint32_t len, hj_emit_t emit, void *ctx);
+
+/* Xbox One / Series pads (GIP). hj_gip_init writes message n (0: power on,
+ * 1: Xbox button light on) with sequence number seq; returns its length, 0 past
+ * the last. */
+void hj_gip_caps(hj_caps_t *c);
+uint32_t hj_gip_init(uint8_t *buf, int n, uint8_t seq);
+void hj_gip_report(const uint8_t *r, uint32_t len, hj_emit_t emit, void *ctx);
 
 #endif
