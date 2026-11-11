@@ -827,6 +827,7 @@ check "asess-run"     "ok" "$(timeout 20 /bin/ranix-sess run -r / -u 1000 -g 100
 check "asess-run-dyn" "dynamic-ok" "$(timeout 20 /bin/ranix-sess run -r / -u 1000 -g 1000 -- /bin/test_dynamic 2>&1 </dev/null | tail -1)"
 check "chroot-escape" "OK"       "$(timeout 10 /bin/test_chroot_escape 2>/dev/null | tail -1)"
 check "netfilter-perm" "OK"      "$(timeout 10 /bin/test_netfilter_perm 2>/dev/null | tail -1)"
+check "c-firewall"     "OK"      "$(timeout 40 /bin/test_firewall 2>/dev/null | tail -1)"
 check "c-tcpspoof"     "OK"      "$(timeout 30 /bin/test_tcpspoof 2>/dev/null | tail -1)"
 check "setns-perm"   "OK"        "$(timeout 10 /bin/test_setns_perm 2>/dev/null | tail -1)"
 check "unshare-perm" "OK"        "$(timeout 10 /bin/test_unshare_perm 2>/dev/null | tail -1)"

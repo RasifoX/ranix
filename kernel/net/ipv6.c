@@ -94,7 +94,7 @@ static int ipv6_for_us(netdev_t *dev, const in6_addr_t *dst)
 /* hand an upper-layer payload (skb->data = transport header) to its protocol */
 static void ipv6_deliver(netdev_t *dev, ipv6_hdr_t *ip6, uint8_t nh, skb_t *skb)
 {
-    if (nf_in_v6(&ip6->src, &ip6->dst, nh, skb->data, skb->len) == NF_DROP)
+    if (nf_in_v6(dev, skb->looped, &ip6->src, &ip6->dst, nh, skb->data, skb->len) == NF_DROP)
     { skb_free(skb); return; }
     switch (nh) {
     case IP6_NH_ICMPV6: icmpv6_rx(dev, skb, ip6); break;
@@ -155,7 +155,8 @@ static ip6_reasm_t *reasm6_find(const in6_addr_t *src, const in6_addr_t *dst,
 }
 
 static void ip6_reasm_add6(netdev_t *dev, ipv6_hdr_t *ip6, uint8_t nh, uint32_t id,
-                           const uint8_t *frag, uint32_t off, uint32_t flen, int more)
+                           const uint8_t *frag, uint32_t off, uint32_t flen, int more,
+                           int looped)
 {
     if (off + flen > IP6_REASM_MAX) return;
 
@@ -185,6 +186,7 @@ static void ip6_reasm_add6(netdev_t *dev, ipv6_hdr_t *ip6, uint8_t nh, uint32_t 
     if (skb) {
         memcpy(skb->data, buf, total);
         skb->len = (uint16_t)(total > 0xffff ? 0xffff : total);
+        skb->looped = (uint8_t)looped;
         ipv6_deliver(dev, &hdr, dnh, skb);
     }
     kfree(buf);
@@ -230,7 +232,7 @@ void ipv6_rx(netdev_t *dev, skb_t *skb)
             uint32_t off  = fo & IP6_FRAG_OFFMASK;
             int      more = fo & IP6_FRAG_MF;
             ip6_reasm_add6(dev, &ip6_copy, fh.next_hdr, ntohl(fh.id),
-                           skb->data, off, skb->len, more);
+                           skb->data, off, skb->len, more, skb->looped);
             skb_free(skb);
             return;
         }
@@ -310,7 +312,7 @@ static int ipv6_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
 int ipv6_tx(netdev_t *dev, skb_t *skb, const in6_addr_t *dst, uint8_t next_hdr)
 {
     in6_addr_t src = ipv6_src_for(dev, dst);
-    if (nf_out_v6(&src, dst, next_hdr, skb->data, skb->len) == NF_DROP)
+    if (nf_out_v6(dev, &src, dst, next_hdr, skb->data, skb->len) == NF_DROP)
     { skb_free(skb); return -1; }
 
     if (sizeof(ipv6_hdr_t) + skb->len > IP6_MTU) {

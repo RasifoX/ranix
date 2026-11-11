@@ -88,8 +88,22 @@ static int tr_key(uint8_t key)
 
 
 /* The Windows key pressed and let go with nothing else in between: the desk takes it
- * to switch between Home and the desktop. As a key-up so Super+key stays free. */
-static int super_alone;
+ * to switch between Home and the desktop. As a key-up so Super+key stays free.
+ * Super+L is the desk's lock, sent as the kitty keyboard protocol spells it
+ * (CSI 108;9u: 'l' with the super modifier) instead of a plain 'l'. */
+static int super_alone, super_down;
+
+static void super_track(uint8_t sc)
+{
+    int is_super = e0_prefix && ((sc & 0x7F) == 0x5B || (sc & 0x7F) == 0x5C);
+    if (is_super) {
+        super_down = !(sc & 0x80);
+        if (!(sc & 0x80)) super_alone = 1;
+        else if (super_alone) { super_alone = 0; tty_input_str("\033[57444u"); }
+    } else if (!(sc & 0x80)) {
+        super_alone = 0;
+    }
+}
 
 static void kbd_byte(uint8_t sc)
 {
@@ -97,13 +111,7 @@ static void kbd_byte(uint8_t sc)
 
     if (sc == 0xE0) { e0_prefix = 1; return; }
 
-    int is_super = e0_prefix && ((sc & 0x7F) == 0x5B || (sc & 0x7F) == 0x5C);
-    if (is_super) {
-        if (!(sc & 0x80)) super_alone = 1;
-        else if (super_alone) { super_alone = 0; tty_input_str("\033[57444u"); }
-    } else if (!(sc & 0x80)) {
-        super_alone = 0;
-    }
+    super_track(sc);
 
     if (e0_prefix) {
         e0_prefix = 0;
@@ -172,6 +180,8 @@ static void kbd_byte(uint8_t sc)
     }
 
     if (!pressed) return;
+
+    if (super_down && key == 0x26) { tty_input_str("\033[108;9u"); return; }   /* Super+L */
 
     switch (key) {                      /* function keys, as xterm spells them */
     case 0x54: tty_input_str("\033[32;3~"); return;   /* Alt+Print Screen: the window, to the desk */

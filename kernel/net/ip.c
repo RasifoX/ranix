@@ -82,9 +82,10 @@ static ip_reasm_t *reasm_find(uint32_t src, uint32_t dst, uint16_t id, uint8_t p
 
 /* Deliver a fully reassembled datagram to the transport layer. payload points
  * at the transport header, len is the reassembled payload length. */
-static void ip_deliver(netdev_t *dev, ip_hdr_t *iph, const uint8_t *payload, uint32_t len)
+static void ip_deliver(netdev_t *dev, ip_hdr_t *iph, const uint8_t *payload, uint32_t len,
+                       int looped)
 {
-    if (nf_in_v4(ntohl(iph->src), ntohl(iph->dst), iph->proto, payload, len) == NF_DROP)
+    if (nf_in_v4(dev, looped, ntohl(iph->src), ntohl(iph->dst), iph->proto, payload, len) == NF_DROP)
         return;
     skb_t *skb = skb_alloc_big(len);
     if (!skb) return;
@@ -100,7 +101,7 @@ static void ip_deliver(netdev_t *dev, ip_hdr_t *iph, const uint8_t *payload, uin
 
 /* Add one fragment; on completion deliver and release the slot. */
 static void ip_reasm_add(netdev_t *dev, ip_hdr_t *iph, const uint8_t *frag,
-                         uint32_t off, uint32_t flen, int more)
+                         uint32_t off, uint32_t flen, int more, int looped)
 {
     if (off + flen > IP_REASM_MAX) return;   /* malformed/oversized */
 
@@ -125,7 +126,7 @@ static void ip_reasm_add(netdev_t *dev, ip_hdr_t *iph, const uint8_t *frag,
     spin_unlock_irq(&reasm_lock, f);
 
     hdr.frag_off = 0;
-    ip_deliver(dev, &hdr, buf, total);
+    ip_deliver(dev, &hdr, buf, total, looped);
     kfree(buf);
 }
 
@@ -164,7 +165,7 @@ void ip_rx(netdev_t *dev, skb_t *skb)
         if (tot < ihl || skb->len < tot) { skb_free(skb); return; }
         uint32_t off  = (uint32_t)(fo & IP_OFFMASK) * 8;
         uint32_t flen = (uint32_t)tot - ihl;
-        ip_reasm_add(dev, iph, skb->data + ihl, off, flen, (fo & IP_MF) != 0);
+        ip_reasm_add(dev, iph, skb->data + ihl, off, flen, (fo & IP_MF) != 0, skb->looped);
         skb_free(skb);
         return;
     }
@@ -172,7 +173,7 @@ void ip_rx(netdev_t *dev, skb_t *skb)
     ip_hdr_t iph_copy = *iph;    /* save before pull */
     skb_pull(skb, ihl);
 
-    if (nf_in_v4(ntohl(iph_copy.src), ntohl(iph_copy.dst), iph_copy.proto,
+    if (nf_in_v4(dev, skb->looped, ntohl(iph_copy.src), ntohl(iph_copy.dst), iph_copy.proto,
                  skb->data, skb->len) == NF_DROP)
     { skb_free(skb); return; }
 
@@ -248,7 +249,7 @@ static int ip_tx_frag(netdev_t *dev, const uint8_t *payload, uint32_t plen,
 
 int ip_tx(netdev_t *dev, skb_t *skb, uint32_t dst_ip, uint8_t proto)
 {
-    if (nf_out_v4(dev->ip, dst_ip, proto, skb->data, skb->len) == NF_DROP)
+    if (nf_out_v4(dev, dev->ip, dst_ip, proto, skb->data, skb->len) == NF_DROP)
     { skb_free(skb); return -1; }
 
     if (sizeof(ip_hdr_t) + skb->len > netdev_mtu(dev)) {

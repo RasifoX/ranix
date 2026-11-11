@@ -2363,10 +2363,14 @@ static long sys_getsockopt(int fd, int lv, int opt, void *val, uint32_t *len)
 
 	if (lv == SOL_RANIX_FILTER && opt == NF_RULE) {
 		if (!capable_task(task_current(), CAP_NET_ADMIN)) return -EPERM;
-		char tmp[512];
-		int n = nf_ctl_dump(tmp, sizeof(tmp));
+		/* 64 rules, the policies and the counters fit */
+		char *tmp = kmalloc(4096);
+		if (!tmp) return -ENOMEM;
+		int n = nf_ctl_dump(tmp, 4096);
 		uint32_t cp = ulen < (uint32_t)n ? ulen : (uint32_t)n;
-		if (cp && copy_to_user(val, tmp, cp) != 0) return -EFAULT;
+		int bad = cp && copy_to_user(val, tmp, cp) != 0;
+		kfree(tmp);
+		if (bad) return -EFAULT;
 		uint32_t rn = (uint32_t)n;
 		if (copy_to_user(len, &rn, sizeof(rn)) != 0) return -EFAULT;
 		return 0;
