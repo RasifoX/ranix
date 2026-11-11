@@ -41,6 +41,8 @@ const char *ps_attr_name(const ps_t *p, int i);          /* NULL past the end */
 int ps_attr_format(const ps_t *p, const char *attr, char *out, size_t cap);   /* bytes, -1 no such file */
 int ps_attr_slot(const ps_t *p, const char *attr);                            /* stable id, -1 none */
 int ps_attr_format_slot(const ps_t *p, int slot, char *out, size_t cap);
+/* /proc/hwdiag's "power supply ..." line from n supplies (no newline): bytes */
+int ps_diag_line(const ps_t *ps, int n, char *out, size_t cap);
 
 #ifndef HOST_TEST
 /* kernel/power_supply.c */

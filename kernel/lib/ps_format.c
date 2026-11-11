@@ -155,3 +155,34 @@ int ps_attr_format(const ps_t *p, const char *attr, char *out, size_t cap)
 {
 	return ps_attr_format_slot(p, ps_attr_slot(p, attr), out, cap);
 }
+
+/* The "power supply" line of /proc/hwdiag (fjord doctor), from the supplies the
+ * drivers read, no newline. None read: available=0, as before. */
+int ps_diag_line(const ps_t *ps, int n, char *out, size_t cap)
+{
+	if (!cap) return -1;
+	w_t w = { out, cap, 0 };
+	int mains = 0, online = 0, bats = 0;
+	const ps_t *b = NULL;
+	for (int i = 0; i < n; i++) {
+		if (ps[i].type == PS_MAINS) { mains++; online |= ps[i].online != 0; }
+		else if (ps[i].type == PS_BATTERY && ps[i].present) { bats++; if (!b) b = &ps[i]; }
+	}
+	ws(&w, "power supply available=");
+	if (!mains && !bats && !n) {
+		ws(&w, "0 reason=no_acpi_aml");
+	} else {
+		ws(&w, "1");
+		if (mains) { ws(&w, " ac_online="); wl(&w, online); }
+		ws(&w, " batteries="); wl(&w, bats);
+		if (b) {
+			static const char *const ST[] = { "unknown", "charging", "discharging", "not_charging", "full" };
+			if (b->capacity >= 0) { ws(&w, " capacity="); wl(&w, b->capacity); }
+			ws(&w, " status=");
+			ws(&w, b->status >= 0 && b->status <= PS_ST_FULL ? ST[b->status] : "unknown");
+		}
+	}
+	size_t k = w.n < cap ? w.n : cap - 1;
+	out[k] = 0;
+	return (int)k;
+}

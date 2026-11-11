@@ -130,6 +130,24 @@ int main(void)
 	CHECK(ps_attr_format(&ac, "type", tiny, sizeof tiny) == 3 && !strcmp(tiny, "Mai"), "bounded");
 	CHECK(ps_attr_format(&ac, "capacity", tiny, sizeof tiny) == -1, "no such file");
 
+	/* /proc/hwdiag's power supply line (fjord doctor): what the driver read, not "no AML" */
+	char dl[160];
+	ps_t sup[2];
+	ps_diag_line(sup, 0, dl, sizeof dl);
+	CHECK(!strcmp(dl, "power supply available=0 reason=no_acpi_aml"), "diag, nothing read: %s", dl);
+	image(w, 1, 0, 2000, 4000);
+	w[0x01] = 1;                                     /* Casper as it is: the adapter, no battery */
+	casper_ac_decode(w, &sup[0]);
+	CHECK(ps_diag_line(sup, 1, dl, sizeof dl) > 0 && !strcmp(dl, "power supply available=1 ac_online=1 batteries=0"),
+	      "diag, adapter only: %s", dl);
+	image(w, 0, 0, 2000, 4000);
+	casper_ac_decode(w, &sup[0]);
+	casper_bat_decode(w, &sup[1]);
+	ps_diag_line(sup, 2, dl, sizeof dl);
+	CHECK(!strcmp(dl, "power supply available=1 ac_online=0 batteries=1 capacity=50 status=discharging"),
+	      "diag, on battery: %s", dl);
+	CHECK(ps_diag_line(sup, 2, tiny, sizeof tiny) == 3 && !strcmp(tiny, "pow"), "diag bounded");
+
 	printf("host_power: %d/%d\n", checks - fails, checks);
 	return fails ? 1 : 0;
 }

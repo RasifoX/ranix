@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/hwdiag.h>
+#include <kernel/power_supply.h>
 #include <kernel/sync.h>
 #include <kernel/extable.h>
 #include <kernel/lib/string.h>
@@ -12,9 +13,10 @@
  * that need no driver: digital thermal sensor, thermal and power-limit
  * throttling logs (Intel SDM vol. 3, "Thermal Monitoring and Protection",
  * IA32_THERM_STATUS 0x19C, IA32_PACKAGE_THERM_STATUS 0x1B1,
- * MSR_TEMPERATURE_TARGET 0x1A2). The power supply (AC, battery) is described
- * by ACPI AML methods, which Ranix does not interpret, so it is reported as
- * unavailable rather than guessed.
+ * MSR_TEMPERATURE_TARGET 0x1A2). The power supply (AC, battery) line comes
+ * from what a board driver read into the power_supply table (Casper: the EC);
+ * on other machines it lives in ACPI AML methods, which Ranix does not
+ * interpret, so it is reported as unavailable rather than guessed.
  */
 
 static hwdiag_fn   g_fns[HWDIAG_MAX];
@@ -66,6 +68,19 @@ void hwdiag_register(hwdiag_fn fn)
 #if defined(__x86_64__)
 static void power_diag(hw_out_t *o);
 
+/* The adapter and the battery as the board's driver read them (casper_power.c
+ * fills the power_supply table); without one the line says available=0. */
+static void supply_line(hw_out_t *o)
+{
+	ps_t ps[4];
+	int n = 0;
+	while (n < 4 && power_supply_get(n, &ps[n]) == 0) n++;
+	char l[160];
+	ps_diag_line(ps, n, l, sizeof(l));
+	hw_str(o, l);
+	hw_end(o);
+}
+
 static void cpuid4(uint32_t leaf, uint32_t r[4])
 {
 	__asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3])
@@ -111,10 +126,7 @@ static void cpu_fill(hw_out_t *o)
 		hw_kv(o, "available", 0);
 		hw_ks(o, "reason", intel ? "no_digital_sensor" : "not_intel");
 		hw_end(o);
-		hw_begin(o, "power", "supply");
-		hw_kv(o, "available", 0);
-		hw_ks(o, "reason", "no_acpi_aml");
-		hw_end(o);
+		supply_line(o);
 		return;
 	}
 	uint64_t tt = 0, ts = 0, ps = 0;
@@ -151,10 +163,7 @@ static void cpu_fill(hw_out_t *o)
 	}
 	if (pln && have_ps) hw_kv(o, "pkg_limit_log", (ps >> 11) & 1);
 	hw_end(o);
-	hw_begin(o, "power", "supply");
-	hw_kv(o, "available", 0);
-	hw_ks(o, "reason", "no_acpi_aml");
-	hw_end(o);
+	supply_line(o);
 	power_diag(o);
 }
 #else
