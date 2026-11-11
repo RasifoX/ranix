@@ -8,6 +8,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/hugetlb.h>
+#include <kernel/mm/swap.h>
 #include <kernel/cgroup.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -22,6 +23,7 @@
 #define PTE_U   (1UL << 2)
 #define PTE_PWT (1UL << 3)
 #define PTE_PCD (1UL << 4)
+#define PTE_A   (1UL << 5)     /* accessed: the CPU sets it, reclaim reads and clears it */
 #define PTE_PS  (1UL << 7)
 #define PTE_NOFREE (1UL << 9)   /* software bit: kernel-shared page, skip free on vm_destroy */
 #define PTE_NX  (1UL << 63)     /* no-execute (EFER.NXE); cleared only when VM_EXEC */
@@ -83,6 +85,9 @@ vm_space_t *vm_create(void)
 	vs->mmap_next = ARCH_USER_MMAP_BASE;
 	vs->huge1g_next = HUGE1G_VA_BASE;
 	vs->brk = 0;
+	vs->swap_scan = 0;
+	vs->locked_all = 0;
+	vs->test_hook = 0;
 	vs->brk_lock = (mutex_t)MUTEX_INIT;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
@@ -169,9 +174,12 @@ void vm_destroy(vm_space_t *vs)
 				uint64_t l1_phys = l2[k] & ~0xFFFUL;
 				uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(l1_phys);
 				for (int l = 0; l < 512; l++) {
-					if (!(l1[l] & PTE_P)) continue;
+					if (!(l1[l] & PTE_P)) {
+						if (swp_pte_is(l1[l])) freed += PAGE_SIZE * swap_pte_free(l1[l]);
+						continue;
+					}
 					if ((l1[l] & PTE_U) && !(l1[l] & PTE_NOFREE)) {
-						freed += PAGE_SIZE * pmm_free((void *)(l1[l] & PA_MASK));
+						freed += PAGE_SIZE * anon_page_put(l1[l] & PA_MASK);
 					}
 				}
 				buddy_free(l1_phys, 0);
@@ -246,6 +254,8 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	if ((old & PTE_P) && (old & PA_MASK) == (paddr & PA_MASK))
 		entry |= old & (PTE_NOFREE | PTE_PWT | PTE_PCD);
 	pt[(vaddr >> 12) & 0x1FF] = entry;
+	/* a page mapped over a swapped-out one replaces it: the slot goes */
+	if (swp_pte_is(old) && swap_pte_free(old)) cgroup_uncharge_mem(vs, PAGE_SIZE);
 
 	__asm__ volatile("invlpg (%0)" :: "r"(vaddr) : "memory");
 	return 0;
@@ -372,7 +382,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 			freed += PAGE_SIZE * pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 		cgroup_uncharge_mem(vs, freed);
 	} else if ((pte & PTE_P) && (pte & PTE_U) && !(pte & PTE_NOFREE)) {
-		if (pmm_free((void *)(pte & PA_MASK))) cgroup_uncharge_mem(vs, PAGE_SIZE);
+		if (anon_page_put(pte & PA_MASK)) cgroup_uncharge_mem(vs, PAGE_SIZE);
+	} else if (swp_pte_is(pte)) {
+		if (swap_pte_free(pte)) cgroup_uncharge_mem(vs, PAGE_SIZE);
 	}
 }
 
@@ -402,6 +414,48 @@ uint64_t arch_vm_get_paddr(uint64_t *pml4_phys, uint64_t vaddr)
 	return (pt[p1i] & PA_MASK);
 }
 
+uint64_t *arch_pte_next(vm_space_t *vs, uint64_t *va, uint64_t end)
+{
+	uint64_t *l4 = (uint64_t *)PHYS_TO_VIRT(user_pml4(vs));
+	for (uint64_t v = *va & PAGE_MASK; v < end; ) {
+		uint64_t e4 = l4[(v >> 39) & 0x1FF];
+		if (!(e4 & PTE_P)) { v = (v | ((1UL << 39) - 1)) + 1; continue; }
+		uint64_t e3 = ((uint64_t *)PHYS_TO_VIRT(e4 & ~0xFFFUL))[(v >> 30) & 0x1FF];
+		if (!(e3 & PTE_P) || (e3 & PTE_PS)) { v = (v | ((1UL << 30) - 1)) + 1; continue; }
+		uint64_t e2 = ((uint64_t *)PHYS_TO_VIRT(e3 & ~0xFFFUL))[(v >> 21) & 0x1FF];
+		if (!(e2 & PTE_P) || (e2 & PTE_PS)) { v = (v | ((1UL << 21) - 1)) + 1; continue; }
+		*va = v;
+		return &((uint64_t *)PHYS_TO_VIRT(e2 & ~0xFFFUL))[(v >> 12) & 0x1FF];
+	}
+	*va = end;
+	return NULL;
+}
+
+uint64_t *arch_pte_find(vm_space_t *vs, uint64_t va)
+{
+	uint64_t v = va & PAGE_MASK;
+	uint64_t *pte = arch_pte_next(vs, &v, (va & PAGE_MASK) + PAGE_SIZE);
+	return pte && v == (va & PAGE_MASK) ? pte : NULL;
+}
+
+void arch_pte_set(vm_space_t *vs, uint64_t va, uint64_t *pte, uint64_t val)
+{
+	(void)vs;
+	*pte = val;
+	__asm__ volatile("invlpg (%0)" :: "r"(va) : "memory");
+}
+
+int arch_pte_young(uint64_t *pte)
+{
+	return (__atomic_fetch_and(pte, ~PTE_A, __ATOMIC_RELAXED) & PTE_A) != 0;
+}
+
+uint64_t arch_pte_page(uint64_t e)
+{
+	if ((e & PTE_P) && (e & PTE_U) && !(e & PTE_NOFREE)) return e & PA_MASK;
+	return 0;
+}
+
 /* Shoot down the other CPUs after a PTE downgrade. invlpg/CR3 are CPU-local,
  * so a sibling thread on another CPU in the same address space keeps a stale
  * TLB entry until forced to flush. range is currently flush-everything (a CR3
@@ -426,6 +480,25 @@ void arch_vm_switch(uint64_t root_phys, uint32_t asid)
 	__asm__ volatile("mov %0, %%cr3" :: "r"(root_phys) : "memory");
 }
 
+/* fork, one leaf table: a user page turns read-only in both spaces (COW) and
+ * gains a reference; a page out on swap gains a reference on its slot. */
+static void copy_leaf_table(uint64_t *l1_old, uint64_t *l1_new)
+{
+	for (int l = 0; l < 512; l++) {
+		uint64_t entry = l1_old[l];
+		if (!(entry & PTE_P)) {
+			if (swp_pte_is(entry)) { swap_pte_dup(entry); l1_new[l] = entry; }
+			continue;
+		}
+		if ((entry & PTE_U) && !(entry & PTE_NOFREE)) {
+			entry &= ~PTE_W;
+			l1_old[l] = entry;
+			pmm_hold((void *)(entry & PA_MASK));
+		}
+		l1_new[l] = entry;
+	}
+}
+
 vm_space_t *vm_copy(vm_space_t *vs)
 {
 	void *new_vs_phys = buddy_alloc(0);
@@ -439,6 +512,8 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->mmap_next = vs->mmap_next;
 	new_vs->huge1g_next = vs->huge1g_next;
 	new_vs->brk = vs->brk;
+	new_vs->swap_scan = 0;
+	new_vs->locked_all = 0; new_vs->test_hook = 0;   /* as Linux: mlockall is not inherited */
 	new_vs->brk_lock = (mutex_t)MUTEX_INIT;
 	new_vs->refcount = 1;
 	new_vs->asid = next_vm_tag();
@@ -523,16 +598,7 @@ vm_space_t *vm_copy(vm_space_t *vs)
 				uint64_t *l1_new = (uint64_t *)PHYS_TO_VIRT(l1_new_phys);
 				l2_new[k] = l1_new_phys | eflags;
 
-				for (int l = 0; l < 512; l++) {
-					if (!(l1_old[l] & PTE_P)) continue;
-					uint64_t entry = l1_old[l];
-					if ((entry & PTE_U) && !(entry & PTE_NOFREE)) {
-						entry &= ~PTE_W;
-						l1_old[l] = entry;
-						pmm_hold((void *)(entry & PA_MASK));
-					}
-					l1_new[l] = entry;
-				}
+				copy_leaf_table(l1_old, l1_new);
 			}
 		}
 	}

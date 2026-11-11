@@ -2464,6 +2464,7 @@ again:;
 		}
 		int acc = flags & 3; /* O_ACCMODE */
 		if ((acc != 0 || (flags & O_TRUNC)) && vfs_dentry_readonly(d)) return -EROFS;
+		if ((acc != 0 || (flags & O_TRUNC)) && inode->swapfile) return -ETXTBSY;   /* swap owns its blocks */
 		if (S_ISDIR(inode->mode) && (acc == 1 || acc == 2)) return -EISDIR;
 		/* check read/write permission on existing file */
 		int accmode = 0;
@@ -2732,6 +2733,8 @@ ssize_t vfs_write(int fd, const void *buf, size_t len)
 		r = -9; /* EBADF */
 	} else if (!f->inode->fops || !f->inode->fops->write) {
 		r = -22; /* EINVAL */
+	} else if (f->inode->swapfile) {
+		r = -ETXTBSY;   /* opened before swapon: swap owns its blocks now */
 	} else {
 		/* O_APPEND: each write lands at end of file, regardless of the seek pos. */
 		if ((f->flags & O_APPEND) && S_ISREG(f->inode->mode))

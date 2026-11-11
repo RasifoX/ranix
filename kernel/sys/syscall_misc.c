@@ -330,9 +330,9 @@ static long sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size,
 		if (new_size - old_size > (1UL << 30)) return -ENOMEM;
 		vma_t *v = p->vm->vmas;
 		while (v && !(old_addr >= v->vaddr && old_addr < v->vaddr + v->size)) v = v->next;
-		if (!v && !arch_vm_get_paddr(p->vm->root, old_addr)) return -EFAULT;
+		if (!v && !arch_vm_get_paddr(p->vm->root, old_addr) && !swap_pte_at(p->vm, old_addr)) return -EFAULT;
 		for (uint64_t a = old_addr + old_size; a < old_addr + new_size; a += PAGE_SIZE) {
-			if (arch_vm_get_paddr(p->vm->root, a)) return -ENOMEM;
+			if (arch_vm_get_paddr(p->vm->root, a) || swap_pte_at(p->vm, a)) return -ENOMEM;
 			for (vma_t *n = p->vm->vmas; n; n = n->next)
 				if (a >= n->vaddr && a < n->vaddr + n->size) return -ENOMEM;
 		}
@@ -968,6 +968,7 @@ static long sys_fallocate(int fd, int mode, off_t offset, off_t len)
 	vfs_inode_t *in = f->inode;
 	if (S_ISDIR(in->mode)) return -EISDIR;
 	if (!S_ISREG(in->mode)) return -EBADF;         /* ESPIPE-ish; Linux: EBADF/ENODEV */
+	if (in->swapfile) return -ETXTBSY;
 	if (!in->iops || !in->iops->truncate) return -EOPNOTSUPP;
 
 	/* KEEP_SIZE only reserves blocks (no ramfs concept) → honest success. */
@@ -1576,6 +1577,7 @@ static long sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, u
 		return 0;
 	case 0x52580011: /* PR_RANIX_GET_UNAME_LINUX */
 		return p->uname_linux;
+	case 0x52580020: return swap_test_hook_set(arg2);   /* PR_RANIX_TEST_HOOK, test kernels only */
 	case PR_SET_NAME: {
 		char name[16];
 		if (strncpy_from_user(name, (const void *)(uintptr_t)arg2, 16) < 0) return -EFAULT;

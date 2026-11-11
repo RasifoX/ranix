@@ -8,6 +8,8 @@
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/mm/oom.h>
+#include <kernel/mm/swap.h>
+#include <kernel/irq.h>
 #include <kernel/sync.h>
 #include <kernel/hal.h>
 #include <kernel/lib/string.h>
@@ -25,10 +27,16 @@
  * cannot self-deadlock. */
 #define OOM_RETRIES 8
 
-static void *vm_alloc_page_oom(void)
+/* With swap on, a fault that finds no free page first gives up the lock and
+ * swaps pages out (FAULT_NOMEM back to vm_handle_fault); only a fault that may
+ * kill runs the OOM killer. */
+#define FAULT_NOMEM   (-2)
+#define RECLAIM_PASSES 4
+
+static void *vm_alloc_page_oom(int may_kill)
 {
 	void *pg = buddy_alloc(0);
-	for (int i = 0; !pg && i < OOM_RETRIES; i++) {
+	for (int i = 0; !pg && may_kill && i < OOM_RETRIES; i++) {
 		if (oom_kill_alloc() != OOM_KILLED_OTHER) break;
 		pg = buddy_alloc(0);
 	}
@@ -118,10 +126,11 @@ _Static_assert(ARCH_USER_STACK_TOP < ARCH_USER_VA_END && HUGE1G_VA_BASE < ARCH_U
 	 * fault in a fresh zero page; the anon case maps with the VMA's recorded
 	 * permissions so a read-only region stays read-only. A VMA without VMA_READ
 	 * (PROT_NONE) is not a candidate — leave ret=-1 for SIGSEGV. */
-static inline int fault_not_present(process_t *p, uint64_t vaddr)
+static inline int fault_not_present(process_t *p, uint64_t vaddr, int may_kill)
 {
 	int ret = -1;
 	uint32_t mf = 0;
+	int anon = 1;   /* a private page: it may go to swap */
 	if (vaddr >= USER_STACK_TOP - MAX_STACK_SIZE && vaddr < USER_STACK_TOP) {
 		mf = VM_USER | VM_READ | VM_WRITE;
 	} else {
@@ -131,14 +140,16 @@ static inline int fault_not_present(process_t *p, uint64_t vaddr)
 			mf = VM_USER | VM_READ;
 			if (v->flags & VMA_WRITE) mf |= VM_WRITE;
 			if (v->flags & VMA_EXEC)  mf |= VM_EXEC;
+			anon = !(v->flags & VMA_SHARED);
 			break;
 		}
 	}
 	if (mf) {
 		if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return ret; /* over memory.max */
-		void *pg = vm_alloc_page_oom();
+		void *pg = vm_alloc_page_oom(may_kill);
 		if (pg) {
 			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+			if (anon) anon_page_mark((uint64_t)pg);
 			if (vm_map(p->vm, vaddr, (uint64_t)pg, mf) == 0) {
 				ret = 0;
 			} else {
@@ -147,6 +158,7 @@ static inline int fault_not_present(process_t *p, uint64_t vaddr)
 			}
 		} else {
 			cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+			if (!may_kill) ret = FAULT_NOMEM;
 		}
 	}
 	return ret;
@@ -179,13 +191,14 @@ static inline int fault_huge_1g(process_t *p, vma_t *v, uint64_t vaddr, uint64_t
 /* Write to a page shared after fork: copy it, map the copy writable, and hand
  * back the old page (*cow_old) to free once fault_lock is dropped. */
 static inline int fault_cow_copy(process_t *p, uint64_t vaddr, uint64_t paddr, uint32_t cow_exec,
-                                 uint64_t *cow_old)
+                                 uint64_t *cow_old, int may_kill)
 {
 	int ret = -1;
 	if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return ret; /* over memory.max */
-	void *new_p = vm_pmm_page_oom();
-	if (!new_p) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return ret; }
+	void *new_p = vm_alloc_page_oom(may_kill);
+	if (!new_p) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return may_kill ? ret : FAULT_NOMEM; }
 	memcpy((void *)PHYS_TO_VIRT(new_p), (void *)PHYS_TO_VIRT(paddr), PAGE_SIZE);
+	anon_page_mark((uint64_t)new_p);   /* the copy is this space's own */
 #if defined(__aarch64__)
 	if (cow_exec) {
 		uintptr_t pp = (uintptr_t)PHYS_TO_VIRT(new_p);
@@ -213,16 +226,23 @@ static inline int fault_cow_copy(process_t *p, uint64_t vaddr, uint64_t paddr, u
 static int fault_quiet;
 void vm_fault_quiet(int on) { fault_quiet = on; }
 
-int vm_handle_fault(uint64_t vaddr, int is_write)
+/* The page at vaddr is out on swap (e, read under fault_lock, which the
+ * caller holds): drop the lock and read it in. A PROT_NONE region stays out,
+ * and so does a page the kernel touched under a spinlock: reading may sleep. */
+static int fault_swapped(process_t *p, uint64_t vaddr, uint64_t e, int is_write, uint64_t lf, int may_sleep)
 {
-	vaddr &= PAGE_MASK;
-	process_t *p = task_current();
-	if (!p || !p->vm) {
-		if (!fault_quiet) kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1);
-		return -1;
-	}
+	int readable = may_sleep;
+	for (vma_t *v = p->vm->vmas; v; v = v->next)
+		if (vaddr >= v->vaddr && vaddr < v->vaddr + v->size) { readable &= (v->flags & VMA_READ) != 0; break; }
+	spin_unlock_irq(&p->vm->fault_lock, lf);
+	return readable ? swap_fault(p->vm, vaddr, e, is_write) : -1;
+}
 
-
+/* One try at the fault under the space's fault_lock. may_kill: an allocation
+ * that fails runs the OOM killer; else it returns FAULT_NOMEM. may_sleep: no
+ * spinlock was held at the fault, so a page may be read in from swap. */
+static int fault_resolve(process_t *p, uint64_t vaddr, int is_write, int may_kill, int may_sleep)
+{
 	/* Threads share one address space, so two CPUs can fault the same PTE
 	 * at once. Without serialization both would run the COW copy-and-free
 	 * and drop the shared page's refcount twice for one logical reference,
@@ -235,7 +255,9 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	uint64_t cow_old = 0;   /* old COW page to free + shoot down after fault_lock */
 
 	if (!paddr) {
-		ret = fault_not_present(p, vaddr);
+		uint64_t *pte = arch_pte_find(p->vm, vaddr);
+		if (pte && swp_pte_is(*pte)) return fault_swapped(p, vaddr, *pte, is_write, lf, may_sleep);
+		ret = fault_not_present(p, vaddr, may_kill);
 		goto out;
 	}
 
@@ -278,7 +300,7 @@ int vm_handle_fault(uint64_t vaddr, int is_write)
 	}
 
 	if (pg->refcount > 1) {
-		ret = fault_cow_copy(p, vaddr, paddr, cow_exec, &cow_old);
+		ret = fault_cow_copy(p, vaddr, paddr, cow_exec, &cow_old, may_kill);
 	} else {
 		ret = vm_map(p->vm, vaddr, paddr, VM_USER | VM_READ | VM_WRITE | cow_exec);
 	}
@@ -289,8 +311,41 @@ out:
 		if (p->vm->refcount > 1) {
 			arch_tlb_flush_range(p->vm, vaddr, vaddr + PAGE_SIZE);
 		}
-		if (pmm_free((void *)cow_old)) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+		if (anon_page_put(cow_old)) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 	}
+	return ret;
+}
+
+int vm_handle_fault(uint64_t vaddr, int is_write)
+{
+	return vm_handle_fault_irq(vaddr, is_write, 0);
+}
+
+/* irqs_on: the faulting context had interrupts on (a user page, or a syscall
+ * copying user memory). Only then may the fault sleep - reclaim, a swap read:
+ * the exception came in with interrupts off, and a CPU that sleeps with them
+ * off never wakes. They are turned back on for that work, as Linux does. */
+int vm_handle_fault_irq(uint64_t vaddr, int is_write, int irqs_on)
+{
+	vaddr &= PAGE_MASK;
+	process_t *p = task_current();
+	if (!p || !p->vm) {
+		if (!fault_quiet) kprintf(KERN_ERR "mm: fault with no vm pid=%d\n", p ? (int)p->pid : -1);
+		return -1;
+	}
+
+	/* Reclaim may sleep: not for a fault the kernel took under a spinlock. */
+	int may_sleep = irqs_on && spin_held_count() == 0;
+	uint64_t irqf = irq_save();
+	if (may_sleep) { irq_enable(); swap_memory_check(); }
+	int ret;
+	for (int pass = 0; ; pass++) {
+		int last = !may_sleep || !swap_active() || pass >= RECLAIM_PASSES;
+		ret = fault_resolve(p, vaddr, is_write, last, may_sleep);
+		if (ret != FAULT_NOMEM) break;
+		swap_reclaim(32, RECLAIM_ANON);
+	}
+	irq_restore(irqf);
 	return ret;
 }
 
@@ -313,7 +368,11 @@ size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int w
 		uint64_t lf = spin_lock_irq(&vs->fault_lock);
 		uint64_t pa = arch_vm_get_paddr(vs->root, pgva);
 		page_t *pg = pa ? paddr_to_page(pa) : NULL;
-		if (!pg) { spin_unlock_irq(&vs->fault_lock, lf); break; }
+		if (!pg) {
+			spin_unlock_irq(&vs->fault_lock, lf);
+			if (!pa && swap_fault_at(vs, pgva) == 1) continue;   /* was out on swap: read in, again */
+			break;
+		}
 		if (write) {
 			uint32_t vf = 0;
 			for (vma_t *v = vs->vmas; v; v = v->next)
@@ -327,6 +386,7 @@ size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int w
 				}
 				if (!np) { spin_unlock_irq(&vs->fault_lock, lf); break; }
 				memcpy((void *)PHYS_TO_VIRT(np), (void *)PHYS_TO_VIRT(pa), PAGE_SIZE);
+				anon_page_mark((uint64_t)np);
 				/* stays read-only: the target's own next write takes the normal path */
 				uint32_t mf = VM_USER | VM_READ | ((vf & VMA_EXEC) ? VM_EXEC : 0);
 				if (vm_map(vs, pgva, (uint64_t)np, mf) != 0) {
@@ -345,7 +405,7 @@ size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int w
 		spin_unlock_irq(&vs->fault_lock, lf);
 		if (cow_old) {
 			arch_tlb_flush_range(vs, pgva, pgva + PAGE_SIZE);
-			if (pmm_free((void *)cow_old)) cgroup_uncharge_mem(vs, PAGE_SIZE);
+			if (anon_page_put(cow_old)) cgroup_uncharge_mem(vs, PAGE_SIZE);
 		}
 		done += chunk;
 	}

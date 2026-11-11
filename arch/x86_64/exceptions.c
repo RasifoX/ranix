@@ -70,7 +70,7 @@ void exc_dispatch(arch_context_t *ctx)
 					spin_dump_held();
 				}
 			}
-			int fr = vm_handle_fault(cr2, is_write);
+			int fr = vm_handle_fault_irq(cr2, is_write, (ctx->rflags & 0x200) != 0);   /* IF */
 			if (ft0) { process_t *fc = task_current(); if (fc) { fc->ss_faults++; fc->ss_fault_ns += slowsys_ns() - ft0; } }
 			if (fr == 0) {
 				ptrace_apply_singlestep(ctx);

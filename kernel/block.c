@@ -238,12 +238,28 @@ static int blkdev_close(vfs_file_t *f)
     return 0;
 }
 
+/* SEEK_END is the end of the disk, as on Linux: mkswap, mkfs and dd size a disk
+ * that way, and the node itself has no size. */
+static off_t blkdev_seek(vfs_file_t *f, off_t off, int whence)
+{
+    block_device_t *bd = f->inode ? f->inode->priv : NULL;
+    off_t new;
+    if (whence == 0)      new = off;
+    else if (whence == 1) new = f->pos + off;
+    else if (whence == 2) new = (off_t)((bd ? bd->size_blocks : 0) * BLOCK_SIZE) + off;
+    else return -EINVAL;
+    if (new < 0) return -EINVAL;
+    f->pos = new;
+    return new;
+}
+
 static vfs_fops_t blkdev_fops = {
     .open  = blkdev_open,
     .close = blkdev_close,
     .read  = blkdev_read,
     .write = blkdev_write,
     .ioctl = blkdev_ioctl,
+    .seek  = blkdev_seek,
 };
 
 /* Filesystems write through, so a drive cache flush is what makes data durable.

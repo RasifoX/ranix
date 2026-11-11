@@ -14,6 +14,7 @@
 #include <kernel/proc.h>
 #include <kernel/vfs.h>
 #include <kernel/mm/heap.h>
+#include <kernel/mm/swap.h>
 #include <kernel/lib/string.h>
 #include <kernel/hal.h>
 #include <asm/context.h>
@@ -209,7 +210,7 @@ int coredump(process_t *proc, int sig, arch_context_t *tf)
 			for (uint64_t a = 0; a < v->size; a += 4096) {
 				void *uaddr = (void *)(v->vaddr + a);
 				size_t chunk = (v->size - a) < 4096 ? (size_t)(v->size - a) : 4096;
-				if (user_pages_mapped(uaddr, chunk))
+				if (user_pages_mapped(uaddr, chunk) || swap_pte_at(proc->vm, (uint64_t)uaddr))
 					core_write(fd, uaddr, chunk);
 				else
 					core_write(fd, zero, chunk);

@@ -45,6 +45,9 @@ typedef struct {
 	void      *mem_cg;     /* cgroup holding mem_charged, set by the first charge */
 	long       mem_charged;/* bytes this space asked for; the OOM killer's score */
 	long       pt_charged; /* of which page tables, freed with the space */
+	uint64_t   swap_scan;  /* reclaim's clock hand: the next VA it looks at (kernel/mm/reclaim.c) */
+	uint32_t   locked_all; /* mlockall: no page of the space is swapped, heap and stack too */
+	uint32_t   test_hook;  /* PR_RANIX_TEST_HOOK, test kernels only (kernel/mm/reclaim.c) */
 	uint32_t   magic;      /* VM_SPACE_MAGIC; corruption/use-after-free tripwire */
 } vm_space_t;
 
@@ -64,7 +67,8 @@ void        vm_set_kernel_pt(uint64_t phys);
 
 void        vm_init_kernel(uint64_t root_phys);
 void       *ioremap(uint64_t phys_addr, size_t size, uint32_t flags);
-int         vm_handle_fault(uint64_t vaddr, int is_write);
+int         vm_handle_fault(uint64_t vaddr, int is_write);   /* as from interrupts off: never sleeps */
+int         vm_handle_fault_irq(uint64_t vaddr, int is_write, int irqs_on);
 void        vm_fault_quiet(int on);   /* no error log for an expected kernel fault */
 size_t      vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write);
 
@@ -79,6 +83,19 @@ void arch_vm_switch(uint64_t root_phys, uint32_t asid);
 void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end);
 
 uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
+
+/* Leaf (4 KB) page-table entries, for swap (kernel/mm/swap.c). Callers hold
+ * vs->fault_lock. arch_pte_next: the entry for the first page at or above *va
+ * (moved there) below end whose page table exists, else NULL. arch_pte_set
+ * stores an entry and drops this CPU's TLB entry; the caller shoots down the
+ * others after the lock. arch_pte_young tests and clears the accessed bit.
+ * arch_pte_page: the page of a present 4 KB user entry the kernel may take
+ * away (not VM_NOFREE), else 0. */
+uint64_t *arch_pte_next(vm_space_t *vs, uint64_t *va, uint64_t end);
+uint64_t *arch_pte_find(vm_space_t *vs, uint64_t va);
+void      arch_pte_set(vm_space_t *vs, uint64_t va, uint64_t *pte, uint64_t val);
+int       arch_pte_young(uint64_t *pte);
+uint64_t  arch_pte_page(uint64_t e);
 
 /* vm.mmap_min_addr: nothing is mapped below it for a task without
  * CAP_SYS_RAWIO, so a kernel NULL dereference never lands on user memory */

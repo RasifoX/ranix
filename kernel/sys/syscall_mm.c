@@ -8,8 +8,9 @@
  * (mprotect). Each mapped region is tracked by a VMA (see vma_add in syscall.c)
  * so the page-fault handler knows a region's intent — anonymous vs file-backed,
  * shared vs private, and which permissions it carries. madvise acts on the hints
- * that matter without a page cache (prefault, drop, lazy-free, hugepage); msync
- * is a no-op as there is nothing to write back. mlock prefaults and pins a range.
+ * that matter without a page cache (prefault, drop, lazy-free, hugepage, page
+ * out to swap); msync writes shared file copies back. mlock prefaults a range
+ * (from swap too) and keeps reclaim off it.
  *
  * Compiled as part of syscall.c (textual include), so the static helpers it
  * relies on — vma_add and the PROT_, MAP_ and VMA_ flag macros — are in scope.
@@ -24,6 +25,7 @@ static void *mm_alloc_page_oom(void)
 {
 	void *pg = buddy_alloc(0);
 	for (int i = 0; !pg && i < 8; i++) {
+		if (swap_active() && swap_reclaim(32, RECLAIM_ANON) > 0) { pg = buddy_alloc(0); continue; }   /* swap first */
 		if (oom_kill_alloc_ex(1) != OOM_KILLED_OTHER) break;
 		pg = buddy_alloc(0);
 	}
@@ -71,6 +73,7 @@ static uint64_t brk_set(process_t *p, uint64_t addr)
 			return cur;
 		}
 		memset((void *)PHYS_TO_VIRT(page), 0, PAGE_SIZE);
+		anon_page_mark((uint64_t)page);
 		vm_map(vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE);
 	}
 	vm->brk = new_brk;
@@ -228,7 +231,7 @@ static long mmap_noreplace_check(process_t *p, uint64_t addr, size_t len)
 	if (addr & (PAGE_SIZE - 1)) return -EINVAL;
 	if (!access_ok((void *)addr, len)) return -ENOMEM;
 	uint64_t end = addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
-	int hit = arch_vm_get_paddr(p->vm->root, addr) != 0;   /* the heap has no VMA */
+	int hit = arch_vm_get_paddr(p->vm->root, addr) != 0 || swap_pte_at(p->vm, addr);   /* the heap has no VMA */
 	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
 	for (vma_t *v = p->vm->vmas; v && !hit; v = v->next)
 		hit = v->vaddr < end && v->vaddr + v->size > addr;
@@ -343,6 +346,7 @@ static long mmap_anon(process_t *p, uint64_t va, size_t len, int prot, int flags
 			void *pg = mm_alloc_page_oom();
 			if (!pg) { map_undo(p, va, v, len); kprintf(KERN_WARN "mm: mmap out of memory pid=%u va=0x%lx len=%zu free=%lu\n", p->pid, va, len, pmm_free_pages()); return -ENOMEM; }
 			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+			if (!(flags & MAP_SHARED)) anon_page_mark((uint64_t)pg);
 			vm_map(p->vm, v, (uint64_t)pg, vmflags);
 		}
 	}
@@ -465,6 +469,7 @@ static long mmap_file_copy(const mmap_file_t *m)
 		(void)nr;
 		file_off += PAGE_SIZE;
 
+		if (!(m->flags & MAP_SHARED)) anon_page_mark((uint64_t)pg);   /* a private copy */
 		vm_map(p->vm, v, (uint64_t)pg, m->vmflags);
 		if (m->prot & PROT_EXEC) mmap_sync_icache((uintptr_t)pg_virt);
 	}
@@ -498,6 +503,8 @@ static long mmap_file(process_t *p, uint64_t va, size_t len, int prot, int flags
 	 * the io_uring rings, carry no access mode */
 	int ro_shared = (flags & MAP_SHARED) && f->path[0] == '/' && (f->flags & 3) == O_RDONLY;
 	if (ro_shared && (prot & PROT_WRITE)) { r = -EACCES; goto out; }
+	/* an active swap area: stores through the mapping would reach its blocks */
+	if (f->inode->swapfile && (flags & MAP_SHARED) && (prot & PROT_WRITE)) { r = -ETXTBSY; goto out; }
 
 	mmap_file_t m = { .p = p, .f = f, .va = va, .off = off, .len = len, .prot = prot,
 	                  .flags = flags, .ro_shared = ro_shared, .vmflags = vmflags,
@@ -601,6 +608,45 @@ static long sys_munmap(uint64_t addr, size_t len)
 	return 0;
 }
 
+/* One page of mprotect, decided and written under fault_lock: reclaim may turn
+ * any present entry into a swap entry (kernel/mm/reclaim.c), and a page read
+ * without the lock and mapped back after that would be mapped while freed.
+ * 0: remapped, or out on swap; 1: nothing there. A page others hold (fork,
+ * the file cache) stays read-only in a private mapping: the write fault copies. */
+static int mprotect_pte(process_t *p, uint64_t va, uint32_t fl)
+{
+	int empty = 0;
+	swap_test_race(p->vm, va);   /* test kernels: reclaim strikes here (PR_RANIX_TEST_HOOK) */
+	uint64_t lf = spin_lock_irq(&p->vm->fault_lock);
+	uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
+	if (pa) {
+		page_t *pg = (fl & VM_WRITE) ? paddr_to_page(pa) : NULL;
+		if (pg && pg->refcount > 1) {
+			vma_t *m = p->vm->vmas;
+			while (m && !(va >= m->vaddr && va < m->vaddr + m->size)) m = m->next;
+			if (m && !(m->flags & VMA_SHARED)) fl &= ~(uint32_t)VM_WRITE;
+		}
+		vm_map(p->vm, va, pa, fl);
+	} else {
+		uint64_t *pte = arch_pte_find(p->vm, va);
+		empty = !(pte && swp_pte_is(*pte));
+	}
+	spin_unlock_irq(&p->vm->fault_lock, lf);
+	return empty;
+}
+
+/* Map the fresh page pg at va if the entry is still empty. 0: something got
+ * there first; the caller frees pg. */
+static int mprotect_fill(process_t *p, uint64_t va, uint64_t pg, uint32_t fl)
+{
+	uint64_t lf = spin_lock_irq(&p->vm->fault_lock);
+	uint64_t *pte = arch_pte_find(p->vm, va);
+	int ok = !arch_vm_get_paddr(p->vm->root, va) && !(pte && swp_pte_is(*pte));
+	if (ok) vm_map(p->vm, va, pg, fl);
+	spin_unlock_irq(&p->vm->fault_lock, lf);
+	return ok;
+}
+
 /* Change a range's protection. The PTEs are remapped and the covering VMAs'
  * flags are updated so the fault handler enforces the new protection (a write
  * to a now read-only page must fault). */
@@ -664,29 +710,16 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 	}
 	spin_unlock_irq(&p->vm->fault_lock, vf);
 
-	/* PTEs are updated after the VMA flags are already published, and each
-	 * vm_map/vm_unmap takes fault_lock itself (so this loop must not hold it).
+	/* PTEs are updated after the VMA flags are already published, one page at
+	 * a time under fault_lock (mprotect_pte; vm_unmap takes it itself).
 	 * A sibling faulting in the gap sees the new VMA prot: if the page is still
 	 * mapped a read just succeeds, and once it is unmapped the PROT_NONE VMA
 	 * denies the refault — never a fresh zero page into a protected region. */
 	for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
-		uint64_t pa = arch_vm_get_paddr(p->vm->root, va);
-		if (pa) {
-			if (prot == 0) {
-				vm_unmap(p->vm, va);
-			} else {
-				/* A page others hold (fork, the file cache) must stay read-only
-				 * in a private mapping: the write fault makes the copy. */
-				uint32_t fl = vmflags;
-				page_t *pg = (fl & VM_WRITE) ? paddr_to_page(pa) : NULL;
-				if (pg && pg->refcount > 1) {
-					vma_t *m = p->vm->vmas;
-					while (m && !(va >= m->vaddr && va < m->vaddr + m->size)) m = m->next;
-					if (m && !(m->flags & VMA_SHARED)) fl &= ~(uint32_t)VM_WRITE;
-				}
-				vm_map(p->vm, va, pa, fl);
-			}
-		} else {
+		if (prot == 0 && arch_vm_get_paddr(p->vm->root, va)) { vm_unmap(p->vm, va); continue; }
+		if (prot == 0 ? swap_pte_at(p->vm, va) : mprotect_pte(p, va, vmflags) == 0)
+			continue;   /* remapped, or out on swap: it comes back with the VMA's new protection */
+		{
 			/* An untouched anonymous page faults in with the VMA's new
 			 * protection, so skip the rest of that VMA instead of filling it. */
 			vma_t *m = p->vm->vmas;
@@ -698,8 +731,7 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 				uint64_t end = m->vaddr + m->size;
 				for (uint64_t x = va; x < end && x < addr + len; x += PAGE_SIZE) {
 					if ((end - x) > (1UL << 30)) break;   /* huge reservation: assume untouched */
-					uint64_t ppa = arch_vm_get_paddr(p->vm->root, x);
-					if (ppa) vm_map(p->vm, x, ppa, vmflags);
+					mprotect_pte(p, x, vmflags);
 				}
 				va = (end < addr + len ? end : addr + len) - PAGE_SIZE;
 				continue;
@@ -708,7 +740,10 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 			void *pg = buddy_alloc(0);
 			if (!pg) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return -ENOMEM; }
 			memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-			vm_map(p->vm, va, (uint64_t)pg, vmflags);
+			if (!mprotect_fill(p, va, (uint64_t)pg, vmflags)) {   /* filled meanwhile */
+				buddy_free((uint64_t)pg, 0);
+				cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+			}
 		}
 	}
 
@@ -727,6 +762,8 @@ static long sys_mprotect(uint64_t addr, size_t len, int prot)
 #define MADV_DONTNEED   4
 #define MADV_FREE       8
 #define MADV_HUGEPAGE   14
+#define MADV_COLD       20
+#define MADV_PAGEOUT    21
 #define MADV_NOHUGEPAGE 15
 
 /* Transparent hugepages: collapse a 2 MB-aligned span of sole-owned, fully
@@ -742,29 +779,48 @@ static void thp_collapse(process_t *p, uint64_t va)
 	if (!(vma->flags & VMA_ANON) || !(vma->flags & VMA_WRITE) || (vma->flags & VMA_SHARED))
 		return;
 
-	uint64_t pa0 = arch_vm_get_paddr(p->vm->root, va);
-	if (!pa0) return;
-	for (int j = 0; j < 512; j++) {
-		uint64_t pa = arch_vm_get_paddr(p->vm->root, va + (uint64_t)j * PAGE_SIZE);
-		if (!pa) return;
-		page_t *pg = paddr_to_page(pa);
-		if (!pg || pg->refcount != 1) return;   /* absent or shared → skip */
-	}
-
-	if (cgroup_charge_mem(p->vm, p->cgroup, HUGE_PAGE_SIZE) != 0) return;
+	/* Check, copy and replace under fault_lock: reclaim may turn any of these
+	 * entries into a swap entry in between, and a page read without the lock
+	 * could be one already freed. The old pages go once the TLBs are flushed. */
+	uint64_t *old = kmalloc(512 * sizeof(uint64_t));
+	if (!old) return;
+	if (cgroup_charge_mem(p->vm, p->cgroup, HUGE_PAGE_SIZE) != 0) { kfree(old); return; }
 	void *blk = buddy_alloc(9);   /* 2 MB */
-	if (!blk) { cgroup_uncharge_mem(p->vm, HUGE_PAGE_SIZE); return; }
-	for (int j = 0; j < 512; j++) {
+	int ok = blk != NULL;
+	swap_test_race(p->vm, va);   /* test kernels: reclaim strikes here (PR_RANIX_TEST_HOOK) */
+	uint64_t lf = spin_lock_irq(&p->vm->fault_lock);
+	for (int j = 0; ok && j < 512; j++) {
 		uint64_t pa = arch_vm_get_paddr(p->vm->root, va + (uint64_t)j * PAGE_SIZE);
-		memcpy((void *)PHYS_TO_VIRT((uint64_t)blk + (uint64_t)j * PAGE_SIZE),
-		       (void *)PHYS_TO_VIRT(pa), PAGE_SIZE);
+		page_t *pg = pa ? paddr_to_page(pa) : NULL;
+		ok = pg && pg->refcount == 1;            /* absent, out on swap or shared: skip */
+		if (ok) {
+			old[j] = pa;
+			memcpy((void *)PHYS_TO_VIRT((uint64_t)blk + (uint64_t)j * PAGE_SIZE),
+			       (void *)PHYS_TO_VIRT(pa), PAGE_SIZE);
+		}
 	}
-	for (uint64_t v = va; v < va + HUGE_PAGE_SIZE; v += PAGE_SIZE)
-		vm_unmap(p->vm, v);               /* frees the old 4K pages + empties the table */
-	if (vm_map_huge(p->vm, va, (uint64_t)blk, VM_USER | VM_READ | VM_WRITE) != 0) {
-		buddy_free((uint64_t)blk, 9);
+	/* empty the leaf entries (each drops from this CPU's TLB), then the 2 MB
+	 * entry replaces their table, which vm_map_huge frees */
+	for (int j = 0; ok && j < 512; j++) {
+		uint64_t v = va + (uint64_t)j * PAGE_SIZE;
+		arch_pte_set(p->vm, v, arch_pte_find(p->vm, v), 0);
+	}
+	if (ok && vm_map_huge(p->vm, va, (uint64_t)blk, VM_USER | VM_READ | VM_WRITE) != 0) {
+		for (int j = 0; j < 512; j++)            /* no 2 MB entry: the pages go back */
+			vm_map(p->vm, va + (uint64_t)j * PAGE_SIZE, old[j], VM_USER | VM_READ | VM_WRITE);
+		ok = 0;
+	}
+	spin_unlock_irq(&p->vm->fault_lock, lf);
+	if (!ok) {
+		if (blk) buddy_free((uint64_t)blk, 9);
 		cgroup_uncharge_mem(p->vm, HUGE_PAGE_SIZE);
+		kfree(old);
+		return;
 	}
+	arch_tlb_flush_range(p->vm, va, va + HUGE_PAGE_SIZE);
+	for (int j = 0; j < 512; j++)
+		if (anon_page_put(old[j])) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
+	kfree(old);
 }
 
 /* Locate the anonymous VMA covering [va, va+PAGE_SIZE). Huge VMAs are excluded:
@@ -813,23 +869,26 @@ static void mm_prefault(process_t *p, uint64_t addr, size_t len)
 		if (!vfl) { va = vma_next_after(p, va); continue; }
 		if (!(vfl & VMA_READ)) continue;
 		if (arch_vm_get_paddr(p->vm->root, va)) continue;
+		if (swap_fault_at(p->vm, va) != 0) continue;   /* was out on swap: read back in */
 		if (cgroup_charge_mem(p->vm, p->cgroup, PAGE_SIZE) != 0) return;
 		void *pg = mm_alloc_page_oom();
 		if (!pg) { cgroup_uncharge_mem(p->vm, PAGE_SIZE); return; }
 		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
+		if (!(vfl & VMA_SHARED)) anon_page_mark((uint64_t)pg);
 		uint32_t mf = VM_USER | VM_READ;
 		if (vfl & VMA_WRITE) mf |= VM_WRITE;
 		if (vfl & VMA_EXEC)  mf |= VM_EXEC;
-		if (vm_map(p->vm, va, (uint64_t)pg, mf) != 0) { buddy_free((uint64_t)pg, 0); cgroup_uncharge_mem(p->vm, PAGE_SIZE); return; }
+		if (!mprotect_fill(p, va, (uint64_t)pg, mf)) { buddy_free((uint64_t)pg, 0); cgroup_uncharge_mem(p->vm, PAGE_SIZE); }   /* a sibling filled it */
 	}
 }
 
 /* Drop the present pages of a private anonymous range (MADV_DONTNEED / MADV_FREE).
  * The pages are freed, which reverses the charge; the next access demand-faults a
  * fresh zero page (vm_handle_fault). Shared anon is left intact — its pages back
- * other mappings — matching MADV_DONTNEED's no-op on MAP_SHARED. We lack reclaim,
- * so MADV_FREE drops eagerly rather than lazily; a re-read still reads as zero,
- * which is a permitted MADV_FREE outcome. */
+ * other mappings — matching MADV_DONTNEED's no-op on MAP_SHARED. Reclaim only
+ * swaps, it does not throw clean pages away, so MADV_FREE drops eagerly rather
+ * than lazily; a re-read still reads as zero, a permitted MADV_FREE outcome.
+ * Pages out on swap are dropped too (vm_unmap frees their slots). */
 static void mm_drop(process_t *p, uint64_t addr, size_t len)
 {
 	uint64_t start = addr & ~(uint64_t)(PAGE_SIZE - 1);
@@ -881,6 +940,20 @@ static long sys_get_mempolicy(int *mode, unsigned long *nmask, unsigned long max
 	return 0;
 }
 
+/* MADV_COLD/MADV_PAGEOUT act on reclaimable memory: a locked or huge-page
+ * VMA in the range is EINVAL, as Linux (can_madv_lru_vma). */
+static long mm_lru_check(process_t *p, uint64_t addr, size_t len)
+{
+	long r = p->vm->locked_all ? -EINVAL : 0;
+	uint64_t cf = spin_lock_irq(&p->vm->fault_lock);
+	for (vma_t *v = p->vm->vmas; v; v = v->next)
+		if (v->vaddr < addr + len && v->vaddr + v->size > addr &&
+		    (v->flags & (VMA_LOCKED | VMA_HUGE | VMA_HUGE_1G)))
+			r = -EINVAL;
+	spin_unlock_irq(&p->vm->fault_lock, cf);
+	return r;
+}
+
 static long sys_madvise(uint64_t addr, size_t len, int advice)
 {
 	process_t *p = task_current();
@@ -895,6 +968,12 @@ static long sys_madvise(uint64_t addr, size_t len, int advice)
 		return 0;
 	}
 	case MADV_WILLNEED:        mm_prefault(p, addr, len); return 0;
+	case MADV_COLD:            return mm_lru_check(p, addr, len);   /* no LRU lists: a hint */
+	case MADV_PAGEOUT: {
+		long r = mm_lru_check(p, addr, len);
+		if (r == 0) swap_pageout(p->vm, addr, addr + ((len + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1)));
+		return r;
+	}
 	case MADV_DONTNEED:
 	case MADV_FREE:            mm_drop(p, addr, len);     return 0;
 	default:                   return 0;   /* NORMAL/RANDOM/SEQUENTIAL/NOHUGEPAGE: advisory */
@@ -903,8 +982,7 @@ static long sys_madvise(uint64_t addr, size_t len, int advice)
 
 /* Mark/clear VMA_LOCKED across [addr, addr+len), splitting any VMA the range only
  * partly covers so the flag lands on exactly the requested span (same carve as
- * mprotect). There is no reclaim yet, so the flag's effect today is the prefault
- * mlock already did plus the promise that future reclaim skips it. */
+ * mprotect). Reclaim (kernel/mm/reclaim.c) never swaps a page of a locked VMA. */
 static void mm_set_locked(process_t *p, uint64_t addr, size_t len, int on)
 {
 	uint64_t end = addr + len;
@@ -952,8 +1030,8 @@ static long sys_mlock(uint64_t addr, size_t len)
 	if (!access_ok((void *)start, len)) return -ENOMEM;   /* range outside user space */
 	long r = mlock_check(p, start, len);
 	if (r) return r;
-	mm_prefault(p, start, len);
-	mm_set_locked(p, start, len, 1);
+	mm_set_locked(p, start, len, 1);   /* first, so reclaim leaves the range alone */
+	mm_prefault(p, start, len);        /* then every page in, from swap too */
 	return 0;
 }
 
@@ -1006,17 +1084,34 @@ static long sys_mlockall(int flags)
 	if (lim == 0) return -EPERM;
 	if ((flags & MCL_CURRENT) && lim != RLIM_INFINITY && mapped_bytes(p) > lim) return -ENOMEM;
 	p->mlock_future = (flags & MCL_FUTURE) ? 1 : 0;
+	p->vm->locked_all = 1;   /* reclaim leaves the whole space alone, heap and stack included */
 	if (flags & MCL_CURRENT) {
 		mm_set_locked(p, 0, USER_SPAN, 1);
-		if (!(flags & MCL_ONFAULT)) mm_prefault(p, 0, USER_SPAN);
+		if (!(flags & MCL_ONFAULT)) { mm_prefault(p, 0, USER_SPAN); swap_in_all(p->vm); }
 	}
 	return 0;
+}
+
+/* swapon(2)/swapoff(2): the work is in kernel/mm/swapon.c */
+static long sys_swapon(const char *path, int flags)
+{
+	char kpath[PATH_MAX];
+	int r = resolve_path(kpath, AT_FDCWD, path);
+	return r ? r : swap_on(kpath, flags);
+}
+
+static long sys_swapoff(const char *path)
+{
+	char kpath[PATH_MAX];
+	int r = resolve_path(kpath, AT_FDCWD, path);
+	return r ? r : swap_off(kpath);
 }
 
 static long sys_munlockall(void)
 {
 	process_t *p = task_current();
 	p->mlock_future = 0;
+	p->vm->locked_all = 0;
 	mm_set_locked(p, 0, USER_SPAN, 0);
 	return 0;
 }

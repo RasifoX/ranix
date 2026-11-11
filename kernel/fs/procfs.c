@@ -13,6 +13,7 @@
 #include <kernel/mm/hugetlb.h>
 #include <kernel/mm/heap.h>
 #include <kernel/mm/mmu.h>
+#include <kernel/mm/swap.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sync.h>
@@ -148,8 +149,11 @@ static int fill_meminfo(char *buf, size_t sz)
 	pb_str(&b, "MemAvailable:   "); pb_u64kib(&b, free);
 	pb_str(&b, "Buffers:        "); pb_u64kib(&b, 0);
 	pb_str(&b, "Cached:         "); pb_u64kib(&b, 0);
-	pb_str(&b, "SwapTotal:      "); pb_u64kib(&b, 0);
-	pb_str(&b, "SwapFree:       "); pb_u64kib(&b, 0);
+	uint64_t st, sf, sc;
+	swap_totals(&st, &sf, &sc);
+	pb_str(&b, "SwapCached:     "); pb_u64kib(&b, sc);
+	pb_str(&b, "SwapTotal:      "); pb_u64kib(&b, st);
+	pb_str(&b, "SwapFree:       "); pb_u64kib(&b, sf);
 	pb_str(&b, "Active:         "); pb_u64kib(&b, used);
 	pb_str(&b, "Inactive:       "); pb_u64kib(&b, 0);
 	pb_str(&b, "AnonHugePages:  "); pb_u64kib(&b, huge2m_kb() * 1024);
@@ -343,7 +347,9 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	}
 	pb_char(&b, '\n');
 	uint64_t vm_kb = proc_vm_bytes(p) / 1024;
-	uint64_t rss_kb = proc_rss_bytes(p) / 1024;
+	uint64_t swap_b = p->vm ? swap_vm_bytes(p->vm) : 0;   /* swapped pages stay charged */
+	uint64_t rss_b = proc_rss_bytes(p);
+	uint64_t rss_kb = (rss_b > swap_b ? rss_b - swap_b : 0) / 1024;
 	pb_str(&b, "VmPeak:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "VmSize:\t"); pb_u64(&b, vm_kb); pb_str(&b, " kB\n");
 	pb_str(&b, "VmHWM:\t");  pb_u64(&b, rss_kb); pb_str(&b, " kB\n");
@@ -352,7 +358,7 @@ static int fill_proc_status(char *buf, size_t sz, int pid)
 	for (vma_t *v = p->vm ? p->vm->vmas : NULL; v; v = v->next)
 		if (v->flags & VMA_LOCKED) lck += v->size;
 	pb_str(&b, "VmLck:\t");  pb_u64(&b, lck / 1024); pb_str(&b, " kB\n");
-	pb_str(&b, "VmSwap:\t0 kB\n");   /* no swap */
+	pb_str(&b, "VmSwap:\t"); pb_u64(&b, swap_b / 1024); pb_str(&b, " kB\n");
 	pb_str(&b, "Threads:\t"); pb_u64(&b, (uint64_t)proc_thread_count(p->tgid)); pb_char(&b, '\n');
 	uint64_t sigign = 0, sigcgt = 0;
 	for (int _i = 0; p->sighand && _i < NSIG; _i++) {
@@ -633,9 +639,7 @@ static int fill_modules(char *buf, size_t sz) { (void)buf; (void)sz; return 0; }
 /* /proc/swaps — no swap areas configured; header only (swapon -s). */
 static int fill_swaps(char *buf, size_t sz)
 {
-	pb_t b = {buf, sz};
-	pb_str(&b, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
-	return (int)(sz - b.rem);
+	return swap_proc_swaps(buf, sz);
 }
 
 /* /proc/partitions — registered block devices (lsblk/fdisk/df probe this).
@@ -677,6 +681,10 @@ static int fill_vmstat(char *buf, size_t sz)
 	pb_t b = {buf, sz};
 	pb_str(&b, "nr_free_pages "); pb_u64(&b, buddy_free_pages()); pb_char(&b, '\n');
 	pb_str(&b, "nr_anon_pages 0\nnr_mapped 0\npgfault 0\npgmajfault 0\n");
+	uint64_t in, out;
+	swap_counts(&in, &out);
+	pb_str(&b, "pswpin "); pb_u64(&b, in); pb_char(&b, '\n');
+	pb_str(&b, "pswpout "); pb_u64(&b, out); pb_char(&b, '\n');
 	pb_str(&b, "kfree_bad "); pb_u64(&b, heap_bad_frees); pb_char(&b, '\n');   /* Ranix: bad frees since boot */
 	return (int)(sz - b.rem);
 }
@@ -894,7 +902,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_TAINTED: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, "0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_DMESG_RESTRICT: { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)dmesg_restrict); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
-	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"0\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b, (uint64_t)vm_swappiness); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MMAP_MIN:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,MMAP_MIN_ADDR); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
@@ -983,6 +991,21 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		if (!wdog_deadline_set) return -ENOSYS;   /* no deadline on this arch */
 		int r = wdog_deadline_set(v);
 		return r ? r : (ssize_t)len;
+	}
+	if (pr->type == PROC_F_SYS_SWAPPINESS) {   /* vm.swappiness: 0..200, root */
+		process_t *c = task_current();
+		if (c && !capable_task(c, CAP_SYS_ADMIN)) return -EPERM;
+		char tmp[16];
+		size_t n = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+		if (copy_fop_from_user(tmp, buf, n) != 0) return -EFAULT;
+		tmp[n] = '\0';
+		if (tmp[0] == '\n') return (ssize_t)len;   /* a shell's newline, written apart */
+		if (tmp[0] < '0' || tmp[0] > '9') return -EINVAL;
+		long v = 0;
+		for (char *q = tmp; *q >= '0' && *q <= '9' && v <= 200; q++) v = v * 10 + (*q - '0');
+		if (v > 200) return -EINVAL;
+		vm_swappiness = (int)v;
+		return (ssize_t)len;
 	}
 	if (pr->type == PROC_F_SYS_PIPE_MAX) {
 		process_t *c = task_current();
@@ -2834,6 +2857,7 @@ static vfs_inode_t *procfs_sysfile_inode(int type)
 	           type == PROC_F_SYS_KPTR_RESTRICT ||
 	           type == PROC_F_SYS_DMESG_RESTRICT ||
 	           type == PROC_F_SYS_PIPE_MAX ||
+	           type == PROC_F_SYS_SWAPPINESS ||
 	           type == PROC_F_SYS_RANIX_DEADLINE))
 		in->mode = S_IFREG | 0644;
 	return in;

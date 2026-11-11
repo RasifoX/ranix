@@ -2,8 +2,8 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* /proc/sys/vm/: max_map_count (JVM/ES/Redis) and overcommit_memory must be
- * readable and live under vm/, not kernel/. */
+/* /proc/sys/vm/: max_map_count (JVM/ES/Redis), overcommit_memory and swappiness
+ * (60 by default, as Linux) must be readable and live under vm/, not kernel/. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -25,7 +25,7 @@ int main(void)
 {
 	if (read_long("/proc/sys/vm/max_map_count") != 65530) { puts("FAIL max_map_count"); return 1; }
 	if (read_long("/proc/sys/vm/overcommit_memory") < 0)  { puts("FAIL overcommit"); return 1; }
-	if (read_long("/proc/sys/vm/swappiness") != 0)        { puts("FAIL swappiness"); return 1; }
+	if (read_long("/proc/sys/vm/swappiness") != 60)       { puts("FAIL swappiness"); return 1; }   /* Linux default */
 	puts("OK");
 	return 0;
 }

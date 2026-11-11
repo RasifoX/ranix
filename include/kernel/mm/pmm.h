@@ -15,12 +15,19 @@
 typedef struct page {
 	uint32_t refcount;
 	uint32_t flags;
-	uint64_t free_next;   /* buddy free-list link (page index; valid only while free) */
+	union {
+		uint64_t free_next;   /* buddy free-list link (page index; valid only while free) */
+		uint64_t swap;        /* PG_SWAPCACHE: the swap entry of its slot (kernel/mm/swap.c) */
+	};
 	uint64_t free_prev;
 } page_t;
 
 #define PG_MANAGED  (1 << 0)
 #define PG_CACHED   (1 << 1)   /* order-0 page parked in a per-CPU buddy magazine */
+#define PG_ANON       (1 << 2)   /* private anonymous page: may be swapped (kernel/mm/swap.c) */
+#define PG_SWAPCACHE  (1 << 3)   /* in the swap cache; .swap names its slot */
+#define PG_SWAPREAD   (1 << 4)   /* being read from swap: wait on swap_wait */
+#define PG_SWAPWRITE  (1 << 5)   /* being written to swap: stays in the cache meanwhile */
 
 extern page_t *mem_map;
 

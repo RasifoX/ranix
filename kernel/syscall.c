@@ -21,6 +21,7 @@
 #include <kernel/mm/vm.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/mm/oom.h>
+#include <kernel/mm/swap.h>
 #include <kernel/lib/string.h>
 #include <kernel/sync.h>
 #include <kernel/smp.h>
@@ -265,6 +266,8 @@ static long sys_mlock(uint64_t addr, size_t len);
 static long sys_munlock(uint64_t addr, size_t len);
 static long sys_mlock2(uint64_t addr, size_t len, int flags);
 static long sys_mlockall(int flags);
+static long sys_swapon(const char *path, int flags);
+static long sys_swapoff(const char *path);
 static long sys_munlockall(void);
 
 /* signal-management syscalls (defined in sys/syscall_sig.c) */
@@ -950,6 +953,8 @@ static int syscall_time_net(long n, const long *a, long *ret)
 	case SYS_ARCH_MLOCK2:      *ret = sys_mlock2((uint64_t)a[0], (size_t)a[1], (int)a[2]); break;
 	case SYS_ARCH_MLOCKALL:    *ret = sys_mlockall((int)a[0]); break;
 	case SYS_ARCH_MUNLOCKALL:  *ret = sys_munlockall(); break;
+	case SYS_ARCH_SWAPON:      *ret = sys_swapon((const char*)a[0], (int)a[1]); break;
+	case SYS_ARCH_SWAPOFF:     *ret = sys_swapoff((const char*)a[0]); break;
 	case SYS_ARCH_SYNC:        *ret = sys_sync(); break;
 	case SYS_ARCH_MOUNT:       *ret = sys_mount((const char*)a[0], (const char*)a[1], (const char*)a[2], (unsigned long)a[3], (const void*)a[4]);
 	                           if (*ret == 0) vfs_mounts_changed(); break;

@@ -220,6 +220,7 @@ SRCS_KERNEL = $(filter-out kernel/proc.c kernel/signal.c,$(wildcard kernel/*.c))
     $(wildcard kernel/tty/*.c) \
     drivers/video/fbdev.c \
     drivers/video/backlight.c \
+    drivers/block/zram.c \
     $(wildcard drivers/gpu/drm/*.c drivers/gpu/drm/i915/*.c drivers/gpu/drm/virtio/*.c drivers/thermal/*.c drivers/platform/*.c) \
     drivers/input/input_core.c \
     drivers/input/input_dev.c \
@@ -582,7 +583,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	            env tee seq sleep date id whoami hostname \
 	            true false dirname basename pwd uptime nproc \
 	            timeout test expr yes which readlink ping nc wget ip \
-	            su login passwd; do \
+	            su login passwd mkswap swapon swapoff; do \
 		ln -sf busybox $(BUILD_DIR)/initramfs/bin/$$cmd; \
 	done
 	@chmod u+s $(BUILD_DIR)/initramfs/bin/su
@@ -854,7 +855,9 @@ qemu: $(TARGET) initramfs
 # Disks are read-only until named in ranix.disk.rw. The test VMs write to throwaway
 # images, so those boots allow all; a shipped image leaves it empty.
 ISO_CMDLINE ?=
-test qemu-disk: ISO_CMDLINE = ranix.disk.rw=all ranix.hugepages1g=1
+qemu-disk: ISO_CMDLINE = ranix.disk.rw=all ranix.hugepages1g=1
+# ranix.test_hooks: test kernels only, lets a test make a race certain (PR_RANIX_TEST_HOOK)
+test: ISO_CMDLINE = ranix.disk.rw=all ranix.hugepages1g=1 ranix.test_hooks
 
 iso: initramfs $(TARGET)
 	@mkdir -p iso/boot/grub

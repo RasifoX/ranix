@@ -905,7 +905,8 @@ static void sig_setup_frame(arch_context_t *tf, process_t *p, int sig, void (*ha
 		*(uint64_t *)(usp + 208 + (uint64_t)_i * 8) = tf->qregs[_i];
 	if (siginfo_wanted) sig_put_siginfo((uint8_t *)(usp + 736), si);
 	usp = uframe;
-	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
+	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0 &&
+	    !(swap_user_retry(usp, sizeof(kframe)) && copy_to_user((void *)usp, kframe, sizeof(kframe)) == 0)) {
 		sig_kill_badframe(p);
 	}
 	tf->sp                   = usp;
@@ -1019,7 +1020,8 @@ static void sig_setup_frame(arch_context_t *tf, process_t *p, int sig, void (*ha
 	if (siginfo_wanted) sig_put_siginfo((uint8_t *)(usp + 680), si);
 	sig_fill_ucontext(tf, p, sig, (uint8_t *)(usp + 808), uframe, old_mask);
 	usp = uframe;
-	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0) {
+	if (copy_to_user((void *)usp, kframe, sizeof(kframe)) != 0 &&
+	    !(swap_user_retry(usp, sizeof(kframe)) && copy_to_user((void *)usp, kframe, sizeof(kframe)) == 0)) {
 		sig_kill_badframe(p);
 	}
 	tf->rsp                  = usp;

@@ -891,6 +891,39 @@ CR=$(timeout 10 /bin/test_kcmp 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  k
 check "c-kcmp"         "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
+# ── swap (arastirma/swap.md): zram and a swap file, pages out and back ──
+CR=$(timeout 90 /bin/test_swap zram 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-zram: /'
+check "c-swap-zram" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap cow 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-cow: /'
+check "c-swap-cow" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap mlock 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-mlock: /'
+check "c-swap-mlock" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap prot 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-prot: /'
+check "c-swap-prot" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap off 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-off: /'
+check "c-swap-off" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap perm 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-perm: /'
+check "c-swap-perm" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap file 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-file: /'
+check "c-swap-file" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap race 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-race: /'
+check "c-swap-race" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap signal 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-signal: /'
+check "c-swap-signal" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap futex 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-futex: /'
+check "c-swap-futex" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap busy 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-busy: /'
+check "c-swap-busy" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap lockall 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-lockall: /'
+check "c-swap-lockall" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap protnone 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-protnone: /'
+check "c-swap-protnone" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 90 /bin/test_swap racehook 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-racehook: /'
+check "c-swap-racehook" "OK" "$(echo "$CR" | tail -1)"
+check "c-swap-busybox" "16380 OK" "$(echo 16M > /sys/block/zram0/disksize && mkswap /dev/zram0 >/dev/null 2>&1 &&
+	swapon -p 5 /dev/zram0 && grep -q '^/dev/zram0 .*partition' /proc/swaps &&
+	free | awk '/^Swap:/ {printf "%s ", $2}'; swapoff /dev/zram0 && echo 0 > /sys/block/zram0/disksize && echo OK)"
+
 # ── 41b. W^X / NX — data & stack non-executable, W+X rejected ──
 check "c-wx"           "OK"  "$(timeout 10 /bin/test_wx 2>/dev/null | tail -1)"
 

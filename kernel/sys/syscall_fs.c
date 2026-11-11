@@ -358,6 +358,7 @@ static long sys_truncate(const char *path, off_t len)
 	if (S_ISDIR(in->mode)) return -EISDIR;
 	r = vfs_may_write(in);
 	if (r) return r;
+	if (in->swapfile) return -ETXTBSY;
 	if (!in->iops || !in->iops->truncate) return -EINVAL;
 	return in->iops->truncate(in, len);
 }
@@ -369,8 +370,8 @@ static long sys_ftruncate(int fd, off_t len)
 	vfs_file_t *f = fget(p->fds, fd);   /* pinned: a truncate can block on the disk */
 	if (!f) return -EBADF;
 	vfs_inode_t *in = f->inode;
-	long r = -22;
-	if ((f->flags & 3) != O_RDONLY && !S_ISDIR(in->mode) && in->iops && in->iops->truncate)
+	long r = in->swapfile ? -ETXTBSY : -22;
+	if (!in->swapfile && (f->flags & 3) != O_RDONLY && !S_ISDIR(in->mode) && in->iops && in->iops->truncate)
 		r = in->iops->truncate(in, len);
 	fput(f);
 	return r;

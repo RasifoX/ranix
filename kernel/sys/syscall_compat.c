@@ -91,7 +91,7 @@ static long sys_mincore(uint64_t addr, size_t len, uint8_t *uvec)
 			for (vma_t *v = vm->vmas; v && !known; v = v->next)
 				known = va >= v->vaddr && va < v->vaddr + v->size;
 			spin_unlock_irq(&vm->fault_lock, f);
-			if (!known) return -ENOMEM;   /* nothing mapped there */
+			if (!known && !swap_pte_at(vm, va)) return -ENOMEM;   /* nothing mapped there */
 		}
 		if (copy_to_user(uvec + i, &in, 1) != 0) return -EFAULT;
 	}

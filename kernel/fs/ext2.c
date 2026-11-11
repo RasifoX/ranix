@@ -2521,12 +2521,27 @@ static int ext2_setattr(vfs_inode_t *vi, const vfs_iattr_t *a)
 	return r;
 }
 
+/* Swap on a file: where byte pos lies on the filesystem's own disk. Swap then
+ * reads and writes those sectors itself, past the block cache. 0: a hole. */
+static uint64_t ext2_bmap(vfs_file_t *f, uint64_t pos, void **bdev)
+{
+	ext2_inode_priv_t *priv = f->inode->priv;
+	ext2_fs_t *fs = priv->fs;
+	if (pos / fs->block_size > 0xFFFFFFFFu) return 0;
+	mutex_lock(&fs->lock);
+	uint64_t blk = inode_map_block(fs, &priv->raw, (uint32_t)(pos / fs->block_size));
+	mutex_unlock(&fs->lock);
+	*bdev = fs->bdev;
+	return blk ? blk * fs->sectors_per_block + (pos % fs->block_size) / BLOCK_SIZE : 0;
+}
+
 static vfs_fops_t ext2_fops = {
 	.open  = ext2_open,
 	.close = ext2_close,
 	.read  = ext2_read,
 	.write = ext2_write,
 	.seek  = ext2_seek,
+	.bmap  = ext2_bmap,
 };
 
 /* the rest is the VFS's: read gives EISDIR, getdents goes through iops */
@@ -2543,6 +2558,7 @@ static vfs_fops_t ext2_fops_paged = {
 	.write = ext2_write,
 	.seek  = ext2_seek,
 	.mmap_page = ext2_mmap_page,
+	.bmap  = ext2_bmap,
 };
 
 /* ── ext2 iops ───────────────────────────────────────────────── */

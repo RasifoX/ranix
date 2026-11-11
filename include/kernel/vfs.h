@@ -174,6 +174,9 @@ typedef struct {
      * private maps alike; a private one is mapped read-only and copied on write.
      * shared_write: stores through the mapping must reach the file. */
     uint64_t (*mmap_page)(struct vfs_file *file, off_t off, int shared_write);
+    /* Swap on a file (kernel/mm/swapon.c): the 512-byte sector holding byte pos
+     * of the file, on the disk set in *bdev; 0 for a hole. */
+    uint64_t (*bmap)(struct vfs_file *file, uint64_t pos, void **bdev);
 } vfs_fops_t;
 
 /* ── inode ───────────────────────────────────────────────── */
@@ -195,6 +198,8 @@ typedef struct vfs_inode {
     uint32_t     no_cache;  /* 1: VFS must not cache children of this dir */
     uint32_t     cached;    /* 1: owned by dentry tree or pipe; 0: free when last fd closes */
     uint32_t     priv_static; /* 1: priv borrows static/caller-owned data — do not kfree it */
+    uint32_t     swapfile;  /* an active swap area (Linux S_SWAPFILE): swap writes its blocks
+                             * itself, so writes, truncate and fallocate get ETXTBSY */
     void        *xattrs;    /* extended attributes: vfs_xattr_t list (NULL if none) */
     int64_t      atime, mtime, ctime;
     uint32_t     atime_nsec, mtime_nsec, ctime_nsec;

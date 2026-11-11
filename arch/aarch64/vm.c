@@ -8,6 +8,7 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/mmu.h>
 #include <kernel/mm/hugetlb.h>
+#include <kernel/mm/swap.h>
 #include <kernel/cgroup.h>
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
@@ -117,6 +118,9 @@ vm_space_t *vm_create(void)
 	vs->mmap_next = ARCH_USER_MMAP_BASE;
 	vs->huge1g_next = HUGE1G_VA_BASE;
 	vs->brk = 0;
+	vs->swap_scan = 0;
+	vs->locked_all = 0;
+	vs->test_hook = 0;
 	vs->brk_lock = (mutex_t)MUTEX_INIT;
 	vs->fault_lock = (spinlock_t)SPINLOCK_INIT;
 
@@ -192,11 +196,17 @@ void vm_destroy(vm_space_t *vs)
 			uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l3_phys);
 			int is_user_l3 = 0;
 			for (int k = 0; k < 512; k++) {
-				if (!(l3[k] & PTE_VALID)) continue;
+				if (!(l3[k] & PTE_VALID)) {
+					if (swp_pte_is(l3[k])) {
+						is_user_l3 = 1;
+						freed += PAGE_SIZE * swap_pte_free(l3[k]);
+					}
+					continue;
+				}
 				if (l3[k] & PTE_USER) {
 					is_user_l3 = 1;
 					if (!(l3[k] & PTE_NOFREE))
-						freed += PAGE_SIZE * pmm_free((void *)(l3[k] & PA_MASK));
+						freed += PAGE_SIZE * anon_page_put(l3[k] & PA_MASK);
 				}
 			}
 			/* Don't free kernel-inherited L3 tables (e.g. framebuffer split).
@@ -282,6 +292,8 @@ int vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags)
 	}
 
 	l3[l3i] = (paddr & ~0xFFFUL) | L3_PAGE | attr;
+	/* a page mapped over a swapped-out one replaces it: the slot goes */
+	if (swp_pte_is(old) && swap_pte_free(old)) cgroup_uncharge_mem(vs, PAGE_SIZE);
 
 	__asm__ volatile(
 		"dsb ishst\n"
@@ -418,7 +430,9 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 			freed += PAGE_SIZE * pmm_free((void *)(huge_base + (uint64_t)i * PAGE_SIZE));
 		cgroup_uncharge_mem(vs, freed);
 	} else if ((pte & PTE_VALID) && (pte & PTE_USER) && !(pte & PTE_NOFREE)) {
-		if (pmm_free((void *)(pte & PA_MASK))) cgroup_uncharge_mem(vs, PAGE_SIZE);
+		if (anon_page_put(pte & PA_MASK)) cgroup_uncharge_mem(vs, PAGE_SIZE);
+	} else if (swp_pte_is(pte)) {
+		if (swap_pte_free(pte)) cgroup_uncharge_mem(vs, PAGE_SIZE);
 	}
 }
 
@@ -443,6 +457,52 @@ uint64_t arch_vm_get_paddr(uint64_t *l0_phys, uint64_t vaddr)
 	uint64_t *l3 = (uint64_t *)PHYS_TO_VIRT(l2[l2i] & ~0xFFFUL);
 	if (!(l3[l3i] & PTE_VALID)) return 0;
 	return (l3[l3i] & PA_MASK);
+}
+
+/* User VA is the 512 GB under L0[0]: L1, L2, then the L3 leaf tables. */
+uint64_t *arch_pte_next(vm_space_t *vs, uint64_t *va, uint64_t end)
+{
+	uint64_t *l1 = (uint64_t *)PHYS_TO_VIRT(user_l1(vs));
+	if (end > (1UL << 39)) end = 1UL << 39;
+	for (uint64_t v = *va & PAGE_MASK; v < end; ) {
+		uint64_t e1 = l1[(v >> 30) & 0x1FF];
+		if ((e1 & 3) != 3) { v = (v | ((1UL << 30) - 1)) + 1; continue; }
+		uint64_t e2 = ((uint64_t *)PHYS_TO_VIRT(e1 & ~0xFFFUL))[(v >> 21) & 0x1FF];
+		if ((e2 & 3) != 3) { v = (v | ((1UL << 21) - 1)) + 1; continue; }
+		*va = v;
+		return &((uint64_t *)PHYS_TO_VIRT(e2 & ~0xFFFUL))[(v >> 12) & 0x1FF];
+	}
+	*va = end;
+	return NULL;
+}
+
+uint64_t *arch_pte_find(vm_space_t *vs, uint64_t va)
+{
+	uint64_t v = va & PAGE_MASK;
+	uint64_t *pte = arch_pte_next(vs, &v, (va & PAGE_MASK) + PAGE_SIZE);
+	return pte && v == (va & PAGE_MASK) ? pte : NULL;
+}
+
+void arch_pte_set(vm_space_t *vs, uint64_t va, uint64_t *pte, uint64_t val)
+{
+	(void)vs;
+	*pte = val;
+	__asm__ volatile("dsb ishst; tlbi vaae1is, %0; dsb ish; isb" :: "r"(va >> 12) : "memory");
+}
+
+/* The access flag is set by the kernel at map time and never cleared (no
+ * hardware AF updates are enabled), so every page looks old: the reclaim
+ * clock acts as a plain FIFO here. */
+int arch_pte_young(uint64_t *pte)
+{
+	(void)pte;
+	return 0;
+}
+
+uint64_t arch_pte_page(uint64_t e)
+{
+	if ((e & 3) == 3 && (e & PTE_USER) && !(e & PTE_NOFREE)) return e & PA_MASK;
+	return 0;
 }
 
 /* The PTE-downgrade paths in this file already broadcast `tlbi ...is`
@@ -489,6 +549,9 @@ vm_space_t *vm_copy(vm_space_t *vs)
 	new_vs->mmap_next = vs->mmap_next;
 	new_vs->huge1g_next = vs->huge1g_next;
 	new_vs->brk = vs->brk;
+	new_vs->swap_scan = 0;
+	new_vs->locked_all = 0;   /* as Linux: mlockall is not inherited */
+	new_vs->test_hook = 0;
 	new_vs->brk_lock = (mutex_t)MUTEX_INIT;
 	new_vs->refcount = 1;
 	new_vs->asid = asid_alloc();
@@ -558,7 +621,13 @@ vm_space_t *vm_copy(vm_space_t *vs)
 			l2_new[j] = l3_new_phys | L12_TABLE;
 
 			for (int k = 0; k < 512; k++) {
-				if (!(l3_old[k] & PTE_VALID)) continue;
+				if (!(l3_old[k] & PTE_VALID)) {
+					if (swp_pte_is(l3_old[k])) {   /* out on swap: both point at the slot */
+						swap_pte_dup(l3_old[k]);
+						l3_new[k] = l3_old[k];
+					}
+					continue;
+				}
 				uint64_t entry = l3_old[k];
 				if ((entry & PTE_USER) && !(entry & PTE_NOFREE)) {
 					entry |= PTE_RO;

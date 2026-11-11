@@ -37,6 +37,7 @@
 #include <asm/cpu.h>
 #include <kernel/tty/tty_core.h>
 #include <kernel/vdso.h>
+#include <kernel/mm/swap.h>
 
 /* Boot-path pets. Long steps with bounded timeouts (DHCP, disk probing) must not
  * add up to a false reset, and a step that truly hangs stops the pets. */
@@ -598,6 +599,7 @@ void kernel_main(void)
 	vdso_init();
 
 	mount_first_disk();
+	zram_init();                    /* /dev/zram0, empty until sized (drivers/block/zram.c) */
 
 	disk_selftest_if_asked();
 

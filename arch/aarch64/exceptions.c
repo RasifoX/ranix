@@ -58,7 +58,7 @@
             uint32_t dfsc = iss & 0x3F;
             /* Translation fault (0x04-0x07) or Permission fault (0x0C-0x0F) */
             if ((dfsc >= 0x04 && dfsc <= 0x07) || (dfsc >= 0x0C && dfsc <= 0x0F)) {
-                if (vm_handle_fault(far, is_write) == 0)
+                if (vm_handle_fault_irq(far, is_write, (tf->spsr & 0x80) == 0) == 0)   /* PSTATE.I */
                     return;
             }
         }

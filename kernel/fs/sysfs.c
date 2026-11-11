@@ -34,6 +34,7 @@
 #include <input/ps2/synaptics.h>
 #include <drivers/input/ps2.h>
 #include <kernel/errno.h>
+#include <kernel/mm/swap.h>
 
 /* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
 #pragma weak ps2_aux_report
@@ -43,7 +44,8 @@ enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET
        SF_BLK_SIZE, SF_BLK_STAT, SF_BLK_RO, SF_BLK_RO_DENIED, SF_BLK_ID, SF_CPU_ONLINE, SF_CPU_POSSIBLE,
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
        SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
-       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE };
+       SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE,
+       SF_ZRAM_DISKSIZE, SF_ZRAM_MMSTAT };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -247,6 +249,13 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		n = 3; memcpy(tmp, m, 3); break;
 	}
 	case SF_NR_HUGEPAGES:  n = put_u64(tmp, (uint64_t)huge2m_nr_total()); tmp[n++] = '\n'; break;
+	case SF_ZRAM_DISKSIZE: n = put_u64(tmp, zram_disksize()); tmp[n++] = '\n'; break;
+	case SF_ZRAM_MMSTAT: {
+		uint64_t v[8];
+		zram_mm_stat(v);
+		for (int i = 0; i < 8; i++) { n += put_u64(tmp + n, v[i]); tmp[n++] = i < 7 ? ' ' : '\n'; }
+		break;
+	}
 	case SF_FREE_HUGEPAGES: n = put_u64(tmp, (uint64_t)huge2m_nr_free()); tmp[n++] = '\n'; break;
 	default:           n = 0; break;
 	}
@@ -285,10 +294,21 @@ static int sysfs_may_turn(int type)
 static ssize_t sysfs_file_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	sysfs_priv_t *pr = f->inode->priv;
-	if (!pr || (pr->type != SF_BACKLIGHT && pr->type != SF_CSTATE && pr->type != SF_NR_HUGEPAGES && pr->type != SF_KEYMAP && pr->type != SF_VOLUME && pr->type != SF_TOUCHPAD)) return -EINVAL;
+	if (!pr || (pr->type != SF_BACKLIGHT && pr->type != SF_CSTATE && pr->type != SF_NR_HUGEPAGES && pr->type != SF_KEYMAP && pr->type != SF_VOLUME && pr->type != SF_TOUCHPAD && pr->type != SF_ZRAM_DISKSIZE)) return -EINVAL;
 	char kbuf[32];
 	size_t n = len < sizeof(kbuf) ? len : sizeof(kbuf);
 	if (copy_fop_from_user(kbuf, buf, n) != 0) return -EFAULT;
+	if (pr->type == SF_ZRAM_DISKSIZE) {      /* bytes, with an optional K, M or G */
+		if (!capable_task(task_current(), CAP_SYS_ADMIN)) return -EPERM;
+		uint64_t v = 0; size_t j = 0;
+		if (n > 0 && (kbuf[0] == '\n' || kbuf[0] == ' ')) return (ssize_t)len;   /* a shell's newline, written apart */
+		if (n == 0 || kbuf[0] < '0' || kbuf[0] > '9') return -EINVAL;
+		for (; j < n && kbuf[j] >= '0' && kbuf[j] <= '9' && v < (1ULL << 50); j++) v = v * 10 + (uint64_t)(kbuf[j] - '0');
+		char u = j < n ? (char)(kbuf[j] | 0x20) : 0;
+		if (u == 'k') v <<= 10; else if (u == 'm') v <<= 20; else if (u == 'g') v <<= 30;
+		int e = zram_set_disksize(v);
+		return e ? e : (ssize_t)len;
+	}
 	if (pr->type == SF_VOLUME) {
 		long pct = 0;
 		if (!sysfs_may_turn(SF_VOLUME)) return -1;
@@ -696,6 +716,10 @@ static vfs_inode_t *sysfs_blockdev_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "ro") == 0) return sysfs_file(SF_BLK_RO, d);
 	if (strcmp(name, "ro_denied") == 0) return sysfs_file(SF_BLK_RO_DENIED, d);
 	if (strcmp(name, "id") == 0) return sysfs_file(SF_BLK_ID, d);
+	if (zram_owns(block_device_get(d))) {    /* Linux's zram knobs; disksize is root's */
+		if (strcmp(name, "disksize") == 0) return sysfs_file_rw(SF_ZRAM_DISKSIZE, d);
+		if (strcmp(name, "mm_stat") == 0) return sysfs_file(SF_ZRAM_MMSTAT, d);
+	}
 	return NULL;
 }
 static const char *blockdev_files[] = { "size", "stat", "ro", "ro_denied", "id" };

@@ -389,9 +389,16 @@ static long futex_wait(process_t *self, void *mm, uint32_t *key, uint32_t *uaddr
 	 * allocate, which it must not do under an IRQ-off spinlock. */
 	uint32_t cur;
 	if ((uintptr_t)uaddr & 3) return -EINVAL;
-	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
-	uint64_t f = spin_lock_irq(&futex_lock);
-	if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) { spin_unlock_irq(&futex_lock, f); return -EFAULT; }
+	uint64_t f;
+	for (int tries = 0; ; tries++) {
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) != 0) return -EFAULT;
+		f = spin_lock_irq(&futex_lock);
+		if (copy_from_user(&cur, uaddr, sizeof(cur)) == 0) break;
+		spin_unlock_irq(&futex_lock, f);
+		/* reclaim sent the word out in between: under the lock it cannot come
+		 * back, so read it in again outside and retry (a real fault stays EFAULT) */
+		if (tries >= 3 || !swap_pte_at(self->vm, (uint64_t)uaddr)) return -EFAULT;
+	}
 	if (cur != val)                                    { spin_unlock_irq(&futex_lock, f); return -EAGAIN; }
 	unsigned h = futex_hash(mm, key);
 	q.next = futex_bucket[h]; futex_bucket[h] = &q;
@@ -984,6 +991,8 @@ static long sys_sysinfo(void *info)
 	si.uptime    = (int64_t)(kernel_ticks / TIMER_HZ);
 	si.totalram  = buddy_total_pages() * PAGE_SIZE;
 	si.freeram   = buddy_free_pages()  * PAGE_SIZE;
+	uint64_t swap_cached;
+	swap_totals(&si.totalswap, &si.freeswap, &swap_cached);   /* free(1) reads these */
 	si.procs     = (uint16_t)task_count();
 	si.mem_unit  = 1;
 	return copy_to_user(info, &si, sizeof(si)) ? -14 : 0;
