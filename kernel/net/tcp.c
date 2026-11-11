@@ -605,6 +605,7 @@ socket_t *tcp_sock_find(struct net_namespace *ns, uint32_t local_ip, uint16_t lo
         if (s->remote_port != remote_port) continue;
         if (s->remote_ip   != remote_ip)   continue;
         if (s->tcp_state == TCP_CLOSED)    continue;   /* gets the peer a RST */
+        if (s->tcp_state == TCP_LISTEN || !remote_port) continue;   /* a listener is no connection */
         (void)local_ip;
         sock_hold(s);
         spin_unlock_irq(&gsock_lock, f);
@@ -628,6 +629,7 @@ socket_t *tcp_sock_find6(struct net_namespace *ns, uint16_t local_port,
         if (s->remote_port != remote_port) continue;
         if (!in6_eq(&s->remote_ip6, remote_ip6)) continue;
         if (s->tcp_state == TCP_CLOSED) continue;
+        if (s->tcp_state == TCP_LISTEN || !remote_port) continue;   /* a listener is no connection */
         sock_hold(s);
         spin_unlock_irq(&gsock_lock, f);
         return s;
@@ -1157,10 +1159,23 @@ find:;
     /* serialise the per-socket state machine against the syscalls */
     uint64_t tl = spin_lock_irq(&tcp_lock);
 
-    /* RST handling */
+    /* RST, as RFC 793 and 5961 have it: in SYN_SENT only when it acknowledges
+     * our SYN; elsewhere only at exactly the next expected byte. One in the
+     * window but not there gets a challenge ACK (the real peer answers it with
+     * a RST that fits); outside the window it is dropped. A guessed RST no
+     * longer ends a connection. */
     if (flags & TCP_RST) {
-        int syn = s->tcp_state == TCP_SYN_SENT || s->tcp_state == TCP_SYN_RECV;
-        tcp_closed(s, syn ? 111 /* ECONNREFUSED */ : 104 /* ECONNRESET */);
+        int st = s->tcp_state, reset = 0;
+        if (st == TCP_SYN_SENT)
+            reset = (flags & TCP_ACK) && ack == s->snd_nxt;
+        else if (st != TCP_LISTEN && st != TCP_CLOSED) {
+            uint32_t wnd = tcp_rwnd(s) ? tcp_rwnd(s) : 1;
+            if (seq == s->rcv_nxt) reset = 1;
+            else if (seq_lt(s->rcv_nxt, seq) && seq_lt(seq, s->rcv_nxt + wnd))
+                tcp_tx_seg(s, TCP_ACK, s->snd_nxt, s->rcv_nxt, NULL, 0);   /* challenge */
+        }
+        if (reset)
+            tcp_closed(s, st == TCP_SYN_SENT || st == TCP_SYN_RECV ? 111 /* ECONNREFUSED */ : 104 /* ECONNRESET */);
         spin_unlock_irq(&tcp_lock, tl);
         sock_put(s);
         skb_free(skb); return;

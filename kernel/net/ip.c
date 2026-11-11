@@ -150,6 +150,13 @@ void ip_rx(netdev_t *dev, skb_t *skb)
     if (dst != dev->ip && dst != 0xffffffff && dst != (dev->ip | ~dev->mask) &&
         (dst >> 24) != 127)   /* 127/8 = loopback, looped back by ip_tx */
     { skb_free(skb); return; }  /* not for us */
+    /* martians: no packet comes from 0.0.0.0 (our own DHCP reads its replies
+     * before this), and 127/8 only ever comes back from this machine */
+    {
+        uint32_t src = ntohl(iph->src);
+        if (!src || (!skb->looped && ((src >> 24) == 127 || (dst >> 24) == 127)))
+        { skb_free(skb); return; }
+    }
 
     uint16_t fo = ntohs(iph->frag_off);
     if (fo & (IP_MF | IP_OFFMASK)) {
@@ -187,6 +194,7 @@ static int ip_xmit(netdev_t *dev, skb_t *skb, uint32_t dst_ip)
         eh->type = htons(ETH_P_IP);
         netdev_count_tx(dev, skb->len);
         if (net_drop_hit()) { skb_free(skb); return 0; }   /* this is the loopback path */
+        skb->looped = 1;
         netdev_rx_enqueue(dev, skb);
         return 0;
     }

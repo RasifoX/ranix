@@ -29,6 +29,7 @@ skb_t *skb_alloc(void)
     if (!s) return NULL;
     s->data = s->buf + SKB_HEADROOM;
     s->len  = 0;
+    s->looped = 0;
     s->next = NULL;
     s->scm_nfiles = 0;
     s->ext = NULL;
@@ -387,6 +388,7 @@ int net_drop_hit(void)
 static int lo_tx(netdev_t *dev, skb_t *skb)
 {
     if (net_drop_hit()) { skb_free(skb); return 0; }  /* "lost" */
+    skb->looped = 1;
     netdev_rx_enqueue(dev, skb);
     return 0;
 }

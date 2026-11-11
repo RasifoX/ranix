@@ -44,6 +44,7 @@ typedef struct skb {
     uint32_t    src_ip;     /* datagram source — for recvfrom on a UDP socket */
     in6_addr_t  src_ip6;    /* IPv6 datagram source */
     uint16_t    src_port;
+    uint8_t     looped;     /* came back from this machine (loopback, own address) */
     struct skb *next;
     /* SCM_RIGHTS: in-flight passed files (AF_UNIX fd-passing) */
 #define SKB_SCM_MAX CONFIG_SKB_SCM_MAX

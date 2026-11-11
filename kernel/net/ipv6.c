@@ -199,6 +199,9 @@ void ipv6_rx(netdev_t *dev, skb_t *skb)
     uint16_t plen = ntohs(ip6->payload_len);
     if (skb->len < (uint16_t)sizeof(ipv6_hdr_t) + plen) { skb_free(skb); return; }
     if (!ipv6_for_us(dev, &ip6->dst)) { skb_free(skb); return; }
+    /* ::1 only ever comes back from this machine (:: stays: DAD probes use it) */
+    if (!skb->looped && (in6_eq(&ip6->src, &in6addr_loopback) || in6_eq(&ip6->dst, &in6addr_loopback)))
+    { skb_free(skb); return; }
 
     ipv6_hdr_t ip6_copy = *ip6;
     skb_pull(skb, sizeof(ipv6_hdr_t));
@@ -246,6 +249,7 @@ static int ipv6_xmit(netdev_t *dev, skb_t *skb, const in6_addr_t *dst)
         memcpy(eh->dst, dev->mac, 6);
         memcpy(eh->src, dev->mac, 6);
         eh->type = htons(ETH_P_IPV6);
+        skb->looped = 1;
         netdev_rx_enqueue(dev, skb);
         return 0;
     }
