@@ -845,6 +845,25 @@ static long sys_open(const char *path, int flags, mode_t mode)
 	return fd;
 }
 
+/* May open(/proc/self/fd/N, flags) make a new open of of's file? The reopen
+ * path is reached exactly where the walk could not check again (an unlinked
+ * file, a path from another root, another process's /proc entry), so this is
+ * that check, as Linux makes it: never more than the original open allowed
+ * (no write through a read-only descriptor, no read through a write-only one,
+ * an O_APPEND one stays appending and is never truncated), and the caller's own
+ * permission on the file. 0 or the errno. (Ranix has no O_PATH; if it gets one,
+ * an O_PATH original allows nothing here, while flags & 3 would read it as RDONLY.) */
+static int reopen_check(vfs_file_t *of, int flags)
+{
+	int had = of->flags & 3, want = flags & 3;
+	if (flags & O_DIRECTORY) return -ENOTDIR;                 /* only regular files come here */
+	if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) return -EEXIST;
+	if (had == O_RDONLY && (want != O_RDONLY || (flags & (O_TRUNC | O_APPEND)))) return -EACCES;
+	if (had == O_WRONLY && want != O_WRONLY) return -EACCES;
+	if ((of->flags & O_APPEND) && (!(flags & O_APPEND) || (flags & O_TRUNC))) return -EACCES;
+	return vfs_may_open(of->inode, want);
+}
+
 /* /proc/self/fd/N opens the file itself, not a path to it: a memfd has none. This
  * is how a process makes a read-only descriptor of its own shared memory. */
 static long proc_fd_reopen(const char *kp, int flags)
@@ -870,11 +889,19 @@ static long proc_fd_reopen(const char *kp, int flags)
 	vfs_file_t *of = fget(cur->fds, n);
 	if (!of) return -ENOENT;
 	if (!of->inode || !S_ISREG(of->inode->mode)) { fput(of); return -ENOENT; }
+	int deny = reopen_check(of, flags);
+	if (deny) { fput(of); return deny; }
+	if (flags & O_TRUNC) {                  /* allowed above: the file itself is truncated */
+		vfs_inode_t *in = of->inode;
+		int tr = in->iops && in->iops->truncate ? in->iops->truncate(in, 0) : 0;
+		if (tr) { fput(of); return tr; }
+	}
 	vfs_file_t *f = kmalloc(sizeof(*f));
 	if (!f) { fput(of); return -ENOMEM; }
 	memset(f, 0, sizeof(*f));
 	f->inode = of->inode;
-	f->flags = flags & ~0100000;         /* the rest of O_CLOEXEC is handled below */
+	/* what stays with the open file; O_CLOEXEC is the fd's, set below */
+	f->flags = flags & ~(02000000 | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 	atomic_fetch_add32((volatile uint32_t *)&f->inode->open_refs, 1);
 	fput(of);                            /* the new open holds the inode now */
 	/* a new open of the file: its filesystem counts it as one, close uncounts it */

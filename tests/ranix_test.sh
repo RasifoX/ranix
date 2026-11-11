@@ -405,6 +405,8 @@ check "c-unpriv"    "OK"            "$(timeout 30 /bin/test_unpriv 2>&1 | tail -
 check "c-uringblock" "OK"           "$(timeout 30 /bin/test_uring_block 2>&1 | tail -1)"
 CR=$(timeout 20 /bin/test_procfd_reopen 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  procfd-reopen: /'
 check "c-procfd-reopen" "OK" "$(echo "$CR" | tail -1)"
+CR=$(timeout 20 /bin/test_devfd_mode 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  devfd-mode: /'
+check "c-devfd-mode" "OK" "$(echo "$CR" | tail -1)"
 check "c-fuzz"      "OK"            "$(timeout 200 /bin/test_fuzz 20261105 40 2>/dev/null | tail -1)"
 check "c-scmrights"  "OK"            "$(timeout 8 /bin/test_scmrights 2>/dev/null)"
 check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null)"

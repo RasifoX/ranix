@@ -352,6 +352,7 @@ struct process;
 void       vfs_walk_done(struct process *p);
 void       fifo_free_inode(vfs_inode_t *in);
 int        vfs_may_write(vfs_inode_t *in);   /* 0, or -13: DAC for the current task */
+int        vfs_may_open(vfs_inode_t *in, int acc);   /* 0, or -13: may the current task open in with O_ACCMODE acc */
 int        vfs_may_enter(vfs_inode_t *dir);  /* 0, or -13: search permission on dir */
 int        vfs_may_search(vfs_inode_t *dir); /* 1, or 0 and the syscall reports EACCES */
 int        vfs_path_searchable(const char *path); /* 0 unless a directory on the way refuses */

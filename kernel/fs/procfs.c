@@ -1324,8 +1324,9 @@ static int procfs_fds_visible(int pid)
 	if (pid == 0) return 1;
 	process_t *t = proc_get((pid_t)pid);
 	if (!t) return 0;
-	int ok = t->tgid == cur->tgid || t->euid == cur->euid ||
-	         capable_task((struct process *)cur, CAP_SYS_PTRACE);
+	/* Linux ptrace_may_access(READ): every uid of the target, and it dumpable,
+	 * or CAP_SYS_PTRACE; a same-euid setuid or non-dumpable task stays hidden */
+	int ok = t->tgid == cur->tgid || ptrace_may_access(t);
 	proc_put(t);
 	return ok;
 }

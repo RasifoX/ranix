@@ -273,7 +273,8 @@ static ssize_t fdproxy_read(vfs_file_t *f, void *buf, size_t len)
 	process_t *cur = task_current();
 	if (!cur || !cur->fds) return -EBADF;
 	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking read */
-	if (!target || !target->inode || !target->inode->fops ||
+	/* the target's own open decides, not this node's: no read through a write-only fd */
+	if (!target || !target->inode || !target->inode->fops || (target->flags & 3) == O_WRONLY ||
 	    !target->inode->fops->read) { if (target) fput(target); return -EBADF; }
 	ssize_t r = target->inode->fops->read(target, buf, len);
 	fput(target);
@@ -286,7 +287,8 @@ static ssize_t fdproxy_write(vfs_file_t *f, const void *buf, size_t len)
 	process_t *cur = task_current();
 	if (!cur || !cur->fds) return -EBADF;
 	vfs_file_t *target = fget(cur->fds, dp->fd_n);  /* pin across the blocking write */
-	if (!target || !target->inode || !target->inode->fops ||
+	/* the target's own open decides, not this node's: no write through a read-only fd */
+	if (!target || !target->inode || !target->inode->fops || (target->flags & 3) == O_RDONLY ||
 	    !target->inode->fops->write) { if (target) fput(target); return -EBADF; }
 	ssize_t r = target->inode->fops->write(target, buf, len);
 	fput(target);

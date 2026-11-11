@@ -481,6 +481,16 @@ static int vfs_check_perm(vfs_inode_t *inode, int accmode, uid_t uid, gid_t gid)
 	return fs_permission(&c, inode->mode, inode->uid, inode->gid, accmode);
 }
 
+/* May the current task open in with access acc (O_RDONLY/O_WRONLY/O_RDWR)?
+ * For an open that did not come through a walk (a /proc/self/fd reopen). */
+int vfs_may_open(vfs_inode_t *in, int acc)
+{
+	process_t *p = task_current();
+	int mode = (acc == O_WRONLY ? 0 : MAY_READ) | (acc == O_RDONLY ? 0 : MAY_WRITE);
+	if (!p) return 0;
+	return vfs_check_perm(in, mode, task_fsuid(p), task_fsgid(p)) ? -EACCES : 0;
+}
+
 /* May the current task look names up in dir? A task's first walks run before it
  * has an identity to check; kernel threads run as root. */
 int vfs_may_search(vfs_inode_t *dir)
@@ -2451,6 +2461,13 @@ again:;
 
 		int cr = open_create(path, uid, gid, umask, mode, rp, raced, &d, &inode);
 		if (cr == 1) { raced = 1; goto again; }
+		if (cr && (flags & O_EXCL)) {
+			/* the name is there, a link the walk could not follow (dangling, or
+			 * /proc/self/fd/N of an unlinked file): Linux's O_CREAT|O_EXCL never
+			 * follows the last link, so it is EEXIST, not the parent's refusal */
+			vfs_stat_t ls = {0};
+			if (vfs_lstat(path, &ls) == 0) return -EEXIST;
+		}
 		if (cr) return cr;
 	} else {
 		if ((flags & O_CREAT) && (flags & O_EXCL)) return -EEXIST;
