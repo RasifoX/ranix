@@ -403,6 +403,8 @@ check "c-uaccess"   "OK"            "$(timeout 60 /bin/test_uaccess 2>&1 | tail 
 check "c-errno"     "OK"            "$(timeout 30 /bin/test_errno 2>&1 | tail -1)"
 check "c-unpriv"    "OK"            "$(timeout 30 /bin/test_unpriv 2>&1 | tail -1)"
 check "c-uringblock" "OK"           "$(timeout 30 /bin/test_uring_block 2>&1 | tail -1)"
+CR=$(timeout 20 /bin/test_procfd_reopen 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  procfd-reopen: /'
+check "c-procfd-reopen" "OK" "$(echo "$CR" | tail -1)"
 check "c-fuzz"      "OK"            "$(timeout 200 /bin/test_fuzz 20261105 40 2>/dev/null | tail -1)"
 check "c-scmrights"  "OK"            "$(timeout 8 /bin/test_scmrights 2>/dev/null)"
 check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null)"
@@ -1235,6 +1237,11 @@ if [ -x /bin/apk.static ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
 		check "apk-live" "yes" "no($(tail -1 /tmp/apkadd 2>/dev/null))"
 	fi
 fi
+
+# A free of a block that is not a live heap block is memory corruption waiting
+# to happen; the heap logs it and goes on. Any one fails the whole run: the
+# count since boot (/proc/vmstat kfree_bad), which a wrapped kernel log cannot hide.
+check "dmesg-no-bad-free" "0" "$(awk '/^kfree_bad / {print $2}' /proc/vmstat)"
 
 echo "---"
 echo "Results: $PASS passed, $FAIL failed out of $((PASS+FAIL)) tests"

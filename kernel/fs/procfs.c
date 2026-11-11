@@ -677,6 +677,7 @@ static int fill_vmstat(char *buf, size_t sz)
 	pb_t b = {buf, sz};
 	pb_str(&b, "nr_free_pages "); pb_u64(&b, buddy_free_pages()); pb_char(&b, '\n');
 	pb_str(&b, "nr_anon_pages 0\nnr_mapped 0\npgfault 0\npgmajfault 0\n");
+	pb_str(&b, "kfree_bad "); pb_u64(&b, heap_bad_frees); pb_char(&b, '\n');   /* Ranix: bad frees since boot */
 	return (int)(sz - b.rem);
 }
 

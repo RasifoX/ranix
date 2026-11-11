@@ -866,14 +866,17 @@ static long proc_fd_reopen(const char *kp, int flags)
 	if (*p < '0' || *p > '9') return -ENOENT;
 	while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
 	if (*p) return -ENOENT;
-	vfs_file_t *of = fd_get(cur->fds, n);
-	if (!of || !of->inode || !S_ISREG(of->inode->mode)) return -ENOENT;
+	/* pinned: a sibling thread's close must not free it (and its inode) under us */
+	vfs_file_t *of = fget(cur->fds, n);
+	if (!of) return -ENOENT;
+	if (!of->inode || !S_ISREG(of->inode->mode)) { fput(of); return -ENOENT; }
 	vfs_file_t *f = kmalloc(sizeof(*f));
-	if (!f) return -ENOMEM;
+	if (!f) { fput(of); return -ENOMEM; }
 	memset(f, 0, sizeof(*f));
 	f->inode = of->inode;
 	f->flags = flags & ~0100000;         /* the rest of O_CLOEXEC is handled below */
 	atomic_fetch_add32((volatile uint32_t *)&f->inode->open_refs, 1);
+	fput(of);                            /* the new open holds the inode now */
 	/* a new open of the file: its filesystem counts it as one, close uncounts it */
 	vfs_fops_t *ops = f->inode->fops;
 	int orc = ops && ops->open ? ops->open(f->inode, f, f->flags) : 0;

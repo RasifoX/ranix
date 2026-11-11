@@ -446,15 +446,14 @@ static void dentry_unhold(vfs_dentry_t *d)
 
 /* Drop one open file description's hold on an inode. Filesystems supporting
  * open-unlinked semantics (evict hook) defer freeing a name-less inode until
- * its last fd closes here. Returns 1 if the inode is theirs to free (caller must
- * not touch it again), 0 otherwise. */
+ * its last fd closes here. Returns 1 if the caller must not free the inode:
+ * the filesystem frees it, or another open still uses it (/proc/self/fd/N
+ * opened a second description of a /proc or /sys file); 0 otherwise. */
 static int vfs_inode_drop_open(vfs_inode_t *in)
 {
 	if (!in || in->open_refs == 0) return 0;
-	if (!in->iops || !in->iops->evict) {
-		atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1);
-		return 0;
-	}
+	if (!in->iops || !in->iops->evict)
+		return atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1) != 0;
 	uint64_t f = spin_lock_irq(&grave_lock);
 	int last = atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1) == 0;
 	int orphan = in->deferred_unlink;

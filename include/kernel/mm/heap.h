@@ -10,5 +10,6 @@
 void heap_init(void);
 void *kmalloc(size_t size);
 void kfree(void *ptr);
+extern uint64_t heap_bad_frees;   /* kfree of a block that is not a live one ("kfree bad ptr") */
 
 #endif

@@ -135,6 +135,7 @@ void *kmalloc(size_t size) {
 #define FREE_RING 512
 static struct { void *ptr, *by; } free_ring[FREE_RING];
 static uint32_t free_at;
+uint64_t heap_bad_frees;   /* /proc/vmstat kfree_bad: the suite fails on any */
 
 void kfree(void *ptr) {
     if (!ptr) return;
@@ -188,6 +189,7 @@ void kfree(void *ptr) {
         void *first = NULL;
         for (uint32_t k = 1; k <= FREE_RING && k <= free_at; k++)
             if (free_ring[(free_at - k) % FREE_RING].ptr == ptr) { first = free_ring[(free_at - k) % FREE_RING].by; break; }
+        heap_bad_frees++;
         spin_unlock_irq(&heap_lock, f);
         kprintf(KERN_ERR "mm: kfree bad ptr=%p magic=0x%x by %p, %p; freed before by %p\n", ptr,
                 hdr->magic, __builtin_return_address(0), __builtin_return_address(1), first);
