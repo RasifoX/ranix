@@ -526,6 +526,7 @@ static long sys_getrusage(int who, void *usage)
 static long sys_setreuid(uid_t ruid, uid_t euid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	uid_t old_r = p->uid, old_euid = p->euid;
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
@@ -540,6 +541,7 @@ static long sys_setreuid(uid_t ruid, uid_t euid)
 		p->suid = new_e;
 	p->fs_uid_set = 0;   /* the fsuid follows the euid again */
 	cred_setxuid_fixup(p, was_priv, old_euid);
+	setid_dumpable(p, old);
 	return 0;
 }
 
@@ -547,6 +549,7 @@ static long sys_setreuid(uid_t ruid, uid_t euid)
 static long sys_setregid(gid_t rgid, gid_t egid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	gid_t old_r = p->gid;
 	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
 	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
@@ -559,12 +562,14 @@ static long sys_setregid(gid_t rgid, gid_t egid)
 	if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != old_r))
 		p->sgid = new_e;
 	p->fs_gid_set = 0;
+	setid_dumpable(p, old);
 	return 0;
 }
 
 static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	uid_t old_euid = p->euid;
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	uid_t new_r = (ruid != (uid_t)-1) ? ruid : p->uid;
@@ -575,6 +580,7 @@ static long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	p->uid = new_r; p->euid = new_e; p->suid = new_s;
 	p->fs_uid_set = 0;
 	cred_setxuid_fixup(p, was_priv, old_euid);
+	setid_dumpable(p, old);
 	return 0;
 }
 
@@ -590,6 +596,7 @@ static long sys_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
 static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	gid_t new_r = (rgid != (gid_t)-1) ? rgid : p->gid;
 	gid_t new_e = (egid != (gid_t)-1) ? egid : p->egid;
 	gid_t new_s = (sgid != (gid_t)-1) ? sgid : p->sgid;
@@ -597,6 +604,7 @@ static long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 		return -EPERM;
 	p->gid = new_r; p->egid = new_e; p->sgid = new_s;
 	p->fs_gid_set = 0;
+	setid_dumpable(p, old);
 	return 0;
 }
 
@@ -620,9 +628,11 @@ static long sys_setfsuid(uid_t fsuid)
 	uid_t prev = task_fsuid(p);
 	if (fsuid == (uid_t)-1) return (long)prev;
 	if (fsuid == prev || may_take_uid(p, fsuid)) {
+		setid_old_t old = setid_save(p);
 		p->fsuid = fsuid;
 		p->fs_uid_set = 1;
 		cred_fsuid_fixup(p, prev);
+		setid_dumpable(p, old);
 	}
 	return (long)prev;
 }
@@ -633,8 +643,10 @@ static long sys_setfsgid(gid_t fsgid)
 	gid_t prev = task_fsgid(p);
 	if (fsgid == (gid_t)-1) return (long)prev;
 	if (fsgid == prev || may_take_gid(p, fsgid)) {
+		setid_old_t old = setid_save(p);
 		p->fsgid = fsgid;
 		p->fs_gid_set = 1;
+		setid_dumpable(p, old);
 	}
 	return (long)prev;
 }

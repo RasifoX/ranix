@@ -275,11 +275,15 @@ int capable_setid(struct process *p, int cap, uint32_t id)
 int task_may_control(struct process *t, int cap)
 {
 	process_t *cur = task_current(), *tg = (process_t *)t;
-	/* Linux: the caller's uid must be all three of the target's, and the target
-	 * dumpable. A setuid-root program a user started (uid=user, euid=0) is not
-	 * the user's to renice, re-limit or move. */
+	/* Linux (prlimit, setpriority, sched_*, cgroup.procs): the caller's uid must
+	 * be all three of the target's. A setuid-root program a user started
+	 * (uid=user, euid=0) is not the user's to renice, re-limit or move. Not
+	 * dumpable is no part of it on Linux: a daemon that dropped root (and so is
+	 * not dumpable, setid_dumpable) still renices and re-limits its own workers.
+	 * What reads or compares a task's insides (ptrace, kcmp, /proc/<pid>/mem)
+	 * goes by ptrace_may_access, which does ask for dumpable. */
 	if (cur == tg || cur->tgid == tg->tgid) return 1;
-	if (cur->euid == tg->uid && cur->euid == tg->euid && cur->euid == tg->suid && tg->dumpable)
+	if (cur->euid == tg->uid && cur->euid == tg->euid && cur->euid == tg->suid)
 		return 1;
 	return capable_task((struct process *)cur, cap);
 }

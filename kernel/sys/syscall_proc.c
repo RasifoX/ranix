@@ -1181,7 +1181,8 @@ static long sys_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsig
 	process_t *a = proc_get_user(pid1), *b = proc_get_user(pid2);
 	long r = 0;
 	if (!a || !b) { r = -3; goto out; }
-	if (!task_may_control(a, CAP_SYS_PTRACE) || !task_may_control(b, CAP_SYS_PTRACE)) { r = -1; goto out; }
+	/* Linux PTRACE_MODE_READ_REALCREDS on both: kcmp tells what a task holds */
+	if (!ptrace_may_access(a) || !ptrace_may_access(b)) { r = -1; goto out; }
 	const void *x, *y;
 	switch (type) {
 	case 0: {                                   /* KCMP_FILE */
@@ -2049,15 +2050,21 @@ static long sys_process_vm(pid_t pid, const iovec_t *uliov, unsigned long lcnt,
 {
 	if (flags) return -EINVAL;
 	if (lcnt > 16 || rcnt > 16) return -EINVAL;   /* (we cap at 16 iovecs) */
-	uid_t teuid = 0;
 	process_t *target = proc_get_user(pid);
-	vm_space_t *tvm = target ? proc_get_vm_cred((pid_t)target->pid, &teuid) : NULL;   /* pinned; vm_destroy to release */
+	vm_space_t *tvm = target ? proc_get_vm((pid_t)target->pid) : NULL;   /* pinned; vm_destroy to release */
+	/* Linux PTRACE_MODE_ATTACH_REALCREDS, as ptrace and /proc/<pid>/mem: every
+	 * uid and gid of the target, and it dumpable, or CAP_SYS_PTRACE. Only the
+	 * euid was compared here: a same-euid task that is not dumpable (it dropped
+	 * root, or said so with prctl) or a setuid program that lowered only its
+	 * euid (its saved uid still root) was open to read and write. The vm is
+	 * pinned before the check: a setuid exec after it gives the target a new vm,
+	 * not this one. */
+	int may = target && ptrace_may_access(target);
 	proc_put(target);
 	if (!tvm) return -ESRCH;
-	process_t *cur = task_current();
 	long ret;
 
-	if (cur->euid != 0 && cur->euid != teuid) {
+	if (!may) {
 		ret = -1;                                      /* EPERM */
 	} else {
 		iovec_t liov[16], riov[16];

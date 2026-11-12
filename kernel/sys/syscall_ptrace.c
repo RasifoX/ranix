@@ -249,11 +249,14 @@ int ptrace_signal_stop(arch_context_t *tf, int sig, sigqueue_t *si)
 /* Linux ptrace_may_access (ATTACH/REALCREDS mode). The caller may access the
  * target only if its euid matches the target's real, effective and saved uid
  * and its egid matches all three gids, and the target is dumpable — or it holds
- * CAP_SYS_PTRACE. Accessing oneself is always allowed. */
+ * CAP_SYS_PTRACE. Accessing oneself, or another thread of one's own process, is
+ * always allowed (Linux same_thread_group): a thread of a task that is not
+ * dumpable still reads its own /proc/self/{mem,maps,auxv}. PTRACE_ATTACH
+ * refuses its own thread group before it gets here. */
 int ptrace_may_access(process_t *t)
 {
 	process_t *p = task_current();
-	if (p == t) return 1;
+	if (p == t || p->tgid == t->tgid) return 1;
 	if (p->asess && p->asess != t->asess) return 0;
 	if (capable_task(p, CAP_SYS_PTRACE)) return 1;
 	if (p->euid != t->uid || p->euid != t->euid || p->euid != t->suid ||

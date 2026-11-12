@@ -1007,18 +1007,6 @@ vm_space_t *proc_get_vm(pid_t pid)
 	return vm;
 }
 
-/* As proc_get_vm, but also samples the target's euid under the same lock — for
- * the access check in process_vm_readv/writev. */
-vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid)
-{
-	uint64_t f = spin_lock_irq(&sched_lock);
-	process_t *p = (pid < 0 || pid >= proc_cnt) ? NULL : proctab[pid];
-	vm_space_t *vm = (p && p->vm) ? vm_get(p->vm) : NULL;
-	if (p && out_euid) *out_euid = p->euid;
-	spin_unlock_irq(&sched_lock, f);
-	return vm;
-}
-
 /* Linux cap_emulate_setxuid: when a process drops the last uid 0 from its
  * {real,effective,saved} set, its permitted/effective caps are cleared; when
  * only euid leaves 0, the effective set is cleared. Call after a setuid-family

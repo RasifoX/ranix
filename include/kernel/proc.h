@@ -475,7 +475,6 @@ pid_t      pid_to_user(pid_t global);      /* the caller's number for a global p
 void       seccomp_fork(process_t *child, process_t *parent);
 void       seccomp_put(struct seccomp_filter *f);
 vm_space_t *proc_get_vm(pid_t pid);        /* pin a target's address space (/proc/<pid>/mem); release with vm_destroy */
-vm_space_t *proc_get_vm_cred(pid_t pid, uid_t *out_euid);  /* + sample euid (process_vm_readv access check) */
 fd_table_t *proc_get_fds(pid_t pid);       /* pin a target's fd table (/proc/<pid>/fd); release with fd_table_put */
 int        ptrace_may_access(process_t *t);/* Linux ptrace_may_access: euid==all-target-ids+dumpable, or CAP_SYS_PTRACE */
 int        proc_may_access(pid_t pid);     /* ptrace_may_access by pid (pins the target) — cross-process /proc gate */

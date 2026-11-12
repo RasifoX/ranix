@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
+#include <kernel/block.h>
+
 /* ── ioctl ───────────────────────────────────────────────── */
 
 #define TIOCGWINSZ  0x5413
@@ -848,24 +850,34 @@ static long sys_open(const char *path, int flags, mode_t mode)
 /* May open(/proc/self/fd/N, flags) make a new open of of's file? The reopen
  * path is reached exactly where the walk could not check again (an unlinked
  * file, a path from another root, another process's /proc entry), so this is
- * that check, as Linux makes it: never more than the original open allowed
- * (no write through a read-only descriptor, no read through a write-only one,
- * an O_APPEND one stays appending and is never truncated), and the caller's own
- * permission on the file. 0 or the errno. (Ranix has no O_PATH; if it gets one,
- * an O_PATH original allows nothing here, while flags & 3 would read it as RDONLY.) */
+ * that check, as Linux's may_open makes it on the file the magic link names:
+ * the caller's own permission on the inode for the access it asks (O_TRUNC
+ * asks for write), and what the open file's mount and inode say for any write
+ * (EROFS, ETXTBSY), exactly what a walk to the file would check at its end.
+ * The original open's mode does not count, nor its O_APPEND (that belongs to
+ * the open file description; Linux keeps appending only for an append-only
+ * inode, which Ranix has not): a read-only descriptor reopens read-write when
+ * the caller may write the file itself, and never when it may not, so a
+ * descriptor of root's file handed to a user gives the user nothing it could
+ * not have opened by name. Directory search on the way is not checked: holding
+ * the descriptor is the proof (Linux the same). /proc/<pid>/mem and the other
+ * ptrace-gated files check the caller again at every read and write.
+ * 0 or the errno. (Ranix has no O_PATH; if it gets one, an O_PATH original
+ * allows nothing here, while flags & 3 would read it as RDONLY.) */
 static int reopen_check(vfs_file_t *of, int flags)
 {
-	int had = of->flags & 3, want = flags & 3;
+	int want = flags & 3;
+	int writes = want != O_RDONLY || (flags & O_TRUNC);
 	if (flags & O_DIRECTORY) return -ENOTDIR;                 /* only regular files come here */
 	if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) return -EEXIST;
-	if (had == O_RDONLY && (want != O_RDONLY || (flags & (O_TRUNC | O_APPEND)))) return -EACCES;
-	if (had == O_WRONLY && want != O_WRONLY) return -EACCES;
-	if ((of->flags & O_APPEND) && (!(flags & O_APPEND) || (flags & O_TRUNC))) return -EACCES;
-	return vfs_may_open(of->inode, want);
+	if (writes && (of->mnt_flags & MS_RDONLY)) return -EROFS;
+	if (writes && of->inode->swapfile) return -ETXTBSY;       /* swap owns its blocks */
+	return vfs_may_open(of->inode, (flags & O_TRUNC) && want == O_RDONLY ? O_RDWR : want);
 }
 
-/* /proc/self/fd/N opens the file itself, not a path to it: a memfd has none. This
- * is how a process makes a read-only descriptor of its own shared memory. */
+/* /proc/self/fd/N opens the file itself, not a path to it: a memfd has none, an
+ * unlinked file has none left. O_CREAT without O_EXCL comes here too (the VFS
+ * makes nothing for a procfs fd link) and opens the file, as on Linux. */
 static long proc_fd_reopen(const char *kp, int flags)
 {
 	const char *p = kp;
@@ -902,6 +914,14 @@ static long proc_fd_reopen(const char *kp, int flags)
 	f->inode = of->inode;
 	/* what stays with the open file; O_CLOEXEC is the fd's, set below */
 	f->flags = flags & ~(02000000 | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
+	/* the same file on the same mount: its st_dev (fstat), read-only mount,
+	 * name and root, and its own hold on the block device (file_free drops it) */
+	f->mnt_flags   = of->mnt_flags;
+	f->sdev        = of->sdev;
+	f->opened_root = of->opened_root;
+	memcpy(f->path, of->path, sizeof(f->path));
+	f->bdev = of->bdev;
+	if (f->bdev) block_get(f->bdev);
 	atomic_fetch_add32((volatile uint32_t *)&f->inode->open_refs, 1);
 	fput(of);                            /* the new open holds the inode now */
 	/* a new open of the file: its filesystem counts it as one, close uncounts it */
@@ -911,6 +931,7 @@ static long proc_fd_reopen(const char *kp, int flags)
 	if (fd < 0) {
 		if (!orc && ops && ops->close) ops->close(f);
 		atomic_sub_fetch32((volatile uint32_t *)&f->inode->open_refs, 1);
+		if (f->bdev) block_put(f->bdev);
 		kfree(f);
 		return fd == -1 ? -12 : fd;
 	}

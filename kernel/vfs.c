@@ -2381,6 +2381,35 @@ int vfs_open_fds(fd_table_t *fds, uid_t uid, gid_t gid, mode_t umask,
 	return ret;
 }
 
+/* Is path's last name a procfs fd link (iops->link_file), whatever it names?
+ * Read as vfs_lstat reads it: the parent walked, the name looked up, not followed. */
+static int last_is_fdlink(const char *path)
+{
+	const char *fname;
+	char *pp = vfs_parent_alloc(path, &fname);
+	if (!pp) return 0;
+	if (!fname[0] || (fname[0] == '.' && (!fname[1] || (fname[1] == '.' && !fname[2])))) {
+		kfree(pp);
+		return 0;
+	}
+	vfs_dentry_t *parent = vfs_dentry_resolve(pp);
+	/* a volatile parent (/proc/<pid> reached by /proc/self) sits in the task's
+	 * slot, which the next resolve reuses: go on from the inode */
+	vfs_inode_t *pin = parent ? parent->inode : NULL;
+	kfree(pp);
+	if (!pin) return 0;
+	if (!S_ISDIR(pin->mode) || !pin->iops || !pin->iops->lookup || !vfs_may_search(pin)) {
+		if (!pin->cached) vfs_inode_free(pin);
+		return 0;
+	}
+	vfs_inode_t *in = pin->iops->lookup(pin, fname);
+	if (!pin->cached) vfs_inode_free(pin);
+	if (!in) return 0;
+	int r = S_ISLNK(in->mode) && in->iops && in->iops->link_file;
+	if (!in->cached) vfs_inode_free(in);
+	return r;
+}
+
 /* O_CREAT of a name the walk did not find: make it in its parent directory.
  * 0 with *dp and *inp set; 1 when someone made it meanwhile (the caller walks
  * again, once); else -errno. */
@@ -2458,6 +2487,10 @@ again:;
 
 	if (!d) {
 		if (!(flags & O_CREAT)) return -ENOENT;
+		/* /proc/self/fd/N whose file has no name left (unlinked, renamed): Linux
+		 * follows the magic link to the open file and creates nothing. The
+		 * caller (sys_open's reopen on ENOENT) opens it, with its own checks */
+		if (!(flags & O_EXCL) && last_is_fdlink(path)) return -ENOENT;
 
 		int cr = open_create(path, uid, gid, umask, mode, rp, raced, &d, &inode);
 		if (cr == 1) { raced = 1; goto again; }

@@ -1012,11 +1012,35 @@ static int may_take_gid(process_t *p, gid_t id)
 	return gid_held(p, id) || capable_setid((struct process *)p, CAP_SETGID, id);
 }
 
+/* The ids an identity change is judged by (Linux commit_creds). */
+typedef struct { uid_t euid, fsuid; gid_t egid, fsgid; } setid_old_t;
+
+static setid_old_t setid_save(const process_t *p)
+{
+	setid_old_t o = { p->euid, task_fsuid((const struct process *)p), p->egid, task_fsgid((const struct process *)p) };
+	return o;
+}
+
+/* Linux commit_creds: a task whose effective or filesystem uid or gid changed
+ * is no longer dumpable (suid_dumpable, 0: Ranix has no knob for it); the same
+ * ids again change nothing. The task may still hold what its old identity
+ * opened or read (root's secret before a drop to a user), and dumpable is what
+ * ptrace_may_access goes by: ptrace, process_vm_*, /proc/<pid>/fd, mem, maps.
+ * Without this the user it became could attach to it and take them. exec sets
+ * dumpable again (exec_switch_vm). */
+static void setid_dumpable(process_t *p, setid_old_t o)
+{
+	if (o.euid != p->euid || o.egid != p->egid ||
+	    o.fsuid != task_fsuid((const struct process *)p) || o.fsgid != task_fsgid((const struct process *)p))
+		p->dumpable = 0;
+}
+
 /* Linux __sys_setuid: with CAP_SETUID all of r/e/s; else only the effective
  * uid, and only to the real or saved one. */
 static long sys_setuid(uid_t uid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	uid_t old_euid = p->euid;
 	int was_priv = (p->uid == 0 || p->euid == 0 || p->suid == 0);
 	if (uid == (uid_t)-1) return -EINVAL;
@@ -1029,12 +1053,14 @@ static long sys_setuid(uid_t uid)
 	}
 	p->fs_uid_set = 0;   /* the fsuid follows the euid again */
 	cred_setxuid_fixup(p, was_priv, old_euid);
+	setid_dumpable(p, old);
 	return 0;
 }
 
 static long sys_setgid(gid_t gid)
 {
 	process_t *p = task_current();
+	setid_old_t old = setid_save(p);
 	if (gid == (gid_t)-1) return -EINVAL;
 	if (capable_setid((struct process *)p, CAP_SETGID, gid)) {
 		p->gid = p->egid = p->sgid = gid;
@@ -1044,6 +1070,7 @@ static long sys_setgid(gid_t gid)
 		return -EPERM;
 	}
 	p->fs_gid_set = 0;
+	setid_dumpable(p, old);
 	return 0;
 }
 
