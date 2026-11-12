@@ -142,6 +142,10 @@ typedef struct process {
 
 	/* ── scheduling ──────────────────────────── */
 	int             ticks_remaining;
+	uint32_t        run_recent;     /* CPU use lately: +16 a tick it runs, halved every 32 ticks (wakeup preemption) */
+	uint64_t        run_recent_at;  /* kernel_ticks run_recent was last halved at */
+	uint8_t         preempted;      /* left the CPU still runnable (or is new), not asleep: queues without preempting */
+	uint8_t         yielding;       /* in arch_yield, a voluntary switch: gives the CPU up even to a busier task */
 	uint64_t        ticks;          /* total CPU ticks (utime + stime) */
 	uint64_t        utime_ticks;    /* ticks spent in user mode */
 	uint64_t        stime_ticks;    /* ticks spent in kernel (syscalls) */

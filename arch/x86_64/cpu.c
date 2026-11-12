@@ -101,7 +101,14 @@ void arch_idle_halt(volatile int *flag)
 	__asm__ volatile("sti; hlt");
 }
 
-void arch_yield(void) { __asm__ volatile("int $0x40"); }
+/* A voluntary switch: schedule() lets even a busier task have the CPU (an
+ * interrupt's reschedule may leave a lighter task running, see schedule()) */
+void arch_yield(void)
+{
+	process_t *c = task_current();
+	if (c) c->yielding = 1;
+	__asm__ volatile("int $0x40");
+}
 
 cpu_context_t *arch_get_cpu_ctx(void)
 {

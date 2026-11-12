@@ -222,6 +222,7 @@ static int        tick_cb_cnt = 0;
 static int        tick_cb_cap = 0;
 
 static void itimer_charge_cpu(process_t *p);
+static void run_charge(process_t *p);
 
 void tick_register(tick_fn_t fn)
 {
@@ -306,6 +307,7 @@ void sched_tick_local(void)
 	current->ticks++;
 	cpu_context_t *cc = arch_get_cpu_ctx();
 	if (current->pid != 0) {
+		run_charge(current);
 		cc->busy_ticks++;
 		cc->idle_run = 0;
 	} else {
@@ -466,8 +468,53 @@ void sched_itimer_account(uint64_t old_val, uint64_t new_val)
 	else if (old_val && !new_val) sched_itimer_armed--;
 }
 
+/* How much CPU a task has used lately: run_recent, +16 a tick it runs, halved
+ * every RUN_HALF ticks. A CPU-bound loop sits between 512 and 1024, a task that
+ * mostly sleeps near 0. It is the short form of Linux CFS's vruntime: normal
+ * tasks queue by it and a woken task preempts a busier one (runqueue_add,
+ * schedule). Only the CPU running the task writes it (its tick); others read a
+ * value at most a tick old, which is all an ordering hint needs. */
+#define RUN_HALF   32
+/* A woken task preempts only a task that used this much more CPU lately (two
+ * ticks' worth): two light tasks do not knock each other off on every wakeup
+ * (Linux: sched_wakeup_granularity). */
+#define WAKE_GRAN  32
+
+static uint32_t run_recent_now(const process_t *p)
+{
+	uint64_t n = (kernel_ticks - p->run_recent_at) / RUN_HALF;
+	return n >= 32 ? 0 : p->run_recent >> n;
+}
+
+static void run_charge(process_t *p)
+{
+	uint64_t n = (kernel_ticks - p->run_recent_at) / RUN_HALF;
+	if (n) {
+		p->run_recent = n >= 32 ? 0 : p->run_recent >> n;
+		p->run_recent_at += n * RUN_HALF;
+	}
+	p->run_recent += 16;
+}
+
+/* fork and clone: the child starts with its parent's recent use (Linux places a
+ * new task at the queue's current vruntime, not ahead of it), so forking cannot
+ * jump the queue, and it queues like a preempted task, without preempting. */
+static void sched_fork_share(process_t *child, process_t *parent)
+{
+	child->run_recent    = parent->run_recent;
+	child->run_recent_at = parent->run_recent_at;
+	child->preempted     = 1;
+}
+
+static inline int is_rt(const process_t *p) { return p->sched_policy != SCHED_NORMAL; }
+
 /* Per-CPU runqueue helpers — caller must hold sched_lock */
 
+/* Order: real-time tasks first, higher priority first, in arrival order within
+ * one priority (SCHED_FIFO/RR); then normal tasks by run_recent, the least used
+ * first, arrival order among equals. A task that slept a lot, woken or preempted,
+ * does not wait out CPU-bound loops' slices; a loop that waited long enough
+ * decays below the others and runs, so none starves. */
 static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
 {
 	if ((uint64_t)p < 0xFFFF000000000000ULL) {
@@ -478,16 +525,28 @@ static void cpu_rq_add(cpu_context_t *cpu, process_t *p)
 	p->in_rq = 1;
 	cpu->rq_n++;
 	p->sched_next = NULL;
-	if (!cpu->rq_tail) {
-		cpu->rq_head = cpu->rq_tail = p;
-	} else if (p->sched_policy != SCHED_NORMAL) {
-		/* real-time (SCHED_FIFO/RR): run ahead of normal tasks */
-		p->sched_next = cpu->rq_head;
-		cpu->rq_head = p;
+	process_t *prev = NULL, *q = cpu->rq_head;
+	if (is_rt(p)) {
+		while (q && is_rt(q) && q->rt_priority >= p->rt_priority) { prev = q; q = q->sched_next; }
 	} else {
-		cpu->rq_tail->sched_next = p;
-		cpu->rq_tail = p;
+		uint32_t r = run_recent_now(p);
+		while (q && (is_rt(q) || run_recent_now(q) <= r)) { prev = q; q = q->sched_next; }
 	}
+	p->sched_next = q;
+	if (prev) prev->sched_next = p; else cpu->rq_head = p;
+	if (!q) cpu->rq_tail = p;
+}
+
+/* At the back regardless of order: sched_pick_next passes over a frozen task
+ * this way (queued by order it could come back first and hide the rest). */
+static void cpu_rq_append(cpu_context_t *cpu, process_t *p)
+{
+	if (p->in_rq) return;
+	p->in_rq = 1;
+	cpu->rq_n++;
+	p->sched_next = NULL;
+	if (cpu->rq_tail) cpu->rq_tail->sched_next = p; else cpu->rq_head = p;
+	cpu->rq_tail = p;
 }
 
 static process_t *cpu_rq_pop(cpu_context_t *cpu)
@@ -546,30 +605,57 @@ static int cpu_rq_len(cpu_context_t *cpu)
 	return cpu->rq_n;
 }
 
+/* Would p, queued on a CPU running cur, take that CPU at once? Real-time over
+ * normal and over lower real-time priority; a normal task woken from sleep over
+ * a normal task that used clearly more CPU lately (wakeup preemption). */
+static int wake_preempts(const process_t *p, const process_t *cur)
+{
+	if (is_rt(p)) return !is_rt(cur) || p->rt_priority > cur->rt_priority;
+	if (is_rt(cur) || p->preempted) return 0;
+	return run_recent_now(p) + WAKE_GRAN < run_recent_now(cur);
+}
+
 /* Pick the least-loaded online CPU the task is allowed on (both arches —
- * without this, x86 piled every task onto the CPU that forked it). */
-static cpu_context_t *pick_cpu(process_t *p)
+ * without this, x86 piled every task onto the CPU that forked it). Among equals:
+ * `home` (a preempted task stays where it ran rather than wait behind another
+ * CPU's loop), else the CPU whose running task it would preempt, the busiest one
+ * (the first CPU before, so every wakeup on a full machine landed on CPU 0). */
+static cpu_context_t *pick_cpu(process_t *p, cpu_context_t *home)
 {
 	cpu_context_t *best = NULL;
-	int best_len = 0;
+	int best_len = 0, best_rank = 0;
 	for (int i = 0; i < smp_ncpus; i++) {
 		cpu_context_t *c = all_cpus[i];
 		if (!c || !c->online || !cpu_allowed(p, i)) continue;
 		/* What it is running counts: an idle CPU beats one whose queue is merely empty */
 		process_t *cur = c->current;
-		int l = cpu_rq_len(c) * 2 + (cur && cur->pid != 0);
-		if (!best || l < best_len) { best = c; best_len = l; }
+		int busy = cur && cur->pid != 0;
+		int l = cpu_rq_len(c) * 2 + busy;
+		int rank = c == home ? 1 << 30
+		         : busy && wake_preempts(p, cur) ? 1 + (int)(is_rt(cur) ? 0 : run_recent_now(cur)) : 0;
+		if (!best || l < best_len || (l == best_len && rank > best_rank)) {
+			best = c; best_len = l; best_rank = rank;
+		}
 	}
 	if (!best) best = arch_get_cpu_ctx();   /* mask excludes all online CPUs: fall back */
 	return best;
 }
 
-/* Internal: must hold sched_lock */
+/* Internal: must hold sched_lock. The chosen CPU is interrupted only when the
+ * task should run there now: the CPU is idle, or wake_preempts. Otherwise it
+ * waits its turn in the queue (the running task's slice end, or a CPU going idle
+ * steals it). Before, every queued task interrupted its CPU, and queued at the
+ * back, behind the CPU-bound loops it had just displaced: with every CPU busy a
+ * woken task waited about a tick (timerfd/POSIX timer medians 0.8-1.1 ms), and
+ * a normal task's wakeup took the CPU from a SCHED_FIFO task. */
 static void runqueue_add(process_t *p)
 {
 	if (p->pid == 0) return;
-	cpu_context_t *cpu = pick_cpu(p);
+	cpu_context_t *self = arch_get_cpu_ctx();
+	cpu_context_t *cpu = pick_cpu(p, p->preempted && cpu_allowed(p, (int)self->cpu_id) ? self : NULL);
+	process_t *cur = cpu->current;
 	cpu_rq_add(cpu, p);
+	if (cur && cur->pid != 0 && !wake_preempts(p, cur)) return;
 	cpu->need_resched = 1;
 	if (cpu != arch_get_cpu_ctx()) {
 		int cid = (int)cpu->cpu_id;
@@ -795,6 +881,7 @@ void sched_tick(void)
 	if (!current) return;
 
 	current->ticks++;
+	if (current->pid != 0) run_charge(current);
 	itimer_charge_cpu(current);
 	kwatch_tick_local(current, arch_get_cpu_ctx());
 
@@ -899,8 +986,14 @@ void sched_requeue_prev(void)
 	/* Only requeue a genuinely runnable process. A process that exited
 	 * after being marked for requeue (PROC_DEAD/ZOMBIE) must not go back
 	 * into the runqueue, or schedule() could resume its task_exit. */
-	if (p->state == PROC_READY)
+	if (p->state == PROC_READY) {
 		runqueue_add(p);
+		/* Woken while it was still leaving (on_cpu), it is queued only now and
+		 * may preempt this CPU, which has already chosen and cleared
+		 * need_resched: interrupt it again rather than wait for the next tick. */
+		if (cpu->need_resched && cpu->current && cpu->current->pid)
+			arch_smp_ipi_send((int)cpu->cpu_id);
+	}
 	spin_unlock_irq(&sched_lock, f);
 }
 
@@ -924,7 +1017,7 @@ static inline process_t *sched_pick_next(cpu_context_t *cpu)
 		int budget = cpu_rq_len(cpu) + 1;
 		while (next && next->pid != 0 && cgroup_frozen(next->cgroup) && budget-- > 0) {
 			next->on_cpu = 0;
-			cpu_rq_add(cpu, next);
+			cpu_rq_append(cpu, next);
 			next = runqueue_pop();
 			while (next && (next->state == PROC_DEAD || next->state == PROC_ZOMBIE)) {
 				next->on_cpu = 0;
@@ -933,7 +1026,7 @@ static inline process_t *sched_pick_next(cpu_context_t *cpu)
 		}
 		if (next && next->pid != 0 && cgroup_frozen(next->cgroup)) {
 			next->on_cpu = 0;
-			cpu_rq_add(cpu, next);
+			cpu_rq_append(cpu, next);
 			next = NULL;
 		}
 	}
@@ -963,6 +1056,47 @@ static inline void sched_retire_dead(process_t *prev, cpu_context_t *cpu)
 			wake_group_waiters(prev->ppid);
 		}
 	}
+}
+
+/* A task's time slice in ticks */
+static int sched_slice(process_t *p)
+{
+	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
+	int q = sched_quantum_val - (p->nice * sched_quantum_val) / 40;
+	/* cgroup cpu.weight scales the slice (100 = baseline) */
+	q = (int)((long)q * cgroup_cpu_weight(p->cgroup) / 100);
+	return q < 1 ? 1 : q;
+}
+
+/* The other half of wakeup preemption: an interrupt's reschedule (not
+ * arch_yield: a kernel wait that yields must let the other task run) leaves the
+ * running task on its CPU when the first task queued here should not take it
+ * (the same rule as wake_preempts, without the margin: queue order):
+ *  - real-time: SCHED_FIFO keeps it against anything but a higher priority,
+ *    SCHED_RR too until its slice is over;
+ *  - normal: kept against a task that used more CPU lately than it; with none
+ *    queued here, kept until its slice is over, and then too if no other CPU
+ *    has work queued (else this CPU may steal it, as before; a lone loop no
+ *    longer hops to the idle task and back every slice).
+ * Before, every reschedule switched: a light task woken at once could be swapped
+ * for a queued CPU-bound loop by the next IPI, and requeued behind it. */
+static int sched_keep_prev(process_t *prev, cpu_context_t *cpu)
+{
+	if (prev->state != PROC_RUNNING || !prev->pid || prev->yielding || prev->exiting) return 0;
+	if (!cpu_allowed(prev, (int)cpu->cpu_id) || cgroup_frozen(prev->cgroup)) return 0;
+	process_t *h = cpu->rq_head;
+	if (is_rt(prev)) {
+		if (!h || !is_rt(h) || h->rt_priority < prev->rt_priority) return 1;
+		if (h->rt_priority > prev->rt_priority) return 0;
+		return prev->sched_policy == SCHED_FIFO || prev->ticks_remaining > 0;
+	}
+	if (!h) {
+		if (prev->ticks_remaining > 0) return 1;
+		for (int i = 0; i < smp_ncpus; i++)   /* slice over: work queued elsewhere goes first */
+			if (all_cpus[i] && all_cpus[i] != cpu && all_cpus[i]->rq_head) return 0;
+		return 1;
+	}
+	return !is_rt(h) && run_recent_now(prev) < run_recent_now(h);
 }
 
 void schedule(void)
@@ -1005,6 +1139,14 @@ void schedule(void)
 		prev->state = PROC_RUNNING;
 		prev->sleeping_on_queue = 0;
 	}
+	if (sched_keep_prev(prev, cpu)) {
+		cpu->pending_requeue = NULL;
+		if (prev->ticks_remaining <= 0) prev->ticks_remaining = sched_slice(prev);
+		spin_unlock_irq(&sched_lock, f);
+		return;
+	}
+	prev->yielding  = 0;
+	prev->preempted = prev->state == PROC_RUNNING;   /* runnable as it leaves; asleep: 0 */
 	if (prev->state == PROC_RUNNING) {
 		prev->state = PROC_READY;
 	}
@@ -1022,12 +1164,7 @@ void schedule(void)
 	}
 	next->state = PROC_RUNNING;
 	next->on_cpu = 1;
-	/* nice −20 → 2×quantum, nice +19 → ~half quantum */
-	int q = sched_quantum_val - (next->nice * sched_quantum_val) / 40;
-	/* cgroup cpu.weight scales the slice (100 = baseline) */
-	q = (int)((long)q * cgroup_cpu_weight(next->cgroup) / 100);
-	if (q < 1) q = 1;
-	next->ticks_remaining = q;
+	next->ticks_remaining = sched_slice(next);
 
 	arch_save_tls(prev);
 

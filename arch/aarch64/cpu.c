@@ -31,7 +31,14 @@ void arch_idle_halt(volatile int *flag)
 	__asm__ volatile("msr daifclr, #2" ::: "memory");
 }
 
-void arch_yield(void) { __asm__ volatile("svc #0"); }
+/* A voluntary switch: schedule() lets even a busier task have the CPU (an
+ * interrupt's reschedule may leave a lighter task running, see schedule()) */
+void arch_yield(void)
+{
+	process_t *c = task_current();
+	if (c) c->yielding = 1;
+	__asm__ volatile("svc #0");
+}
 
 void arch_cpu_init(void)
 {

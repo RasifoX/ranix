@@ -672,6 +672,7 @@ static pid_t do_fork(uint64_t clone_flags, uint64_t newsp, struct asess *enter, 
 	child->user_gs_base    = parent->user_gs_base;
 	if (fork_namespaces(child, parent, clone_flags)) goto fail_early;
 	child->ticks_remaining = sched_quantum_val;
+	sched_fork_share(child, parent);
 
 	if (enter) {
 		err = asess_prepare_child(child, enter);
@@ -905,6 +906,7 @@ pid_t proc_clone_thread_ex(uint64_t newsp, uint64_t tls, uint32_t *ctid, uint32_
 
 	child->clear_child_tid = ctid;
 	child->ticks_remaining = sched_quantum_val;
+	sched_fork_share(child, parent);
 
 	pid_t vtid = thread_publish(child, parent, as_process, ptid, set_tid);
 	if (vtid < 0) { err = vtid; goto fail; }
