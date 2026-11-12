@@ -215,18 +215,20 @@ static void kswapd(void)
  * PR_RANIX_TEST_HOOK) that the page mprotect or a THP collapse is about to
  * rewrite be swapped out first, right where reclaim on another CPU could do
  * it: a narrow race made certain, so its test fails on code that mishandles
- * it. Without the boot flag the prctl is EINVAL and the hook never fires. */
+ * it. Without the boot flag the prctl is EINVAL and the hook never fires.
+ * arg2 is a bit set: 1 this swap race, 2 a pause inside a pty master's close
+ * (kernel/fs/pty.c), 0 none. */
 long swap_test_hook_set(uint64_t on)
 {
 	process_t *p = task_current();
-	if (!cmdline_has("ranix.test_hooks") || on > 1 || !p || !p->vm) return -EINVAL;
+	if (!cmdline_has("ranix.test_hooks") || on > 3 || !p || !p->vm) return -EINVAL;
 	p->vm->test_hook = (uint32_t)on;
 	return 0;
 }
 
 void swap_test_race(vm_space_t *vs, uint64_t va)
 {
-	if (vs->test_hook) swap_pageout(vs, va & PAGE_MASK, (va & PAGE_MASK) + PAGE_SIZE);
+	if (vs->test_hook & 1) swap_pageout(vs, va & PAGE_MASK, (va & PAGE_MASK) + PAGE_SIZE);
 }
 
 void swap_kswapd_start(void)

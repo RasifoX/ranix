@@ -325,6 +325,18 @@ int task_pgrp_in_session(pid_t pgrp, pid_t sid)
 	return found;
 }
 
+/* Some process (a zombie not yet reaped included, as on Linux) is in group pgrp. */
+int task_pgrp_exists(pid_t pgrp)
+{
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *sentinel = proctab[0];
+	int found = 0;
+	for (process_t *t = sentinel->next; t && t != sentinel; t = t->next)
+		if (t->pgrp == pgrp && t->state != PROC_DEAD) { found = 1; break; }
+	spin_unlock_irq(&sched_lock, f);
+	return found;
+}
+
 int task_in_group(process_t *p, gid_t g)
 {
 	if (p->egid == g) return 1;

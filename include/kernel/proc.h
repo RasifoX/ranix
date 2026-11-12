@@ -401,6 +401,7 @@ void       task_signal_group(process_t *leader, int sig);
 void       task_group_exit(process_t *p, int code, int by_sig);
 void       task_signal_pgrp(pid_t pgrp, int sig);
 int        task_pgrp_in_session(pid_t pgrp, pid_t sid);
+int        task_pgrp_exists(pid_t pgrp);   /* setsid: is the caller a group leader */
 int        signal_may_send(process_t *sender, process_t *t, int sig);
 int        task_in_group(process_t *p, gid_t g);   /* egid or a supplementary group */
 int        task_kill_many(process_t *sender, pid_t pgrp, int sig);

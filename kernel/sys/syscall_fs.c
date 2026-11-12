@@ -953,8 +953,15 @@ static long sys_getsid(pid_t pid) {
 	if (pid) proc_put(p);
 	return r;
 }
+/* POSIX: a process group leader cannot start a session (EPERM): its group's
+ * members would be left in a group whose id is now another session's. Any
+ * process whose pgrp is the caller's pid makes the caller one, as on Linux. */
 static long sys_setsid(void) {
 	process_t *p = task_current();
+	/* init boots in group 1 but in no session (sid 0), where Linux has it in
+	 * group 0: its first setsid (systemd makes one) is no leader's */
+	int boot_init = p->pid == 1 && p->sid == 0;
+	if (!boot_init && task_pgrp_exists((pid_t)p->pid)) return -EPERM;
 	p->pgrp = (pid_t)p->pid;
 	p->sid  = (pid_t)p->pid;
 	p->ctty = NULL;

@@ -12,6 +12,8 @@
 #include <kernel/fs/devfs.h>
 #include <kernel/init.h>
 #include <kernel/errno.h>
+#include <kernel/time.h>
+#include <kernel/mm/vm.h>
 
 /*
  * Unix98 pseudo-terminals. Opening /dev/ptmx allocates a master/slave pair and
@@ -24,6 +26,7 @@
  */
 
 vfs_fops_t *pts_fops_ptr(void);   /* the slave ops, defined below */
+static void pty_test_gap(void);    /* test kernels: PR_RANIX_TEST_HOOK bit 2 */
 
 #define PTY_MAX   CONFIG_PTY_MAX
 #define PTY_BUF   4096
@@ -72,7 +75,8 @@ vfs_fops_t *pts_fops_ptr(void);   /* the slave ops, defined below */
 typedef struct {
 	uint8_t      m2s[PTY_BUF], s2m[PTY_BUF];   /* master→slave, slave→master */
 	uint32_t     m2s_h, m2s_t, s2m_h, s2m_t;
-	int          in_use, master_open, slave_open;
+	int          in_use, master_open;
+	int          slave_open;   /* open slave files: the hangup is the last one's close */
 	int          index;
 	spinlock_t   lock;
 	wait_queue_t m2s_wait;   /* slave readers / master writers */
@@ -449,6 +453,8 @@ static ssize_t master_read(vfs_file_t *file, void *buf, size_t len)
 	ssize_t r = copy_read_out(buf, kb, ring_read(p, p->s2m, &p->s2m_h, &p->s2m_t, &p->s2m_wait,
 	                                             &p->slave_open, kb, n, file->flags & O_NONBLOCK));
 	kfree(kb);
+	/* drained, and no slave open: the terminal is gone, EIO as on Linux */
+	if (r == 0 && n > 0 && !p->slave_open) return -EIO;
 	if (r > 0) wake_up(&p->s2m_wait);    /* slave writers waiting for room */
 	return r;
 }
@@ -467,10 +473,22 @@ static int master_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 	if (cmd == TIOCSPTLCK) return 0;   /* we don't lock slaves */
 	return pty_common_ioctl(p, cmd, arg);
 }
+#define PTY_POLLIN  0x0001
+#define PTY_POLLOUT 0x0004
+#define PTY_POLLHUP 0x0010
+
+/* Readable with output waiting; hung up (and readable: the read says EIO) with
+ * no slave open. Writable while a slave is open: input is taken at once (the
+ * line discipline drops what does not fit), so a write never blocks. sshd
+ * waits for POLLOUT before it hands keystrokes on. */
 static int master_poll(vfs_file_t *file)
 {
 	pty_t *p = file->priv;
-	return r_avail(p->s2m_h, p->s2m_t) > 0 || !p->slave_open;
+	int r = 0;
+	if (r_avail(p->s2m_h, p->s2m_t) > 0) r |= PTY_POLLIN;
+	if (!p->slave_open) r |= PTY_POLLIN | PTY_POLLHUP;
+	else r |= PTY_POLLOUT;
+	return r;
 }
 static int master_close(vfs_file_t *file)
 {
@@ -486,11 +504,14 @@ static int master_close(vfs_file_t *file)
 	spin_unlock_irq(&p->lock, f);
 	if (both_closed) p->in_use = 0;
 	spin_unlock_irq(&pool_lock, pf);
+	/* Terminal hangup: SIGHUP+SIGCONT the foreground group and detach the ctty
+	 * from every process that had this pty as its controlling terminal. The
+	 * signal goes first: a reader woken before it saw EOF and went on, and the
+	 * SIGHUP that came after found a process that had already moved on. */
+	tty_hangup(p, fg);
+	pty_test_gap();
 	wake_up(&p->m2s_wait);   /* slave readers see EOF */
 	wake_up(&p->s2m_wait);   /* slave writers see EIO */
-	/* Terminal hangup: SIGHUP+SIGCONT the foreground group and detach the ctty
-	 * from every process that had this pty as its controlling terminal. */
-	tty_hangup(p, fg);
 	return 0;
 }
 
@@ -512,7 +533,7 @@ static int pts_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
 	process_t *me = task_current();
 	if (me && me->euid != 0 && me->euid != p->owner) { spin_unlock_irq(&pool_lock, pf); return -EACCES; }
 	uint64_t f = spin_lock_irq(&p->lock);
-	p->slave_open = 1;
+	p->slave_open++;
 	spin_unlock_irq(&p->lock, f);
 	spin_unlock_irq(&pool_lock, pf);
 	file->priv = p;
@@ -556,27 +577,47 @@ static int slave_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
 	return pty_common_ioctl(file->priv, cmd, arg);
 }
+/* Readable once a full line (or EOF) is committed to m2s in canonical mode, any
+ * byte otherwise; writable while there is room toward the master ("\r\n" needs
+ * two); hung up once the master is gone. */
 static int slave_poll(vfs_file_t *file)
 {
 	pty_t *p = file->priv;
-	if (p->c_lflag & ICANON) {
-		/* readable only once a full line (or EOF) is committed to m2s */
-		return r_avail(p->m2s_h, p->m2s_t) > 0 || p->eof || !p->master_open;
-	}
-	return r_avail(p->m2s_h, p->m2s_t) > 0 || !p->master_open;
+	int r = 0;
+	if (r_avail(p->m2s_h, p->m2s_t) > 0 || ((p->c_lflag & ICANON) && p->eof))
+		r |= PTY_POLLIN;
+	if (!p->master_open) r |= PTY_POLLIN | PTY_POLLHUP;
+	else if (r_free(p->s2m_h, p->s2m_t) >= 2) r |= PTY_POLLOUT;
+	return r;
 }
 static int slave_close(vfs_file_t *file)
 {
 	pty_t *p = file->priv;
 	uint64_t pf = spin_lock_irq(&pool_lock);
 	uint64_t f  = spin_lock_irq(&p->lock);
-	p->slave_open = 0;
-	int both_closed = !p->master_open;
+	/* sshd opens the slave once more by name and closes it after TIOCSCTTY;
+	 * the shell still holds the first file, so that close is no hangup. A
+	 * flag here gave the master EOF as soon as its buffer ran dry: dropbear
+	 * closed the pty and a "sh -c" in the session never got to print. */
+	if (p->slave_open > 0) p->slave_open--;
+	int last = p->slave_open == 0;
+	int both_closed = last && !p->master_open;
 	spin_unlock_irq(&p->lock, f);
 	if (both_closed) p->in_use = 0;
 	spin_unlock_irq(&pool_lock, pf);
-	wake_up(&p->s2m_wait);   /* master readers see EOF */
+	if (last) wake_up(&p->s2m_wait);   /* master readers see EOF */
 	return 0;
+}
+
+/* Test kernels only: PR_RANIX_TEST_HOOK bit 2 (kernel/mm/reclaim.c) holds a
+ * master close for 200 ms between its two steps, so a reader woken before the
+ * hangup has every chance to run (test_ptyhuprace). */
+static void pty_test_gap(void)
+{
+	process_t *c = task_current();
+	if (!c || !c->vm || !(c->vm->test_hook & 2)) return;
+	uint64_t end = mono_ns() + 200000000ULL;
+	while (mono_ns() < end) task_sleep_until_ns(end);
 }
 
 static vfs_fops_t ptmx_fops = {

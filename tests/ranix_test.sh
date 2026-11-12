@@ -1022,6 +1022,33 @@ timeout -s KILL 25 dbclient -y -y -i /tmp/id -p 2222 root@127.0.0.1 'echo SSHWOR
 kill -9 $DBPID 2>/dev/null
 check "c-ssh-session" "SSHWORKS" "$(grep -c SSHWORKS /tmp/d2 >/dev/null && echo SSHWORKS)"
 
+# ── SSH with a pty (ssh -tt): sshd opens the slave a second time by name and closes
+# it; that must not hang the terminal up. 11-12 on Casper the master read EOF once
+# its buffer ran dry, dropbear closed it and the session got SIGHUP: a nested sh
+# printed nothing, an exec'd program was killed before its first write. The client
+# runs on a pty of its own (test_sshpty), as from a terminal: dbclient -t needs one. ─
+check "c-ptyreopen" "OK" "$(timeout 8 /bin/test_ptyreopen 2>/dev/null | tail -1)"
+# Hangup order (SIGHUP before the slave's readers wake; made certain by a test hook),
+# EIO from a master whose slave is gone, EPERM for setsid by a group leader: Linux's.
+check "c-ptyhuprace"  "OK" "$(timeout 15 /bin/test_ptyhuprace 2>/dev/null | tail -1)"
+check "c-ptyeio"      "OK" "$(timeout 8 /bin/test_ptyeio 2>/dev/null | tail -1)"
+check "c-setsidlead"  "OK" "$(timeout 8 /bin/test_setsid_leader 2>/dev/null | tail -1)"
+dropbear -F -s -g -r /etc/dropbear/dropbear_ed25519_host_key -p 2223 2>/dev/null &
+DBPID=$!
+sleep 2
+rm -f /tmp/sshpty-late
+timeout -s KILL 30 /bin/test_sshpty dbclient -t -t -y -y -i /tmp/id -p 2223 root@127.0.0.1 \
+    'echo A; sh -c "sleep 1; echo B"; echo C' >/tmp/d3 2>/dev/null
+timeout -s KILL 30 /bin/test_sshpty dbclient -t -t -y -y -i /tmp/id -p 2223 root@127.0.0.1 \
+    'exec timeout 5 sh -c "sleep 1; echo LATE > /tmp/sshpty-late"' >/dev/null 2>&1
+timeout -s KILL 30 /bin/test_sshpty -i 'hello\r' dbclient -t -t -y -y -i /tmp/id -p 2223 root@127.0.0.1 \
+    'read x; echo "got:$x"' >/tmp/d4 2>/dev/null
+kill -9 $DBPID 2>/dev/null
+check "c-sshpty-nested" "A B C" "$(grep -x '[ABC]' /tmp/d3 | tr '\n' ' ' | sed 's/ $//')"
+check "c-sshpty-late"   "LATE"  "$(cat /tmp/sshpty-late 2>/dev/null)"
+check "c-sshpty-input"  "got:hello" "$(grep -x 'got:hello' /tmp/d4)"
+check "c-ptypollout"    "OK"   "$(timeout 8 /bin/test_ptypollout 2>/dev/null | tail -1)"
+
 # ── CPython: real interpreter importing from the 9.4MB stdlib zip + file churn.
 # This is the load that GP-faulted the kernel: zipimport stat()s paths *into* the
 # zip (e.g. .../python312.zip/json), which made the resolver call ramfs lookup on
