@@ -511,6 +511,8 @@ check "c-mountspoll"    "OK"  "$(timeout 10 /bin/test_mountspoll 2>&1 | tail -1)
 check "c-sleepmin"      "OK"  "$(timeout 20 /bin/test_sleepmin 2>&1 | tail -1)"
 check "c-epolletdir"   "OK"  "$(timeout 10 /bin/test_epolletdir 2>&1 | tail -1)"
 check "c-sleepprec"    "OK"  "$(timeout 20 /bin/test_sleepprec 2>&1 | tail -1)"
+check "c-clockfast"    "OK"  "$(timeout 20 /bin/test_clockfast 2>&1 | tail -1)"
+check "c-sleeptail"    "OK"  "$(timeout 20 /bin/test_sleeptail 2>&1 | tail -1)"
 check "c-waitprec"     "OK"  "$(timeout 30 /bin/test_waitprec 2>&1 | tail -1)"
 check "c-futexprec"    "OK"  "$(timeout 20 /bin/test_futexprec 2>&1 | tail -1)"
 check "c-timerprec"    "OK"  "$(timeout 20 /bin/test_timerprec 2>&1 | tail -1)"

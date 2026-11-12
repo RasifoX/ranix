@@ -32,6 +32,7 @@ static uint32_t            cnt_mult, cnt_shift, cnt_valid;
 uint32_t                   vdso_timens_used;   /* once set, monotonic clocks take the syscall */
 
 static void vdso_update(void);
+static void vdso_refresh(void);
 
 void vdso_init(void)
 {
@@ -99,9 +100,13 @@ static inline uint64_t hw_counter(void)
 }
 
 /* Push a fresh vvar immediately — called when the kernel steps the clock
- * (settimeofday/clock_settime/adjtimex) so the vDSO doesn't serve a stale base
- * until the next tick. */
-void vdso_time_changed(void) { vdso_update(); }
+ * (settimeofday/clock_settime/adjtimex) or a time namespace offset is set, so
+ * the vDSO doesn't serve a stale base until the next update. It must not skip
+ * like the tick does: with a counter the tick refreshes only every 10th time,
+ * and a clock_settime read back at once got the old wall clock (c-rtc), a child
+ * in a new time namespace the plain monotonic one (c-time-ns). Under KVM that
+ * stayed hidden while the vDSO was off for want of a TSC (kvm-clock). */
+void vdso_time_changed(void) { vdso_refresh(); }
 
 /* Refresh vvar under a seqlock (odd seq = update in progress). vdso_update runs
  * both as a timer-tick callback and from the clock-setting syscalls (via
@@ -109,11 +114,16 @@ void vdso_time_changed(void) { vdso_update(); }
  * (aarch64) or cross-CPU update can't drive seq back to even mid-write and let a
  * vDSO reader validate a torn mix of two updates. */
 static spinlock_t vdso_lock = SPINLOCK_INIT;
-static void vdso_update(void)
+static void vdso_update(void)            /* the tick callback */
 {
-	if (!vvar_k) return;
 	/* between updates the counter carries it; without one, every tick counts */
 	if (cnt_valid && kernel_ticks % (TIMER_HZ / 100)) return;
+	vdso_refresh();
+}
+
+static void vdso_refresh(void)
+{
+	if (!vvar_k) return;
 	uint64_t f = spin_lock_irq(&vdso_lock);
 	uint64_t cnt = hw_counter();
 	int64_t ms, mn, rs, rn;

@@ -1995,6 +1995,7 @@ static ssize_t procfs_timens_off_write(vfs_file_t *f, const void *buf, size_t le
 		while (*s && *s != '\n') s++;
 
 		vdso_timens_used = 1;
+		vdso_time_changed();   /* monotonic clocks take the syscall from now on */
 		if (first == 'm') { p->time_ns_new->mono_sec = sec; p->time_ns_new->mono_nsec = nsec; }
 		else if (first == 'b') { p->time_ns_new->boot_sec = sec; p->time_ns_new->boot_nsec = nsec; }
 	}

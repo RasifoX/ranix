@@ -244,10 +244,86 @@ static inline uint64_t rdtsc_(void)
 	return (uint64_t)hi << 32 | lo;
 }
 
+/* kvm-clock (pvclock), as a Linux guest uses it: under KVM the guest is often not
+ * told the TSC is invariant (QEMU's -cpu host leaves invtsc out), and without a
+ * TSC every clock read was the HPET, a trap to the VMM's user space: 12 us a
+ * clock_gettime on Casper, the vDSO off, and the idle path's own clock reads made
+ * 2.5 ms sleeps end 0.25-0.4 ms late (test_clockfast, test_sleeptail). KVM gives
+ * the TSC's exact rate in the pvclock page; with its "stable" feature the TSC is
+ * the same on every vCPU, so it can be used as the invariant one is. Returns the
+ * ns = delta * mult >> 28 factor, or 0 when not under KVM / not stable. */
+#define KVM_CPUID_SIG        0x40000000U
+#define KVM_CPUID_FEATURES   0x40000001U
+#define KVM_FEATURE_CLOCKSOURCE2        (1U << 3)
+#define KVM_FEATURE_CLOCKSOURCE_STABLE  (1U << 24)
+#define MSR_KVM_SYSTEM_TIME_NEW 0x4b564d01U
+
+struct pvclock_vcpu_time_info {
+	volatile uint32_t version;
+	uint32_t pad0;
+	volatile uint64_t tsc_timestamp;
+	volatile uint64_t system_time;
+	volatile uint32_t tsc_to_system_mul;
+	volatile int8_t   tsc_shift;
+	volatile uint8_t  flags;
+	uint8_t  pad[2];
+} __attribute__((packed));
+
+static struct pvclock_vcpu_time_info kvm_pvti __attribute__((aligned(64)));
+
+static inline void wrmsr_(uint32_t msr, uint64_t v)
+{
+	__asm__ volatile("wrmsr" :: "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
+int kvm_clock;   /* 1: the TSC rate came from kvm-clock */
+
+static uint64_t kvm_clock_mult(void)
+{
+	uint32_t a, b, c, d;
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+	if (!(c & (1U << 31))) return 0;                     /* no hypervisor */
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(KVM_CPUID_SIG));
+	if ((a && a < KVM_CPUID_FEATURES) || b != 0x4b4d564bU || c != 0x564b4d56U || d != 0x0000004dU)
+		return 0;                                        /* "KVMKVMKVM\0\0\0" */
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(KVM_CPUID_FEATURES));
+	if (!(a & KVM_FEATURE_CLOCKSOURCE2) || !(a & KVM_FEATURE_CLOCKSOURCE_STABLE))
+		return 0;
+	wrmsr_(MSR_KVM_SYSTEM_TIME_NEW, VIRT_TO_PHYS(&kvm_pvti) | 1);
+	uint32_t ver, mul = 0; int8_t shift = 0;
+	for (int tries = 0; tries < 1000; tries++) {
+		ver = kvm_pvti.version;
+		__asm__ volatile("" ::: "memory");
+		mul = kvm_pvti.tsc_to_system_mul;
+		shift = kvm_pvti.tsc_shift;
+		__asm__ volatile("" ::: "memory");
+		if (!(ver & 1) && ver == kvm_pvti.version && mul) break;
+		mul = 0;
+	}
+	wrmsr_(MSR_KVM_SYSTEM_TIME_NEW, 0);                  /* the rate is all we keep */
+	if (!mul) return 0;
+	/* pvclock: ns = ((delta << shift, or >> -shift) * mul) >> 32 */
+	uint64_t m = shift >= 0 ? ((uint64_t)mul << shift) >> 4 : ((uint64_t)mul >> -shift) >> 4;
+	return m;
+}
+
 void tsc_calibrate(void)
 {
 	uint32_t a, d;
 	__asm__ volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000007U) : "ebx", "ecx");
+	if (!(d & (1U << 8)) && hpet_base) {
+		uint64_t m = kvm_clock_mult();
+		if (m) {
+			uint64_t h = hpet_now_ns(), t = rdtsc_();
+			tsc0 = t;
+			tsc_ns0 = h;
+			kvm_clock = 1;
+			kprintf(KERN_INFO "tsc: kvm-clock, %lu Hz\n", (unsigned long)((1000000000ULL << 28) / m));
+			__sync_synchronize();
+			tsc_mult = m;
+		}
+		return;
+	}
 	if (!(d & (1U << 8)) || !hpet_base)
 		return;
 	uint64_t h0 = hpet_now_ns(), t0 = rdtsc_(), h1;
