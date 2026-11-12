@@ -20,6 +20,7 @@
 #include <asm/context.h>
 
 char core_pattern[128] = "core";
+int  suid_dumpable;   /* fs.suid_dumpable: 0 (Linux's default) */
 
 #define ET_CORE     4
 #define PT_LOAD     1
@@ -109,6 +110,13 @@ int coredump(process_t *proc, int sig, arch_context_t *tf)
 	if (!proc || !core_signal(sig) || core_pattern[0] == '\0') return 0;
 	/* Linux writes no ELF core under a page of RLIMIT_CORE */
 	if (proc->rlim_set && proc->rlim_cur[4 /* RLIMIT_CORE */] < 4096 /* a page */) return 0;
+	/* A task that is not dumpable (it changed its ids: it may hold what its old
+	 * identity read) leaves no core. Dumpable 2 (suid_dumpable 2) dumps as root,
+	 * only to an absolute core_pattern, a new file of root's that no link can
+	 * redirect (Linux do_coredump's suid-safe dump). */
+	if (proc->dumpable == 0) return 0;
+	int as_root = proc->dumpable == 2;
+	if (as_root && core_pattern[0] != '/') return 0;
 
 	/* count + total of dumpable VMAs (capped) */
 	int nv = 0;
@@ -135,7 +143,17 @@ int coredump(process_t *proc, int sig, arch_context_t *tf)
 		path[n] = '\0';
 	}
 
-	int fd = vfs_open(path, 0x41 /*O_CREAT|O_WRONLY*/ | 0x200 /*O_TRUNC*/, 0600);
+	int fd;
+	if (as_root) {   /* Linux: only the fsuid becomes root's, for the open */
+		process_t *me = task_current();   /* the dying task itself: vfs_open's ids */
+		uint8_t was_set = me->fs_uid_set;
+		uid_t was = me->fsuid;
+		me->fs_uid_set = 1; me->fsuid = 0;
+		fd = vfs_open(path, O_CREAT | O_WRONLY | O_EXCL | O_NOFOLLOW, 0600);
+		me->fs_uid_set = was_set; me->fsuid = was;
+	} else {
+		fd = vfs_open(path, 0x41 /*O_CREAT|O_WRONLY*/ | 0x200 /*O_TRUNC*/, 0600);
+	}
 	if (fd < 0) return 0;
 
 	int phnum = 1 + nv;  /* PT_NOTE + PT_LOADs */

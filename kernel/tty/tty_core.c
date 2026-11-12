@@ -316,6 +316,9 @@ static int tty_poll(vfs_file_t *f)
 #define TIOCSPGRP  0x5410
 #define TIOCSCTTY  0x540e
 #define TIOCNOTTY  0x5422
+#define TIOCOUTQ   0x5411
+#define FIONREAD   0x541B   /* = TIOCINQ */
+#define TCFLSH     0x540B
 #define KDSETMODE  0x4B3A
 #define KDGETMODE  0x4B3B
 #define KD_TEXT     0
@@ -392,6 +395,34 @@ static int tty_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
     if (cmd == TIOCNOTTY) {
         process_t *cur = task_current();
         if (cur && cur->ctty == t) { cur->ctty = NULL; cur->ctty_fops = NULL; }
+        return 0;
+    }
+    if (cmd == FIONREAD) {   /* committed input (a canonical line once it ends) */
+        tty_poll_uart();
+        uint64_t flags = spin_lock_irq(&t->lock);
+        int n = (t->in_head - t->in_tail + TTY_BUF_SIZE) % TTY_BUF_SIZE;
+        spin_unlock_irq(&t->lock, flags);
+        return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
+    }
+    if (cmd == TIOCOUTQ) {   /* output is written out at once */
+        int n = 0;
+        return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
+    }
+    if (cmd == TCFLSH) {     /* TCIFLUSH/TCIOFLUSH drop typed input; output is already out */
+        if (arg > 2) return -EINVAL;
+        if (arg != 1) {
+            tty_poll_uart();
+            uint64_t flags = spin_lock_irq(&t->lock);
+            t->in_tail = t->in_head;
+            t->line_pos = 0;
+            spin_unlock_irq(&t->lock, flags);
+        }
+        return 0;
+    }
+    switch (cmd) {           /* line control with nothing to act on, as the pty */
+    case 0x5409: case 0x540A:                /* TCSBRK, TCXONC */
+    case 0x540C: case 0x540D:                /* TIOCEXCL, TIOCNXCL */
+    case 0x5425: case 0x5427: case 0x5428:   /* TCSBRKP, TIOCSBRK, TIOCCBRK */
         return 0;
     }
     if (cmd == KDSETMODE) {

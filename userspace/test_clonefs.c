@@ -25,6 +25,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #define NOBODY 65534
@@ -113,11 +114,15 @@ static int chroot_seen(int flags)
 	return WIFEXITED(st) ? WEXITSTATUS(st) : 4;
 }
 
+/* A drop from root without exec leaves the task not dumpable (Linux
+ * commit_creds, fs.suid_dumpable 0), and its /proc/self/uid_map is then
+ * root's, closed to it. A process started as nobody (login, exec) is
+ * dumpable: be that one. */
 static int chromium_pattern(void)
 {
 	pid_t c = fork();
 	if (c == 0) {
-		if (setgid(NOBODY) || setuid(NOBODY)) _exit(10);
+		if (setgid(NOBODY) || setuid(NOBODY) || prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)) _exit(10);
 		if (unshare(CLONE_NEWUSER)) _exit(11);
 		if (put("/proc/self/uid_map", "65534 65534 1\n") || put("/proc/self/gid_map", "65534 65534 1\n")) _exit(12);
 		int r = clone_run(child_fdinfo, CLONE_FS | CLONE_VM | CLONE_VFORK, NULL);

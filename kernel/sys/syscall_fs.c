@@ -1022,7 +1022,7 @@ static setid_old_t setid_save(const process_t *p)
 }
 
 /* Linux commit_creds: a task whose effective or filesystem uid or gid changed
- * is no longer dumpable (suid_dumpable, 0: Ranix has no knob for it); the same
+ * is no longer dumpable (dumpable = fs.suid_dumpable, 0 by default); the same
  * ids again change nothing. The task may still hold what its old identity
  * opened or read (root's secret before a drop to a user), and dumpable is what
  * ptrace_may_access goes by: ptrace, process_vm_*, /proc/<pid>/fd, mem, maps.
@@ -1032,7 +1032,7 @@ static void setid_dumpable(process_t *p, setid_old_t o)
 {
 	if (o.euid != p->euid || o.egid != p->egid ||
 	    o.fsuid != task_fsuid((const struct process *)p) || o.fsgid != task_fsgid((const struct process *)p))
-		p->dumpable = 0;
+		p->dumpable = suid_dumpable;
 }
 
 /* Linux __sys_setuid: with CAP_SETUID all of r/e/s; else only the effective

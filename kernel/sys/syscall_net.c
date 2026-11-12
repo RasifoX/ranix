@@ -362,7 +362,9 @@ static ssize_t sock_write_vfs(vfs_file_t *file, const void *buf, size_t len)
     return -ENOSYS;
 }
 
-#define FIONREAD 0x541B
+#define FIONREAD    0x541B   /* = SIOCINQ */
+#define SIOCOUTQ    0x5411   /* = TIOCOUTQ */
+#define SIOCOUTQNSD 0x894B
 
 #define SIOCGIFNAME    0x8910
 #define SIOCGIFCONF    0x8912
@@ -569,12 +571,41 @@ static int sock_ioctl_vfs(vfs_file_t *file, uint32_t cmd, uint64_t arg)
         return sock_ioctl_ifset(cmd, arg);
     case SIOCGIFCONF:
         return sock_ioctl_ifconf(arg);
-    case FIONREAD: {                        /* bytes queued for reading */
+    case FIONREAD: {   /* Linux SIOCINQ: a stream's (and seqpacket's) queue, a datagram's next */
+        if (s->type == SOCK_STREAM && s->tcp_state == TCP_LISTEN) return -EINVAL;
+        int all = s->type == SOCK_STREAM || s->unix_seqpacket;
         int navail = 0;
         uint64_t f = spin_lock_irq(&s->recv_lock);
-        for (skb_t *skb = s->recv_head; skb; skb = skb->next) navail += skb->len;
+        for (skb_t *skb = s->recv_head; skb; skb = skb->next) {
+            navail += skb->len;
+            if (!all) break;
+        }
         spin_unlock_irq(&s->recv_lock, f);
         return copy_to_user((void *)(uintptr_t)arg, &navail, sizeof(navail)) ? -14 : 0;
+    }
+    case SIOCOUTQ: case SIOCOUTQNSD: {
+        int n = 0;
+        if (s->domain == AF_UNIX) {
+            if (cmd == SIOCOUTQNSD) return -ENOTTY;
+            /* what this end sent that its peer has not read yet (Linux counts
+             * the send buffer it holds, which the reader frees) */
+            socket_t *peer = s->tcp_state == TCP_LISTEN ? NULL : s->unix_peer;
+            if (peer) {
+                uint64_t f = spin_lock_irq(&peer->recv_lock);
+                for (skb_t *skb = peer->recv_head; skb; skb = skb->next) n += skb->len;
+                spin_unlock_irq(&peer->recv_lock, f);
+            }
+        } else if (s->type == SOCK_STREAM && s->domain != AF_PACKET && s->domain != AF_NETLINK) {
+            /* TCP: sent and not acked (SIOCOUTQ); nothing waits unsent here */
+            if (s->tcp_state == TCP_LISTEN) return -EINVAL;
+            if (cmd == SIOCOUTQ && s->tcp_state != TCP_CLOSED &&
+                s->tcp_state != TCP_SYN_SENT && s->tcp_state != TCP_SYN_RECV)
+                n = (int)(s->snd_nxt - s->snd_una);
+        } else if (cmd == SIOCOUTQNSD) {
+            return -ENOTTY;
+        }
+        /* a datagram goes out at once: 0 */
+        return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
     }
     default:
         return -ENOTTY;

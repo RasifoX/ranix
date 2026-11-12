@@ -216,7 +216,7 @@ typedef struct process {
 	gid_t           sgid;  /* saved set-gid */
 	gid_t           groups[32]; /* supplementary groups */
 	int             ngroups;
-	int             dumpable;  /* 0=not dumpable, 1=dumpable (default) */
+	int             dumpable;  /* 1 dumpable (default), 0 not, 2 "as root" (suid_dumpable 2) */
 	int             no_new_privs; /* prctl(PR_SET_NO_NEW_PRIVS): sticky, inherited */
 	uint8_t         mdwe;              /* PR_SET_MDWE: refuse W+X mappings; inherited, irreversible */
 	int             pdeathsig;    /* prctl(PR_SET_PDEATHSIG): signal on parent death */
@@ -357,6 +357,8 @@ typedef struct process {
 	 * a PIE's load address (AT_PHDR, AT_ENTRY) and ld.so (AT_BASE) there */
 	uint64_t        saved_auxv[48];
 	uint32_t        saved_auxv_len;    /* bytes, AT_NULL pair included */
+	/* where exec put the environment strings, for /proc/<pid>/environ */
+	uint64_t        env_start, env_end;
 } process_t;
 
 /* scheduler */
@@ -548,6 +550,9 @@ void ptimer_drop(pid_t tgid);
 
 /* coredump.c */
 extern char core_pattern[128];
+/* fs.suid_dumpable: what dumpable becomes when a task changes its ids or execs
+ * with euid != ruid (0, 1, or 2 = dump as root, to an absolute core_pattern) */
+extern int  suid_dumpable;
 int  coredump(process_t *p, int sig, arch_context_t *ctx);   /* 1: a core was written */
 
 #endif

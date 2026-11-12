@@ -23,6 +23,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #define NOBODY 65534
@@ -61,9 +62,13 @@ static int probe(void)
 	return 0;
 }
 
+/* A drop from root without exec leaves the task not dumpable (Linux
+ * commit_creds, fs.suid_dumpable 0), and its /proc/self/uid_map is then
+ * root's, closed to it. A process started as nobody (login, exec) is
+ * dumpable: be that one. */
 static int become_nobody(void)
 {
-	return setgroups(0, NULL) || setgid(NOBODY) || setuid(NOBODY);
+	return setgroups(0, NULL) || setgid(NOBODY) || setuid(NOBODY) || prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
 }
 
 /* map one id line in the caller's own new namespace */

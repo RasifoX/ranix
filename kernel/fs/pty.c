@@ -45,6 +45,12 @@ static void pty_test_gap(void);    /* test kernels: PR_RANIX_TEST_HOOK bit 2 */
 #define TIOCGPTN   0x80045430
 #define TIOCSPTLCK 0x40045431
 #define TIOCNOTTY  0x5422
+#define TIOCOUTQ   0x5411
+#define FIONREAD   0x541B   /* = TIOCINQ */
+#define TCFLSH     0x540B
+#define TCIFLUSH   0
+#define TCOFLUSH   1
+#define TCIOFLUSH  2
 
 #define SIGTTIN    21
 #define SIGTTOU    22
@@ -326,9 +332,50 @@ static void termios_unpack(pty_t *p, const uint8_t t[36])
 	memcpy(p->c_cc, t + 17, NCCS);
 }
 
-static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
+/* What waits on this end, as Linux's n_tty answers TIOCINQ: the slave's
+ * committed input (a canonical line once its newline is in; m2s holds nothing
+ * else, the line being edited is apart), the master's the slave's output. */
+static int pty_inq(pty_t *p, int master)
+{
+	uint64_t f = spin_lock_irq(&p->lock);
+	int n = master ? (int)r_avail(p->s2m_h, p->s2m_t) : (int)r_avail(p->m2s_h, p->m2s_t);
+	spin_unlock_irq(&p->lock, f);
+	return n;
+}
+
+/* TCFLSH: TCIFLUSH drops this end's input (the slave's line being edited and
+ * its EOF too). A write lands in the peer's input at once, where Linux's
+ * TCOFLUSH no longer reaches it either: nothing to drop on the output side. */
+static int pty_flush(pty_t *p, int master, uint64_t arg)
+{
+	if (arg != TCIFLUSH && arg != TCOFLUSH && arg != TCIOFLUSH) return -EINVAL;
+	if (arg == TCOFLUSH) return 0;
+	uint64_t f = spin_lock_irq(&p->lock);
+	if (master) {
+		p->s2m_t = p->s2m_h;
+	} else {
+		p->m2s_t = p->m2s_h;
+		p->line_len = 0;
+		p->eof = 0;
+	}
+	spin_unlock_irq(&p->lock, f);
+	wake_up(master ? &p->s2m_wait : &p->m2s_wait);   /* writers waiting for room */
+	return 0;
+}
+
+static int pty_common_ioctl(pty_t *p, int master, uint32_t cmd, uint64_t arg)
 {
 	switch (cmd) {
+	case FIONREAD: {
+		int n = pty_inq(p, master);
+		return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
+	}
+	case TIOCOUTQ: {   /* nothing is held between the ends (Linux pty: 0) */
+		int n = 0;
+		return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
+	}
+	case TCFLSH:
+		return pty_flush(p, master, arg);
 	case TCGETS: {
 		uint8_t t[36];
 		termios_pack(p, t);
@@ -378,7 +425,7 @@ static int pty_common_ioctl(pty_t *p, uint32_t cmd, uint64_t arg)
 	/* line-control requests have nothing to act on here; anything else must not
 	 * read as success, or a caller trusts the buffer it passed */
 	switch (cmd) {
-	case 0x5409: case 0x540A: case 0x540B:   /* TCSBRK, TCXONC, TCFLSH */
+	case 0x5409: case 0x540A:                /* TCSBRK, TCXONC */
 	case 0x540C: case 0x540D:                /* TIOCEXCL, TIOCNXCL */
 	case 0x5425: case 0x5427: case 0x5428:   /* TCSBRKP, TIOCSBRK, TIOCCBRK */
 		return 0;
@@ -471,7 +518,7 @@ static int master_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 		return copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
 	}
 	if (cmd == TIOCSPTLCK) return 0;   /* we don't lock slaves */
-	return pty_common_ioctl(p, cmd, arg);
+	return pty_common_ioctl(p, 1, cmd, arg);
 }
 #define PTY_POLLIN  0x0001
 #define PTY_POLLOUT 0x0004
@@ -575,7 +622,7 @@ static ssize_t slave_write(vfs_file_t *file, const void *buf, size_t len)
 }
 static int slave_ioctl(vfs_file_t *file, uint32_t cmd, uint64_t arg)
 {
-	return pty_common_ioctl(file->priv, cmd, arg);
+	return pty_common_ioctl(file->priv, 0, cmd, arg);
 }
 /* Readable once a full line (or EOF) is committed to m2s in canonical mode, any
  * byte otherwise; writable while there is room toward the master ("\r\n" needs

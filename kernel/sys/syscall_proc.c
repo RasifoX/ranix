@@ -1781,12 +1781,14 @@ static uint64_t exec_fill_stack(process_t *p, uint8_t *kbuf, uint64_t *uargv, ui
 
 	/* ASLR: randomize stack top within last stack page (up to 4080 bytes) */
 	uint64_t sp = USER_STACK_TOP_ - (no_aslr ? 0 : ((rng_next() & 0xffULL) << 4));
+	p->env_start = p->env_end = sp;   /* the strings run down from here, env[0] lowest */
 	for (int j = envc - 1; j >= 0; j--) {
 		int n = 0; while (a->kenvp[j][n]) n++;
 		sp -= (uint64_t)(n + 1);
 		memcpy(KB(sp), a->kenvp[j], (size_t)(n + 1));
 		uenvp[j] = sp;
 	}
+	p->env_start = sp;
 	for (int j = argc - 1; j >= 0; j--) {
 		int n = 0; while (a->kargv[j][n]) n++;
 		sp -= (uint64_t)(n + 1);
@@ -1865,7 +1867,9 @@ static void exec_switch_vm(process_t *p, vm_space_t *new_vm, const elf_info_t *e
 	p->vm        = new_vm;
 	p->vm->brk   = ei->load_end;
 	p->vm->mmap_next = en->mmap_base;
-	p->dumpable  = secure_exec ? 0 : 1;
+	/* Linux begin_new_exec + commit_creds: an image that changed the ids, or
+	 * runs with euid != ruid (or egid != rgid), gets suid_dumpable */
+	p->dumpable  = (secure_exec || p->euid != p->uid || p->egid != p->gid) ? suid_dumpable : 1;
 	ptrace_exec_done(p);
 	vfork_release(p);
 	arch_vm_switch((uint64_t)new_vm->root, new_vm->asid);

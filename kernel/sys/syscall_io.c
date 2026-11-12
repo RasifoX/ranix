@@ -17,6 +17,7 @@
 #define FIONCLEX   0x5450
 #define FIOCLEX    0x5451
 #define FIONBIO    0x5421
+#define FIONREAD   0x541B
 
 static pid_t tty_fg_pgrp = 1;
 
@@ -43,6 +44,18 @@ static long sys_ioctl(int fd, uint32_t cmd, uint64_t arg)
 			fd_set_cloexec(p->fds, fd, cmd == FIOCLEX);
 			r = 0;
 			break;
+		case FIONREAD:   /* a regular file: what is left past the offset (Linux do_vfs_ioctl) */
+			if (f->inode && S_ISREG(f->inode->mode)) {
+				uint64_t size = f->inode->size;
+				if (f->inode->iops && f->inode->iops->stat) {   /* the size fstat shows */
+					vfs_stat_t vs = {0};
+					if (f->inode->iops->stat(f->inode, &vs) == 0) size = vs.size;
+				}
+				int n = (int)((off_t)size - f->pos);
+				r = copy_to_user((void *)(uintptr_t)arg, &n, sizeof(n)) ? -14 : 0;
+				break;
+			}
+			/* fall through */
 		default:
 			r = (f->inode && f->inode->fops && f->inode->fops->ioctl)
 			  ? f->inode->fops->ioctl(f, cmd, arg)

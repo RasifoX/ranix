@@ -509,6 +509,13 @@ static void walk_fail(int err)
 	if (p && !p->walk_err) p->walk_err = err;
 }
 
+/* A filesystem's lookup or readlink that refuses a name it has (procfs: an
+ * fd of a task the caller may not trace) says why: EACCES, not ENOENT. */
+void vfs_walk_refuse(int err)
+{
+	walk_fail(err);
+}
+
 /* A name is made, found or removed only in a directory. A filesystem's
  * directory ops read the inode's private data as an entry list, so on a
  * regular file they would write into its data index. */
@@ -1213,6 +1220,7 @@ static int walk_symlink(walk_t *w, vfs_dentry_t *child, char *work, const char *
 	w->f = spin_lock_irq(&vfs_lock);
 	if (lrc != 0) {
 		spin_unlock_irq(&vfs_lock, w->f);
+		if (lrc == -EACCES) walk_fail(EACCES);   /* a link one may not follow (procfs) */
 		return -1;
 	}
 	/* splice: work = target + remaining(end) */

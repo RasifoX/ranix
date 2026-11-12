@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #define NOBODY 65534
@@ -69,9 +70,13 @@ static int root_without_cap(void)
 	return chroot(JAIL) == 0 ? 1 : (errno == EPERM ? 0 : 4);
 }
 
+/* A drop from root without exec leaves the task not dumpable (Linux
+ * commit_creds, fs.suid_dumpable 0), and its /proc/self/uid_map is then
+ * root's, closed to it. A process started as nobody (login, exec) is
+ * dumpable: be that one. */
 static int nobody_userns(void)
 {
-	if (setgid(NOBODY) || setuid(NOBODY)) return 2;
+	if (setgid(NOBODY) || setuid(NOBODY) || prctl(PR_SET_DUMPABLE, 1, 0, 0, 0)) return 2;
 	if (unshare(CLONE_NEWUSER)) return 3;
 	if (put("/proc/self/uid_map", "0 65534 1\n") || put("/proc/self/gid_map", "0 65534 1\n")) return 4;
 	if (chdir(JAIL "/d1/d2")) return 5;

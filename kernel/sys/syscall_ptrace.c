@@ -262,7 +262,7 @@ int ptrace_may_access(process_t *t)
 	if (p->euid != t->uid || p->euid != t->euid || p->euid != t->suid ||
 	    p->egid != t->gid || p->egid != t->egid || p->egid != t->sgid)
 		return 0;
-	return t->dumpable != 0;
+	return t->dumpable == 1;   /* SUID_DUMP_USER: 2 ("as root") is no more open than 0 */
 }
 
 static int ptrace_get_regs(process_t *tracee, ptrace_regs_t *ur)

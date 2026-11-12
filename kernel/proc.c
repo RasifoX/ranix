@@ -391,6 +391,8 @@ static void copy_task_state(process_t *child, const process_t *parent)
 	memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
 	memcpy(child->saved_auxv, parent->saved_auxv, sizeof(child->saved_auxv));
 	child->saved_auxv_len = parent->saved_auxv_len;
+	child->env_start = parent->env_start;
+	child->env_end   = parent->env_end;
 
 	/* a new task runs the same image: inherit the parent's argv so
 	 * /proc/<pid>/cmdline (ps full command) reflects the real command line. */

@@ -435,7 +435,8 @@ static int fill_proc_syscall(char *buf, size_t sz, int pid)
 	pb_t b = {buf, sz};
 	process_t *me = task_current();
 	if (!p) return 0;
-	if (me->euid == 0 || me->euid == p->euid) {
+	(void)me;
+	{   /* the caller may trace it: procfs_file_read checked */
 		arch_context_t *c = p->uctx;
 		if (!p->in_syscall || !c) {
 			pb_str(&b, "running\n");
@@ -624,6 +625,8 @@ typedef struct {
 #define PROC_F_SYS_SEM            57
 #define PROC_F_SYS_PIPE_MAX       61
 #define PROC_F_SYS_MMAP_MIN       62
+#define PROC_F_SYS_SUID_DUMPABLE  63
+#define PROC_F_P_ENVIRON          64
 #define PROC_F_SYSVIPC_SHM        58   /* 58..60: /proc/sysvipc/{shm,sem,msg} */
 #define PROC_F_SYSVIPC_MSG        60
 static const char *const ipc_limit_names[] = { "shmmax", "shmmni", "shmall", "msgmax", "msgmnb", "msgmni" };
@@ -742,6 +745,7 @@ static const struct {
 	{ "mounts",    PROC_F_MOUNTS },        /* what /proc/mounts shows */
 	{ "oom_score_adj", PROC_F_P_OOMADJ },
 	{ "oom_score", PROC_F_P_OOMSCORE },
+	{ "environ",   PROC_F_P_ENVIRON },     /* listed; the lookup makes its own inode */
 };
 #define PID_FILES_N ((int)(sizeof(pid_files) / sizeof(pid_files[0])))
 
@@ -809,10 +813,14 @@ static int fill_sysvipc_file(int type, char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+static int procfs_fds_visible(int pid);
+
 static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 {
 	procfs_inode_priv_t *pr = f->inode->priv;
 	if (!pr) return -1;
+	/* what a task is doing in the kernel: only to who may trace it (Linux lock_trace) */
+	if (pr->type == PROC_F_P_SYSCALL && !procfs_fds_visible(pr->pid)) return -EPERM;
 
 	uint64_t phys = (uint64_t)buddy_alloc(0);
 	if (!phys) return -1;
@@ -907,6 +915,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_SYS_MAX_MAP_COUNT:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"65530\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_SWAPPINESS:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b, (uint64_t)vm_swappiness); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_MMAP_MIN:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,MMAP_MIN_ADDR); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
+	case PROC_F_SYS_SUID_DUMPABLE:  { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_u64(&b,(uint64_t)suid_dumpable); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	default: n = 0; break;
 	}
 
@@ -1031,6 +1040,19 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 		pipe_max_size = v;
 		return (ssize_t)len;
 	}
+	if (pr->type == PROC_F_SYS_SUID_DUMPABLE) {   /* fs.suid_dumpable: 0, 1 or 2, root */
+		process_t *c = task_current();
+		if (c && !capable_task(c, CAP_SYS_ADMIN)) return -EPERM;
+		char tmp[16];
+		if (len == 0 || len >= sizeof(tmp)) return -EINVAL;
+		if (copy_fop_from_user(tmp, buf, len) != 0) return -EFAULT;
+		size_t n = len, i = 0;
+		while (n && (tmp[n-1] == '\n' || tmp[n-1] == ' ' || tmp[n-1] == '\t')) n--;
+		while (i < n && (tmp[i] == ' ' || tmp[i] == '\t')) i++;
+		if (n - i != 1 || tmp[i] < '0' || tmp[i] > '2') return -EINVAL;
+		suid_dumpable = tmp[i] - '0';
+		return (ssize_t)len;
+	}
 	if (pr->type == PROC_F_SYS_KPTR_RESTRICT || pr->type == PROC_F_SYS_DMESG_RESTRICT) {
 		process_t *c = task_current();
 		if (c && c->euid != 0 && !capable_task(c, CAP_SYS_ADMIN)) return -EPERM;
@@ -1046,7 +1068,20 @@ static ssize_t procfs_sysctl_write(vfs_file_t *f, const void *buf, size_t len)
 	return -1;
 }
 
+/* maps and auxv of a task the caller may not trace do not open (Linux
+ * proc_mem_open: EACCES); the fill functions check again at read */
+static int procfs_file_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)f; (void)flags;
+	procfs_inode_priv_t *pr = in->priv;
+	if (pr && (pr->type == PROC_F_P_MAPS || pr->type == PROC_F_P_AUXV) &&
+	    !procfs_fds_visible(pr->pid))
+		return -EACCES;
+	return 0;
+}
+
 static vfs_fops_t procfs_fops = {
+	.open  = procfs_file_open,
 	.read  = procfs_file_read,
 	.write = procfs_sysctl_write,
 };
@@ -1128,7 +1163,67 @@ static ssize_t procfs_mem_read(vfs_file_t *f, void *buf, size_t len)
 static ssize_t procfs_mem_write(vfs_file_t *f, const void *buf, size_t len)
 { return procfs_mem_rw(f, (void *)buf, len, 1); }
 
-static vfs_fops_t procfs_mem_fops = { .read = procfs_mem_read, .write = procfs_mem_write };
+static int procfs_mem_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)f; (void)flags;
+	procfs_inode_priv_t *pr = in->priv;
+	return pr && !procfs_fds_visible(pr->pid) ? -EACCES : 0;   /* Linux __mem_open */
+}
+
+static vfs_fops_t procfs_mem_fops = { .open = procfs_mem_open, .read = procfs_mem_read, .write = procfs_mem_write };
+
+/* /proc/<pid>/environ: the environment strings exec put on its stack (Linux
+ * env_start..env_end), read from its memory; 0400, and only to who may trace it */
+static ssize_t procfs_environ_read(vfs_file_t *f, void *ubuf, size_t len)
+{
+	procfs_inode_priv_t *pr = (procfs_inode_priv_t *)f->inode->priv;
+	if (!procfs_fds_visible(pr->pid)) return -EACCES;
+	process_t *t = pr->pid ? proc_get((pid_t)pr->pid) : task_current();
+	if (!t) return 0;
+	uint64_t start = t->env_start, end = t->env_end;
+	pid_t pid = t->pid;
+	if (pr->pid) proc_put(t);
+	if (f->pos < 0 || end <= start || (uint64_t)f->pos >= end - start) return 0;
+	vm_space_t *vm = proc_get_vm(pid);   /* pinned; vm_destroy to release */
+	if (!vm) return 0;
+	uint64_t at = start + (uint64_t)f->pos;
+	if (len > end - at) len = (size_t)(end - at);
+	char tmp[256];
+	size_t done = 0;
+	while (done < len) {
+		size_t n = len - done; if (n > sizeof(tmp)) n = sizeof(tmp);
+		size_t got = vm_access_remote(vm, at + done, tmp, n, 0);
+		if (got && copy_to_user((char *)ubuf + done, tmp, got) != 0) {
+			vm_destroy(vm);
+			return done ? (ssize_t)done : -EFAULT;
+		}
+		done += got;
+		if (got < n) break;
+	}
+	vm_destroy(vm);
+	f->pos += (off_t)done;
+	return (ssize_t)done;
+}
+
+static vfs_fops_t procfs_environ_fops = { .open = procfs_mem_open, .read = procfs_environ_read };
+
+static vfs_inode_t *procfs_environ_inode(int pid)
+{
+	vfs_inode_t *in = kmalloc(sizeof(*in));
+	if (!in) return NULL;
+	memset(in, 0, sizeof(*in));
+	in->ino = proc_ino_alloc();
+	in->mode = S_IFREG | 0400;
+	in->nlink = 1; in->refcount = 1;
+	in->fops = &procfs_environ_fops;
+	procfs_inode_priv_t *pr = kmalloc(sizeof(*pr));
+	if (!pr) { kfree(in); return NULL; }
+	memset(pr, 0, sizeof(*pr));
+	pr->pid = pid;
+	pr->type = PROC_F_P_ENVIRON;
+	in->priv = pr;
+	return in;
+}
 
 static vfs_inode_t *procfs_mem_inode(int pid)
 {
@@ -1232,14 +1327,16 @@ typedef struct { int pid; } procfs_fddir_priv_t;
 
 static int procfs_fds_visible(int pid);
 
-/* fd/N of a task the reader may not see is not there: the link names the
- * file, and walking it reaches the file's attributes (walk_fdlink) */
+/* fd/N of a task the reader may not trace is refused, EACCES as on Linux
+ * (proc_fd_access_allowed): the link names the file, and walking it reaches
+ * the file's attributes (walk_fdlink) */
 static vfs_inode_t *procfs_fddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	int fd_n = 0; const char *s = name;
-	if (!*s || !procfs_fds_visible(pid)) return NULL;
+	if (!*s) return NULL;
+	if (!procfs_fds_visible(pid)) { vfs_walk_refuse(EACCES); return NULL; }   /* Linux: EACCES */
 	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
 	if (*s) return NULL;
 	int self = (pid == 0);
@@ -1289,6 +1386,7 @@ static int procfs_fddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *ou
 {
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
+	if (!procfs_fds_visible(pid)) return -1;
 	fd_table_t *fds = procfs_fds_get(pid);
 	if (!fds) return -1;
 	int i = procfs_fd_nth(fds, idx);
@@ -1308,7 +1406,7 @@ static vfs_inode_t *procfs_fddir_inode(int pid)
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino      = proc_ino_alloc();
-	in->mode     = S_IFDIR | 0555;
+	in->mode     = S_IFDIR | 0500;   /* Linux: the task's own (root's when not dumpable) */
 	in->nlink    = 2;
 	in->refcount = 1;
 	in->iops     = &procfs_fddir_iops;
@@ -1321,9 +1419,9 @@ static vfs_inode_t *procfs_fddir_inode(int pid)
 }
 
 /* ── /proc/<pid>/fdinfo: per open fd, its offset and open flags ──
- * Linux format ("pos:\t0\nflags:\t02\nmnt_id:\t0\nino:\t5\n"). The task's
- * own, as on Linux: the directory is 0500 and each file 0400 of its euid, and
- * a read by anyone else without CAP_SYS_PTRACE is refused. Chromium's sandbox
+ * Linux format ("pos:\t0\nflags:\t02\nmnt_id:\t0\nino:\t5\n"). As on Linux
+ * the directory is 0555 and each file 0444, and the gate is the task: who may
+ * not trace it (ptrace_may_access) opens neither, EACCES. Chromium's sandbox
  * chroots into /proc/self/fdinfo/: a directory nothing can be made in. */
 
 typedef struct { int pid; int fd_n; } procfs_fdinfo_priv_t;
@@ -1342,12 +1440,15 @@ static int procfs_fds_visible(int pid)
 	return ok;
 }
 
-/* the inode's owner: the task's euid/egid */
+/* the inode's owner, as Linux task_dump_owner: the task's euid/egid, but root
+ * for all except the world-readable directories (itself, task/, fdinfo/) of a
+ * task that is not dumpable (1). Set in->mode first. */
 static void procfs_owner(vfs_inode_t *in, int pid)
 {
 	process_t *t = pid ? proc_get((pid_t)pid) : task_current();
 	if (!t) return;
 	in->uid = t->euid; in->gid = t->egid;
+	if (in->mode != (S_IFDIR | 0555) && t->dumpable != 1) { in->uid = 0; in->gid = 0; }
 	if (pid) proc_put(t);
 }
 
@@ -1419,7 +1520,7 @@ static vfs_inode_t *procfs_fdinfo_inode(int pid, int fd_n)
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
 	in->ino      = proc_ino_alloc();
-	in->mode     = S_IFREG | 0400;
+	in->mode     = S_IFREG | 0444;   /* as Linux: fdinfo/ is the gate */
 	in->nlink    = 1;
 	in->refcount = 1;
 	in->fops     = &procfs_fdinfo_fops;
@@ -1436,7 +1537,8 @@ static vfs_inode_t *procfs_fdinfodir_lookup(vfs_inode_t *dir, const char *name)
 	procfs_fddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	int fd_n = 0; const char *s = name;
-	if (!*s || !procfs_fds_visible(pid)) return NULL;
+	if (!*s) return NULL;
+	if (!procfs_fds_visible(pid)) { vfs_walk_refuse(EACCES); return NULL; }
 	while (*s >= '0' && *s <= '9') { fd_n = fd_n * 10 + (*s - '0'); s++; }
 	if (*s) return NULL;
 	fd_table_t *fds = procfs_fds_get(pid);
@@ -1454,7 +1556,7 @@ static int procfs_fdinfodir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t
 	fd_table_t *fds = procfs_fds_get(pid);
 	if (!fds) return -1;
 	int i = procfs_fd_nth(fds, idx);
-	if (i >= 0) procfs_num_dirent(out, i, idx, S_IFREG | 0400);
+	if (i >= 0) procfs_num_dirent(out, i, idx, S_IFREG | 0444);
 	procfs_fds_put(pid, fds);
 	return i >= 0 ? 0 : -1;
 }
@@ -1464,12 +1566,24 @@ static vfs_iops_t procfs_fdinfodir_iops = {
 	.readdir = procfs_fdinfodir_readdir,
 };
 
+/* fdinfo/ is 0555 on Linux, its gate a permission check: who may not trace
+ * the task opens it EACCES (proc_fdinfo_permission) */
+static int procfs_fdinfodir_open(vfs_inode_t *in, vfs_file_t *f, int flags)
+{
+	(void)f; (void)flags;
+	procfs_fddir_priv_t *pp = in->priv;
+	return procfs_fds_visible(pp ? pp->pid : 0) ? 0 : -EACCES;
+}
+
+static vfs_fops_t procfs_fdinfodir_fops = { .open = procfs_fdinfodir_open };
+
 static vfs_inode_t *procfs_fdinfodir_inode(int pid)
 {
 	vfs_inode_t *in = procfs_fddir_inode(pid);
 	if (!in) return NULL;
-	in->mode = S_IFDIR | 0500;
+	in->mode = S_IFDIR | 0555;
 	in->iops = &procfs_fdinfodir_iops;
+	in->fops = &procfs_fdinfodir_fops;
 	procfs_owner(in, pid);
 	return in;
 }
@@ -1492,6 +1606,7 @@ static int procfs_pidlink_readlink(vfs_inode_t *in, char *buf, size_t sz)
 {
 	procfs_pidlink_priv_t *pr = in->priv;
 	if (!pr) return -1;
+	if (!procfs_fds_visible(pr->pid)) return -EACCES;   /* Linux proc_fd_access_allowed */
 	process_t *p = pr->pid == 0 ? task_current() : proc_get((pid_t)pr->pid);
 	if (!p) return -1;
 	const char *src;
@@ -2303,11 +2418,35 @@ static vfs_inode_t *procfs_asessroot_inode(void)
 
 static vfs_inode_t *procfs_taskdir_inode(int pid);
 
+static vfs_inode_t *procfs_piddir_entry(int pid, const char *name);
+
+/* Each entry with Linux's mode, and owned as task_dump_owner says */
 static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 {
 	procfs_piddir_priv_t *pp = dir->priv;
 	if (!pp) return NULL;
-	int pid = pp->pid;
+	vfs_inode_t *in = procfs_piddir_entry(pp->pid, name);
+	if (!in || strcmp(name, "asess") == 0) return in;
+	if (strcmp(name, "syscall") == 0 || strcmp(name, "auxv") == 0)
+		in->mode = S_IFREG | 0400;
+	procfs_owner(in, pp->pid);
+	/* a task's own fds stay open to it, dumpable or not (Linux
+	 * proc_fd_permission: its own thread group). The inode is made for this
+	 * walk, so it can carry the walker as its owner. */
+	if (strcmp(name, "fd") == 0) {
+		process_t *me = task_current();
+		process_t *t = pp->pid ? proc_get((pid_t)pp->pid) : NULL;
+		if (!pp->pid || (t && t->tgid == me->tgid)) {
+			in->uid = task_fsuid((struct process *)me);
+			in->gid = task_fsgid((struct process *)me);
+		}
+		if (t) proc_put(t);
+	}
+	return in;
+}
+
+static vfs_inode_t *procfs_piddir_entry(int pid, const char *name)
+{
 	if (strcmp(name, "task") == 0)
 		return procfs_taskdir_inode(pid);
 	if (strcmp(name, "fd") == 0)
@@ -2328,6 +2467,8 @@ static vfs_inode_t *procfs_piddir_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_cgroup_inode(pid);
 	if (strcmp(name, "mem") == 0)
 		return procfs_mem_inode(pid);
+	if (strcmp(name, "environ") == 0)
+		return procfs_environ_inode(pid);
 	if (strcmp(name, "asess") == 0) {
 		process_t *t = pid ? proc_get((pid_t)pid) : task_current();
 		uint64_t id = t ? asess_id_of(t) : 0;
@@ -2393,6 +2534,8 @@ static int procfs_piddir_stat(vfs_inode_t *in, vfs_stat_t *out)
 	out->ino   = in->ino;
 	out->mode  = in->mode;
 	out->nlink = in->nlink;
+	out->uid   = in->uid;   /* the task's euid: ps reads the owner from here */
+	out->gid   = in->gid;
 	out->size  = 0;
 	return 0;
 }
@@ -2419,6 +2562,7 @@ static vfs_inode_t *procfs_piddir_inode(int pid)
 	if (!pp) { kfree(in); return NULL; }
 	pp->pid  = pid;
 	in->priv = pp;
+	procfs_owner(in, pid);
 	return in;
 }
 
@@ -2854,8 +2998,9 @@ static procfs_sysfile_t sys_fs_files[] = {
 	{ "file-max",    PROC_F_SYS_FILE_MAX },
 	{ "file-nr",     PROC_F_SYS_NFILE    },
 	{ "dentry-state", PROC_F_SYS_DENTRY  },
+	{ "suid_dumpable", PROC_F_SYS_SUID_DUMPABLE },
 };
-#define SYS_FS_N 4
+#define SYS_FS_N 5
 
 /* forward declarations */
 static vfs_inode_t *procfs_sysdir_inode(void);
@@ -2871,6 +3016,8 @@ static vfs_inode_t *procfs_sysfile_inode(int type)
 	           type == PROC_F_SYS_KPTR_RESTRICT ||
 	           type == PROC_F_SYS_DMESG_RESTRICT ||
 	           type == PROC_F_SYS_PIPE_MAX ||
+	           type == PROC_F_SYS_SUID_DUMPABLE ||
+	           type == PROC_F_SYS_CORE_PATTERN ||
 	           type == PROC_F_SYS_SWAPPINESS ||
 	           type == PROC_F_SYS_RANIX_DEADLINE ||
 	           type == PROC_F_SYS_RANIX_SPLASH))
