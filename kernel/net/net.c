@@ -474,7 +474,9 @@ void net_init(void)
 }
 
 /* Point /etc/resolv.conf at the DHCP-supplied nameserver, replacing the static
- * default so name resolution follows the network we actually joined. */
+ * default so name resolution follows the network we actually joined. This is
+ * the root the kernel booted in (the initramfs): a root that init switches to
+ * later never sees it and links its own /etc/resolv.conf to /proc/net/pnp. */
 static void write_resolv_conf(uint32_t dns)
 {
 
@@ -505,6 +507,7 @@ static void net_dhcp_one(netdev_t *d, int can_sleep)
          * machine off while its own view of the network still looks fine. */
         uint32_t half = dhcp_last_lease ? dhcp_last_lease / 2 : 1800;
         d->renew_tick = kernel_ticks + (uint64_t)(half ? half : 60) * TIMER_HZ;
+        d->dns = dns;   /* /proc/net/pnp: what a switched-to root reads */
         if (dns && !d->keep_dns) write_resolv_conf(dns);
     } else {
         kprintf(KERN_WARN "dhcp: %s no response, keeping %u.%u.%u.%u\n", d->name,

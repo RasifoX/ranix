@@ -99,6 +99,8 @@ typedef struct netdev {
     uint64_t    renew_tick;               /* when to renew the DHCP lease, 0 = none */
     int         keep_dns;                 /* a gadget's link (USB): its lease does not
                                            * replace the system's DNS server */
+    uint32_t    dns;                      /* the DNS server its last lease gave, 0 none
+                                           * (/proc/net/pnp, host byte order) */
     void       *priv;
 
     /* /proc/net/dev. Atomic: TX runs from syscalls, RX from any polling CPU. */

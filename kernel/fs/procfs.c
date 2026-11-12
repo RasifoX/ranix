@@ -590,6 +590,7 @@ typedef struct {
 #define PROC_F_NET_ROUTE 23
 #define PROC_F_NET_IF6   24
 #define PROC_F_NET_UNIX  29
+#define PROC_F_NET_PNP   27
 
 /* /proc/sys entries */
 #define PROC_F_SYS_HZ            30
@@ -703,6 +704,7 @@ static int fill_net_udp(char *buf, size_t sz);
 static int fill_net_route(char *buf, size_t sz);
 static int fill_net_if_inet6(char *buf, size_t sz);
 static int fill_net_unix(char *buf, size_t sz);
+static int fill_net_pnp(char *buf, size_t sz);
 
 /* static file table for root dir */
 static const struct {
@@ -887,6 +889,7 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_NET_ROUTE: n = fill_net_route(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_IF6:   n = fill_net_if_inet6(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_NET_UNIX:  n = fill_net_unix(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_NET_PNP:   n = fill_net_pnp(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_SYS_HZ:           { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,"100\n"); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_OSTYPE:       { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b, task_current()->uname_linux ? "Linux" : "Ranix"); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
 	case PROC_F_SYS_HOSTNAME:     { pb_t b = {tmp,PROCFS_BUF_SIZE}; pb_str(&b,current_uts()->nodename); pb_char(&b,'\n'); n=(int)(PROCFS_BUF_SIZE-b.rem); } break;
@@ -2818,6 +2821,45 @@ static int fill_net_route(char *buf, size_t sz)
 	return (int)(sz - b.rem);
 }
 
+/* /proc/net/pnp: the DNS servers the DHCP leases gave, in resolv.conf form, as
+ * Linux's kernel autoconfig prints them. The kernel's own /etc/resolv.conf goes
+ * to the root the boot started in; a root switched to later links its
+ * /etc/resolv.conf here and so follows every lease, renewal and link change.
+ * The default route's device comes first, a server is listed once, a device
+ * that is down (or a gadget's link, keep_dns) gives none; three at most, as
+ * resolvers read no more (MAXNS). */
+static int fill_net_pnp(char *buf, size_t sz)
+{
+	pb_t b = {buf, sz};
+	netdev_t *first = NULL;
+	uint32_t best = 0xffffffffu;
+	route4_t r;
+	for (int i = 0; route4_get(current_net_ns(), i, &r) == 0; i++)
+		if (r.dst == 0 && r.mask == 0 && r.dev && r.metric < best && netdev_usable(r.dev)) {
+			best = r.metric;
+			first = r.dev;
+		}
+	pb_str(&b, "#PROTO: DHCP\n");
+	uint32_t seen[3];
+	int ns = 0;
+	for (int i = -1; ns < 3; i++) {
+		netdev_t *dev = i < 0 ? first : net_dev(i);
+		if (i >= 0 && !dev) break;
+		if (!dev || (i >= 0 && dev == first)) continue;
+		if (!dev->dns || dev->keep_dns || !netdev_usable(dev)) continue;
+		int dup = 0;
+		for (int k = 0; k < ns; k++) dup |= seen[k] == dev->dns;
+		if (dup) continue;
+		seen[ns++] = dev->dns;
+		pb_str(&b, "nameserver ");
+		for (int k = 0; k < 4; k++) {
+			pb_u64(&b, (dev->dns >> (24 - k * 8)) & 0xff);
+			pb_char(&b, k < 3 ? '.' : '\n');
+		}
+	}
+	return (int)(sz - b.rem);
+}
+
 /* one /proc/net/if_inet6 line: 32-hex addr, ifindex, prefixlen, scope, flags, name */
 static void pb_if6(pb_t *b, const in6_addr_t *a, int ifindex,
                    int prefixlen, int scope, const char *name)
@@ -2891,8 +2933,9 @@ static const struct { const char *name; int type; } net_files[] = {
 	{ "route",   PROC_F_NET_ROUTE },
 	{ "if_inet6",PROC_F_NET_IF6   },
 	{ "unix",    PROC_F_NET_UNIX  },
+	{ "pnp",     PROC_F_NET_PNP   },
 };
-#define NET_FILES_N 6
+#define NET_FILES_N 7
 
 static vfs_inode_t *procfs_netdir_inode(void);
 

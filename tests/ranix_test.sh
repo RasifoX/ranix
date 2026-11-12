@@ -677,6 +677,16 @@ check "ip-route-add"  "yes" "$(ip route add 192.0.2.0/24 via 10.0.3.2 dev eth1 2
 check "ip-route-del"  "0"   "$(ip route del 192.0.2.0/24 2>&1; ip route | grep -c '^192.0.2.0/24')"
 check "ip-link-down"  "0 down" "$(ip link set eth1 down 2>&1; echo $(ip route | grep -c 'dev eth1') $(cat /sys/class/net/eth1/operstate 2>&1))"
 check "ip-link-up"    "2 up" "$(ip link set eth1 up 2>&1; echo $(ip route | grep -c 'dev eth1') $(cat /sys/class/net/eth1/operstate 2>&1))"
+# The DNS servers the leases gave, as Linux's kernel autoconfig shows them: /proc/net/pnp in
+# resolv.conf form. A root the boot switched to links /etc/resolv.conf here, so it follows every
+# lease, renewal and link change (the kernel cannot write a file in a root it never saw).
+# Default-route device first, each server once, a device that is down drops out.
+pnp() { awk '$1=="nameserver"{printf "%s%s", s, $2; s=" "}' /proc/net/pnp 2>&1; }
+check "pnp-dns"       "10.0.2.3 10.0.3.3" "$(pnp)"
+check "pnp-proto"     "#PROTO: DHCP" "$(head -1 /proc/net/pnp 2>&1)"
+check "pnp-link-down" "10.0.2.3" "$(ip link set eth1 down 2>&1; pnp)"
+check "pnp-link-up"   "10.0.2.3 10.0.3.3" "$(ip link set eth1 up 2>&1; pnp)"
+check "pnp-symlink"   "2" "$(ln -sf /proc/net/pnp /tmp/resolv.pnp; grep -c '^nameserver' /tmp/resolv.pnp 2>&1; rm -f /tmp/resolv.pnp)"
 BD=$(timeout 120 /bin/test_bindtodev 2>&1); echo "$BD" | grep -v "^OK$" | sed 's/^/  bindtodev: /'
 check "c-bindtodev"   "OK"  "$(echo "$BD" | tail -1)"
 txp() { sed -n "s/^ *$1://p" /proc/net/dev | awk '{print $10}'; }
