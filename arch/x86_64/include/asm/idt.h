@@ -42,5 +42,6 @@ extern void irq_stub_syscall(void);
 extern void irq_stub_ipi(void);
 extern void irq_stub_lapic(void);
 extern void irq_stub_tlbshoot(void);
+extern void irq_stub_sleeppark(void);
 
 #endif

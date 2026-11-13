@@ -199,6 +199,10 @@ static long sys_timer_settime(int id, int flags, const kits_t *unew, kits_t *uol
 			int64_t s, ns;
 			real_time(&s, &ns);
 			base = (uint64_t)s * NS + (uint64_t)ns;
+		} else if (t->clock == CLOCK_BOOTTIME) {   /* + the time spent in suspend */
+			int64_t bs, bn;
+			clock_boot_offset(&bs, &bn);
+			base += (uint64_t)bs * NS + (uint64_t)bn;
 		}
 		val = val > base ? val - base : 1;
 	}

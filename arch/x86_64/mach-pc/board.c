@@ -62,6 +62,7 @@ void board_secondary_irq_init(void)
 
 #include <drivers/block/sdcard.h>
 #include <drivers/platform/casper_power.h>
+#include <kernel/sleep.h>
 
 void board_drivers_register(void)
 {
@@ -78,6 +79,7 @@ void board_drivers_register(void)
 	casper_ec_init();          /* one laptop's EC: the one way into it */
 	casper_power_init();       /* its adapter and battery (EC RAM); needs casper_ec_init */
 	acpi_button_start();       /* power button; the SCI (ranix.sci=1) needs the EC's board known */
+	arch_sleep_init();         /* suspend: what blocks S3, /proc/hwdiag power sleep */
 	ec_keys_init();            /* its events (keys, power, lid); off unless asked for */
 }
 

@@ -21,6 +21,7 @@
 #include <kernel/lib/string.h>
 #include <asm/cpu.h>
 #include <kernel/vdso.h>
+#include <kernel/sleep.h>
 
 #define VDSO_MAXPG 4
 
@@ -30,6 +31,11 @@ static uint64_t            vdso_phys[VDSO_MAXPG];
 static int                 vdso_npg;
 static uint32_t            cnt_mult, cnt_shift, cnt_valid;
 uint32_t                   vdso_timens_used;   /* once set, monotonic clocks take the syscall */
+static volatile int        vdso_asleep;
+static void vdso_refresh(void);
+
+/* kernel/suspend.c: around the sleep, the vDSO falls back to the system call */
+void vdso_sleep(int asleep) { vdso_asleep = asleep; vdso_refresh(); }
 
 static void vdso_update(void);
 static void vdso_refresh(void);
@@ -149,6 +155,12 @@ static void vdso_refresh(void)
 	vvar_k->timens_used = vdso_timens_used;
 	vvar_k->mono_sec  = ms; vvar_k->mono_nsec = mn;
 	vvar_k->real_sec  = rs; vvar_k->real_nsec = rn;
+	int64_t bs, bn;
+	clock_boot_offset(&bs, &bn);
+	vvar_k->boot_off_sec = bs; vvar_k->boot_off_nsec = bn;
+	/* asleep: the counter is about to be reset (S3) or re-anchored, so the vDSO
+	 * takes the system call until the first refresh after the resume */
+	if (vdso_asleep) vvar_k->cnt_valid = 0;
 	__asm__ volatile("" ::: "memory");
 	vvar_k->seq++;                       /* → even */
 	spin_unlock_irq(&vdso_lock, f);

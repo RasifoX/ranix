@@ -33,6 +33,10 @@ struct vdso_vvar {
 	unsigned int          cnt_mult;   /* delta_ns = (delta_cnt * mult) >> shift */
 	unsigned int          cnt_shift;
 	unsigned int          timens_used;
+	unsigned int          _pad0;
+	/* BOOTTIME - MONOTONIC: the time spent in suspend (appended, the layout above unchanged) */
+	long long             boot_off_sec;
+	long long             boot_off_nsec;
 };
 
 #endif

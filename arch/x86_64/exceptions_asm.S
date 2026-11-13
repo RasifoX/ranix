@@ -438,6 +438,26 @@ irq_stub_ipi:
 	addq $16, %rsp
 	iretq
 
+/* Suspend park IPI — vector 0xF3 (arch/x86_64/sleep.c). The CPU stays in
+ * sleep_park_handler until the sleep is over; in S3 it is reset meanwhile and
+ * comes back into that handler through the wake page, then returns from here
+ * as from any interrupt. Never reschedules. */
+.global irq_stub_sleeppark
+irq_stub_sleeppark:
+	testq $3, 8(%rsp)
+	jz 1f
+	swapgs
+1:	pushq $0
+	pushq $0xF3
+	save_context
+	call sleep_park_handler
+	restore_context
+	addq $16, %rsp
+	testq $3, 8(%rsp)
+	jz 2f
+	swapgs
+2:	iretq
+
 /* TLB shootdown IPI — vector 0xF2. Flushes the local TLB and acks. Never
  * reschedules and never touches task->ctx, so it is safe to take while the
  * kernel is mid-syscall (the CPL gate does not apply: there is nothing to

@@ -275,6 +275,14 @@ void itco_pet(void)
 		tco_w16(TCO1_STS, TCO1_STS_TIMEOUT);
 }
 
+/* Suspend: the timer stops counting (TMR_HLT), or a sleep longer than the
+ * timeout would end in a reset. itco_start runs it again. */
+void itco_halt(void)
+{
+	if (!tco_base) return;
+	tco_w16(TCO1_CNT, (uint16_t)(tco1_cnt_rmw() | TCO1_CNT_TMR_HLT));
+}
+
 void itco_set_ticks(unsigned ticks)
 {
 	if (!tco_base) return;

@@ -37,6 +37,7 @@
 #include <drivers/input/ps2.h>
 #include <kernel/errno.h>
 #include <kernel/mm/swap.h>
+#include <kernel/sleep.h>
 
 /* the PS/2 touchpad exists only on x86: weak, so NULL on arm */
 #pragma weak ps2_aux_report
@@ -387,13 +388,14 @@ static vfs_inode_t *sysfs_root_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "fs")      == 0) return sysfs_dir(&sysfs_fs_iops, -1);
 	if (strcmp(name, "bus")     == 0) return sysfs_dir(&sysfs_bus_iops, -1);
 	if (strcmp(name, "dev")     == 0) return drm_sysfs_root("dev");
+	if (strcmp(name, "power")   == 0) return power_sysfs_root();
 	return NULL;
 }
 static int sysfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "kernel", "class", "block", "devices", "fs", "bus", "dev" };
-	if (idx >= 7) return -1;
+	const char *names[] = { "kernel", "class", "block", "devices", "fs", "bus", "dev", "power" };
+	if (idx >= 8) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
@@ -645,13 +647,14 @@ static vfs_inode_t *sysfs_class_lookup(vfs_inode_t *dir, const char *name)
 	if (strcmp(name, "net") == 0) return sysfs_dir(&sysfs_net_iops, -1);
 	if (strcmp(name, "drm") == 0) return drm_sysfs_root("class/drm");
 	if (strcmp(name, "power_supply") == 0) return power_supply_sysfs_root();
+	if (strcmp(name, "rtc") == 0) return rtc_sysfs_root();
 	return NULL;
 }
 static int sysfs_class_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	const char *names[] = { "net", "drm", "power_supply" };
-	if (idx >= 3) return -1;
+	const char *names[] = { "net", "drm", "power_supply", "rtc" };
+	if (idx >= 4) return -1;
 	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
 	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;

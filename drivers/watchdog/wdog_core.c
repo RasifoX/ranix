@@ -46,6 +46,7 @@
 #define WD_COUNT_CHECK_SECS 3     /* several 0.6 s ticks, short of any timeout */
 
 static unsigned wd_secs;
+static unsigned wd_ticks_armed;   /* the stage ticks itco_start took: again after a sleep */
 static int      wd_armed;
 static uint64_t wd_stale_ms;
 static volatile int wd_stop_pets;
@@ -105,6 +106,7 @@ void watchdog_init(void)
 	if (itco_start(ticks) != 0) return;
 
 	wd_secs = secs;
+	wd_ticks_armed = ticks;
 	wd_stale_ms = (uint64_t)(secs / 2) * 1000;
 	wd_armed = 1;
 	kprintf(KERN_INFO "wdog: armed, reset %u s after the last pet (%u ticks per stage)\n",
@@ -259,6 +261,27 @@ static void deadline_check(void)
 	deadline_tick = 0;
 	kprintf(KERN_WARN "wdog: deadline reached, resetting\n");
 	board_reset();
+}
+
+/* Suspend (kernel/suspend.c). Asleep, nothing pets: the timer is halted, and
+ * after the resume every canary counts as fresh (their age is HPET time, which
+ * the sleep may have moved on) before the timer runs again. */
+void watchdog_sleep(void)
+{
+	if (!wd_armed) return;
+	wd_stop_pets = 1;
+	smp_mb();
+	itco_halt();
+}
+
+void watchdog_wake(void)
+{
+	if (!wd_armed) return;
+	uint64_t now = wd_now_ms();
+	for (int i = 0; i < smp_ncpus; i++) canary_beat[i] = now;
+	itco_start(wd_ticks_armed);
+	smp_mb();
+	wd_stop_pets = 0;
 }
 
 static int deadline_registered;

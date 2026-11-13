@@ -14,6 +14,7 @@ extern uint32_t vdso_timens_used;   /* once set, monotonic clocks take the sysca
 
 void vdso_init(void);
 void vdso_map(vm_space_t *vs);
+void vdso_sleep(int asleep);        /* kernel/suspend.c: vDSO takes the syscall while asleep */
 void vdso_time_changed(void);       /* refresh the vvar after a clock step */
 
 #endif

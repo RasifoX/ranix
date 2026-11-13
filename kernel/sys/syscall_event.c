@@ -351,6 +351,10 @@ static long sys_timerfd_settime(int fd, int flags,
             int64_t rs, rn; real_time(&rs, &rn);
             uint64_t real_now = (uint64_t)rs * 1000000000UL + (uint64_t)rn;
             at = at > real_now ? now + (at - real_now) : now;
+        } else if (t->clockid == CLOCK_BOOTTIME) {   /* BOOTTIME = MONOTONIC + time in suspend */
+            int64_t bs, bn; clock_boot_offset(&bs, &bn);
+            uint64_t off = (uint64_t)bs * 1000000000UL + (uint64_t)bn;
+            at = at > off ? at - off : now;
         }
         t->expire_ns = at ? at : 1;
     } else {

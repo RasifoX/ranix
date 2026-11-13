@@ -241,10 +241,75 @@ void lapic_bsp_tick_takeover(void)
 	lapic_timer_start();
 }
 
+/* ── Suspend (arch/x86_64/sleep.c) ───────────────────────────────────────── */
+extern volatile int sleep_frozen;      /* sleep.c: the BSP is in the s2idle loop */
+extern volatile int sleep_timer_fired;
+
+void lapic_timer_mask(void)
+{
+	if (lapic) lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+}
+
+/* The BSP's timer while it sleeps in s2idle: one shot after ns (the poll for a
+ * button that has no SCI), or none with ns = 0. No tick work is done for it. */
+void lapic_sleep_arm(uint64_t ns)
+{
+	if (!lapic || !lapic_cnt_per_ms) return;
+	lapic_write(LAPIC_LVT_TIMER, ns ? VEC_LAPIC_TIMER : LVT_MASKED);
+	lapic_write(LAPIC_TIMER_DIV, 0x3);
+	uint64_t cnt = ns * lapic_cnt_per_ms / 1000000ULL;
+	if (cnt > 0xFFFFFFFFULL) cnt = 0xFFFFFFFFULL;
+	lapic_write(LAPIC_TIMER_INIT, ns ? (uint32_t)(cnt ? cnt : 1) : 0);
+}
+
+/* After S3 the local APIC is reset: the BSP's as at boot (the APs set theirs in
+ * arch_secondary_init's path, which their resume repeats). */
+void lapic_resume_cpu(void)
+{
+	if (!lapic) return;
+	lapic_write(LAPIC_SPIV, lapic_read(LAPIC_SPIV) | 0x100 | 0xFF);
+	if (arch_get_cpu_ctx()->cpu_id == 0) {
+		lapic_write(LAPIC_LVT_LINT0, LVT_DM_EXTINT);
+		lapic_write(LAPIC_LVT_LINT1, LVT_DM_NMI);
+	}
+}
+
+/* An AP back from S3: INIT, then SIPI to the wake page (sleep.c fills it). */
+void arch_smp_wake_cpu(int cpu_id, uint64_t page_phys)
+{
+	uint32_t apic_id = cpu_apic_id[cpu_id];
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
+	lapic_write(LAPIC_ICR_LO, ICR_INIT | ICR_ASSERT | ICR_LEVEL);
+	io_delay();
+	lapic_write(LAPIC_ICR_HI, apic_id << 24);
+	lapic_write(LAPIC_ICR_LO, ICR_INIT | ICR_LEVEL);
+	io_delay();
+	for (int i = 0; i < 2; i++) {
+		lapic_write(LAPIC_ICR_HI, apic_id << 24);
+		lapic_write(LAPIC_ICR_LO, ICR_SIPI | (uint32_t)(page_phys >> 12));
+		io_delay();
+	}
+}
+
+/* Vector 0xF3: park this CPU for a sleep (sleep.c). */
+void arch_smp_park_send(int cpu_id)
+{
+	if (!lapic) return;
+	while (lapic_read(LAPIC_ICR_LO) & (1u << 12))
+		__asm__ volatile("pause" ::: "memory");
+	lapic_write(LAPIC_ICR_HI, cpu_apic_id[cpu_id] << 24);
+	lapic_write(LAPIC_ICR_LO, ICR_FIXED | 0xF3);
+}
+
 /* Vector 0xF1 handler — scheduler tick. The BSP's carries the global tick. */
 void lapic_timer_irq(void)
 {
 	cpu_context_t *c = arch_get_cpu_ctx();
+	if (sleep_frozen && c->cpu_id == 0) {   /* asleep: no tick, no timers; the loop looks */
+		sleep_timer_fired = 1;
+		lapic_write(LAPIC_EOI, 0);
+		return;
+	}
 	if (!lapic_oneshot[c->cpu_id]) {
 		if (c->cpu_id == 0) tick_notify();
 		else tick_notify_local();

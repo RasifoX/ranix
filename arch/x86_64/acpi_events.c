@@ -34,6 +34,7 @@
 #include <uapi/types.h>
 #include <asm/cpu.h>
 #include <asm/io.h>
+#include <kernel/sleep.h>
 #include <kernel/cmdline.h>
 #include <kernel/hwdiag.h>
 #include <kernel/input.h>
@@ -231,6 +232,35 @@ static void acpi_button_thread(void)
 		if (pressed) power_pressed();
 	}
 }
+
+/* ---- suspend (arch/x86_64/sleep.c) ----
+ * arm=1 when the sleep begins: a press from before does not wake, and the SCI
+ * count is the baseline. arm=0 in the sleep loop, IRQs off: WAKE_POWER for a
+ * press, WAKE_SCI for any other SCI (the EC's, a lid on Casper), else 0. The
+ * press that wakes is taken here and not passed on: no KEY_POWER, no SIGPWR,
+ * or the desktop would shut down the machine it just woke (as Linux's button
+ * driver does). */
+static uint32_t scis_at_sleep;
+
+int acpi_sleep_wake_check(int arm)
+{
+	if (!A.pm1a_evt) return 0;
+	if (arm) {
+		outw_p(A.pm1a_evt, PM1_PWRBTN);
+		btn_pending = 0;
+		scis_at_sleep = scis;
+		return 0;
+	}
+	if (btn_pending || (inw_p(A.pm1a_evt) & PM1_PWRBTN)) {
+		outw_p(A.pm1a_evt, PM1_PWRBTN);
+		btn_pending = 0;
+		return WAKE_POWER;
+	}
+	if (sci_on && scis != scis_at_sleep) return WAKE_SCI;
+	return 0;
+}
+
+int acpi_sci_irq(void) { return sci_on ? (int)A.sci_int : -1; }
 
 static void acpi_diag(hw_out_t *o)
 {

@@ -8,6 +8,7 @@
 #include <asm/cpu.h>
 #include <kernel/vdso.h>
 #include <kernel/time.h>
+#include <kernel/sleep.h>
 #include <kernel/csprng.h>
 #include <kernel/ptrace.h>
 #include <kernel/errno.h>
@@ -684,6 +685,30 @@ static void real_time(int64_t *sec, int64_t *nsec)
 	*sec = s; *nsec = n;
 }
 
+/* BOOTTIME - MONOTONIC: the time spent asleep (kernel/suspend.c). MONOTONIC stands
+ * still while the machine sleeps, as on Linux; BOOTTIME and REALTIME move on. */
+static int64_t g_boot_off_sec  = 0;
+static int64_t g_boot_off_nsec = 0;
+
+void clock_boot_offset(int64_t *sec, int64_t *nsec) { *sec = g_boot_off_sec; *nsec = g_boot_off_nsec; }
+
+/* After a sleep: the raw clock was re-anchored at mono_at_entry_ns (arch_clock_rebase),
+ * so MONOTONIC continues from where it stopped; the offsets take the sleep. */
+void clock_sleep_resume(uint64_t mono_at_entry_ns, uint64_t slept_ns)
+{
+	static sleep_clock_t sc;
+	sc.rt_off_sec = g_rt_off_sec;
+	sc.rt_off_nsec = g_rt_off_nsec;
+	sc.boot_off_sec = g_boot_off_sec;
+	sc.boot_off_nsec = g_boot_off_nsec;
+	sleep_clock_resume(&sc, mono_at_entry_ns, slept_ns);
+	g_rt_off_sec = sc.rt_off_sec;
+	g_rt_off_nsec = sc.rt_off_nsec;
+	g_boot_off_sec = sc.boot_off_sec;
+	g_boot_off_nsec = sc.boot_off_nsec;
+	vdso_time_changed();
+}
+
 /* read the hardware clock (CMOS / PL031) once at boot → real wall-clock epoch */
 void rtc_init(void)
 {
@@ -744,8 +769,10 @@ static long sys_clock_gettime(int clkid, linux_timespec_t *tp)
 		time_namespace_t *ns = current_time_ns();
 		long osec  = (clkid == CLOCK_BOOTTIME) ? ns->boot_sec  : ns->mono_sec;
 		long onsec = (clkid == CLOCK_BOOTTIME) ? ns->boot_nsec : ns->mono_nsec;
+		if (clkid == CLOCK_BOOTTIME) { osec += g_boot_off_sec; onsec += g_boot_off_nsec; }
 		k.tv_sec  += osec; k.tv_nsec += onsec;
-		if (k.tv_nsec >= 1000000000L) { k.tv_sec++; k.tv_nsec -= 1000000000L; }
+		while (k.tv_nsec >= 1000000000L) { k.tv_sec++; k.tv_nsec -= 1000000000L; }
+		while (k.tv_nsec < 0)            { k.tv_sec--; k.tv_nsec += 1000000000L; }
 		break;
 	}
 	case CLOCK_MONOTONIC_RAW:      /* raw: no NTP adjust, no namespace offset */

@@ -870,6 +870,12 @@ static long sys_clock_nanosleep(int clkid, int flags,
 	else if (clkid == CLOCK_MONOTONIC || clkid == CLOCK_BOOTTIME) mono_time(&now.tv_sec, &now.tv_nsec);
 	else nowr = -22;
 	if (nowr) return nowr;
+	if (clkid == CLOCK_BOOTTIME) {   /* BOOTTIME = MONOTONIC + the time spent in suspend */
+		int64_t bs, bn;
+		clock_boot_offset(&bs, &bn);
+		now.tv_sec += bs; now.tv_nsec += bn;
+		if (now.tv_nsec >= 1000000000L) { now.tv_sec++; now.tv_nsec -= 1000000000L; }
+	}
 	if (flags & 1) {                 /* TIMER_ABSTIME: an instant, not a span */
 		k.tv_sec  -= now.tv_sec;
 		k.tv_nsec -= now.tv_nsec;

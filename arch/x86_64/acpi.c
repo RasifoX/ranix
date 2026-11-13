@@ -210,6 +210,7 @@ static void *find_table(struct rsdp *r, const char *sig)
  * instead of the 10 ms tick (aarch64 already has cntvct). */
 static volatile uint8_t *hpet_base;
 static uint64_t          hpet_period_fs;
+static int64_t           hpet_off;      /* ns: the HPET re-anchored after a sleep (S3 resets it) */
 
 static void hpet_init_from(struct rsdp *r)
 {
@@ -223,12 +224,23 @@ static void hpet_init_from(struct rsdp *r)
 	*(volatile uint64_t *)(hpet_base + 0x10) |= 1;      /* ENABLE_CNF */
 }
 
-uint64_t hpet_now_ns(void)
+static uint64_t hpet_raw_ns(void)
 {
-	if (!hpet_base) return 0;
 	uint64_t cnt = *(volatile uint64_t *)(hpet_base + 0xF0);
 	/* ns = cnt * period_fs / 1e6, split to avoid 64-bit overflow */
 	return (cnt / 1000000ULL) * hpet_period_fs + ((cnt % 1000000ULL) * hpet_period_fs) / 1000000ULL;
+}
+
+uint64_t hpet_now_ns(void)
+{
+	if (!hpet_base) return 0;
+	return hpet_raw_ns() + (uint64_t)hpet_off;
+}
+
+/* S3 powered the HPET down: its counter is 0 again and stopped. */
+void hpet_resume(void)
+{
+	if (hpet_base) *(volatile uint64_t *)(hpet_base + 0x10) |= 1;      /* ENABLE_CNF */
 }
 
 /* The TSC, timed against the HPET once. Reading the HPET is an uncached bus cycle
@@ -381,6 +393,28 @@ uint64_t tsc_ns_at(uint64_t tsc)
 uint64_t tsc_now_ns(void)
 {
 	return tsc_ns_at(rdtsc_());
+}
+
+/* ── Suspend: the clocks after a sleep ──────────────────────────────────────
+ * The raw clock (TSC, else HPET) is what CLOCK_MONOTONIC is. After a sleep it
+ * restarts at ns, the monotonic time of the entry: in s2idle the TSC kept
+ * counting, in S3 it was reset; the same anchor serves both, and MONOTONIC does
+ * not count the sleep (kernel/suspend.c adds it to BOOTTIME and REALTIME). Only
+ * with every other CPU parked: tsc0 and tsc_ns0 are read without a lock. */
+uint64_t arch_clock_raw_ns(void)
+{
+	uint64_t t = tsc_now_ns();
+	return t ? t : hpet_now_ns();
+}
+
+void arch_clock_rebase(uint64_t ns)
+{
+	if (hpet_base) hpet_off = (int64_t)(ns - hpet_raw_ns());
+	if (tsc_mult) {
+		tsc0 = rdtsc_();
+		tsc_ns0 = ns;
+	}
+	__sync_synchronize();
 }
 
 /* ── FADT reset register ────────────────────────────────────────────────────
@@ -621,6 +655,36 @@ void arch_fw_unlock(void)
 	while (!__sync_bool_compare_and_swap(fw_glock, old, old & ~(GL_OWNED | GL_PENDING)));
 	if (old & GL_PENDING)
 		outw_port(fw_pm1a_cnt, (uint16_t)((inw_port(fw_pm1a_cnt) & ~PM1_SLP_EN) | PM1_GBL_RLS));
+}
+
+/* What arch/x86_64/sleep.c needs for S3: the FACS (waking vector), the PM1
+ * control blocks and the FADT flags. -1 without them. */
+int acpi_sleep_info(acpi_sleep_info_t *o)
+{
+	struct rsdp *r = find_rsdp();
+	if (!r) return -1;
+	uint8_t *f = find_table(r, "FACP");
+	if (!f || ((struct sdt_header *)f)->length < 116) return -1;
+	uint32_t len = ((struct sdt_header *)f)->length, fc32 = 0, a = 0, b = 0, evt = 0, flags = 0;
+	uint64_t fc = 0;
+	memcpy(&fc32, f + FADT_FIRMWARE_CTRL, 4);
+	if (len >= FADT_X_FIRMWARE_CTRL + 8) memcpy(&fc, f + FADT_X_FIRMWARE_CTRL, 8);
+	if (!fc) fc = fc32;
+	memcpy(&a, f + 64, 4);
+	memcpy(&b, f + 68, 4);
+	memcpy(&evt, f + 56, 4);
+	memcpy(&flags, f + FADT_FLAGS, 4);
+	memset(o, 0, sizeof(*o));
+	o->facs = fc ? (uint8_t *)PHYS_TO_VIRT(fc) : 0;
+	if (o->facs && memcmp(o->facs, "FACS", 4)) o->facs = 0;
+	o->pm1a_cnt = a <= 0xFFFF ? (uint16_t)a : 0;
+	o->pm1b_cnt = b <= 0xFFFF ? (uint16_t)b : 0;
+	o->pm1a_evt = evt <= 0xFFFF ? (uint16_t)evt : 0;
+	o->pm1_len = f[88];
+	o->fadt_flags = flags;
+	o->dsdt = dsdt_aml;
+	o->dsdt_len = dsdt_len;
+	return o->pm1a_cnt && o->pm1a_evt ? 0 : -1;
 }
 
 int arch_fw_oem(char oem[7], char table[9])

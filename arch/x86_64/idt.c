@@ -67,6 +67,7 @@ void idt_init(void)
 	idt_set_gate(0xF0,        irq_stub_ipi,       0x8E);  /* SMP reschedule IPI */
 	idt_set_gate(0xF1,        irq_stub_lapic,     0x8E);  /* per-CPU LAPIC timer */
 	idt_set_gate(0xF2,        irq_stub_tlbshoot,  0x8E);  /* cross-CPU TLB shootdown */
+	idt_set_gate(0xF3,        irq_stub_sleeppark, 0x8E);  /* park for a suspend (sleep.c) */
 
 	struct idtr idtr = {
 		.limit = sizeof(idt) - 1,

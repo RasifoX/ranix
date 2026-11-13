@@ -86,6 +86,7 @@ int VNAME(clock_gettime)(int clk, struct vts *ts)
 		__asm__ volatile("" ::: "memory");
 		int64_t sec  = mono ? v->mono_sec : v->real_sec;
 		int64_t nsec = mono ? v->mono_nsec : v->real_nsec;
+		if (clk == 7) { sec += v->boot_off_sec; nsec += v->boot_off_nsec; }   /* BOOTTIME: + time asleep */
 		if (v->cnt_valid) {
 			uint64_t delta = read_cnt() - v->cnt_base;
 			nsec += (int64_t)((delta * v->cnt_mult) >> v->cnt_shift);

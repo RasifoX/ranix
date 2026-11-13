@@ -14,6 +14,8 @@ void watchdog_init(void);        /* cmdline + hardware arm; early, before thread
 void watchdog_start(void);       /* health and pet threads; needs SMP up */
 void watchdog_touch(void);       /* boot path: pet as proof of forward progress */
 void watchdog_boot_done(void);   /* boot finished: the pet thread takes over */
+void watchdog_sleep(void);       /* suspend: halt the hardware timer, stop petting */
+void watchdog_wake(void);        /* resume: fresh canaries, the timer runs again */
 
 void panic_reset_begin(const char *msg);  /* first thing in a panic, no locks */
 void panic_reset_nested(void);            /* a fault while painting the panic */

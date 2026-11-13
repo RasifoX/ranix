@@ -44,6 +44,18 @@ typedef struct {
 	const uint8_t *dsdt;
 } acpi_ev_info_t;
 int  acpi_events_info(acpi_ev_info_t *o);   /* acpi.c: from the FADT; -1 without PM1 */
+typedef struct {
+	uint8_t       *facs;                /* firmware_waking_vector at +12, X_ at +24 */
+	uint16_t       pm1a_cnt, pm1b_cnt, pm1a_evt;
+	uint8_t        pm1_len;
+	uint32_t       fadt_flags;          /* bit 21: LOW_POWER_S0_IDLE_CAPABLE */
+	const uint8_t *dsdt;
+	uint32_t       dsdt_len;
+} acpi_sleep_info_t;
+int  acpi_sleep_info(acpi_sleep_info_t *o);  /* acpi.c: for S3; -1 without PM1 */
+int  acpi_sleep_wake_check(int swallow);     /* acpi_events.c: a press or an SCI event seen while asleep */
+int  acpi_sci_irq(void);                     /* acpi_events.c: the SCI line when it is taken, else -1 */
+void hpet_resume(void);
 void acpi_poweroff(void);
 void acpi_reset(void);
 

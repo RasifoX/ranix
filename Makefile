@@ -159,11 +159,13 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/mach-pc/pstore.c \
         arch/x86_64/acpi.c \
         arch/x86_64/acpi_events.c \
+        arch/x86_64/sleep.c \
         arch/x86_64/multiboot2.c
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
         arch/x86_64/exceptions_asm.S \
-        arch/x86_64/trampoline.S
+        arch/x86_64/trampoline.S \
+        arch/x86_64/wakeup.S
     SRCS_DRIVERS = \
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \
@@ -295,7 +297,7 @@ PY_VER             = 3.12.3
 PY_XY              = 3.12
 PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
 
-.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest bootscreentest acpieventstest hostpowertest flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest bootscreentest acpieventstest suspendtest hostpowertest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -1031,9 +1033,17 @@ bootscreentest: iso
 acpieventstest: iso
 	@python3 tests/acpievents.py
 
-# Host tests of the power code: Casper battery decode, power_supply text, EC model
+# Suspend in QEMU (KVM): s2idle woken by the RTC, the power button and a key; S3
+# on PIIX4 and q35 (ozel-SUSP1/TASARIM.md). Several short boots.
+suspendtest: iso
+	@python3 tests/suspend.py
+
+# Host tests of the power code: Casper battery decode, power_supply text, EC model;
+# suspend's pure half (_Sx_ packages, sleep length, clocks). CASPER_DSDT: a real table, if at hand.
+CASPER_DSDT ?= tests/data/casper-dsdt.aml
 hostpowertest:
 	@mkdir -p $(BUILD_DIR)/host
+	cc -std=gnu11 -Wall -Wextra -DHOST_TEST -I. -Iinclude tests/host_sleep.c kernel/lib/sleep_math.c -o $(BUILD_DIR)/host/sleep && $(BUILD_DIR)/host/sleep $(CASPER_DSDT)
 	cc -std=gnu11 -Wall -Wextra -DHOST_TEST -I. -Iinclude tests/host_power.c drivers/platform/casper_bat.c kernel/lib/ps_format.c -o $(BUILD_DIR)/host/power && $(BUILD_DIR)/host/power
 	cc -std=gnu11 -Wall -Wextra -I. tests/host_ec_hotkey.c drivers/input/ec_hotkey.c -o $(BUILD_DIR)/host/ec_hotkey && $(BUILD_DIR)/host/ec_hotkey
 	TMPDIR=$(abspath $(BUILD_DIR))/host sh tests/casper_ec_host/run.sh
