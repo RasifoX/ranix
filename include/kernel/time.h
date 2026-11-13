@@ -17,6 +17,8 @@ extern volatile uint64_t kernel_ticks;           /* kernel/sched.c */
 uint64_t mono_ns(void);                          /* kernel/sys/syscall_proc.c */
 void ranix_monotime(int64_t *sec, int64_t *nsec);
 void ranix_walltime(int64_t *sec, int64_t *nsec);
+/* monotonic and wall time at one monotonic instant (ns), without reading the clock again */
+void ranix_times_at(uint64_t mono_ns, int64_t *msec, int64_t *mnsec, int64_t *rsec, int64_t *rnsec);
 
 void    rtc_init(void);                          /* read the RTC into the wall clock */
 int64_t arch_rtc_read(void);                     /* board code: RTC as Unix seconds */

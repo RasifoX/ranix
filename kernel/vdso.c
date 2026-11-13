@@ -127,8 +127,18 @@ static void vdso_refresh(void)
 	uint64_t f = spin_lock_irq(&vdso_lock);
 	uint64_t cnt = hw_counter();
 	int64_t ms, mn, rs, rn;
-	ranix_monotime(&ms, &mn);
-	ranix_walltime(&rs, &rn);
+#if defined(__x86_64__)
+	/* the base count and the clock from the same TSC read: read again, anything
+	 * between the two (an SMI, ~16 us) stayed in this whole period's clock */
+	uint64_t ns = cnt_valid ? tsc_ns_at(cnt) : 0;
+	if (ns)
+		ranix_times_at(ns, &ms, &mn, &rs, &rn);
+	else
+#endif
+	{
+		ranix_monotime(&ms, &mn);
+		ranix_walltime(&rs, &rn);
+	}
 
 	vvar_k->seq++;                       /* → odd */
 	__asm__ volatile("" ::: "memory");

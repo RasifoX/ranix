@@ -51,6 +51,7 @@ void acpi_reset(void);
 extern uint64_t tsc_mult;
 void     tsc_calibrate(void);
 uint64_t tsc_now_ns(void);
+uint64_t tsc_ns_at(uint64_t tsc);   /* the clock at a TSC value already read */
 uint64_t hpet_now_ns(void);
 
 /* exceptions.c */

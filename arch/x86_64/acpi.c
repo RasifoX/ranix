@@ -365,12 +365,22 @@ void tsc_calibrate(void)
 	tsc_mult = mult;
 }
 
-uint64_t tsc_now_ns(void)
+/* The clock at a TSC value already read. The vDSO's vvar takes its base count
+ * and its clock from ONE read through this: read twice, an SMI between the two
+ * (~16 us on Casper, IRQs off do not stop it) put a whole 10 ms vvar period that
+ * far ahead, and a 2.5 ms sleep across its end measured 7-14 us short in user
+ * space (test_sleeptail 3/60000 on the bare Casper, 0 under KVM; TSC1). */
+uint64_t tsc_ns_at(uint64_t tsc)
 {
 	if (!tsc_mult)
 		return 0;
-	uint64_t delta = rdtsc_() - tsc0;
+	uint64_t delta = tsc - tsc0;
 	return tsc_ns0 + (uint64_t)(((unsigned __int128)delta * tsc_mult) >> 28);
+}
+
+uint64_t tsc_now_ns(void)
+{
+	return tsc_ns_at(rdtsc_());
 }
 
 /* ── FADT reset register ────────────────────────────────────────────────────

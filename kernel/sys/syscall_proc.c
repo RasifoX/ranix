@@ -698,6 +698,14 @@ void rtc_init(void)
 /* filesystem timestamps: real wall-clock once the RTC set it, else uptime. */
 void ranix_walltime(int64_t *sec, int64_t *nsec) { real_time(sec, nsec); }
 void ranix_monotime(int64_t *sec, int64_t *nsec) { mono_time(sec, nsec); }
+void ranix_times_at(uint64_t ns, int64_t *msec, int64_t *mnsec, int64_t *rsec, int64_t *rnsec)
+{
+	int64_t ms = (int64_t)(ns / 1000000000ULL), mn = (int64_t)(ns % 1000000000ULL);
+	int64_t s = ms + g_rt_off_sec, n = mn + g_rt_off_nsec;
+	if (n >= 1000000000LL) { s++; n -= 1000000000LL; }
+	if (n < 0)             { s--; n += 1000000000LL; }
+	*msec = ms; *mnsec = mn; *rsec = s; *rnsec = n;
+}
 
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID  3
