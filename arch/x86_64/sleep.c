@@ -84,7 +84,10 @@ static void probe(void)
 	else if (r == SLEEP_TYPE_COND)         deep_why = "\\_S3_ depends on AML Ranix does not run";
 	else if (!SI.facs)                     deep_why = "no FACS for the waking vector";
 	else if (!usable)                      deep_why = "the wake page is not usable RAM";
-	else if (sleep_wake_end - sleep_wake_start > WAKE_DATA) deep_why = "wake page code too long";
+	/* code + data on the one wake page; the code's own limit (WAKE_DATA) is the
+	 * assembler's .org. The old check compared the whole page with WAKE_DATA and
+	 * kept deep off everywhere (SUSP1 KVM 11-13: 0xF56 > 0xF00) */
+	else if (sleep_wake_end - sleep_wake_start > 0x1000) deep_why = "wake page longer than a page";
 	else if (!(cmdline_get("ranix.s3", v, sizeof v) && (!strcmp(v, "1") || !strcmp(v, "force"))))
 		deep_why = "a test feature for now: ranix.s3=1";
 	else { deep_ok = 1; deep_why = ""; }
