@@ -440,4 +440,8 @@ void arch_sleep_init(void)
 				}
 			}
 	hwdiag_register(sleep_diag);
+	/* now, at boot: the probe walks the boot loader's memory map, which a system
+	 * call (the first read of /sys/power/mem_sleep) can no longer reach -- it
+	 * faulted there on CR2 0x9b72d8 (SUSP1 KVM, 11-13) */
+	probe();
 }
