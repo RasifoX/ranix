@@ -54,6 +54,10 @@ volatile int sleep_timer_fired;
 
 static volatile int park_hold;
 static volatile int park_state[MAX_CPUS];   /* 0 running, 1 parked, 2 back from S3 */
+/* each CPU's raw clock as it parks: the latest time it can have handed out. Its TSC
+ * may run a little ahead of the BSP's, so the resume anchors at the largest of them
+ * and MONOTONIC never goes back on that CPU (SUSP1 KVM 11-13: back=1, < 1 us) */
+static volatile uint64_t park_ns[MAX_CPUS];
 static int park_kind;
 static sleep_cpu_t cpu_save[MAX_CPUS];
 
@@ -184,6 +188,7 @@ static void cpu_reinit(int cpu)
 void sleep_park_handler(void)
 {
 	int cpu = (int)arch_get_cpu_ctx()->cpu_id;
+	park_ns[cpu] = arch_clock_raw_ns();   /* IRQs off: nothing on this CPU reads later */
 	lapic_timer_mask();
 	lapic_eoi();
 	if (park_kind == SLEEP_DEEP) {
@@ -379,6 +384,8 @@ int arch_sleep_enter(int kind, uint64_t *raw_before, uint64_t *raw_after, int64_
 	lapic_timer_mask();
 	*rtc_before = arch_rtc_read();
 	*raw_before = arch_clock_raw_ns();
+	for (int i = 1; i < smp_ncpus && i < MAX_CPUS; i++)
+		if (park_state[i] && park_ns[i] > *raw_before) *raw_before = park_ns[i];
 	int w = kind == SLEEP_DEEP ? s3() : s2idle();
 	*raw_after = arch_clock_raw_ns();
 	*rtc_after = arch_rtc_read();
