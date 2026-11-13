@@ -38,5 +38,7 @@ struct vdso_vvar {
 	long long             boot_off_sec;
 	long long             boot_off_nsec;
 };
+/* the boot_off_* fields exist: a test built against an older header does without them */
+#define VDSO_VVAR_BOOT_OFF 1
 
 #endif

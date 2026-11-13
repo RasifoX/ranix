@@ -226,7 +226,11 @@ static void tailer(struct tail *r, int cpu)
 		__asm__ volatile("" ::: "memory");
 		unsigned long long b = v->cnt_base;
 		long long m = v->mono_sec * 1000000000LL + v->mono_nsec;
+#ifdef VDSO_VVAR_BOOT_OFF
 		long long bo = v->boot_off_sec * 1000000000LL + v->boot_off_nsec;
+#else
+		long long bo = 0;   /* older kernel: no suspend, nothing re-anchors (the run fails on /sys/power first) */
+#endif
 		unsigned mult = v->cnt_mult, sh = v->cnt_shift;
 		int valid = (int)v->cnt_valid;
 		__asm__ volatile("" ::: "memory");
