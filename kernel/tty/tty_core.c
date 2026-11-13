@@ -489,12 +489,17 @@ static int ctty_poll(vfs_file_t *f)
  * "bash -i" (VS Code reads the login environment so) opens /dev/tty when
  * stderr is not one; handed the console it waited for the console's
  * foreground forever. Others keep the console: init starts its shell there
- * without a controlling terminal. */
+ * without a controlling terminal, but only as root, who may open the console
+ * itself (0600). Anyone else with no terminal gets ENXIO, as on Linux: the
+ * console's line holds what is typed at the machine, the lock screen's
+ * password too, and a program another person left running (a desktop app,
+ * setsid from a terminal) read it through /dev/tty, and could switch the
+ * screen to text over the lock (KDSETMODE), found 2026-11-12. */
 static int ctty_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 {
     (void)in; (void)f; (void)flags;
     process_t *cur = task_current();
-    if (cur && !cur->ctty && cur->pid > 1 && cur->sid == (pid_t)cur->pid)
+    if (cur && !cur->ctty && cur->pid > 1 && (cur->sid == (pid_t)cur->pid || cur->euid != 0))
         return -ENXIO;
     return 0;
 }
