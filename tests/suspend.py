@@ -17,6 +17,11 @@ the guest half is userspace/test_suspend.c. One boot per mode:
      QEMU reports the guest suspended, woken by the RTC alarm, the clocks as in R
   W  S3 on PIIX4 woken by the monitor's system_wakeup
   Q  S3 on q35 (-global ICH9-LPC.disable_s3=0) woken by system_wakeup
+  T  KT13's early-wake tests across an s2idle (test_sleeptail, test_vvarepoch):
+     2.5 ms sleeps before, across and after; none early, the one across
+     included; MONOTONIC does not jump, BOOTTIME takes the sleep; every vvar
+     period continues the one before to 1 ns except across the suspend
+  U  the same across S3 (PIIX4)
 S3 boots have no VGA and no NIC: a device Ranix cannot restore blocks deep.
 
 Usage: python3 tests/suspend.py [MODES]   (after make ARCH=x86_64 iso; QEMU_CMD as
@@ -40,6 +45,8 @@ R) for i in 1 2 3; do /bin/test_suspend sleep freeze %(secs)d; done ;;
 P|K) /bin/test_suspend sleep freeze 0 ;;
 D) /bin/test_suspend files deep; echo deep > /sys/power/mem_sleep; /bin/test_suspend sleep mem %(secs)d ;;
 W|Q) echo deep > /sys/power/mem_sleep; /bin/test_suspend sleep mem 0 ;;
+T) /bin/test_suspend tail freeze %(secs)d ;;
+U) echo deep > /sys/power/mem_sleep; /bin/test_suspend tail mem %(secs)d ;;
 A) echo deep > /sys/power/mem_sleep; echo mem > /sys/power/state; echo "SUS-A rc=$? fail=$(cat /sys/power/suspend_stats/fail) step=$(cat /sys/power/suspend_stats/last_failed_step)" ;;
 esac
 grep '^power ' /proc/hwdiag | sed 's/^/SUS-HW /'
@@ -55,6 +62,8 @@ MODES = {
     "K": ([],                                                  "",           "sendkey a"),
     "D": (["-global", "PIIX4_PM.disable_s3=0", "-vga", "none", "-nic", "none"], "ranix.s3=1", None),
     "W": (["-global", "PIIX4_PM.disable_s3=0", "-vga", "none", "-nic", "none"], "ranix.s3=1", "system_wakeup"),
+    "T": ([],                                                  "",           None),
+    "U": (["-global", "PIIX4_PM.disable_s3=0", "-vga", "none", "-nic", "none"], "ranix.s3=1", None),
     # q35 has its AHCI built in, and Ranix's AHCI driver has no resume: deep is refused, by name
     "A": (["-M", "q35", "-global", "ICH9-LPC.disable_s3=0", "-vga", "none", "-nic", "none"], "ranix.s3=1", None),
     # the S3 path itself on q35, the unused AHCI let through (ranix.s3=force, tests only)
@@ -126,7 +135,7 @@ def boot(mode):
         info["ready_host"].append(time.time())
         # while asleep: does QEMU itself see the guest suspended (S3)?
         t_end = time.time() + SECS + 3
-        while time.time() < t_end and serial().count("SUS-RESULT") < c:
+        while time.time() < t_end and serial().count("SUS-RESULT") + serial().count("SUS-TAIL") < c:
             if "suspended" in cmd("info status"):
                 info["suspended"] = True
                 if action == "system_wakeup":
@@ -137,7 +146,9 @@ def boot(mode):
         if action and action != "system_wakeup":
             time.sleep(1.5)                 # well inside the sleep
             cmd(action)
-        if not wait("SUS-RESULT", 60, c) and action is None and mode in ("D",):
+        if mode in ("T", "U"):
+            wait("SUS-TAIL", 60, c)
+        elif not wait("SUS-RESULT", 60, c) and action is None and mode in ("D",):
             cmd("system_wakeup")            # the alarm did not wake S3: say so, but finish the boot
             info["rtc_s3_failed"] = True
             wait("SUS-RESULT", 30, c)
@@ -192,7 +203,7 @@ def judge_sleep(mode, out, info, n, kind, wake, host_secs=None):
 
 
 def main():
-    want = sys.argv[1] if len(sys.argv) > 1 else "BRPKDWAQ"
+    want = sys.argv[1] if len(sys.argv) > 1 else "BRPKDWAQTU"
     shutil.rmtree(B, ignore_errors=True)
     os.makedirs(B)
     root = f"{B}/root"
@@ -223,6 +234,20 @@ def main():
             if mode == "P":
                 check("P: the press that woke is not a shutdown request", "init: SIGPWR" not in out and
                       "acpi: power button" not in out, out[-400:])
+        elif mode in ("T", "U"):
+            t = (re.findall(r"^SUS-TAIL .*$", out, re.M) or [""])[-1]
+            r = fields(t)
+            g = lambda k: int(r.get(k, -1))
+            check(f"{mode}: the sleep happened", r.get("err") == "0" and g("n") > 500, t)
+            check(f"{mode}: no 2.5 ms sleep ended early, the one across the suspend included", g("early") == 0, t)
+            check(f"{mode}: no more than 1 in 10 over 300 us late", 0 <= g("late") <= g("n") // 10, t)
+            check(f"{mode}: MONOTONIC did not jump across the suspend (longest sleep {g('mono_gap_ms')} ms)",
+                  0 <= g("mono_gap_ms") < 200, t)
+            check(f"{mode}: BOOTTIME took the sleep ({g('boot_gap_ms')} ms)", g("boot_gap_ms") >= SECS * 1000 - 1100, t)
+            check(f"{mode}: every vvar period continues the one before ({g('vvar_bad')} bad of {g('vvar_n')})",
+                  g("vvar_bad") == 0 and g("vvar_n") > 100 and g("vvar_skip") >= 1, t)
+            if mode == "U":
+                check("U: QEMU saw the guest suspended (S3)", info["suspended"], info)
         elif mode == "A":
             check("A: q35's AHCI blocks deep, by name, without sleeping", "PM: ahci has no resume, no S3" in out and
                   re.search(r"SUS-A rc=[1-9]\d* fail=1 step=suspend_devices", out) and not info["suspended"],

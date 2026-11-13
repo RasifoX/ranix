@@ -17,6 +17,17 @@
  *       "SUS-RESULT err=.. mono_ms=.. boot_ms=.. real_ms=.. dv_mono_us=.. dv_boot_us=..
  *        dv_real_us=.. back=.. after=.. last=<ranix_last> success=.."
  *       and "SUS-NAP mono_ms=.. boot_ms=..". The host judges the numbers.
+ *
+ *   test_suspend tail freeze|mem SECS
+ *       KT13's early-wake tests across a sleep (test_sleeptail, test_vvarepoch):
+ *       on the last CPU, 2.5 ms MONOTONIC sleeps one after another, before,
+ *       across and after the suspend, with the vvar periods watched as
+ *       test_vvarepoch does. Prints "SUS-TAIL n=.. early=.. late=.. cross_over_us=..
+ *       mono_gap_ms=.. boot_gap_ms=.. vvar_n=.. vvar_bad=.. vvar_skip=..": no sleep
+ *       may end early, the one across the suspend included (MONOTONIC stood
+ *       still), MONOTONIC must not jump while BOOTTIME took the whole sleep, and
+ *       every vvar period continues the one before it to 1 ns, except across the
+ *       suspend (the counter was re-anchored there: skipped and counted).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -32,6 +43,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "../include/uapi/vdso.h"   /* struct vdso_vvar, VVAR_VADDR */
 
 static int64_t ns_of(struct timespec t) { return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec; }
 
@@ -179,11 +191,90 @@ static int sleep_test(const char *kind, int secs)
 	return err ? 1 : 0;
 }
 
+struct tail {
+	volatile int stop;
+	volatile long long n, early, late, cross_over_ns, mono_gap_ns, boot_gap_ns;
+	volatile long long vn, vbad, vskip;
+};
+
+/* the 2.5 ms sleeps and the vvar watch, on one CPU until stop */
+static void tailer(struct tail *r, int cpu)
+{
+	cpu_set_t s;
+	CPU_ZERO(&s);
+	CPU_SET(cpu, &s);
+	sched_setaffinity(0, sizeof s, &s);
+	const volatile struct vdso_vvar *v = (const volatile struct vdso_vvar *)VVAR_VADDR;
+	unsigned oseq = 0;
+	unsigned long long ob = 0;
+	long long om = 0, obo = 0;
+	int ovalid = 0;
+	while (!r->stop) {
+		struct timespec d = { 0, 2500000 };
+		int64_t a = vclock(CLOCK_MONOTONIC), ab = vclock(CLOCK_BOOTTIME);
+		clock_nanosleep(CLOCK_MONOTONIC, 0, &d, NULL);
+		int64_t z = vclock(CLOCK_MONOTONIC), zb = vclock(CLOCK_BOOTTIME);
+		int64_t over = z - a - 2500000, bgap = zb - ab;
+		r->n++;
+		if (over < 0) r->early++;
+		if (bgap > r->boot_gap_ns) { r->boot_gap_ns = bgap; r->cross_over_ns = over; }   /* the sleep across the suspend */
+		else if (over > 300000) r->late++;
+		if (z - a > r->mono_gap_ns) r->mono_gap_ns = z - a;
+		/* test_vvarepoch's check on the period now in force */
+		unsigned q = v->seq;
+		if ((q & 1) || q == oseq) continue;
+		__asm__ volatile("" ::: "memory");
+		unsigned long long b = v->cnt_base;
+		long long m = v->mono_sec * 1000000000LL + v->mono_nsec;
+		long long bo = v->boot_off_sec * 1000000000LL + v->boot_off_nsec;
+		unsigned mult = v->cnt_mult, sh = v->cnt_shift;
+		int valid = (int)v->cnt_valid;
+		__asm__ volatile("" ::: "memory");
+		if (v->seq != q) continue;
+		if (oseq && valid && ovalid) {
+			if (bo != obo || b < ob) r->vskip++;      /* a suspend between: re-anchored */
+			else {
+				long long j = (m - om) - (long long)(((b - ob) * (unsigned long long)mult) >> sh);
+				r->vn++;
+				if (j < 0 || j > 1) r->vbad++;
+			}
+		} else if (oseq) r->vskip++;
+		oseq = q; ob = b; om = m; obo = bo; ovalid = valid;
+	}
+	_exit(0);
+}
+
+static int tail_test(const char *kind, int secs)
+{
+	struct tail *r = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (r == MAP_FAILED) { printf("SUS-TAIL err=mmap\n"); return 1; }
+	memset((void *)r, 0, sizeof *r);
+	int ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+	pid_t c = fork();
+	if (c == 0) tailer(r, ncpu > 1 ? ncpu - 1 : 0);
+	sleep(1);
+	char b[32];
+	snprintf(b, sizeof b, "+%d\n", secs);
+	if (secs > 0 && put("/sys/class/rtc/rtc0/wakealarm", b)) printf("SUS-NOTE wakealarm failed\n");
+	printf("SUS-READY tail\n");
+	fflush(stdout);
+	snprintf(b, sizeof b, "%s\n", kind);
+	int err = put("/sys/power/state", b);
+	sleep(2);
+	r->stop = 1;
+	waitpid(c, 0, 0);
+	printf("SUS-TAIL err=%d n=%lld early=%lld late=%lld cross_over_us=%lld mono_gap_ms=%lld boot_gap_ms=%lld "
+	       "vvar_n=%lld vvar_bad=%lld vvar_skip=%lld\n", err, r->n, r->early, r->late, r->cross_over_ns / 1000,
+	       r->mono_gap_ns / 1000000, r->boot_gap_ns / 1000000, r->vn, r->vbad, r->vskip);
+	return err || r->early ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, 0, _IOLBF, 0);
 	if (argc >= 2 && !strcmp(argv[1], "files")) return files(argc >= 3 && !strcmp(argv[2], "deep"));
 	if (argc >= 4 && !strcmp(argv[1], "sleep")) return sleep_test(argv[2], atoi(argv[3]));
+	if (argc >= 4 && !strcmp(argv[1], "tail")) return tail_test(argv[2], atoi(argv[3]));
 	fprintf(stderr, "usage: test_suspend files [deep] | sleep freeze|mem SECS\n");
 	return 2;
 }
