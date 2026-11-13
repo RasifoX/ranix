@@ -27,7 +27,7 @@ S3 boots have no VGA and no NIC: a device Ranix cannot restore blocks deep.
 Usage: python3 tests/suspend.py [MODES]   (after make ARCH=x86_64 iso; QEMU_CMD as
 for make test, with KVM: QEMU_CMD="qemu-system-x86_64 -enable-kvm -cpu host")
 """
-import os, re, shlex, shutil, socket, subprocess, sys, time
+import os, re, shlex, shutil, signal, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -96,6 +96,17 @@ def boot(mode):
                                  "-boot", "d", "-cdrom", f"{B}/sus.iso", "-rtc", "base=utc",
                                  "-monitor", f"unix:{mon},server,nowait"] + extra,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        return drive(p, mon, log, mode, action)
+    finally:
+        # whatever went wrong (a monitor timeout, SIGTERM from an outer timeout), the VM goes too:
+        # it runs in its own session and outlived the test on 11-13 (Casper, 31 min, ppid 1)
+        if p.poll() is None:
+            os.killpg(p.pid, 9)
+            p.wait()
+
+
+def drive(p, mon, log, mode, action):
     for _ in range(100):
         if os.path.exists(mon):
             break
@@ -269,4 +280,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # an outer timeout's SIGTERM unwinds through run()'s finally, which stops the VM
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(124))
     sys.exit(main())
