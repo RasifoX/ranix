@@ -264,6 +264,8 @@ void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
     net_rx_wake();   /* event-driven: process now (TCP state machine is lock-serialised) */
 }
 
+static void net_poll_run(int hw);
+
 void net_lo_drain(void)
 {
     process_t *p = task_current();
@@ -273,7 +275,7 @@ void net_lo_drain(void)
     p->net_lo_inline = 1;
     do {
         p->net_lo_pending = 0;
-        net_poll();
+        net_poll_run(0);
     } while (p->net_lo_pending);
     p->net_lo_inline = was;
     /* a drain running on another CPU may have finished its queues before ours
@@ -305,7 +307,10 @@ skb_t *netdev_rx_dequeue(netdev_t *dev)
 static spinlock_t net_poll_lock = SPINLOCK_INIT;
 static volatile int net_poll_busy;
 
-void net_poll(void)
+/* hw: also the devices' own poll hooks and the dead-namespace reaper. A send's
+ * loopback drain only wants the queues: a real NIC's poll costs more than the
+ * round trip it serves (bare Casper 11-15). */
+static void net_poll_run(int hw)
 {
     uint64_t f = spin_lock_irq(&net_poll_lock);
     if (net_poll_busy) { spin_unlock_irq(&net_poll_lock, f); return; }
@@ -314,7 +319,7 @@ void net_poll(void)
 
     for (int i = 0; i < ndevs; i++) {
         netdev_t *dev = devs[i];
-        if (dev->poll) dev->poll(dev);
+        if (hw && dev->poll) dev->poll(dev);
 
         if (dev->rx_claimed) continue;
         skb_t *skb;
@@ -323,12 +328,14 @@ void net_poll(void)
             eth_rx(dev, skb);
         }
     }
-    net_ns_reap();
+    if (hw) net_ns_reap();
 
     f = spin_lock_irq(&net_poll_lock);
     net_poll_busy = 0;
     spin_unlock_irq(&net_poll_lock, f);
 }
+
+void net_poll(void) { net_poll_run(1); }
 
 /* ── event-driven RX softirq thread ──────────────────────────
  * RX runs in a dedicated kernel thread woken the instant a packet is enqueued,
