@@ -413,6 +413,7 @@ CR=$(timeout 60 /bin/test_procpriv 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^
 check "c-procpriv" "OK" "$(echo "$CR" | tail -1)"
 CR=$(timeout 30 /bin/test_ctty_console 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  ctty-console: /'
 check "c-ctty-console" "OK" "$(echo "$CR" | tail -1)"
+check "c-dfflag"    "OK"            "$(timeout 20 /bin/test_dfflag 2>&1 | tail -1)"
 check "c-fuzz"      "OK"            "$(timeout 200 /bin/test_fuzz 20261105 40 2>/dev/null | tail -1)"
 check "c-scmrights"  "OK"            "$(timeout 8 /bin/test_scmrights 2>/dev/null)"
 check "c-abstract"   "OK"            "$(timeout 8 /bin/test_abstract 2>/dev/null)"

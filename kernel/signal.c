@@ -1043,6 +1043,7 @@ static void sig_setup_frame(arch_context_t *tf, process_t *p, int sig, void (*ha
 		tf->rdx = usp + 808;   /* ucontext_t * */
 	}
 	tf->rip                  = (uint64_t)handler;
+	tf->rflags              &= ~(0x400UL | 0x100UL);   /* the handler starts with DF and TF clear (SysV ABI, Linux) */
 }
 #endif
 
