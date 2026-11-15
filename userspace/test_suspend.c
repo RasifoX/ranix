@@ -105,7 +105,7 @@ static int files(int deep)
 	return *why ? 1 : 0;
 }
 
-struct watch { volatile int stop, resumed; volatile int64_t back, max_back_ns, after; };
+struct watch { volatile int stop, resumed; volatile int64_t back, max_back_ns, after, back_t; };
 
 static void watcher(struct watch *w, int cpu)
 {
@@ -116,7 +116,7 @@ static void watcher(struct watch *w, int cpu)
 	int64_t last = vclock(CLOCK_MONOTONIC);
 	while (!w->stop) {
 		int64_t t = vclock(CLOCK_MONOTONIC);
-		if (t < last) { w->back++; if (last - t > w->max_back_ns) w->max_back_ns = last - t; }
+		if (t < last) { w->back++; if (last - t > w->max_back_ns) { w->max_back_ns = last - t; w->back_t = t; } }
 		if (w->resumed) w->after++;
 		last = t;
 	}
@@ -178,11 +178,12 @@ static int sleep_test(const char *kind, int secs)
 	first_line("/sys/power/suspend_stats/success", ok, sizeof ok);
 	for (char *p = last; *p; p++) if (*p == ' ') *p = ',';
 	printf("SUS-RESULT err=%d mono_ms=%lld boot_ms=%lld real_ms=%lld dv_mono_us=%lld dv_boot_us=%lld dv_real_us=%lld "
-	       "back=%lld max_back_us=%lld after=%lld last=%s success=%s real_end=%lld\n", err,
+	       "back=%lld max_back_us=%lld after=%lld last=%s success=%s real_end=%lld back_ns=%lld back_at_us=%lld\n", err,
 	       (long long)((m1 - m0) / 1000000), (long long)((bt1 - bt0) / 1000000), (long long)((r1 - r0) / 1000000),
 	       (long long)(dv[0] / 1000), (long long)(dv[1] / 1000), (long long)(dv[2] / 1000),
 	       (long long)w->back, (long long)(w->max_back_ns / 1000), (long long)w->after, last, ok,
-	       (long long)(r1 / 1000000000LL));
+	       (long long)(r1 / 1000000000LL), (long long)w->max_back_ns,
+	       (long long)(w->back ? (w->back_t - m0) / 1000 : 0));   /* where in MONOTONIC: 0 = the write, mono_ms = its return */
 	fflush(stdout);
 	waitpid(nap, 0, 0);
 	ssize_t n = read(pfd[0], b, sizeof b - 1);

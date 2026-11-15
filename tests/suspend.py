@@ -15,7 +15,7 @@ the guest half is userspace/test_suspend.c. One boot per mode:
   K  s2idle woken by a key (monitor sendkey)
   D  S3 on PIIX4 (-global PIIX4_PM.disable_s3=0, ranix.s3=1): "[s2idle] deep",
      QEMU reports the guest suspended, woken by the RTC alarm, the clocks as in R
-  W  S3 on PIIX4 woken by the monitor's system_wakeup
+  W  S3 on PIIX4 woken by the monitor's system_wakeup (QEMU reports it as the power button)
   Q  S3 on q35 (-global ICH9-LPC.disable_s3=0) woken by system_wakeup
   T  KT13's early-wake tests across an s2idle (test_sleeptail, test_vvarepoch):
      2.5 ms sleeps before, across and after; none early, the one across
@@ -269,7 +269,9 @@ def main():
                 check("D: deep offered with ranix.s3=1", "SUS-FILES OK" in out,
                       [l for l in out.split("\n") if l.startswith("SUS-FILES")])
                 check("D: the RTC alarm woke S3", not info.get("rtc_s3_failed"), info)
-            judge_sleep(mode, out, info, 1, "deep", "rtc" if mode == "D" else "other")
+            # system_wakeup: QEMU sets WAK_STS with PWRBTN_STS ("pretend that resume was caused by
+            # power button", hw/acpi/core.c), so the kernel reads a power-button wake
+            judge_sleep(mode, out, info, 1, "deep", "rtc" if mode == "D" else "power")
             check(f"{mode}: no CPU lost in S3", kv.get("ap_lost") == "0", hw)
     for f in os.listdir(B):
         if f.endswith((".iso", ".cpio", ".sock")):
