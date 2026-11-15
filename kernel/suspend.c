@@ -360,8 +360,11 @@ static ssize_t pfile_write(vfs_file_t *f, const void *buf, size_t len)
 		return (ssize_t)len;
 	}
 	if (id == N_WAKEALARM) {
-		int64_t at, s, ns;
-		ranix_walltime(&s, &ns);
+		/* "+N" from the RTC's own second, as Linux (rtc_read_time): the alarm
+		 * matches the RTC, whose second does not turn with the wall clock's, and
+		 * from the wall clock N came out up to a second short (2.7 s for +4, 11-15) */
+		int64_t at, s = arch_rtc_read(), ns;
+		if (s <= 0) ranix_walltime(&s, &ns);
 		if (wakealarm_parse(k, n, s, &at)) return -EINVAL;
 		if (at && rtc_wakealarm_get() > 0) return -EBUSY;    /* as Linux: clear with 0 first */
 		int e = rtc_wakealarm_set(at);
