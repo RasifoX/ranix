@@ -11,33 +11,37 @@
 #include <kernel/mm/vm.h>
 
 
-/* Byte copy whose load/store fault to the exit label via __ex_table, so an
- * unmapped/bad user address returns the not-copied count instead of panicking.
- * n is decremented only after both accesses succeed, so on a fault it still
- * holds the bytes left to copy. */
+/* User copy whose faulting access exits through __ex_table, so a bad user
+ * address returns the count not copied instead of panicking. It was a byte loop:
+ * every read, write and exec paid ~1 ns a byte (4 KB pread 3.7x Linux, HIZ0 11-15).
+ * x86_64: rep movsb (ERMS); on a fault rcx is still the bytes left.
+ * aarch64: 8 bytes at a time while 8 are left; an 8-byte access that faults
+ * (it may straddle into an unmapped page) falls back to bytes, so the count
+ * left stays exact. */
 static unsigned long __copy_user(void *dst, const void *src, unsigned long n)
 {
 	uaccess_begin();
 #if defined(__x86_64__)
 	__asm__ volatile(
-	".Lcu_loop%=:\n"
-	"	test	%[n], %[n]\n"
-	"	jz	.Lcu_out%=\n"
-	".Lcu_ld%=:\n"
-	"	movb	(%[src]), %%al\n"
-	".Lcu_st%=:\n"
-	"	movb	%%al, (%[dst])\n"
-	"	inc	%[src]\n"
-	"	inc	%[dst]\n"
-	"	dec	%[n]\n"
-	"	jmp	.Lcu_loop%=\n"
+	".Lcu_rep%=:\n"
+	"	rep movsb\n"
 	".Lcu_out%=:\n"
-	_ASM_EXTABLE(".Lcu_ld%=", ".Lcu_out%=")
-	_ASM_EXTABLE(".Lcu_st%=", ".Lcu_out%=")
-	: [n] "+r"(n), [src] "+r"(src), [dst] "+r"(dst)
-	:: "al", "memory", "cc");
+	_ASM_EXTABLE(".Lcu_rep%=", ".Lcu_out%=")
+	: "+c"(n), "+S"(src), "+D"(dst)
+	:: "memory");
 #else
 	__asm__ volatile(
+	".Lcu_w%=:\n"
+	"	cmp	%[n], #8\n"
+	"	b.lo	.Lcu_loop%=\n"
+	".Lcu_wld%=:\n"
+	"	ldr	x8, [%[src]]\n"
+	".Lcu_wst%=:\n"
+	"	str	x8, [%[dst]]\n"
+	"	add	%[src], %[src], #8\n"
+	"	add	%[dst], %[dst], #8\n"
+	"	sub	%[n], %[n], #8\n"
+	"	b	.Lcu_w%=\n"
 	".Lcu_loop%=:\n"
 	"	cbz	%[n], .Lcu_out%=\n"
 	".Lcu_ld%=:\n"
@@ -49,6 +53,8 @@ static unsigned long __copy_user(void *dst, const void *src, unsigned long n)
 	"	sub	%[n], %[n], #1\n"
 	"	b	.Lcu_loop%=\n"
 	".Lcu_out%=:\n"
+	_ASM_EXTABLE(".Lcu_wld%=", ".Lcu_loop%=")
+	_ASM_EXTABLE(".Lcu_wst%=", ".Lcu_loop%=")
 	_ASM_EXTABLE(".Lcu_ld%=", ".Lcu_out%=")
 	_ASM_EXTABLE(".Lcu_st%=", ".Lcu_out%=")
 	: [n] "+r"(n), [src] "+r"(src), [dst] "+r"(dst)
@@ -152,6 +158,15 @@ long strncpy_from_user(char *dst, const char *src, size_t n)
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
+#if defined(__x86_64__)
+    /* ERMS: one rep movsb beats the loops below from ~64 bytes, aligned or not
+     * (HIZ0 11-15: the unaligned path was a byte loop) */
+    if (n >= 64) {
+        void *d0 = dst;
+        __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) :: "memory");
+        return d0;
+    }
+#endif
     unsigned char       *d = (unsigned char *)dst;
     const unsigned char *s = (const unsigned char *)src;
 
@@ -178,6 +193,7 @@ void *memmove(void *dst, const void *src, size_t n)
     const unsigned char *s = (const unsigned char *)src;
 
     if (d < s) {
+        if ((size_t)(s - d) >= n) return memcpy(dst, src, n);   /* apart: rep movsb may run out of order */
         while (n--) *d++ = *s++;
     } else if (d > s) {
         d += n;
@@ -190,6 +206,13 @@ void *memmove(void *dst, const void *src, size_t n)
 
 void *memset(void *dst, int c, size_t n)
 {
+#if defined(__x86_64__)
+    if (n >= 64) {
+        void *d0 = dst;
+        __asm__ volatile("rep stosb" : "+D"(dst), "+c"(n) : "a"(c) : "memory");
+        return d0;
+    }
+#endif
     unsigned char *d = (unsigned char *)dst;
     unsigned char  v = (unsigned char)c;
 
