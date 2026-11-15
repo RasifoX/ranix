@@ -8,7 +8,7 @@ on Linux for the reference (FLOWING-PLAN stage 0).
 Usage: python3 tests/hiz.py   (after make ARCH=x86_64 iso; QEMU_CMD as for make test)
 HIZ_PROF=NAME: run only that measure under /dev/prof (the tick sampler) and print
 where the kernel spent its ticks, by function and by caller."""
-import base64, bisect, collections, os, shlex, shutil, struct, subprocess, sys, time
+import base64, bisect, collections, os, shlex, shutil, signal, struct, subprocess, sys, time
 
 B = "build/hiz"
 QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -cpu host"))
@@ -106,4 +106,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # an outer timeout's SIGTERM unwinds through main's finally, which stops the VM:
+    # without it a panicked guest's QEMU outlived the run (11-15, 1.5 h, ppid 1)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(124))
     sys.exit(main())
