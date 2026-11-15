@@ -79,7 +79,7 @@ static void probe(void)
 	int usable = 0;
 	mb2_foreach_mem_region(page_ok, &usable);
 	int r = SI.dsdt ? acpi_sleep_type(SI.dsdt, SI.dsdt_len, 3, &s3_a, &s3_b) : SLEEP_TYPE_NONE;
-	char v[4];
+	char v[8];   /* "force": 4 bytes cut it to "for" and q35's S3 test never slept deep (11-15) */
 	if (r == SLEEP_TYPE_NONE)              deep_why = "no \\_S3_ in the DSDT";
 	else if (r == SLEEP_TYPE_COND)         deep_why = "\\_S3_ depends on AML Ranix does not run";
 	else if (!SI.facs)                     deep_why = "no FACS for the waking vector";
