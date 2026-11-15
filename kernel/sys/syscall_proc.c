@@ -1651,18 +1651,21 @@ static long exec_load_interp(process_t *p, vm_space_t *new_vm, const elf_info_t 
 /* Map the user stack; remember the phys of the top ARG_WIN_PAGES pages so the
  * argv/envp/auxv block can be written through their kernel direct-map address
  * instead of raw user VAs. The caller destroys new_vm on failure. */
-static long exec_map_stack(process_t *p, vm_space_t *new_vm, uint64_t argpg[ARG_WIN_PAGES])
+/* Only the top `top` pages, the ones the argument block can reach; the rest of
+ * the stack faults in as it is touched (vm.c, MAX_STACK_SIZE). All 256 pages
+ * allocated, zeroed and mapped on every exec were most of fork+exec's 2.3x
+ * Linux (HIZ1 profile 11-15). */
+static long exec_map_stack(process_t *p, vm_space_t *new_vm, uint64_t argpg[ARG_WIN_PAGES], int top)
 {
-	if (cgroup_charge_mem(new_vm, p->cgroup, (USER_STACK_PAGES_ + 1) * PAGE_SIZE) != 0)
+	if (cgroup_charge_mem(new_vm, p->cgroup, (uint64_t)(top + 1) * PAGE_SIZE) != 0)
 		return -ENOMEM;
-	for (int j = 0; j < USER_STACK_PAGES_; j++) {
+	for (int j = 0; j < ARG_WIN_PAGES; j++) argpg[j] = 0;
+	for (int j = ARG_WIN_PAGES - top; j < ARG_WIN_PAGES; j++) {
 		void *pg = buddy_alloc(0);
 		if (!pg) return -ENOMEM;
 		memset((void *)PHYS_TO_VIRT(pg), 0, PAGE_SIZE);
-		uint64_t sva = USER_STACK_TOP_ - (uint64_t)(USER_STACK_PAGES_ - j) * PAGE_SIZE;
-		vm_map(new_vm, sva, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
-		if (j >= USER_STACK_PAGES_ - ARG_WIN_PAGES)
-			argpg[j - (USER_STACK_PAGES_ - ARG_WIN_PAGES)] = (uint64_t)pg;
+		vm_map(new_vm, ARG_BASE + (uint64_t)j * PAGE_SIZE, (uint64_t)pg, VM_USER | VM_READ | VM_WRITE);
+		argpg[j] = (uint64_t)pg;
 	}
 	void *guard = buddy_alloc(0);
 	if (guard) {
@@ -1986,9 +1989,20 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 	 * 4 GB, so the window starts past it */
 	if (!ei.interp[0] && ei.load_bias) en.mmap_base += ei.load_bias;
 
+	/* Reject before anything changes if the assembled initial stack — strings +
+	 * execfn + AT_RANDOM + auxv + the argv/envp pointer vectors — would not fit
+	 * the arg window. Beyond this the KB() mask would wrap and silently corrupt;
+	 * -E2BIG matches Linux. ~512 bytes covers auxv+padding. */
+	size_t need = (size_t)a.koff + PATH_MAX + 16 + 512 +
+	              (size_t)(a.argc + a.envc + 3) * sizeof(uint64_t);
+	if (need >= ARG_WIN_BYTES) { vm_destroy(new_vm); EXEC_STAGE_FREE(); return -E2BIG; }
+	/* the pages need reaches, one more for the ASLR shift of the top (< 4 KB) */
+	int top = (int)((need + PAGE_SIZE - 1) / PAGE_SIZE) + 1;
+	if (top > ARG_WIN_PAGES) top = ARG_WIN_PAGES;
+
 	uint64_t argpg[ARG_WIN_PAGES];
 	if ((ei.interp[0] && (r = exec_load_interp(p, new_vm, &ei, &en)) != 0) ||
-	    (r = exec_map_stack(p, new_vm, argpg)) != 0) {
+	    (r = exec_map_stack(p, new_vm, argpg, top)) != 0) {
 		vm_destroy(new_vm); EXEC_STAGE_FREE(); return r;
 	}
 
@@ -1998,14 +2012,6 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 	exec_close_cloexec(p);
 	exec_reset_signals(p);
 	exec_apply_creds(p, new_euid, new_egid);
-
-	/* Reject before the point of no return (the VM switch) if the assembled
-	 * initial stack — strings + execfn + AT_RANDOM + auxv + the argv/envp pointer
-	 * vectors — would not fit the arg window. Beyond this the KB() mask would wrap
-	 * and silently corrupt; -E2BIG matches Linux. ~512 bytes covers auxv+padding. */
-	size_t need = (size_t)a.koff + PATH_MAX + 16 + 512 +
-	              (size_t)(a.argc + a.envc + 3) * sizeof(uint64_t);
-	if (need >= ARG_WIN_BYTES) { EXEC_STAGE_FREE(); return -E2BIG; }
 
 	uint64_t *uargv = kmalloc((size_t)(a.argc + 1) * sizeof(uint64_t));
 	uint64_t *uenvp = kmalloc((size_t)(a.envc + 1) * sizeof(uint64_t));
@@ -2026,6 +2032,7 @@ static long do_execve(char *kpath, char * const argv[], char * const envp[])
 	int first_pg = (int)((sp - ARG_BASE) / PAGE_SIZE);
 	if (first_pg < 0) first_pg = 0;
 	for (int _i = first_pg; _i < ARG_WIN_PAGES; _i++)
+		if (argpg[_i])   /* need bounds sp: a page below the mapped top is never written */
 		memcpy((void *)PHYS_TO_VIRT(argpg[_i]),
 		       kbuf + (uint64_t)_i * PAGE_SIZE, PAGE_SIZE);
 	kfree(kbuf);
