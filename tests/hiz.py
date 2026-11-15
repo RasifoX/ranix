@@ -15,8 +15,8 @@ QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -c
 GUEST = "#!/bin/bash\n/bin/bench\necho HIZ-SON\n"
 PROF = os.environ.get("HIZ_PROF")
 GUEST_PROF = """#!/bin/bash
-echo 1 > /dev/prof; /bin/bench %s; echo 0 > /dev/prof
-python3 -c 'import base64; d = open("/dev/prof", "rb").read(); print("PROF-BASLA"); [print(base64.b64encode(d[i:i + 3072]).decode()) for i in range(0, len(d), 3072)]; print("PROF-SON")'
+echo 1 > /dev/prof; echo "PROF-AC rc=$? $(ls -l /dev/prof)"; /bin/bench %s; echo "PROF-BOY $(wc -c < /dev/prof)"; echo 0 > /dev/prof
+echo PROF-BASLA; busybox base64 /dev/prof; echo PROF-SON
 echo HIZ-SON
 """
 
@@ -29,10 +29,11 @@ def symbols():
 
 def report(out):
     if "PROF-BASLA" not in out or "PROF-SON" not in out:
-        print("PROF yok (no /dev/prof: it needs a framebuffer)")
+        print("PROF yok (no profile in the serial output)")
         return
     b64 = out.split("PROF-BASLA", 1)[1].split("PROF-SON", 1)[0]
     d = b"".join(base64.b64decode(l.strip()) for l in b64.split("\n") if l.strip())
+    open(f"{B}/prof.bin", "wb").write(d)
     addrs, names = symbols()
 
     def name(a):
@@ -50,6 +51,10 @@ def report(out):
     print(f"PROF {n} ornek")
     for f, c in fn.most_common(25):
         print(f"PROF {100 * c / n:5.1f}% {f}")
+    raw = collections.Counter(struct.unpack_from("<Q", d, i + 8)[0] for i in range(0, len(d) - 23, 24)
+                              if name(struct.unpack_from("<Q", d, i)[0]) == "irq_restore")
+    for a, c in raw.most_common(8):
+        print(f"PROFR {100 * c / n:5.1f}% {a:#x} {name(a)}")
     for (f, c2), c in pair.most_common(25):
         print(f"PROFC {100 * c / n:5.1f}% {f} <- {c2}")
 
@@ -78,7 +83,7 @@ def main():
     shutil.rmtree(iso)
     log = f"{B}/serial.log"
     p = subprocess.Popen(QEMU + ["-smp", "2", "-m", "2G", "-display", "none", "-no-reboot", "-serial", f"file:{log}",
-                                 "-boot", "d", "-cdrom", f"{B}/hiz.iso"] + ([] if PROF else ["-vga", "none"]),
+                                 "-boot", "d", "-cdrom", f"{B}/hiz.iso", "-vga", "none"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     out = ""
     try:
