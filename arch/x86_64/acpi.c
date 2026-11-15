@@ -377,6 +377,19 @@ void tsc_calibrate(void)
 	tsc_mult = mult;
 }
 
+/* tsc0/tsc_ns0 change after boot only in arch_clock_rebase (the resume). A reader
+ * parked by the sleep IPI between its loads came back to a TSC read before the
+ * sleep against the anchor after it: 2^64 ns (SUSP1 KVM 11-15, R2). tsc_seq
+ * makes it read again; a count before the anchor is the anchor, never a wrap. */
+static volatile uint32_t tsc_seq;
+
+static uint64_t tsc_ns_from(uint64_t tsc, uint64_t t0, uint64_t ns0)
+{
+	if ((int64_t)(tsc - t0) < 0)
+		return ns0;
+	return ns0 + (uint64_t)(((unsigned __int128)(tsc - t0) * tsc_mult) >> 28);
+}
+
 /* The clock at a TSC value already read. The vDSO's vvar takes its base count
  * and its clock from ONE read through this: read twice, an SMI between the two
  * (~16 us on Casper, IRQs off do not stop it) put a whole 10 ms vvar period that
@@ -386,13 +399,33 @@ uint64_t tsc_ns_at(uint64_t tsc)
 {
 	if (!tsc_mult)
 		return 0;
-	uint64_t delta = tsc - tsc0;
-	return tsc_ns0 + (uint64_t)(((unsigned __int128)delta * tsc_mult) >> 28);
+	uint32_t s;
+	uint64_t t0, ns0;
+	do {
+		s = tsc_seq;
+		__asm__ volatile("" ::: "memory");
+		t0 = tsc0;
+		ns0 = tsc_ns0;
+		__asm__ volatile("" ::: "memory");
+	} while ((s & 1) || s != tsc_seq);
+	return tsc_ns_from(tsc, t0, ns0);
 }
 
 uint64_t tsc_now_ns(void)
 {
-	return tsc_ns_at(rdtsc_());
+	if (!tsc_mult)
+		return 0;
+	uint32_t s;
+	uint64_t t, t0, ns0;
+	do {
+		s = tsc_seq;
+		__asm__ volatile("" ::: "memory");
+		t = rdtsc_();
+		t0 = tsc0;
+		ns0 = tsc_ns0;
+		__asm__ volatile("" ::: "memory");
+	} while ((s & 1) || s != tsc_seq);
+	return tsc_ns_from(t, t0, ns0);
 }
 
 /* ── Suspend: the clocks after a sleep ──────────────────────────────────────
@@ -411,8 +444,12 @@ void arch_clock_rebase(uint64_t ns)
 {
 	if (hpet_base) hpet_off = (int64_t)(ns - hpet_raw_ns());
 	if (tsc_mult) {
+		tsc_seq++;
+		__sync_synchronize();
 		tsc0 = rdtsc_();
 		tsc_ns0 = ns;
+		__sync_synchronize();
+		tsc_seq++;
 	}
 	__sync_synchronize();
 }
