@@ -11,7 +11,7 @@ host checks with fsck.fat and mtype that the filesystem is clean, the size is th
 same and the bytes are there.
 
 Usage: python3 tests/fatlog.py   (after make ARCH=x86_64 iso; QEMU_CMD as for make test)"""
-import os, shlex, shutil, signal, subprocess, sys, time
+import os, re, shlex, shutil, signal, subprocess, sys, time
 
 B = "build/fatlog"
 QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -cpu host"))
@@ -27,6 +27,7 @@ printf 'KESIT-OK' | dd of=$f bs=1 seek=4092 conv=notrunc 2>/dev/null; echo "FATL
 # past the end: only up to the size goes in
 head -c 100 /dev/zero | tr '\0' 'Z' | dd of=$f bs=1 seek=%(end)d conv=notrunc 2>/dev/null; echo "FATLOG yaz3 rc=$?"
 echo "FATLOG boyut $(stat -c %%s $f)"
+echo "FATLOG liste $(ls /mnt | tr '\n' ' ')"
 sync; umount /mnt; echo "FATLOG umount rc=$?"
 echo FATLOG-SON
 '''
@@ -95,6 +96,8 @@ def main():
     ok.append(("the first write is there", data.startswith(b"RANIX-BASLA\n"), data[:16]))
     ok.append(("across the cluster edge", data[4092:4100] == b"KESIT-OK", data[4088:4104]))
     ok.append(("past the end stopped at the size", data[SIZE - 10:] == b"Z" * 10, data[SIZE - 12:]))
+    names = (re.findall(r"^FATLOG liste (.*)$", out, re.M) or [""])[-1].split()
+    ok.append(("readdir lists the 13-character name", "RANIX-LOG.TXT" in names, names))
     readme = subprocess.run(["mtype", "-i", img, "::README.TXT"], capture_output=True).stdout
     ok.append(("the other file untouched", readme == b"Ranix boot log partition\n", readme))
     for name, good, why in ok:

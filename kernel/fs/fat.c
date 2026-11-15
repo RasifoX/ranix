@@ -146,6 +146,10 @@ static void fat_lfn_chars(const uint8_t *de, char *name)
 	int seq = (de[0] & 0x1F);
 	if (seq < 1 || seq > 20) return;
 	int base = (seq - 1) * 13;
+	/* the last slot (0x40) ends the name: a name filling it exactly (13, 26, ...
+	 * characters, RANIX-LOG.TXT) has no 0x0000 in it, and the name ran on into
+	 * whatever the buffer held: readdir listed garbage, lookup matched by luck */
+	if (de[0] & 0x40) name[base + 13] = '\0';
 	const int off[13] = { 1,3,5,7,9, 14,16,18,20,22,24, 28,30 };
 	for (int i = 0; i < 13; i++) {
 		uint16_t w = rd16(de + off[i]);
