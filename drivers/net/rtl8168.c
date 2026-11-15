@@ -920,9 +920,12 @@ void rtl8168_init(void)
     rtl_t *r = &g_rtl;
     netdev_t *dev = &g_rtl_dev;
 
-    /* 0x8161 is the same MAC family under another device id. */
+    /* 0x8161 is the same MAC family under another device id; so is 0x2600, the
+     * "Killer E2600" of the Acer Nitro 16 (rev 0x21, DxDiag 11-15). The HWREV
+     * check below still decides: another family is reported and left alone. */
     if (pci_find(VENDOR_REALTEK, 0x8168, &r->bus, &r->dev, &r->fn) != 0 &&
-        pci_find(VENDOR_REALTEK, 0x8161, &r->bus, &r->dev, &r->fn) != 0)
+        pci_find(VENDOR_REALTEK, 0x8161, &r->bus, &r->dev, &r->fn) != 0 &&
+        pci_find(VENDOR_REALTEK, 0x2600, &r->bus, &r->dev, &r->fn) != 0)
         return;     /* no NIC: stay silent, this is the normal case in QEMU */
 
     rtl_pci_wake(r);
