@@ -255,7 +255,31 @@ void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
     else              dev->rx_head = skb;
     dev->rx_tail = skb;
     spin_unlock_irq(&dev->rx_lock, f);
+    /* a loopback frame of a send that drains after itself: no RX thread hop.
+     * Through the thread a 1-byte TCP round trip was 4 switches, 28 us under
+     * KVM against Linux's 13 us bare (HIZ1 11-15); Linux runs it in the
+     * sender's softirq. */
+    process_t *p = skb->looped ? task_current() : NULL;
+    if (p && p->net_lo_inline) { p->net_lo_pending = 1; return; }
     net_rx_wake();   /* event-driven: process now (TCP state machine is lock-serialised) */
+}
+
+void net_lo_drain(void)
+{
+    process_t *p = task_current();
+    if (!p || !p->net_lo_pending) return;
+    /* what the drain itself sends back (the peer's ACK) is drained here too */
+    uint8_t was = p->net_lo_inline;
+    p->net_lo_inline = 1;
+    do {
+        p->net_lo_pending = 0;
+        net_poll();
+    } while (p->net_lo_pending);
+    p->net_lo_inline = was;
+    /* a drain running on another CPU may have finished its queues before ours
+     * went in; then net_poll returned at its busy guard: the thread takes it */
+    for (int i = 0; i < ndevs; i++)
+        if (devs[i]->rx_head) { net_rx_wake(); break; }
 }
 
 skb_t *netdev_rx_dequeue(netdev_t *dev)

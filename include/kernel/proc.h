@@ -342,6 +342,8 @@ typedef struct process {
 	uint32_t        magic;         /* PROC_MAGIC; corruption/use-after-free tripwire */
 	uint32_t        refcount;      /* outstanding proc_get pins; PCB freed once 0 and pcb_dead */
 	uint8_t         pcb_dead;      /* proc_reap tore the PCB down; the last proc_put frees it */
+	uint8_t         net_lo_inline; /* a send that drains its own loopback frames (net_lo_drain) */
+	uint8_t         net_lo_pending;/* it left some on a loopback queue, the RX thread not woken */
 
 	/* ── hung-task detector (khungtaskd) ──────────────────────── */
 	uint8_t         hung_watch;        /* 1 = an uninterruptible block the detector must time out */

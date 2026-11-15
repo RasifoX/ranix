@@ -202,7 +202,11 @@ static long tcp_stream_tx(socket_t *s, const void *buf, size_t len, int nonblock
             break;
         }
         for (size_t off = 0; off < n; ) {
+            process_t *self = task_current();
+            self->net_lo_inline = 1;
             int rc = tcp_send(s, kbuf + off, n - off > 65535 ? 65535 : (uint16_t)(n - off));
+            self->net_lo_inline = 0;
+            net_lo_drain();     /* before any wait: the peer's ACK comes from this drain */
             if (rc == -11) {
                 if (nonblock) { err = -11; break; }
                 err = tcp_send_wait(s);

@@ -175,6 +175,7 @@ void net_poll(void);
 
 /* Wake the RX softirq thread — called from a driver's RX interrupt handler */
 void net_rx_wake(void);
+void net_lo_drain(void);   /* after a send: receive its own loopback frames here */
 
 /* Push received skb onto dev's RX queue */
 void netdev_rx_enqueue(netdev_t *dev, skb_t *skb);
