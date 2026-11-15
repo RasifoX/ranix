@@ -28,6 +28,11 @@ printf 'KESIT-OK' | dd of=$f bs=1 seek=4092 conv=notrunc 2>/dev/null; echo "FATL
 head -c 100 /dev/zero | tr '\0' 'Z' | dd of=$f bs=1 seek=%(end)d conv=notrunc 2>/dev/null; echo "FATLOG yaz3 rc=$?"
 echo "FATLOG boyut $(stat -c %%s $f)"
 echo "FATLOG liste $(ls /mnt | tr '\n' ' ')"
+# reading the whole file in small pieces walks its cluster chain once, not once per read
+# every disk's read count (/sys/block names it vblk0, not after /dev/vda)
+reads() { n=0; for b in /sys/block/*/stat; do n=$((n + $(cut -d' ' -f1 $b))); done; echo $n; }
+r0=$(reads); dd if=$f of=/dev/null bs=4096 2>/dev/null; r1=$(reads)
+echo "FATLOG okuma $((r1 - r0))"
 sync; umount /mnt; echo "FATLOG umount rc=$?"
 echo FATLOG-SON
 '''
@@ -83,8 +88,8 @@ def main():
         if p.poll() is None:
             os.killpg(p.pid, 9)
             p.wait()
-    out = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
-    for l in out.replace("\r", "").split("\n"):
+    out = open(log, "rb").read().decode("utf-8", "replace").replace("\r", "") if os.path.exists(log) else ""
+    for l in out.split("\n"):
         if l.startswith("FATLOG"):
             print(l)
 
@@ -98,6 +103,10 @@ def main():
     ok.append(("past the end stopped at the size", data[SIZE - 10:] == b"Z" * 10, data[SIZE - 12:]))
     names = (re.findall(r"^FATLOG liste (.*)$", out, re.M) or [""])[-1].split()
     ok.append(("readdir lists the 13-character name", "RANIX-LOG.TXT" in names, names))
+    reads = int((re.findall(r"^FATLOG okuma (\d+)$", out, re.M) or ["-1"])[-1])
+    # 1 MB of 4 KB clusters: 2048 data sectors and ~256 FAT steps; walking the chain
+    # from the start on every 4 KB read is ~33000 (the USB log hung on wc, 11-16)
+    ok.append(("a sequential read walks the chain once", 0 <= reads <= 4 * (SIZE // 512), reads))
     readme = subprocess.run(["mtype", "-i", img, "::README.TXT"], capture_output=True).stdout
     ok.append(("the other file untouched", readme == b"Ranix boot log partition\n", readme))
     for name, good, why in ok:

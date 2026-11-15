@@ -48,6 +48,11 @@ typedef struct {
 	uint32_t  first_clus;
 	uint32_t  size;
 	int       is_dir;
+	/* where the last read or write left off, (cluster index << 32) | cluster: a
+	 * file read in small pieces walks its chain once, not from the start on every
+	 * read (a 4 MB log took minutes, USB prova 11-16). One word, so racing files
+	 * see a pair that was true; the chain never changes (no allocation). */
+	uint64_t  hint;
 } fat_priv_t;
 
 static vfs_iops_t fat_dir_iops;
@@ -59,7 +64,7 @@ static uint32_t rd32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1]<<8) | (p
 /* read one 512-byte sector */
 static int fat_rd_sec(fat_fs_t *fs, uint64_t lba, uint8_t *buf)
 {
-	return fs->bdev->read(fs->bdev, lba, buf, 1);
+	return block_read(fs->bdev, lba, buf, 1);   /* range check, the device lock, the counters */
 }
 
 /* next cluster in the chain, or >= EOC sentinel when the chain ends */
@@ -105,7 +110,7 @@ static vfs_inode_t *fat_make_inode(fat_fs_t *fs, uint32_t first_clus, uint32_t s
 	fat_priv_t *pv = kmalloc(sizeof(*pv));
 	if (!pv) { kfree(vi); return NULL; }
 	memset(vi, 0, sizeof(*vi));
-	pv->fs = fs; pv->first_clus = first_clus; pv->size = size; pv->is_dir = is_dir;
+	pv->fs = fs; pv->first_clus = first_clus; pv->size = size; pv->is_dir = is_dir; pv->hint = 0;
 	vi->ino      = first_clus ? first_clus : (uint64_t)(uintptr_t)pv;
 	vi->mode     = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
 	vi->size     = size;
@@ -261,6 +266,32 @@ static int fat_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	return c.found ? 0 : -1;
 }
 
+/* The cluster holding byte pos of the file, from the hint when it is at or before
+ * it. 0 when the chain ends first. */
+static uint32_t fat_clus_at(fat_priv_t *pv, uint64_t pos)
+{
+	fat_fs_t *fs = pv->fs;
+	uint64_t want = pos / (fs->sec_per_clus * 512);
+	uint64_t h = __atomic_load_n(&pv->hint, __ATOMIC_RELAXED);
+	uint64_t idx = 0;
+	uint32_t clus = pv->first_clus;
+	if (h && (h >> 32) <= want) { idx = h >> 32; clus = (uint32_t)h; }
+	while (idx < want) {
+		if (clus < 2 || fat_is_eoc(fs, clus)) return 0;
+		clus = fat_next(fs, clus);
+		idx++;
+	}
+	return clus;
+}
+
+/* clus holds byte pos: the next read or write near it starts there */
+static void fat_hint(fat_priv_t *pv, uint64_t pos, uint32_t clus)
+{
+	uint64_t idx = pos / (pv->fs->sec_per_clus * 512);
+	if (clus >= 2 && !fat_is_eoc(pv->fs, clus) && idx <= 0xFFFFFFFFu)
+		__atomic_store_n(&pv->hint, (idx << 32) | clus, __ATOMIC_RELAXED);
+}
+
 /* ── file write, in place ───────────────────────────────────
  * Only bytes the file already has: past its size the write stops (ENOSPC when
  * nothing fit). No allocation, no FAT or directory update, so a crash mid-write
@@ -278,9 +309,7 @@ static ssize_t fat_write(vfs_file_t *f, const void *buf, size_t len)
 	size_t   done = 0;
 	uint8_t  sec[512];
 
-	uint32_t clus = pv->first_clus;
-	uint64_t skip = pos / clus_bytes;
-	while (skip-- > 0 && !fat_is_eoc(fs, clus)) clus = fat_next(fs, clus);
+	uint32_t clus = fat_clus_at(pv, pos);
 
 	uint64_t in_clus = pos % clus_bytes;
 	while (done < len && clus >= 2 && !fat_is_eoc(fs, clus)) {
@@ -296,8 +325,13 @@ static ssize_t fat_write(vfs_file_t *f, const void *buf, size_t len)
 			if (w != 0) { if (!done) return w < 0 ? w : -5; goto out; }
 			done += n; in_clus += n;
 		}
+		if (in_clus < clus_bytes) {        /* done inside this cluster */
+			fat_hint(pv, pos + done, clus);
+			break;
+		}
 		in_clus = 0;
 		clus = fat_next(fs, clus);
+		fat_hint(pv, pos + done, clus);    /* pos + done starts the cluster after */
 	}
 out:
 	f->pos += (off_t)done;
@@ -317,10 +351,7 @@ static ssize_t fat_read(vfs_file_t *f, void *buf, size_t len)
 	size_t   done = 0;
 	uint8_t  sec[512];
 
-	/* skip to the cluster holding pos */
-	uint32_t clus = pv->first_clus;
-	uint64_t skip = pos / clus_bytes;
-	while (skip-- > 0 && !fat_is_eoc(fs, clus)) clus = fat_next(fs, clus);
+	uint32_t clus = fat_clus_at(pv, pos);    /* the cluster holding pos */
 
 	uint64_t in_clus = pos % clus_bytes;
 	while (done < len && clus >= 2 && !fat_is_eoc(fs, clus)) {
@@ -334,8 +365,13 @@ static ssize_t fat_read(vfs_file_t *f, void *buf, size_t len)
 			if (copy_fop_to_user((uint8_t *)buf + done, sec + soff, n) != 0) return (ssize_t)done;
 			done += n; in_clus += n;
 		}
+		if (in_clus < clus_bytes) {        /* done inside this cluster */
+			fat_hint(pv, pos + done, clus);
+			break;
+		}
 		in_clus = 0;
 		clus = fat_next(fs, clus);
+		fat_hint(pv, pos + done, clus);    /* pos + done starts the cluster after */
 	}
 	f->pos += (off_t)done;
 	return (ssize_t)done;
@@ -350,7 +386,7 @@ int fat_mount(vfs_mount_t *mnt, void *data)
 	block_device_t *bdev = data;
 	if (!bdev) return -1;
 	uint8_t bpb[512];
-	if (bdev->read(bdev, 0, bpb, 1) != 0) return -1;
+	if (block_read(bdev, 0, bpb, 1) != 0) return -1;
 
 	uint32_t bps = rd16(bpb + 11);
 	if (bps != 512) return -1;                       /* we assume 512-byte sectors */
