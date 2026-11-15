@@ -185,11 +185,13 @@ void prof_sample(arch_context_t *ctx)
 		/* the frame chain names who called even when the top of stack is data;
 		 * only followed when it stays on this stack, asm may use rbp otherwise */
 		caller = *(uint64_t *)ctx->rsp;
-		/* irq_restore: the tick waited behind the sti and lands on its last
-		 * instructions, after the pop of rbp; the return address on top is the
-		 * function whose IRQs-off stretch it was (HIZ1 11-15: 24-35% "irq_restore") */
-		int at_sti = ctx->rip - (uint64_t)irq_restore < 64;
-		if (!at_sti && ctx->rbp > ctx->rsp && ctx->rbp - ctx->rsp < 8192 && !(ctx->rbp & 7))
+		/* irq_restore: the tick waited behind its popf and lands on the epilogue,
+		 * pop %rbp (the return address one slot up) or ret (on top): the caller
+		 * is whose IRQs-off stretch it was (HIZ1 11-15: 24-35% "irq_restore") */
+		uint8_t op = *(const uint8_t *)ctx->rip;
+		if (ctx->rip - (uint64_t)irq_restore < 64 && (op == 0x5d || op == 0xc3))
+			caller = *(uint64_t *)(ctx->rsp + (op == 0x5d ? 8 : 0));
+		else if (ctx->rbp > ctx->rsp && ctx->rbp - ctx->rsp < 8192 && !(ctx->rbp & 7))
 			caller = *(uint64_t *)(ctx->rbp + 8);
 	}
 	prof_buf[i] = (prof_t){ctx->rip, caller, p ? (uint32_t)p->pid : 0, (uint32_t)arch_get_cpu_ctx()->cpu_id};
