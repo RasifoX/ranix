@@ -1405,17 +1405,33 @@ static void hr_early_learn(uint64_t now)
 	hr_early_ns = e > EARLY_MAX ? EARLY_MAX : e;
 }
 
+/* How long this CPU's idles last, a moving average: a deep state (C6) takes tens of
+ * us to leave, which a wake every few us pays each time. Below IDLE_DEEP_MIN the
+ * next idle is likely short too and stays shallow (HLT, C1), as Linux's menu
+ * governor does. Bare Casper 11-15: a pipe and a loopback TCP round trip waking
+ * the other CPU were 1.4x and 2x Linux with C6 on every idle. */
+#define IDLE_DEEP_MIN 400000ULL     /* ns */
+static uint64_t idle_avg_ns[MAX_CPUS];
+
 void sched_idle_wait(volatile int *flag, int deep)
 {
 	uint64_t next = hrtimer_on ? hrtimer_next() : ~0ULL;
+	uint64_t now = mono_ns();
 	if (next != ~0ULL) {
-		uint64_t now = mono_ns();
 		if (next > now && next - now <= hr_early_ns) {
 			while (!*flag && mono_ns() < next + 50000) cpu_relax();
 			return;
 		}
 	}
-	arch_idle_deep(flag, deep);
+	int cpu = (int)arch_get_cpu_ctx()->cpu_id;
+	uint64_t *avg = cpu < MAX_CPUS ? &idle_avg_ns[cpu] : NULL;
+	/* a timer due sooner than the deep state pays for itself also stays shallow */
+	int shallow = (avg && *avg < IDLE_DEEP_MIN) || (next != ~0ULL && next > now && next - now < IDLE_DEEP_MIN);
+	arch_idle_deep(flag, deep && !shallow);
+	if (avg) {
+		uint64_t took = mono_ns() - now;
+		*avg = *avg - *avg / 8 + took / 8;
+	}
 }
 
 /* Sleep to a CLOCK_MONOTONIC instant (or a signal). With a one-shot timer the
