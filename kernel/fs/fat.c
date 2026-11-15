@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /*
- * FAT filesystem — FAT12 / FAT16 / FAT32, read-only with long-filename (VFAT)
- * support. The one on-disk format Linux ships for every removable/EFI medium;
+ * FAT filesystem — FAT12 / FAT16 / FAT32, long-filename (VFAT) support. Read,
+ * and write in place: inside a file's existing clusters and size, never growing it
+ * or touching the FAT or a directory (fat_write). That is enough for a log file the
+ * image ships preallocated, which Windows reads back if Ranix did not come up. The one on-disk format Linux ships for every removable/EFI medium;
  * Ranix mounts it so USB sticks, SD cards and ESP partitions are readable.
  *
  * Layout: [reserved (incl. boot sector)] [FATs] [root dir (12/16 fixed; 32 in
@@ -255,6 +257,49 @@ static int fat_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 	return c.found ? 0 : -1;
 }
 
+/* ── file write, in place ───────────────────────────────────
+ * Only bytes the file already has: past its size the write stops (ENOSPC when
+ * nothing fit). No allocation, no FAT or directory update, so a crash mid-write
+ * leaves at worst those bytes torn, never the filesystem. */
+static ssize_t fat_write(vfs_file_t *f, const void *buf, size_t len)
+{
+	fat_priv_t *pv = f->inode->priv;
+	fat_fs_t   *fs = pv->fs;
+	if (!fs->bdev->write) return -30;                     /* EROFS */
+	if ((uint64_t)f->pos >= pv->size) return len ? -28 : 0;   /* ENOSPC */
+	if (f->pos + len > pv->size) len = pv->size - f->pos;
+
+	uint32_t clus_bytes = fs->sec_per_clus * 512;
+	uint64_t pos = f->pos;
+	size_t   done = 0;
+	uint8_t  sec[512];
+
+	uint32_t clus = pv->first_clus;
+	uint64_t skip = pos / clus_bytes;
+	while (skip-- > 0 && !fat_is_eoc(fs, clus)) clus = fat_next(fs, clus);
+
+	uint64_t in_clus = pos % clus_bytes;
+	while (done < len && clus >= 2 && !fat_is_eoc(fs, clus)) {
+		uint64_t base = clus_to_lba(fs, clus);
+		while (in_clus < clus_bytes && done < len) {
+			uint32_t s = (uint32_t)(in_clus / 512);
+			uint32_t soff = in_clus % 512;
+			uint32_t n = 512 - soff;
+			if (n > len - done) n = (uint32_t)(len - done);
+			if (n < 512 && fat_rd_sec(fs, base + s, sec) != 0) goto out;   /* a partial sector keeps the rest */
+			if (copy_fop_from_user(sec + soff, (const uint8_t *)buf + done, n) != 0) goto out;
+			int w = fs->bdev->write(fs->bdev, base + s, sec, 1);
+			if (w != 0) { if (!done) return w < 0 ? w : -5; goto out; }
+			done += n; in_clus += n;
+		}
+		in_clus = 0;
+		clus = fat_next(fs, clus);
+	}
+out:
+	f->pos += (off_t)done;
+	return (ssize_t)done;
+}
+
 /* ── file read ───────────────────────────────────────────── */
 static ssize_t fat_read(vfs_file_t *f, void *buf, size_t len)
 {
@@ -293,7 +338,7 @@ static ssize_t fat_read(vfs_file_t *f, void *buf, size_t len)
 }
 
 static vfs_iops_t fat_dir_iops  = { .lookup = fat_lookup, .readdir = fat_readdir };
-static vfs_fops_t fat_file_fops = { .read = fat_read };
+static vfs_fops_t fat_file_fops = { .read = fat_read, .write = fat_write };
 
 /* ── mount ───────────────────────────────────────────────── */
 int fat_mount(vfs_mount_t *mnt, void *data)
