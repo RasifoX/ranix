@@ -370,7 +370,7 @@ void vm_unmap(vm_space_t *vs, uint64_t vaddr)
 	 * page is freed/reused — a sibling thread in the same address space may
 	 * still have a writable TLB entry. Done outside fault_lock so a sibling
 	 * spinning on it (IRQ-off) can still ack the shootdown IPI. */
-	if ((pte || huge_base || huge1g) && vs->refcount > 1)
+	if ((pte || huge_base || huge1g) && vm_tlb_elsewhere(vs))
 		arch_tlb_flush_range(vs, vaddr, vaddr + PAGE_SIZE);
 
 	if (huge1g) {

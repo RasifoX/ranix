@@ -81,6 +81,9 @@ void arch_vm_switch(uint64_t root_phys, uint32_t asid);
  * aarch64 the broadcast TLBI in vm.c already covers all cores, so this is a
  * no-op. Must NOT be called while holding vs->fault_lock. */
 void arch_tlb_flush_range(vm_space_t *vs, uint64_t start, uint64_t end);
+/* before freeing a page vs mapped: 1 if other CPUs must be shot down; other
+ * CPUs that only kept vs's entries are made to reload instead (vm.c) */
+int  vm_tlb_elsewhere(vm_space_t *vs);
 
 uint64_t arch_vm_get_paddr(uint64_t *root, uint64_t vaddr);
 

@@ -15,6 +15,7 @@
 #include <kernel/lib/string.h>
 #include <kernel/kprintf.h>
 #include <kernel/sched.h>
+#include <kernel/smp.h>
 #include <kernel/vfs.h>
 #include <kernel/cgroup.h>
 #include <asm/mmu.h>
@@ -308,12 +309,32 @@ static int fault_resolve(process_t *p, uint64_t vaddr, int is_write, int may_kil
 out:
 	spin_unlock_irq(&p->vm->fault_lock, lf);
 	if (cow_old) {
-		if (p->vm->refcount > 1) {
+		if (vm_tlb_elsewhere(p->vm))
 			arch_tlb_flush_range(p->vm, vaddr, vaddr + PAGE_SIZE);
-		}
 		if (anon_page_put(cow_old)) cgroup_uncharge_mem(p->vm, PAGE_SIZE);
 	}
 	return ret;
+}
+
+/* Another CPU may still translate through vs: a thread of it runs there, or the
+ * CPU ran it last and kept its TLB (x86 arch_vm_switch skips the CR3 reload when
+ * the same space comes back, and an idle CPU keeps the last one). A single-threaded
+ * process that migrated away from a CPU and back, past an unmap done meanwhile
+ * without a shootdown, wrote through the stale entry into the freed page: kernel
+ * heap pages zeroed under the syscall fuzzer (HIZ1 11-15). */
+int vm_tlb_elsewhere(vm_space_t *vs)
+{
+	if (vs->refcount > 1) return 1;   /* a sibling thread may run there now: shoot down */
+	/* One thread, running here: the others only kept the space's entries from
+	 * before. Forgetting their tag makes their next switch to it reload CR3,
+	 * which flushes; no IPI. */
+	cpu_context_t *self = arch_get_cpu_ctx();
+	for (int i = 0; i < smp_ncpus && i < MAX_CPUS; i++) {
+		cpu_context_t *c = all_cpus[i];
+		if (c && c != self && c->vm_tag == vs->asid)
+			__atomic_store_n(&c->vm_tag, 0, __ATOMIC_RELEASE);
+	}
+	return 0;
 }
 
 int vm_handle_fault(uint64_t vaddr, int is_write)
