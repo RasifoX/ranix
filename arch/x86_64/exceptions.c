@@ -16,6 +16,7 @@
 #include <kernel/syscall.h>
 #include <kernel/sync.h>
 #include <kernel/time.h>
+#include <kernel/irq.h>
 
 void exceptions_init(void)
 {
@@ -184,7 +185,11 @@ void prof_sample(arch_context_t *ctx)
 		/* the frame chain names who called even when the top of stack is data;
 		 * only followed when it stays on this stack, asm may use rbp otherwise */
 		caller = *(uint64_t *)ctx->rsp;
-		if (ctx->rbp > ctx->rsp && ctx->rbp - ctx->rsp < 8192 && !(ctx->rbp & 7))
+		/* irq_restore: the tick waited behind the sti and lands on its last
+		 * instructions, after the pop of rbp; the return address on top is the
+		 * function whose IRQs-off stretch it was (HIZ1 11-15: 24-35% "irq_restore") */
+		int at_sti = ctx->rip - (uint64_t)irq_restore < 64;
+		if (!at_sti && ctx->rbp > ctx->rsp && ctx->rbp - ctx->rsp < 8192 && !(ctx->rbp & 7))
 			caller = *(uint64_t *)(ctx->rbp + 8);
 	}
 	prof_buf[i] = (prof_t){ctx->rip, caller, p ? (uint32_t)p->pid : 0, (uint32_t)arch_get_cpu_ctx()->cpu_id};
@@ -206,7 +211,8 @@ static ssize_t prof_write(vfs_file_t *f, const void *buf, size_t len)
 	(void)f;
 	char c = 0;
 	if (len && copy_fop_from_user(&c, buf, 1)) return -14;
-	if (c == '1') { prof_n = 0; prof_on = 1; } else prof_on = 0;
+	/* '1' starts, '0' stops; anything else (the newline of echo, written apart) leaves it */
+	if (c == '1') { prof_n = 0; prof_on = 1; } else if (c == '0') prof_on = 0;
 	return (ssize_t)len;
 }
 

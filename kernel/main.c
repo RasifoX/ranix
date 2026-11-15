@@ -600,6 +600,9 @@ void kernel_main(void)
 	WD_BOOT_PROGRESS();
 	splash_progress(30);
 	fbdev_init();
+#ifdef __x86_64__
+	prof_init();                    /* /dev/prof, root only: the tick sampler (tests/hiz.py HIZ_PROF) */
+#endif
 	drm_init();                     /* /dev/dri: KMS on the firmware's mode */
 	thermal_guard_init();           /* package temperature limit until ACPI drives the fan */
 	rescue_init();                  /* udp rescue channel + /dev/rescue (kernel/rescue.c) */

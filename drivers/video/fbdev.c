@@ -118,8 +118,5 @@ void fbdev_init(void)
 {
 	if (global_fb_phys) {
 		devfs_register_device_gid("fb0", S_IFCHR | 0660, DEVFS_GID_VIDEO, 0x1d00, &fbdev_fops);
-#ifdef __x86_64__
-		prof_init();
-#endif
 	}
 }
