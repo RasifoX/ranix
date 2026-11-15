@@ -50,6 +50,26 @@ static int pipe_writable(const pipe_t *pipe)
     return free >= PIPE_BUF_SIZE || free == pipe->size;
 }
 
+/* The ring in at most two runs: size is a power of two. A byte loop with a %
+ * per byte took 1.4 ms per 64 KB, 96x Linux (HIZ0 on Casper, 11-15). */
+static void ring_out(pipe_t *pipe, uint8_t *dst, uint32_t n)
+{
+    uint32_t a = pipe->size - pipe->tail;
+    if (a > n) a = n;
+    memcpy(dst, pipe->buffer + pipe->tail, a);
+    memcpy(dst + a, pipe->buffer, n - a);
+    pipe->tail = (pipe->tail + n) & (pipe->size - 1);
+}
+
+static void ring_in(pipe_t *pipe, const uint8_t *src, uint32_t n)
+{
+    uint32_t a = pipe->size - pipe->head;
+    if (a > n) a = n;
+    memcpy(pipe->buffer + pipe->head, src, a);
+    memcpy(pipe->buffer, src + a, n - a);
+    pipe->head = (pipe->head + n) & (pipe->size - 1);
+}
+
 static void *pipe_buffer_alloc(pipe_t *pipe)
 {
     int order = PIPE_DEF_ORDER;
@@ -112,10 +132,7 @@ static ssize_t pipe_read(vfs_file_t *file, void *buf, size_t len)
         int was_writable = pipe_writable(pipe);
         uint32_t n = avail < (len - read) ? avail : (len - read);
         if (n > PIPE_BUF_SIZE) n = PIPE_BUF_SIZE;   /* kbuf's size */
-        for (uint32_t i = 0; i < n; i++) {
-            kbuf[i] = pipe->buffer[pipe->tail];
-            pipe->tail = (pipe->tail + 1) % pipe->size;
-        }
+        ring_out(pipe, kbuf, n);
         pipe->count -= n;
         /* the read that makes it writable again is the writer's edge */
         int now_writable = !was_writable && pipe_writable(pipe);
@@ -187,10 +204,7 @@ static ssize_t pipe_write(vfs_file_t *file, const void *buf, size_t len)
             }
 
             uint32_t n = free < (chunk - off) ? free : (uint32_t)(chunk - off);
-            for (uint32_t i = 0; i < n; i++) {
-                pipe->buffer[pipe->head] = kbuf[off + i];
-                pipe->head = (pipe->head + 1) % pipe->size;
-            }
+            ring_in(pipe, kbuf + off, n);
             pipe->count += n;
             pipe->in_gen++;
 
@@ -469,7 +483,7 @@ long pipe_fcntl_size(vfs_file_t *file, int set, unsigned long arg)
         cgroup_file_release(cg, size);
         return -EBUSY;
     }
-    for (uint32_t i = 0; i < pipe->count; i++) nb[i] = pipe->buffer[(pipe->tail + i) % pipe->size];
+    ring_out(pipe, nb, pipe->count);
     uint8_t *old = pipe->buffer;
     int old_order = pipe->order;
     uint32_t old_size = pipe->size;
