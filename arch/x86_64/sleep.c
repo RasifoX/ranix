@@ -206,7 +206,7 @@ static void wake_page(sleep_cpu_t *ctx)
 {
 	uint8_t *p = (uint8_t *)PHYS_TO_VIRT((uint64_t)WAKE_PHYS);
 	memcpy(p, sleep_wake_start, (size_t)(sleep_wake_end - sleep_wake_start));
-	uint64_t top = la57_enabled ? VIRT_TO_PHYS((uint64_t)pml5) : VIRT_TO_PHYS((uint64_t)pml4);
+	uint64_t top = arch_vm_la57() ? VIRT_TO_PHYS((uint64_t)pml5) : VIRT_TO_PHYS((uint64_t)pml4);
 	*(volatile uint64_t *)(p + WAKE_DATA + WD_TOP) = top;
 	*(volatile uint64_t *)(p + WAKE_DATA + WD_CTX) = (uint64_t)ctx;
 	*(volatile uint64_t *)(p + WAKE_DATA + WD_ENTRY) = (uint64_t)sleep_resume_entry;

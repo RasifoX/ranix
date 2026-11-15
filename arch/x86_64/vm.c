@@ -42,6 +42,7 @@
  * fault again. mmu_init() seeds this while the identity map is still live. */
 static int la57;
 void arch_vm_set_la57(int v) { la57 = v; }
+int  arch_vm_la57(void) { return la57; }
 
 /* PML5 slots holding the kernel's 48-bit-canonical mappings under 5-level. */
 #define PML5_DMAP  504   /* direct map  (0xFFFF800000000000) */

@@ -53,7 +53,8 @@
 
 /* Boot page tables (boot.S); pml4/pml5 are physical addresses when cast. */
 extern uint64_t pml4[], pml5[], pdpt_dm[];
-extern uint8_t  la57_enabled;                    /* boot.S found 5-level paging */
+extern uint8_t  la57_enabled;                    /* boot.S found 5-level paging; boot only: mmu_init() */
 void arch_vm_set_la57(int v);                    /* vm.c */
+int  arch_vm_la57(void);                         /* the flag after boot (the boot symbol is in the identity map only) */
 
 #endif

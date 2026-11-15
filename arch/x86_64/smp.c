@@ -341,7 +341,7 @@ static void setup_trampoline(int cpu_id)
 
 	/* Top-level table the AP loads into CR3 — PML5 under 5-level, else PML4.
 	 * Same VIRT_TO_PHYS convention as the BSP path that already boots APs. */
-	uint64_t pml4_phys = la57_enabled ? VIRT_TO_PHYS((uint64_t)pml5)
+	uint64_t pml4_phys = arch_vm_la57() ? VIRT_TO_PHYS((uint64_t)pml5)
 	                                   : VIRT_TO_PHYS((uint64_t)pml4);
 
 	/* Virtual stack top for C code (secondary_cpu_main uses virtual addresses) */
