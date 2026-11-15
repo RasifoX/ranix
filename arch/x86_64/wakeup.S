@@ -183,6 +183,10 @@ sleep_save_cpu:
  * by the caller (gdt_init clears its busy bit first). */
 .global sleep_resume_entry
 sleep_resume_entry:
+	/* the stack first: RSP is still the firmware's real-mode SP (0xF70 on SeaBIOS), and
+	 * the null guard leaves that page unmapped: the lretq below faulted, a triple
+	 * fault (SUSP1 TCG 11-15). The saved one is mapped in every top table. */
+	movq SC_RSP(%rdi), %rsp
 	movq SC_CR4(%rdi), %rax
 	movq %rax, %cr4
 	movq SC_CR0(%rdi), %rax
