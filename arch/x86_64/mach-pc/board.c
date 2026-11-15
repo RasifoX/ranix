@@ -62,6 +62,7 @@ void board_secondary_irq_init(void)
 
 #include <drivers/block/sdcard.h>
 #include <drivers/platform/casper_power.h>
+#include <drivers/gpu/nvidia/nv_probe.h>
 #include <kernel/sleep.h>
 
 void board_drivers_register(void)
@@ -75,6 +76,7 @@ void board_drivers_register(void)
 	virtio_net_pci_init();
 	rtl8168_init();
 	hda_init();
+	nv_probe_init();           /* NVIDIA GPU: identify, BARs, MSI vector; nothing more yet */
 	rtw8723_init();
 	casper_ec_init();          /* one laptop's EC: the one way into it */
 	casper_power_init();       /* its adapter and battery (EC RAM); needs casper_ec_init */

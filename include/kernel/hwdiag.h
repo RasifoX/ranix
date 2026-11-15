@@ -23,7 +23,7 @@ void hw_end(hw_out_t *o);
 typedef void (*hwdiag_fn)(hw_out_t *o);
 
 /* Up to HWDIAG_MAX providers; called in process context from procfs reads. */
-#define HWDIAG_MAX 8
+#define HWDIAG_MAX 12
 void hwdiag_register(hwdiag_fn fn);
 int  hwdiag_fill(char *buf, size_t sz);
 

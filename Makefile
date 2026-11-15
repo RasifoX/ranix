@@ -186,7 +186,9 @@ else ifeq ($(ARCH),x86_64)
         drivers/virtio/virtio_pci.c \
         drivers/net/rtl8168.c \
         drivers/net/rtw8723.c \
-        drivers/sound/hda.c
+        drivers/sound/hda.c \
+        drivers/gpu/nvidia/nv_chip.c \
+        drivers/gpu/nvidia/nv_probe.c
 endif
 
 # Auto-discovered: every .c in kernel/net is compiled (no textual-includes here).
@@ -297,7 +299,7 @@ PY_VER             = 3.12.3
 PY_XY              = 3.12
 PY_SRC_URL         = https://www.python.org/ftp/python/$(PY_VER)/Python-$(PY_VER).tgz
 
-.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest bootscreentest acpieventstest suspendtest hostpowertest flakehunt vdso defconfig tinyconfig
+.PHONY: all clean qemu image initramfs bash-static curl python apk-static test persisttest oomboottest bootscreentest acpieventstest suspendtest hostpowertest hostnvtest flakehunt vdso defconfig tinyconfig
 
 # Switch the active .config to a committed preset and drop the stale generated
 # files so the next build regenerates them. defconfig = full build; tinyconfig =
@@ -986,7 +988,7 @@ ifeq ($(ARCH),x86_64)
 # -m 3G so the 1 GB hugepage pool reserves a block, letting c-hugepage1g
 # exercise 1 GB map/write/read/unmap (fork COW needs 2 blocks → -m 6G one-off).
 # hostpowertest first: the Casper EC/battery model runs where QEMU has no such EC
-test: hostpowertest iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
+test: hostpowertest hostnvtest iso $(BUILD_DIR)/gpt-test.img $(BUILD_DIR)/usb-test.img $(BUILD_DIR)/nvme-test.img
 	@rm -f $(TEST_LOG) $(BUILD_DIR)/userial
 	@mkfifo $(BUILD_DIR)/userial
 	timeout $(TEST_TIMEOUT) $(QEMU_CMD) $(QEMU_NET) -smp 4 -m 3G -display none \
@@ -1047,6 +1049,12 @@ hostpowertest:
 	cc -std=gnu11 -Wall -Wextra -DHOST_TEST -I. -Iinclude tests/host_power.c drivers/platform/casper_bat.c kernel/lib/ps_format.c -o $(BUILD_DIR)/host/power && $(BUILD_DIR)/host/power
 	cc -std=gnu11 -Wall -Wextra -I. tests/host_ec_hotkey.c drivers/input/ec_hotkey.c -o $(BUILD_DIR)/host/ec_hotkey && $(BUILD_DIR)/host/ec_hotkey
 	TMPDIR=$(abspath $(BUILD_DIR))/host sh tests/casper_ec_host/run.sh
+
+# Host test of the NVIDIA probe (drivers/gpu/nvidia): PCI/MMIO model of the Casper's
+# GeForce 940MX and of an RTX 4050 Laptop; QEMU has no NVIDIA GPU.
+hostnvtest:
+	@mkdir -p $(BUILD_DIR)/host
+	TMPDIR=$(abspath $(BUILD_DIR))/host sh tests/nv_host/run.sh
 
 persisttest:
 	@bash tests/persist.sh
