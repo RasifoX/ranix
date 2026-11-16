@@ -509,7 +509,7 @@ int kvm_pio_string_finish(kvm_vcpu_t *v)
 		uint64_t missing;
 		int r = kvm_gpa_write(v->vm, v->ins_gpa, data, n, &missing);
 		if (r != -EAGAIN) return r;
-		if ((r = kvm_ept_fault(v->vm, missing)) <= 0) return r ? r : -EFAULT;
+		if ((r = kvm_ept_fault(v->vm, missing, 1)) <= 0) return r ? r : -EFAULT;
 	}
 	return -EFAULT;
 }

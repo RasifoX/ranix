@@ -30,6 +30,10 @@
  * sent to everyone leaves the sender running, and INIT then SIPI start the
  * second vcpu (waiting in KVM_RUN on its own thread) at the SIPI's page.
  *
+ * A fourth VM logs its memory's dirty pages (KVM_MEM_LOG_DIRTY_PAGES, as QEMU
+ * does for VGA): the pages the guest wrote, not the one it only read, and after
+ * KVM_GET_DIRTY_LOG only the pages written since.
+ *
  * Prints OK, or SKIP where the CPU has no VMX (or is not x86), else FAIL lines. */
 #include <stdio.h>
 #include <stdint.h>
@@ -342,6 +346,77 @@ static void test_guest(int kvm)
 
 	munmap(run, (size_t)msz);
 	close(vcpu);
+	close(vm);
+	munmap(mem, MEM_SIZE);
+}
+
+/* The dirty-log guest, at 0x1000: writes pages 5 and 7, reads page 6, stops at
+ * port 0x42, writes page 7 again, halts. */
+extern const unsigned char guestd_start[], guestd_end[];
+__asm__(
+	".pushsection .rodata\n"
+	".globl guestd_start, guestd_end\n"
+	"guestd_start:\n"
+	".code16\n"
+	"	movb $1, 0x5000\n"
+	"	movb $2, 0x7000\n"
+	"	mov 0x6000, %al\n"
+	"	out %al, $0x42\n"
+	"	movb $3, 0x7000\n"
+	"	hlt\n"
+	".code64\n"
+	"guestd_end:\n"
+	".popsection\n");
+
+static uint64_t dirty_bits(int vm, uint32_t slot)
+{
+	uint64_t bits[1] = { ~0ULL };
+	struct kvm_dirty_log d = { .slot = slot, .dirty_bitmap = (uint64_t)(uintptr_t)bits };
+	if (ioctl(vm, KVM_GET_DIRTY_LOG, &d) != 0) { FAIL("KVM_GET_DIRTY_LOG: %s", strerror(errno)); return ~0ULL; }
+	return bits[0];
+}
+
+static void test_dirty_log(int kvm)
+{
+	int vm = ioctl(kvm, KVM_CREATE_VM, 0);
+	if (vm < 0) { FAIL("dirty: KVM_CREATE_VM: %s", strerror(errno)); return; }
+	uint8_t *mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mem == MAP_FAILED) { FAIL("dirty: mmap"); close(vm); return; }
+	memcpy(mem + 0x1000, guestd_start, (size_t)(guestd_end - guestd_start));
+	struct kvm_userspace_memory_region r = {
+		.slot = 0, .flags = KVM_MEM_LOG_DIRTY_PAGES, .guest_phys_addr = 0, .memory_size = 0x10000,
+		.userspace_addr = (uint64_t)(uintptr_t)mem,
+	};
+	if (ioctl(vm, KVM_SET_USER_MEMORY_REGION, &r) != 0) { FAIL("dirty: logged slot: %s", strerror(errno)); goto out; }
+	int vcpu = ioctl(vm, KVM_CREATE_VCPU, 0);
+	int msz = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
+	struct kvm_run *run = vcpu < 0 ? MAP_FAILED : mmap(NULL, (size_t)msz, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu, 0);
+	if (run == MAP_FAILED) { FAIL("dirty: vcpu"); goto out; }
+	struct kvm_sregs sregs;
+	ioctl(vcpu, KVM_GET_SREGS, &sregs);
+	sregs.cs.selector = 0; sregs.cs.base = 0;
+	ioctl(vcpu, KVM_SET_SREGS, &sregs);
+	struct kvm_regs regs; memset(&regs, 0, sizeof(regs));
+	regs.rip = 0x1000; regs.rflags = 0x2;
+	ioctl(vcpu, KVM_SET_REGS, &regs);
+
+	if (ioctl(vcpu, KVM_RUN, 0) != 0 || run->exit_reason != KVM_EXIT_IO || run->io.port != 0x42)
+		{ FAIL("dirty: first run exit %u", run->exit_reason); goto out2; }
+	uint64_t b = dirty_bits(vm, 0);
+	if (b != ((1ULL << 5) | (1ULL << 7))) FAIL("dirty: after the first run %llx, want pages 5 and 7 (a0)", (unsigned long long)b);
+	b = dirty_bits(vm, 0);
+	if (b != 0) FAIL("dirty: a second read %llx, want none", (unsigned long long)b);
+	if (ioctl(vcpu, KVM_RUN, 0) != 0 || run->exit_reason != KVM_EXIT_HLT)
+		{ FAIL("dirty: second run exit %u", run->exit_reason); goto out2; }
+	b = dirty_bits(vm, 0);
+	if (b != (1ULL << 7)) FAIL("dirty: after the write again %llx, want page 7 (80)", (unsigned long long)b);
+	if (mem[0x5000] != 1 || mem[0x7000] != 3) FAIL("dirty: memory %d %d, want 1 3", mem[0x5000], mem[0x7000]);
+	struct kvm_dirty_log nolog = { .slot = 1, .dirty_bitmap = (uint64_t)(uintptr_t)&b };
+	expect_errno("dirty log of a slot without logging", ioctl(vm, KVM_GET_DIRTY_LOG, &nolog), ENOENT);
+out2:
+	munmap(run, (size_t)msz);
+	close(vcpu);
+out:
 	close(vm);
 	munmap(mem, MEM_SIZE);
 }
@@ -701,6 +776,7 @@ int main(void)
 	test_tables(kvm);
 	test_guest2(kvm);
 	test_apic(kvm);
+	test_dirty_log(kvm);
 	close(kvm);
 	printf(fails ? "FAILED %d\n" : "OK\n", fails);
 	return fails != 0;

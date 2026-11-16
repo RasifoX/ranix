@@ -12,6 +12,11 @@
  * address; it is dropped when the slot goes away or the VM is freed. Every leaf
  * that holds a page carries EPT_PINNED, a bit the processor ignores.
  *
+ * Dirty logging (KVM_MEM_LOG_DIRTY_PAGES, QEMU's VGA and migration): a logged
+ * slot's pages are mapped without write access; the first write faults, sets
+ * the page's bit and makes the leaf writable. KVM_GET_DIRTY_LOG hands the bits
+ * out and takes write access away again (kvm_ept_protect).
+ *
  * Taking a mapping away has two passes (kvm_ept_unmap): first the leaves lose
  * their access bits, then every CPU that may cache them flushes (quiesce), and
  * only then are the pages let go. A guest on another CPU therefore never
@@ -100,9 +105,9 @@ int kvm_slot_present(kvm_vm_t *vm, uint64_t gpa)
 	return __atomic_load_n(&vm->slots_seq, __ATOMIC_RELAXED) == seq ? found : -1;
 }
 
-/* Map the page at gpa from its slot. The caller is the VM owner's thread, in
- * process context (pinning may fault the page in and sleep). */
-int kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa)
+/* Map the page at gpa from its slot, for a write when write. The caller is the
+ * VM owner's thread, in process context (pinning may fault the page in and sleep). */
+int kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa, int write)
 {
 	gpa &= ~(uint64_t)(PAGE_SIZE - 1);
 	int r = mutex_lock_killable(&vm->lock);
@@ -112,11 +117,20 @@ int kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa)
 	uint64_t *leaf = ept_leaf(vm, gpa, 1);
 	if (!leaf) { r = -ENOMEM; goto out; }
 	r = 1;
-	if (*leaf & EPT_RWX) goto out;   /* another vcpu mapped it first */
-	int write = !(s->flags & KVM_MEM_READONLY);
-	uint64_t pa = vm_pin_user_page(s->hva + (gpa - s->gpa), write);
+	int writable = !(s->flags & KVM_MEM_READONLY);
+	/* a logged page is writable only once it is marked dirty */
+	int give_w = writable && (!s->dirty || write);
+	if (*leaf & EPT_RWX) {           /* mapped: another vcpu was first, or a logged page's first write */
+		if (give_w && !(*leaf & EPT_W)) {
+			if (s->dirty) { uint64_t n = (gpa - s->gpa) >> 12; s->dirty[n / 64] |= 1ULL << (n % 64); }
+			*leaf |= EPT_W;      /* more access: no flush needed */
+		}
+		goto out;
+	}
+	uint64_t pa = vm_pin_user_page(s->hva + (gpa - s->gpa), writable);
 	if (!pa) { r = -EFAULT; goto out; }
-	*leaf = pa | EPT_PINNED | EPT_MT_WB | EPT_R | EPT_X | (write ? EPT_W : 0);
+	if (give_w && s->dirty) { uint64_t n = (gpa - s->gpa) >> 12; s->dirty[n / 64] |= 1ULL << (n % 64); }
+	*leaf = pa | EPT_PINNED | EPT_MT_WB | EPT_R | EPT_X | (give_w ? EPT_W : 0);
 out:
 	mutex_unlock(&vm->lock);
 	return r;
@@ -163,6 +177,18 @@ void kvm_ept_unmap(kvm_vm_t *vm, uint64_t gpa, uint64_t size)
 		vm_unpin_user_page(vm->vs, *leaf & EPT_ADDR);
 		*leaf = 0;
 	}
+}
+
+/* Take write access away from [gpa, gpa+size): the pages stay mapped, the next
+ * write faults and is logged. Caller holds vm->lock. */
+void kvm_ept_protect(kvm_vm_t *vm, uint64_t gpa, uint64_t size)
+{
+	int any = 0;
+	for (uint64_t a = gpa; a < gpa + size; a += PAGE_SIZE) {
+		uint64_t *leaf = ept_leaf(vm, a, 0);
+		if (leaf && (*leaf & EPT_W)) { *leaf &= ~EPT_W; any = 1; }
+	}
+	if (any) kvm_vm_quiesce(vm);
 }
 
 static void ept_free_table(kvm_vm_t *vm, uint64_t tphys, int level)

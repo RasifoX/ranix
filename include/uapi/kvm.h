@@ -379,6 +379,14 @@ struct kvm_run {
 /* ioctls on a VM fd */
 #define KVM_CREATE_VCPU            KVM_IO(0x41)   /* arg: vcpu id */
 #define KVM_SET_USER_MEMORY_REGION KVM_IOW(0x46, struct kvm_userspace_memory_region)
+/* the pages of a KVM_MEM_LOG_DIRTY_PAGES slot written since the last call, one
+ * bit each (bitmap of ALIGN(pages, 64) bits); the call starts the next round */
+struct kvm_dirty_log {
+	uint32_t slot;
+	uint32_t padding1;
+	uint64_t dirty_bitmap;   /* user pointer */
+};
+#define KVM_GET_DIRTY_LOG KVM_IOW(0x42, struct kvm_dirty_log)
 #define KVM_SET_TSS_ADDR           KVM_IO(0x47)
 #define KVM_CREATE_IRQCHIP         KVM_IO(0x60)
 #define KVM_IRQ_LINE               KVM_IOW(0x61, struct kvm_irq_level)

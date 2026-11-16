@@ -21,6 +21,7 @@
 typedef struct kvm_slot {
 	uint64_t gpa, size, hva;   /* size 0: the slot is free */
 	uint32_t flags;
+	uint64_t *dirty;           /* KVM_MEM_LOG_DIRTY_PAGES: a bit per page written */
 } kvm_slot_t;
 
 #define KVM_MAX_IOEVENTFD 128
@@ -107,6 +108,7 @@ typedef struct kvm_vcpu {
 	uint64_t    cr0, cr4, efer, xcr0, apic_base;
 	uint32_t    pio_in;      /* an IN is waiting for userspace's data: its size */
 	uint64_t    prefault;    /* guest-physical page to map before the next entry, or ~0 */
+	int         prefault_write;   /* ... for a write (a dirty-logged page is mapped read-only first) */
 	kvm_mmio_t  mmio;        /* a load waiting for userspace's data, when mmio_pending */
 	/* a read-modify-write of device memory: the load went out, then the
 	 * store goes out at the next KVM_RUN; its flags reach RFLAGS at the next
@@ -246,7 +248,8 @@ void kvm_ioeventfd_free(kvm_vm_t *vm);
 void kvm_vm_quiesce(kvm_vm_t *vm);   /* no vcpu uses what was published before (vm->lock held) */
 int  kvm_ept_init(kvm_vm_t *vm);
 void kvm_ept_free(kvm_vm_t *vm);
-int  kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa);   /* 1 mapped, 0 no slot there, <0 error */
+int  kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa, int write);   /* 1 mapped, 0 no slot there, <0 error */
+void kvm_ept_protect(kvm_vm_t *vm, uint64_t gpa, uint64_t size);   /* writes fault again (dirty log) */
 void kvm_ept_unmap(kvm_vm_t *vm, uint64_t gpa, uint64_t size);
 /* -EAGAIN: *missing is a page not mapped yet */
 int  kvm_gpa_read(kvm_vm_t *vm, uint64_t gpa, void *buf, size_t n, uint64_t *missing);

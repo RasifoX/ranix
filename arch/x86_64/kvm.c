@@ -133,6 +133,7 @@ static void kvm_vm_put(kvm_vm_t *vm)
 	kvm_ioeventfd_free(vm);
 	kvm_irq_free(vm);
 	kvm_ept_free(vm);
+	for (int i = 0; i < KVM_MAX_SLOTS; i++) kfree(vm->slots[i].dirty);
 	vm_destroy(vm->vs);
 	kfree(vm);
 }
@@ -464,15 +465,22 @@ fail:
 static int vm_set_memory(kvm_vm_t *vm, const struct kvm_userspace_memory_region *m)
 {
 	const uint64_t pmask = PAGE_SIZE - 1;
-	if (m->slot >= KVM_MAX_SLOTS || (m->flags & ~KVM_MEM_READONLY)) return -EINVAL;
+	if (m->slot >= KVM_MAX_SLOTS || (m->flags & ~(KVM_MEM_READONLY | KVM_MEM_LOG_DIRTY_PAGES))) return -EINVAL;
 	if ((m->guest_phys_addr | m->memory_size | m->userspace_addr) & pmask) return -EINVAL;
 	if (m->guest_phys_addr + m->memory_size < m->guest_phys_addr ||
 	    m->guest_phys_addr + m->memory_size > (1ULL << 48)) return -EINVAL;
 	if (m->memory_size && !access_ok((void *)(uintptr_t)m->userspace_addr, m->memory_size)) return -EFAULT;
 	if (m->flags & KVM_MEM_READONLY) return -EINVAL;   /* not offered (KVM_CAP_READONLY_MEM is 0) */
 
+	uint64_t *bits = NULL;               /* a bit per page, whole words */
+	if (m->memory_size && (m->flags & KVM_MEM_LOG_DIRTY_PAGES)) {
+		uint64_t words = ((m->memory_size >> 12) + 63) / 64;
+		bits = kmalloc(words * 8);
+		if (!bits) return -ENOMEM;
+		memset(bits, 0, words * 8);
+	}
 	int r = mutex_lock_killable(&vm->lock);
-	if (r) return r;
+	if (r) { kfree(bits); return r; }
 	for (int i = 0; m->memory_size && i < KVM_MAX_SLOTS; i++) {
 		kvm_slot_t *s = &vm->slots[i];
 		if (i == (int)m->slot || !s->size) continue;
@@ -488,6 +496,9 @@ static int vm_set_memory(kvm_vm_t *vm, const struct kvm_userspace_memory_region 
 		s->size = 0;   /* gone before the unmap, so no vcpu maps it back */
 		kvm_ept_unmap(vm, old.gpa, old.size);
 	}
+	kfree(s->dirty);
+	s->dirty = bits;
+	bits = NULL;
 	s->gpa = m->guest_phys_addr;
 	s->hva = m->userspace_addr;
 	s->flags = m->flags;
@@ -495,6 +506,29 @@ static int vm_set_memory(kvm_vm_t *vm, const struct kvm_userspace_memory_region 
 	__atomic_add_fetch(&vm->slots_seq, 1, __ATOMIC_RELEASE);
 out:
 	mutex_unlock(&vm->lock);
+	kfree(bits);
+	return r;
+}
+
+/* KVM_GET_DIRTY_LOG: the slot's pages written since the last call; they are
+ * write-protected again before the bits are cleared, so a write in between is
+ * either in this round or the next, never lost. */
+static int vm_get_dirty_log(kvm_vm_t *vm, const struct kvm_dirty_log *d)
+{
+	if (d->slot >= KVM_MAX_SLOTS) return -EINVAL;
+	int r = mutex_lock_killable(&vm->lock);
+	if (r) return r;
+	kvm_slot_t *s = &vm->slots[d->slot];
+	if (!s->size || !s->dirty) { mutex_unlock(&vm->lock); return -ENOENT; }
+	uint64_t words = ((s->size >> 12) + 63) / 64;
+	uint64_t *copy = kmalloc(words * 8);
+	if (!copy) { mutex_unlock(&vm->lock); return -ENOMEM; }
+	kvm_ept_protect(vm, s->gpa, s->size);
+	memcpy(copy, s->dirty, words * 8);
+	memset(s->dirty, 0, words * 8);
+	mutex_unlock(&vm->lock);
+	r = copy_to_user((void *)(uintptr_t)d->dirty_bitmap, copy, words * 8) ? -EFAULT : 0;
+	kfree(copy);
 	return r;
 }
 
@@ -530,6 +564,12 @@ static int vm_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		if (!vm_owner(vm)) return -EIO;
 		if (copy_from_user(&m, (void *)(uintptr_t)arg, sizeof(m))) return -EFAULT;
 		return vm_set_memory(vm, &m);
+	}
+	case KVM_GET_DIRTY_LOG: {
+		struct kvm_dirty_log d;
+		if (!vm_owner(vm)) return -EIO;
+		if (copy_from_user(&d, (void *)(uintptr_t)arg, sizeof(d))) return -EFAULT;
+		return vm_get_dirty_log(vm, &d);
 	}
 	case KVM_SET_TSS_ADDR:
 	case KVM_SET_IDENTITY_MAP_ADDR:

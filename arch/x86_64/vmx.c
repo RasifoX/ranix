@@ -749,6 +749,7 @@ static int exit_ept_violation(kvm_vcpu_t *v)
 		/* a slot (or the slots changing): map the page in the outer loop,
 		 * where a miss is decided under the lock */
 		v->prefault = gpa & ~(uint64_t)(PAGE_SIZE - 1);
+		v->prefault_write = (vmread(EXIT_QUALIFICATION) >> 1) & 1;   /* SDM 27-7: bit 1, a write */
 		return RUN_OUTER;
 	}
 	switch (kvm_mmio_exit(v, gpa)) {
@@ -1026,8 +1027,10 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 		if (v->apic && !vcpu_ready(v)) continue;
 		if (v->prefault != NO_PREFAULT) {
 			uint64_t gpa = v->prefault;
+			int w = v->prefault_write;
 			v->prefault = NO_PREFAULT;
-			int r = kvm_ept_fault(v->vm, gpa);
+			v->prefault_write = 0;
+			int r = kvm_ept_fault(v->vm, gpa, w);
 			if (r < 0) return r;
 			/* r == 0: the slot went away meanwhile; the guest's access
 			 * exits again and is decided as device memory then */

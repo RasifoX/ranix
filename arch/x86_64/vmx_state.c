@@ -90,7 +90,7 @@ int vmx_set_sregs(kvm_vcpu_t *v, const struct kvm_sregs *s)
 	/* PAE paging reads its PDPTEs from guest memory: map that page now, while
 	 * this thread may still sleep */
 	if ((s->cr0 & CR0_PG) && (s->cr4 & CR4_PAE) && !(s->efer & EFER_LMA)) {
-		int r = kvm_ept_fault(v->vm, s->cr3 & ~0xFFFULL);
+		int r = kvm_ept_fault(v->vm, s->cr3 & ~0xFFFULL, 0);
 		if (r < 0) return r;
 	}
 	uint64_t f;
