@@ -21,6 +21,7 @@
 #include <kernel/kprintf.h>
 #include <kernel/lib/string.h>
 #include <kernel/pstore.h>
+#include <kernel/kout.h>
 #include <asm/mmu.h>
 #include <kernel/init.h>
 
@@ -56,6 +57,9 @@ static char         *ps_data;
 static uint64_t      ps_total;
 static uint64_t      ps_flushed;
 static uint32_t      ps_crc = 0xFFFFFFFFu;
+/* the boot before this one (pstore_attach), read through /sys/fs/pstore */
+static const pstore_hdr_t *prev_hdr;
+static const char         *prev_data;
 
 /* Reflected CRC-32 (zlib polynomial), nibble table: small, no SSE. */
 static const uint32_t crc_nibble[16] = {
@@ -220,8 +224,11 @@ void pstore_attach(void)
 	int use = newest == 0 ? 1 : 0;
 	uint64_t seq = newest < 0 ? 1 : ((const pstore_hdr_t *)slot[newest])->seq + 1;
 
-	if (newest >= 0)
+	if (newest >= 0) {
 		report_previous((const pstore_hdr_t *)slot[newest], slot[newest] + HDR_SIZE);
+		prev_hdr  = (const pstore_hdr_t *)slot[newest];
+		prev_data = slot[newest] + HDR_SIZE;
+	}
 	else
 		kprintf(KERN_INFO "pstore: no previous log (first boot, or RAM did not survive)\n");
 
@@ -242,6 +249,49 @@ void pstore_attach(void)
 	pstore_commit();
 
 	kprintf(KERN_INFO "pstore: logging to 0x%lx slot %d, boot #%lu\n", ps_base, use, seq);
+}
+
+uint64_t pstore_prev_size(void)
+{
+	if (!prev_hdr) return 0;
+	return prev_hdr->total > DATA_SIZE ? DATA_SIZE : prev_hdr->total;
+}
+
+/* Byte off of the previous log in the order it was written: a wrapped ring starts
+ * at total % DATA_SIZE, the oldest byte still there. */
+size_t pstore_prev_read(uint64_t off, char *buf, size_t len)
+{
+	uint64_t size = pstore_prev_size();
+	if (off >= size) return 0;
+	if (len > size - off) len = (size_t)(size - off);
+	uint64_t start = prev_hdr->total > DATA_SIZE ? prev_hdr->total % DATA_SIZE : 0;
+	for (size_t done = 0; done < len; ) {
+		uint64_t at = (start + off + done) % DATA_SIZE;
+		size_t run = (size_t)(DATA_SIZE - at);
+		if (run > len - done) run = len - done;
+		memcpy(buf + done, prev_data + at, run);
+		done += run;
+	}
+	return len;
+}
+
+int pstore_prev_summary(char *buf, int cap)
+{
+	if (!prev_hdr || cap < 2) return 0;
+	const char *crc = prev_hdr->total > DATA_SIZE ? "wrapped" :
+	                  crc_buf(prev_data, prev_hdr->total) == prev_hdr->data_crc ? "intact" : "crc-mismatch";
+	kout_t o;
+	kout_init(&o, buf, (size_t)cap);
+	kout_s(&o, "boot "); kout_u(&o, prev_hdr->seq); kout_s(&o, ": "); kout_s(&o, state_name(prev_hdr->state));
+	kout_s(&o, ", "); kout_u(&o, prev_hdr->total); kout_s(&o, " bytes, "); kout_s(&o, crc);
+	kout_s(&o, ", last beat "); kout_u(&o, prev_hdr->beat_ticks / TIMER_HZ); kout_c(&o, 's');
+	if (prev_hdr->state == PSTORE_STATE_PANIC) {
+		kout_s(&o, ", panic: ");
+		for (size_t k = 0; k < REASON_MAX && prev_hdr->reason[k]; k++)
+			kout_c(&o, prev_hdr->reason[k] == '\n' ? ' ' : prev_hdr->reason[k]);
+	}
+	kout_c(&o, '\n');
+	return (int)o.len;
 }
 
 void pstore_putc(char c)

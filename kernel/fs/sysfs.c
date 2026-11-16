@@ -28,6 +28,7 @@
 #include <kernel/pci.h>
 #include <kernel/mm/hugetlb.h>
 #include <kernel/kprintf.h>
+#include <kernel/pstore.h>
 
 #include <kernel/nsproxy.h>
 #include <kernel/fs/devfs.h>
@@ -49,7 +50,7 @@ enum { SF_OSTYPE = 1, SF_OSRELEASE, SF_HOSTNAME, SF_NET_ADDR, SF_NET_MTU, SF_NET
        SF_CGROUP_CTRL, SF_CGROUP_PROCS, SF_THP_ENABLED,
        SF_PCI_VENDOR, SF_PCI_DEVICE, SF_PCI_CAPS,
        SF_NR_HUGEPAGES, SF_FREE_HUGEPAGES, SF_KEYMAP, SF_VOLUME, SF_TOUCHPAD, SF_BACKLIGHT, SF_CSTATE, SF_LID,
-       SF_ZRAM_DISKSIZE, SF_ZRAM_MMSTAT };
+       SF_ZRAM_DISKSIZE, SF_ZRAM_MMSTAT, SF_PSTORE_LOG, SF_PSTORE_INFO };
 
 static int put_u64(char *o, uint64_t v)
 {
@@ -71,7 +72,7 @@ static vfs_iops_t sysfs_root_iops, sysfs_kernel_iops, sysfs_class_iops,
                   sysfs_cpu_iops, sysfs_fs_iops, sysfs_cgroup_iops, sysfs_bus_iops,
                   sysfs_pci_iops, sysfs_pcidev_iops, sysfs_pcidev_entry_iops,
                   sysfs_mm_iops, sysfs_thp_iops, sysfs_hugepages_iops,
-                  sysfs_hugepages2m_iops;
+                  sysfs_hugepages2m_iops, sysfs_pstore_iops;
 static vfs_fops_t sysfs_file_fops;
 static vfs_fops_t sysfs_dir_fops = { 0 };
 
@@ -182,6 +183,27 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 {
 	sysfs_priv_t *pr = f->inode->priv;
 	if (!pr) return -1;
+	if (pr->type == SF_PSTORE_LOG || pr->type == SF_PSTORE_INFO) {
+		/* the last boot's kernel log: the kernel's own words, as dmesg is (CAP_SYSLOG) */
+		process_t *me = task_current();
+		if (!capable_task(me, CAP_SYSLOG) && !capable_task(me, CAP_SYS_ADMIN)) return -EPERM;
+	}
+	if (pr->type == SF_PSTORE_LOG) {         /* up to half a megabyte: a page at a time */
+		uint64_t ph = (uint64_t)buddy_alloc(0);
+		if (!ph) return -ENOMEM;
+		char *k = (char *)PHYS_TO_VIRT(ph);
+		size_t done = 0;
+		while (done < len) {
+			size_t want = len - done < 4096 ? len - done : 4096;
+			size_t got = pstore_prev_read((uint64_t)f->pos, k, want);
+			if (!got) break;
+			if (copy_fop_to_user((char *)buf + done, k, got) != 0) { buddy_free(ph, 0); return done ? (ssize_t)done : -EFAULT; }
+			f->pos += (off_t)got;
+			done += got;
+		}
+		buddy_free(ph, 0);
+		return (ssize_t)done;
+	}
 
 	uint64_t phys = (uint64_t)buddy_alloc(0);
 	if (!phys) return -1;
@@ -270,6 +292,7 @@ static ssize_t sysfs_file_read(vfs_file_t *f, void *buf, size_t len)
 		break;
 	}
 	case SF_FREE_HUGEPAGES: n = put_u64(tmp, (uint64_t)huge2m_nr_free()); tmp[n++] = '\n'; break;
+	case SF_PSTORE_INFO:    n = pstore_prev_summary(tmp, 4096); break;
 	default:           n = 0; break;
 	}
 
@@ -510,14 +533,46 @@ static vfs_inode_t *sysfs_fs_lookup(vfs_inode_t *dir, const char *name)
 {
 	(void)dir;
 	if (strcmp(name, "cgroup") == 0) return sysfs_dir(&sysfs_cgroup_iops, -1);
+	if (strcmp(name, "pstore") == 0) return sysfs_dir(&sysfs_pstore_iops, -1);
 	return NULL;
 }
 static int sysfs_fs_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
 	(void)dir;
-	if (idx != 0) return -1;
-	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = 1;
-	put_str(out->name, "cgroup"); out->name[6] = '\0';
+	static const char *const names[] = { "cgroup", "pstore" };
+	if (idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFDIR | 0555; out->next_off = idx + 1;
+	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
+	return 0;
+}
+
+/* ── /sys/fs/pstore: the boot before this one (Linux's names) ───
+ * console-ramoops-0  its kernel log; ranix-previous  how it ended. Both absent when
+ * there was no previous boot to read (first boot, or the RAM did not survive). */
+static vfs_inode_t *pstore_file(int type)
+{
+	vfs_inode_t *in = sysfs_file(type, -1);
+	if (in) {
+		in->mode = S_IFREG | 0400;
+		if (type == SF_PSTORE_LOG) in->size = pstore_prev_size();
+	}
+	return in;
+}
+static vfs_inode_t *sysfs_pstore_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	if (!pstore_prev_size()) return NULL;
+	if (strcmp(name, "console-ramoops-0") == 0) return pstore_file(SF_PSTORE_LOG);
+	if (strcmp(name, "ranix-previous") == 0)    return pstore_file(SF_PSTORE_INFO);
+	return NULL;
+}
+static int sysfs_pstore_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	static const char *const names[] = { "console-ramoops-0", "ranix-previous" };
+	if (!pstore_prev_size() || idx >= 2) return -1;
+	out->ino = sys_ino_alloc(); out->mode = S_IFREG | 0400; out->next_off = idx + 1;
+	put_str(out->name, names[idx]); out->name[strlen(names[idx])] = '\0';
 	return 0;
 }
 static const struct { const char *name; int type; } cgroup_files[] = {
@@ -833,6 +888,7 @@ static vfs_iops_t sysfs_system_iops   = { .lookup = sysfs_system_lookup,   .read
 static vfs_iops_t sysfs_cpu_iops      = { .lookup = sysfs_cpu_lookup,      .readdir = sysfs_cpu_readdir      };
 static vfs_iops_t sysfs_fs_iops       = { .lookup = sysfs_fs_lookup,       .readdir = sysfs_fs_readdir       };
 static vfs_iops_t sysfs_cgroup_iops   = { .lookup = sysfs_cgroup_lookup,   .readdir = sysfs_cgroup_readdir   };
+static vfs_iops_t sysfs_pstore_iops   = { .lookup = sysfs_pstore_lookup,   .readdir = sysfs_pstore_readdir   };
 static vfs_iops_t sysfs_bus_iops      = { .lookup = sysfs_bus_lookup,      .readdir = sysfs_bus_readdir      };
 static vfs_iops_t sysfs_pci_iops      = { .lookup = sysfs_pci_lookup,      .readdir = sysfs_pci_readdir      };
 static vfs_iops_t sysfs_pcidev_iops   = { .lookup = sysfs_pcidev_lookup,   .readdir = sysfs_pcidev_readdir   };
