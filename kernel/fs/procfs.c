@@ -1120,7 +1120,9 @@ static vfs_fops_t procfs_dir_fops = { 0 };
 
 /* ── inode allocation ────────────────────────────────────────── */
 
-static uint64_t   proc_ino_next = 0x8000;
+/* Fixed numbers (directories, 0x7ffe..0xbfff and 0x8000 + pid*100 + n) sit below
+ * 1<<32; numbers handed out one per lookup start there, so the two never meet. */
+static uint64_t   proc_ino_next = 1ULL << 32;
 static spinlock_t proc_ino_lock = SPINLOCK_INIT;
 
 static uint64_t proc_ino_alloc(void)
@@ -1129,6 +1131,15 @@ static uint64_t proc_ino_alloc(void)
 	uint64_t n = proc_ino_next++;
 	spin_unlock_irq(&proc_ino_lock, f);
 	return n;
+}
+
+/* A file made from a table (pid, PROC_F_* type) has one number for its life, the
+ * same from stat and from the directory listing, as on Linux: cp, find and tar
+ * compare it to tell files apart. pid -1 is a file outside any /proc/<pid>. */
+#define PROC_FILE_INO_BASE (1ULL << 40)
+static uint64_t proc_file_ino(int pid, int type)
+{
+	return PROC_FILE_INO_BASE | ((uint64_t)(uint32_t)(pid + 1) << 12) | (uint32_t)(type & 0xfff);
 }
 
 /* ── /proc/<pid>/mem — cross-process memory R/W (gdb) ────────────────────────
@@ -1215,7 +1226,7 @@ static vfs_inode_t *procfs_environ_inode(int pid)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino = proc_ino_alloc();
+	in->ino = proc_file_ino(pid, PROC_F_P_ENVIRON);
 	in->mode = S_IFREG | 0400;
 	in->nlink = 1; in->refcount = 1;
 	in->fops = &procfs_environ_fops;
@@ -1250,7 +1261,7 @@ static vfs_inode_t *procfs_inode_file(int pid, int type)
 	vfs_inode_t *in = kmalloc(sizeof(*in));
 	if (!in) return NULL;
 	memset(in, 0, sizeof(*in));
-	in->ino     = proc_ino_alloc();
+	in->ino     = proc_file_ino(pid, type);
 	in->mode    = S_IFREG | (type == PROC_F_P_OOMADJ ? 0644 : 0444);
 	in->nlink   = 1;
 	in->refcount= 1;
@@ -2495,7 +2506,7 @@ static int procfs_piddir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 	procfs_piddir_priv_t *pp = dir->priv;
 	int pid = pp ? pp->pid : 0;
 	if (idx < PID_FILES_N) {
-		out->ino      = 0x8000 + (uint64_t)pid * 100 + idx;
+		out->ino      = proc_file_ino(pid, pid_files[idx].type);
 		out->mode     = S_IFREG | 0444;
 		out->next_off = idx + 1;
 		const char *n = pid_files[idx].name;
@@ -2952,7 +2963,7 @@ static int procfs_netdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *o
 {
 	(void)dir;
 	if (idx >= (uint32_t)NET_FILES_N) return -1;
-	out->ino      = 0x9000 + idx;
+	out->ino      = proc_file_ino(-1, net_files[idx].type);
 	out->mode     = S_IFREG | 0444;
 	out->next_off = idx + 1;
 	const char *n = net_files[idx].name;
@@ -3081,7 +3092,7 @@ static int procfs_syskerneldir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_diren
 {
 	(void)dir;
 	if (idx >= (uint32_t)SYS_KERNEL_N) return -1;
-	out->ino = 0xa100 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	out->ino = proc_file_ino(-1, sys_kernel_files[idx].type); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	const char *n = sys_kernel_files[idx].name;
 	int nlen = 0; while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -3121,7 +3132,7 @@ static int procfs_sysnetcoredir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dire
 {
 	(void)dir;
 	if (idx >= (uint32_t)SYS_NET_CORE_N) return -1;
-	out->ino = 0xa200 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	out->ino = proc_file_ino(-1, sys_net_core_files[idx].type); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	const char *n = sys_net_core_files[idx].name;
 	int nlen = 0; while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -3188,7 +3199,7 @@ static int procfs_sysfsdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t 
 {
 	(void)dir;
 	if (idx >= (uint32_t)SYS_FS_N) return -1;
-	out->ino = 0xa300 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	out->ino = proc_file_ino(-1, sys_fs_files[idx].type); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	const char *n = sys_fs_files[idx].name;
 	int nlen = 0; while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -3223,7 +3234,7 @@ static int procfs_sysvmdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t 
 {
 	(void)dir;
 	if (idx >= (uint32_t)SYS_VM_N) return -1;
-	out->ino = 0xa400 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	out->ino = proc_file_ino(-1, sys_vm_files[idx].type); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	const char *n = sys_vm_files[idx].name;
 	int nlen = 0; while (n[nlen]) nlen++;
 	memcpy(out->name, n, nlen); out->name[nlen] = '\0';
@@ -3259,7 +3270,7 @@ static int procfs_sysvipcdir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_
 {
 	(void)dir;
 	if (idx >= 3) return -1;
-	out->ino = 0xa500 + idx; out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	out->ino = proc_file_ino(-1, PROC_F_SYSVIPC_SHM + (int)idx); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
 	memcpy(out->name, sysvipc_names[idx], 4);
 	return 0;
 }
@@ -3411,7 +3422,7 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 
 	/* static files first */
 	if (idx < ROOT_FILES_N) {
-		out->ino      = 0x8000 + idx;
+		out->ino      = proc_file_ino(-1, root_files[idx].type);
 		out->mode     = S_IFREG | 0444;
 		out->next_off = idx + 1;
 		const char *n = root_files[idx].name;

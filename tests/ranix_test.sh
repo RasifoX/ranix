@@ -189,6 +189,20 @@ check "proc-vmstat-free" "1"       "$(grep -c nr_free_pages /proc/vmstat)"
 check "proc-modules-ok"  "0"       "$(cat /proc/modules | wc -l)"
 check "proc-partitions"  "1"       "$(cat /proc/partitions | head -1 | grep -c name)"
 check "proc-diskstats"   "ok"      "$(cat /proc/diskstats >/dev/null 2>&1 && echo ok)"
+# A /proc file keeps one inode number: stat twice gives the same, and the directory
+# listing gives that number too. cp and find rely on it (cp skips a file whose
+# inode changes under it).
+proc_ino_same() {
+	for f in /proc/version /proc/net/dev /proc/1/status /proc/sys/kernel/hostname; do
+		a=$(stat -c %i "$f" 2>/dev/null); b=$(stat -c %i "$f" 2>/dev/null)
+		l=$(ls -i "$(dirname "$f")" 2>/dev/null | awk -v n="$(basename "$f")" '$2 == n { print $1 }')
+		[ -n "$a" ] && [ "$a" = "$b" ] && [ "$a" = "$l" ] || { echo "$f $a $b $l"; return; }
+	done
+	echo ok
+}
+check "proc-ino-stable"  "ok"      "$(proc_ino_same)"
+check "proc-cp"          "ok"      "$(rm -f /tmp/pv.$$; cp /proc/version /tmp/pv.$$ 2>/dev/null && [ -s /tmp/pv.$$ ] && [ "$(cat /tmp/pv.$$)" = "$(cat /proc/version)" ] && echo ok; rm -f /tmp/pv.$$)"
+check "proc-ino-unique"  "0"       "$(ls -i /proc /proc/net /proc/1 /proc/sys/kernel 2>/dev/null | awk 'NF==2 {print $1}' | sort | uniq -d | wc -l)"
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
 check "dmesg-format"     "0"       "$(dmesg 2>/dev/null | grep -v -c -E '^\[ *[0-9]+\.[0-9]{6}\] [a-z%][a-z0-9_-]{1,15}: [ -~]+$')"
 check "c-klog"           "OK"      "$(timeout 20 /bin/test_klog 2>/dev/null | tail -1)"
