@@ -133,9 +133,52 @@ void *kmalloc(size_t size) {
 
 /* The last frees and who made them: a block freed twice names its first freer. */
 #define FREE_RING 512
-static struct { void *ptr, *by; } free_ring[FREE_RING];
+static struct { void *ptr, *by, *by1, *by2; } free_ring[FREE_RING];
 static uint32_t free_at;
 uint64_t heap_bad_frees;   /* /proc/vmstat kfree_bad: the suite fails on any */
+
+/* The callers one and two frames above kfree's caller, through the frame
+ * pointers, each step checked (a short stack, an IRQ's, ends early): NULL where
+ * the chain stops. __builtin_return_address(n > 0) would follow it blindly. */
+static void caller_frames(void *fp, void **by1, void **by2)
+{
+    *by1 = *by2 = NULL;
+    uint64_t *f = (uint64_t *)fp;                      /* kfree's frame */
+    for (int depth = 0; depth < 3; depth++) {
+        if (!f || ((uint64_t)f & 7) || (uint64_t)f < 0xffff800000000000ULL) return;
+        uint64_t *up = (uint64_t *)f[0];
+        if (!up || up <= f || (uint64_t)up - (uint64_t)f > 65536) return;   /* stacks grow down */
+        if (depth == 1) *by1 = (void *)up[1];
+        if (depth == 2) *by2 = (void *)up[1];
+        f = up;
+    }
+}
+
+/* Whether ptr is a live block of this heap (its header says so). */
+int kmem_is_block(const void *ptr)
+{
+    if (!ptr) return 0;
+    const heap_header_t *hdr = (const heap_header_t *)ptr - 1;
+    return hdr->magic == HEAP_LARGE || hdr->magic == HEAP_MAGIC;
+}
+
+/* The last recorded free of ptr: who called kfree, and their two callers. 0 if
+ * the ring no longer holds one. For reports on a pointer used after its free. */
+int kmem_last_free(const void *ptr, void *by[3])
+{
+    uint64_t f = spin_lock_irq(&heap_lock);
+    int found = 0;
+    for (uint32_t k = 1; k <= FREE_RING && k <= free_at; k++) {
+        uint32_t i = (free_at - k) % FREE_RING;
+        if (free_ring[i].ptr == ptr) {
+            by[0] = free_ring[i].by; by[1] = free_ring[i].by1; by[2] = free_ring[i].by2;
+            found = 1;
+            break;
+        }
+    }
+    spin_unlock_irq(&heap_lock, f);
+    return found;
+}
 
 void kfree(void *ptr) {
     if (!ptr) return;
@@ -145,6 +188,8 @@ void kfree(void *ptr) {
     if (hdr->magic == HEAP_LARGE || hdr->magic == HEAP_MAGIC) {
         free_ring[free_at % FREE_RING].ptr = ptr;
         free_ring[free_at % FREE_RING].by = __builtin_return_address(0);
+        caller_frames(__builtin_frame_address(0), &free_ring[free_at % FREE_RING].by1,
+                      &free_ring[free_at % FREE_RING].by2);
         free_at++;
     }
 
