@@ -14,7 +14,17 @@ typedef struct {
     spinlock_t lock;
     wait_queue_t rd_wait;
     wait_queue_t wr_wait;
+    eventfd_hook_t *hooks;   /* kernel listeners (eventfd_hook_add), under lock */
 } eventfd_t;
+
+/* the count went up: kernel listeners first; one that takes it empties it.
+ * Caller holds efd->lock. */
+static void eventfd_run_hooks(eventfd_t *efd)
+{
+    int take = 0;
+    for (eventfd_hook_t *h = efd->hooks; h; h = h->next) take |= h->fn(h->arg);
+    if (take) efd->count = 0;
+}
 
 static ssize_t eventfd_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
@@ -55,6 +65,7 @@ static ssize_t eventfd_write_vfs(vfs_file_t *file, const void *buf, size_t len)
         uint64_t f = spin_lock_irq(&efd->lock);
         if ((uint64_t)-2 - efd->count >= val) {
             efd->count += val;
+            if (val) eventfd_run_hooks(efd);
             wake_up(&efd->rd_wait);
             spin_unlock_irq(&efd->lock, f);
             poll_notify_key(efd);
@@ -97,6 +108,43 @@ static vfs_fops_t eventfd_fops = {
     .close = eventfd_close_vfs,
 };
 
+int eventfd_is(vfs_file_t *f)
+{
+    return f && f->inode && f->inode->fops == &eventfd_fops;
+}
+
+void eventfd_signal_file(vfs_file_t *f, uint64_t n)
+{
+    eventfd_t *efd = (eventfd_t *)f->inode->priv;
+    uint64_t fl = spin_lock_irq(&efd->lock);
+    if ((uint64_t)-2 - efd->count >= n) efd->count += n;
+    if (n) eventfd_run_hooks(efd);
+    wake_up(&efd->rd_wait);
+    spin_unlock_irq(&efd->lock, fl);
+    poll_notify_key(efd);
+}
+
+int eventfd_hook_add(vfs_file_t *f, eventfd_hook_t *h)
+{
+    if (!eventfd_is(f)) return -EINVAL;
+    eventfd_t *efd = (eventfd_t *)f->inode->priv;
+    uint64_t fl = spin_lock_irq(&efd->lock);
+    h->next = efd->hooks;
+    efd->hooks = h;
+    if (efd->count && h->fn(h->arg)) efd->count = 0;
+    spin_unlock_irq(&efd->lock, fl);
+    return 0;
+}
+
+void eventfd_hook_del(vfs_file_t *f, eventfd_hook_t *h)
+{
+    eventfd_t *efd = (eventfd_t *)f->inode->priv;
+    uint64_t fl = spin_lock_irq(&efd->lock);
+    for (eventfd_hook_t **p = &efd->hooks; *p; p = &(*p)->next)
+        if (*p == h) { *p = h->next; break; }
+    spin_unlock_irq(&efd->lock, fl);
+}
+
 static long sys_eventfd2(unsigned int initval, int flags)
 {
     if (flags & ~(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)) return -EINVAL;
@@ -104,6 +152,7 @@ static long sys_eventfd2(unsigned int initval, int flags)
     if (!efd) return -ENOMEM;
     efd->count = initval;
     efd->flags = flags;
+    efd->hooks = NULL;
     efd->lock  = (spinlock_t)SPINLOCK_INIT;
     wait_queue_init(&efd->rd_wait);
     wait_queue_init(&efd->wr_wait);

@@ -1457,6 +1457,28 @@ void task_sleep_until_ns(uint64_t end)
 	c->wake_deadline = 0;
 }
 
+void task_sleep_flag_until_ns(volatile int *flag, uint64_t end)
+{
+	uint64_t now = mono_ns();
+	if (end && now >= end) return;
+	uint64_t f = spin_lock_irq(&sched_lock);
+	process_t *c = task_current();
+	if (*flag || task_has_actionable_signal()) { spin_unlock_irq(&sched_lock, f); return; }
+	if (end) {
+		uint64_t tick_ns = 1000000000ULL / TIMER_HZ;
+		uint64_t backstop = kernel_ticks + (end - now + tick_ns - 1) / tick_ns + 1;
+		c->wake_deadline = backstop;
+		sched_note_wake_deadline(backstop);
+		if (hrtimer_on) sched_note_wake_ns(end);
+	}
+	c->sleeping_on_queue = 1;
+	c->state = PROC_SLEEPING;
+	spin_unlock_irq(&sched_lock, f);
+	arch_yield();
+	c->wake_ns = 0;
+	c->wake_deadline = 0;
+}
+
 /* Sleep until tick `deadline` (or a signal). Woken by the deadline sweep in
  * sched_tick, not the per-tick blanket wake — no churn while sleeping. */
 void task_sleep_until(uint64_t deadline) {

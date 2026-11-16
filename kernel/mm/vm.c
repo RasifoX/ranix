@@ -433,6 +433,52 @@ size_t vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int w
 	return done;
 }
 
+/* The caller's page at va, made present (and private and writable for write)
+ * through the normal fault path, then held with one extra reference. A device
+ * that reaches the page by its physical address (a KVM guest's memory through
+ * EPT) cannot take a page fault, so the page must stay where it is: swap and the
+ * 2 MB collapse only move a page nobody else holds. The write fault comes first,
+ * while this reference is not there yet, so it breaks COW rather than copying
+ * the page away from the hold. Hugepage regions are refused: their 4 KB parts
+ * are not separate pages to hold. Returns the physical address, 0 on failure. */
+uint64_t vm_pin_user_page(uint64_t va, int write)
+{
+	process_t *p = task_current();
+	if (!p || !p->vm || !access_ok((void *)va, PAGE_SIZE)) return 0;
+	vm_space_t *vs = p->vm;
+	va &= PAGE_MASK;
+	for (int tries = 0; tries < 3; tries++) {
+		if (vm_handle_fault_irq(va, write, 1) != 0) return 0;
+		uint64_t lf = spin_lock_irq(&vs->fault_lock);
+		uint32_t vf = 0;
+		for (vma_t *v = vs->vmas; v; v = v->next)
+			if (va >= v->vaddr && va < v->vaddr + v->size) { vf = v->flags; break; }
+		uint64_t pa = arch_vm_get_paddr(vs->root, va);
+		page_t *pg = pa ? paddr_to_page(pa) : NULL;
+		if ((vf & (VMA_HUGE | VMA_HUGE_1G)) || (pa && (!pg || !(pg->flags & PG_MANAGED)))) {
+			spin_unlock_irq(&vs->fault_lock, lf);
+			return 0;
+		}
+		if (pg && (!write || (vf & VMA_WRITE))) {
+			pmm_hold((void *)pa);
+			spin_unlock_irq(&vs->fault_lock, lf);
+			return pa;
+		}
+		spin_unlock_irq(&vs->fault_lock, lf);   /* swapped out again meanwhile: once more */
+	}
+	return 0;
+}
+
+/* Drop a vm_pin_user_page hold. vs is the space it was taken in: when this was
+ * the last reference (the owner unmapped the page meanwhile), the memory charge
+ * the owner's unmap left in place goes with it. */
+void vm_unpin_user_page(vm_space_t *vs, uint64_t pa)
+{
+	page_t *pg = paddr_to_page(pa);
+	int anon = pg && (pg->flags & PG_ANON);
+	if (anon_page_put(pa) && anon && vs) cgroup_uncharge_mem(vs, PAGE_SIZE);
+}
+
 void vm_activate(void)
 {
 	task_t *t = task_current();

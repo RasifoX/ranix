@@ -27,6 +27,7 @@
 #include <uapi/types.h>
 #include <asm/cpu.h>
 #include <asm/gdt.h>
+#include <asm/kvm.h>
 #include <asm/io.h>
 #include <asm/mmu.h>
 #include <asm/sleep.h>
@@ -172,6 +173,7 @@ static void park_wait(void)
 /* The TSS, IDT, syscall MSRs, PAT, HWP and the local APIC of a CPU back from S3. */
 static void cpu_reinit(int cpu)
 {
+	vmx_cpu_reset(cpu);   /* S3 took it out of VMX operation */
 	gdt_init(cpu);
 	idt_load();
 	arch_syscall_init();

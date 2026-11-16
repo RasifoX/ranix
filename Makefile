@@ -160,12 +160,23 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/acpi.c \
         arch/x86_64/acpi_events.c \
         arch/x86_64/sleep.c \
-        arch/x86_64/multiboot2.c
+        arch/x86_64/multiboot2.c \
+        arch/x86_64/kvm.c \
+        arch/x86_64/kvm_cpuid.c \
+        arch/x86_64/kvm_emul.c \
+        arch/x86_64/kvm_ept.c \
+        arch/x86_64/kvm_ioev.c \
+        arch/x86_64/kvm_irq.c \
+        arch/x86_64/kvm_lapic.c \
+        arch/x86_64/kvm_msr.c \
+        arch/x86_64/vmx.c \
+        arch/x86_64/vmx_state.c
     SRCS_ARCH_ASM = \
         arch/x86_64/boot.S \
         arch/x86_64/exceptions_asm.S \
         arch/x86_64/trampoline.S \
-        arch/x86_64/wakeup.S
+        arch/x86_64/wakeup.S \
+        arch/x86_64/vmx_entry.S
     SRCS_DRIVERS = \
         drivers/serial/uart16550/uart16550.c \
         drivers/irqchip/pic8259/pic8259.c \

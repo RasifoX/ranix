@@ -16,6 +16,7 @@ void devfs_register_device_priv(const char *name, mode_t mode, dev_t rdev, vfs_f
 #define DEVFS_GID_DIALOUT 20 /* serial ports: USB serial adapters and boards */
 #define DEVFS_GID_INPUT 23
 #define DEVFS_GID_VIDEO 27
+#define DEVFS_GID_KVM 34     /* /dev/kvm: who may run virtual machines */
 #define DEVFS_GID_CLAIM 950  /* /dev/claim: who may hold machine resources */
 /* Same as devfs_register_device, with the node owned by root:gid. */
 void devfs_register_device_gid(const char *name, mode_t mode, gid_t gid, dev_t rdev, vfs_fops_t *fops);

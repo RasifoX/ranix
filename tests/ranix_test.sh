@@ -443,6 +443,15 @@ check "c-killwins"    "OK"            "$(timeout 60 /bin/test_killwins 2>&1 | ta
 check "c-kwatch"      "OK"            "$(timeout 40 /bin/test_killwins kwatch 2>&1 | tail -1)"
 check "c-rescue"      "OK"            "$(timeout 30 /bin/test_rescue 2>&1 | tail -1)"
 check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail -1)"
+# KVM (arch/x86_64/kvm.c, vmx.c): a real-mode guest through /dev/kvm. It needs VMX
+# in the test VM's CPU (make test with -cpu host on a VT-x host); without it SKIP.
+kvm_out="$(timeout 30 /bin/test_kvm 2>&1)"
+if [ "$kvm_out" = "SKIP" ]; then
+    echo "SKIP: c-kvm (no VMX)"
+else
+    [ "$(echo "$kvm_out" | tail -1)" = "OK" ] || echo "$kvm_out" | head -20
+    check "c-kvm"     "OK"            "$(echo "$kvm_out" | tail -1)"
+fi
 check "c-peercred"    "OK"            "$(timeout 10 /bin/test_peercred 2>&1 | tail -1)"
 check "c-inputsrc"     "OK"            "$(timeout 20 /bin/test_inputsrc 2>&1 </dev/null | tail -1)"
 check "c-mediakeys"    "OK"            "$(timeout 20 /bin/test_mediakeys 2>&1 </dev/null | tail -1)"

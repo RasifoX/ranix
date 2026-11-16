@@ -71,6 +71,10 @@ int         vm_handle_fault(uint64_t vaddr, int is_write);   /* as from interrup
 int         vm_handle_fault_irq(uint64_t vaddr, int is_write, int irqs_on);
 void        vm_fault_quiet(int on);   /* no error log for an expected kernel fault */
 size_t      vm_access_remote(vm_space_t *vs, uint64_t va, void *kbuf, size_t n, int write);
+/* A page of the caller's space held for a device that reaches it by physical
+ * address (KVM guest memory): physical address or 0. Unpin with the same space. */
+uint64_t    vm_pin_user_page(uint64_t va, int write);
+void        vm_unpin_user_page(vm_space_t *vs, uint64_t pa);
 
 /* arch-specific: load page table into hardware. asid is the address space's
  * TLB tag on aarch64 (0 forces a flush); ignored on x86_64. */

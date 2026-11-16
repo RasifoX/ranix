@@ -14,6 +14,7 @@
 #include <kernel/pstore.h>
 #include <kernel/init.h>
 #include <asm/cpu.h>
+#include <asm/kvm.h>
 #include <kernel/sound.h>
 
 static board_config_t config = {
@@ -83,6 +84,7 @@ void board_drivers_register(void)
 	acpi_button_start();       /* power button; the SCI (ranix.sci=1) needs the EC's board known */
 	arch_sleep_init();         /* suspend: what blocks S3, /proc/hwdiag power sleep */
 	ec_keys_init();            /* its events (keys, power, lid); off unless asked for */
+	kvm_init();                /* /dev/kvm when the CPU has VT-x with EPT */
 }
 
 board_config_t *board_get_config(void) { return &config; }
