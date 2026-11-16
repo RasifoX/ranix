@@ -34,6 +34,10 @@
  * does for VGA): the pages the guest wrote, not the one it only read, and after
  * KVM_GET_DIRTY_LOG only the pages written since.
  *
+ * A fifth VM stores into device memory with REP STOSW forwards and REP STOSB
+ * backwards (a VGA BIOS clears its text screen so): one MMIO write per element,
+ * DI and CX as the CPU leaves them.
+ *
  * Prints OK, or SKIP where the CPU has no VMX (or is not x86), else FAIL lines. */
 #include <stdio.h>
 #include <stdint.h>
@@ -421,6 +425,83 @@ out:
 	munmap(mem, MEM_SIZE);
 }
 
+/* The STOS guest, at 0x1000: ES at 0x20000 (no slot there), three words
+ * forwards from 0, then two bytes backwards from 4. */
+extern const unsigned char guests_start[], guests_end[];
+__asm__(
+	".pushsection .rodata\n"
+	".globl guests_start, guests_end\n"
+	"guests_start:\n"
+	".code16\n"
+	"	mov $0x2000, %ax\n"
+	"	mov %ax, %es\n"
+	"	xor %di, %di\n"
+	"	mov $3, %cx\n"
+	"	mov $0x1234, %ax\n"
+	"	cld\n"
+	"	rep stosw\n"
+	"	mov $4, %di\n"
+	"	mov $2, %cx\n"
+	"	mov $0x55, %al\n"
+	"	std\n"
+	"	rep stosb\n"
+	"	cld\n"
+	"	hlt\n"
+	".code64\n"
+	"guests_end:\n"
+	".popsection\n");
+
+static void test_stos(int kvm)
+{
+	int vm = ioctl(kvm, KVM_CREATE_VM, 0);
+	if (vm < 0) { FAIL("stos: KVM_CREATE_VM: %s", strerror(errno)); return; }
+	uint8_t *mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mem == MAP_FAILED) { FAIL("stos: mmap"); close(vm); return; }
+	memcpy(mem + 0x1000, guests_start, (size_t)(guests_end - guests_start));
+	if (set_slot(vm, 0, 0, MEM_SIZE, mem) != 0) { FAIL("stos: slot: %s", strerror(errno)); goto out; }
+	int vcpu = ioctl(vm, KVM_CREATE_VCPU, 0);
+	int msz = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
+	struct kvm_run *run = vcpu < 0 ? MAP_FAILED : mmap(NULL, (size_t)msz, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu, 0);
+	if (run == MAP_FAILED) { FAIL("stos: vcpu"); goto out; }
+	struct kvm_sregs sregs;
+	ioctl(vcpu, KVM_GET_SREGS, &sregs);
+	sregs.cs.selector = 0; sregs.cs.base = 0;
+	ioctl(vcpu, KVM_SET_SREGS, &sregs);
+	struct kvm_regs regs; memset(&regs, 0, sizeof(regs));
+	regs.rip = 0x1000; regs.rflags = 0x2;
+	ioctl(vcpu, KVM_SET_REGS, &regs);
+	static const struct { uint64_t addr; uint32_t len; uint32_t val; } want[] = {
+		{ 0x20000, 2, 0x1234 }, { 0x20002, 2, 0x1234 }, { 0x20004, 2, 0x1234 },
+		{ 0x20004, 1, 0x55 }, { 0x20003, 1, 0x55 },
+	};
+	unsigned got = 0;
+	for (int i = 0; i < 50; i++) {
+		if (ioctl(vcpu, KVM_RUN, 0) != 0) { FAIL("stos: KVM_RUN: %s", strerror(errno)); break; }
+		if (run->exit_reason == KVM_EXIT_HLT) break;
+		if (run->exit_reason != KVM_EXIT_MMIO) {
+			FAIL("stos: exit %u (data %llx %llx)", run->exit_reason,
+			     (unsigned long long)run->internal.data[0], (unsigned long long)run->internal.data[1]);
+			break;
+		}
+		uint32_t v = 0;
+		memcpy(&v, run->mmio.data, run->mmio.len < 4 ? run->mmio.len : 4);
+		if (got >= 5 || !run->mmio.is_write || run->mmio.phys_addr != want[got].addr ||
+		    run->mmio.len != want[got].len || v != want[got].val)
+			FAIL("stos: write %u: addr %llx len %u val %x write %d", got,
+			     (unsigned long long)run->mmio.phys_addr, run->mmio.len, v, run->mmio.is_write);
+		got++;
+	}
+	if (got != 5) FAIL("stos: %u writes, want 5", got);
+	ioctl(vcpu, KVM_GET_REGS, &regs);
+	if ((regs.rdi & 0xFFFF) != 2 || (regs.rcx & 0xFFFF) != 0)
+		FAIL("stos: di %llx cx %llx, want 2 0", (unsigned long long)regs.rdi, (unsigned long long)regs.rcx);
+	munmap(run, (size_t)msz);
+	close(vcpu);
+out:
+	close(vm);
+	munmap(mem, MEM_SIZE);
+}
+
 /* KVM_GET_SUPPORTED_CPUID, the MSR index list: what a VMM reads first */
 static void test_tables(int kvm)
 {
@@ -777,6 +858,7 @@ int main(void)
 	test_guest2(kvm);
 	test_apic(kvm);
 	test_dirty_log(kvm);
+	test_stos(kvm);
 	close(kvm);
 	printf(fails ? "FAILED %d\n" : "OK\n", fails);
 	return fails != 0;

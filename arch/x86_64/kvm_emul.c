@@ -15,8 +15,10 @@
  * and the read-modify-writes a compiler makes of "reg |= bit" (ADD OR AND SUB
  * XOR CMP TEST, register and immediate forms), flags included: done here for
  * the vcpu's own APIC, and for the VMM's devices as a load to userspace, then
- * at the next KVM_RUN the store (Linux's KVM does the same two trips). A
- * string move is refused (the VMM sees an internal error with the instruction
+ * at the next KVM_RUN the store (Linux's KVM does the same two trips). STOS
+ * (with REP: a BIOS clearing VGA text memory) goes out one element per exit,
+ * the instruction run again until the count is spent, as Linux's KVM does.
+ * MOVS is refused (the VMM sees an internal error with the instruction
  * bytes), which names what to add.
  *
  * Fetching the instruction needs the guest's own page tables: the four paging
@@ -234,6 +236,55 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 	return 0;
 }
 
+/* STOS (AA, AB) whose element at gpa hit no memory slot: one element goes out
+ * as an MMIO write; DI moves and, with REP, CX counts down; the instruction
+ * runs again (RIP stays) until CX is 0, so each further element that is device
+ * memory exits here and one that is RAM the CPU stores itself. 1: an MMIO
+ * write is in run; 2: nothing to store (REP with CX 0), back to the guest;
+ * 0: not a STOS. */
+static int mmio_stos(kvm_vcpu_t *v, const uint8_t *b, int n, uint64_t gpa)
+{
+	uint32_t cs_ar = (uint32_t)vmread(GUEST_ES_AR + 2 * SEG_CS);
+	int long64 = (v->efer & EFER_LMA) && (cs_ar & (1U << 13));
+	int def32 = long64 || ((v->cr0 & 1) && (cs_ar & (1U << 14)));
+	int osz = def32 ? 4 : 2, asz = long64 ? 8 : (def32 ? 4 : 2), rep = 0, i = 0;
+	for (; i < n; i++) {
+		uint8_t p = b[i];
+		if (p == 0x66) osz = def32 ? 2 : 4;
+		else if (p == 0x67) asz = long64 ? 4 : (def32 ? 2 : 4);
+		else if (p == 0xF3 || p == 0xF2) rep = 1;   /* F2 is REP too for STOS */
+		else if (p == 0x26 || p == 0x2E || p == 0x36 || p == 0x3E || p == 0x64 || p == 0x65) continue;   /* ES is fixed */
+		else break;
+	}
+	if (long64 && i < n && (b[i] & 0xF0) == 0x40) { if (b[i] & 8) osz = 8; i++; }
+	if (i >= n || (b[i] != 0xAA && b[i] != 0xAB)) return 0;
+	int size = b[i] == 0xAA ? 1 : osz, len = i + 1;
+	uint64_t amask = asz == 8 ? ~0ULL : asz == 4 ? 0xFFFFFFFFULL : 0xFFFFULL;
+	struct kvm_run *run = v->run;
+	uint64_t cx = v->g.r[R_CX] & amask;
+	if (rep && cx == 0) {                          /* nothing to store: only RIP moves */
+		vmwrite(GUEST_RIP, vmread(GUEST_RIP) + (uint64_t)len);
+		return 2;
+	}
+	uint64_t val = v->g.r[R_AX];
+	int down = (vmread(GUEST_RFLAGS) >> 10) & 1;   /* DF */
+	uint64_t di = ((v->g.r[R_DI] & amask) + (down ? -(uint64_t)size : (uint64_t)size)) & amask;
+	/* a 32-bit address zero-extends into RDI; a 16-bit one keeps the rest */
+	v->g.r[R_DI] = asz == 2 ? (v->g.r[R_DI] & ~0xFFFFULL) | di : di;
+	if (rep) {
+		cx = (cx - 1) & amask;
+		v->g.r[R_CX] = asz == 2 ? (v->g.r[R_CX] & ~0xFFFFULL) | cx : cx;
+	}
+	if (!rep || cx == 0) vmwrite(GUEST_RIP, vmread(GUEST_RIP) + (uint64_t)len);
+	run->exit_reason = KVM_EXIT_MMIO;
+	run->mmio.phys_addr = gpa;
+	run->mmio.len = (uint32_t)size;
+	run->mmio.is_write = 1;
+	memset(run->mmio.data, 0, sizeof(run->mmio.data));
+	memcpy(run->mmio.data, &val, (size_t)size);
+	return 1;
+}
+
 static uint64_t reg_read(kvm_vcpu_t *v, const kvm_mmio_t *d)
 {
 	if (d->reg < 0) return d->imm;
@@ -251,6 +302,13 @@ int kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa)
 	if (r == -EAGAIN) return KVM_MMIO_RETRY;   /* map the code page, run the access again */
 	struct kvm_run *run = v->run;
 	kvm_mmio_t d;
+	int st = r ? 0 : mmio_stos(v, b, n, gpa);
+	if (st == 2) return KVM_MMIO_GUEST;
+	if (st == 1) {
+		uint64_t val = 0;
+		memcpy(&val, run->mmio.data, run->mmio.len);
+		return kvm_ioeventfd_hit(v->vm, 0, gpa, run->mmio.len, val) ? KVM_MMIO_GUEST : KVM_MMIO_USER;
+	}
 	if (r || decode(v, b, n, &d)) {
 		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 		run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
