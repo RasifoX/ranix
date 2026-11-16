@@ -16,10 +16,11 @@
  * XOR CMP TEST, register and immediate forms), flags included: done here for
  * the vcpu's own APIC, and for the VMM's devices as a load to userspace, then
  * at the next KVM_RUN the store (Linux's KVM does the same two trips). STOS
- * (with REP: a BIOS clearing VGA text memory) goes out one element per exit,
- * the instruction run again until the count is spent, as Linux's KVM does.
- * MOVS is refused (the VMM sees an internal error with the instruction
- * bytes), which names what to add.
+ * and MOVS from RAM (with REP: a BIOS clearing VGA text memory, copying a font
+ * into it) go out one element per exit, the instruction run again until the
+ * count is spent, as Linux's KVM does. Anything else (a MOVS whose source is
+ * device memory) is refused: the VMM sees an internal error with the
+ * instruction bytes, which names what to add.
  *
  * Fetching the instruction needs the guest's own page tables: the four paging
  * modes are walked for translation only (the guest just ran the instruction,
@@ -169,6 +170,7 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 		case 0x80: d->write = 1; d->size = 1; imm_bytes = 1; group = 1; break;
 		case 0x81: d->write = 1; d->size = (uint8_t)osz; imm_bytes = osz == 2 ? 2 : 4; group = 1; break;
 		case 0x83: d->write = 1; d->size = (uint8_t)osz; imm_bytes = 1; group = 1; break;
+		case 0xF6: d->size = 1; imm_bytes = 1; group = 2; break;                    /* TEST r/m8, imm8 */
 		case 0xF7: d->size = (uint8_t)osz; imm_bytes = osz == 2 ? 2 : 4; group = 2; break;
 		case 0x88: d->write = 1; d->size = 1; break;
 		case 0x89: d->write = 1; d->size = (uint8_t)osz; break;
@@ -202,7 +204,7 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 		if (mod == 3) return -1;   /* a register operand: not a memory access */
 		if ((op == 0xC6 || op == 0xC7) && !two && reg != 0) return -1;
 		if (group == 1) d->alu = (int8_t)reg;
-		if (group == 2) { if (reg != 0) return -1; d->alu = 8; }   /* only F7 /0, TEST r/m, imm */
+		if (group == 2) { if (reg != 0) return -1; d->alu = 8; }   /* only F6/F7 /0, TEST r/m, imm */
 		d->reg = (int8_t)(reg | ((rex & 4) ? 8 : 0));
 		/* AH, CH, DH, BH: byte registers 4-7 without a REX prefix */
 		if (d->size == 1 && d->reg_size == 1 && !rex && reg >= 4) { d->high8 = 1; d->reg = (int8_t)(reg - 4); }
@@ -236,46 +238,74 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 	return 0;
 }
 
-/* STOS (AA, AB) whose element at gpa hit no memory slot: one element goes out
- * as an MMIO write; DI moves and, with REP, CX counts down; the instruction
- * runs again (RIP stays) until CX is 0, so each further element that is device
- * memory exits here and one that is RAM the CPU stores itself. 1: an MMIO
- * write is in run; 2: nothing to store (REP with CX 0), back to the guest;
- * 0: not a STOS. */
-static int mmio_stos(kvm_vcpu_t *v, const uint8_t *b, int n, uint64_t gpa)
+/* A string store whose element at gpa hit no memory slot: STOS (AA, AB) stores
+ * AL/AX/EAX/RAX; MOVS (A4, A5) copies from seg:SI (DS unless overridden) when
+ * that is guest RAM, as a BIOS copying a font from its ROM into VGA memory. One
+ * element goes out as an MMIO write; SI and DI move and, with REP, CX counts
+ * down; the instruction runs again (RIP stays) until CX is 0, so each further
+ * element that is device memory exits here and one that is RAM the CPU does
+ * itself (Linux's KVM repeats the instruction the same way). A MOVS whose
+ * source is device memory is refused. 1: an MMIO write is in run; 2: nothing
+ * to store (REP with CX 0), back to the guest; 3: map v->prefault and run it
+ * again; 0: not one of these. */
+static int mmio_string(kvm_vcpu_t *v, const uint8_t *b, int n, uint64_t gpa)
 {
 	uint32_t cs_ar = (uint32_t)vmread(GUEST_ES_AR + 2 * SEG_CS);
 	int long64 = (v->efer & EFER_LMA) && (cs_ar & (1U << 13));
 	int def32 = long64 || ((v->cr0 & 1) && (cs_ar & (1U << 14)));
-	int osz = def32 ? 4 : 2, asz = long64 ? 8 : (def32 ? 4 : 2), rep = 0, i = 0;
+	int osz = def32 ? 4 : 2, asz = long64 ? 8 : (def32 ? 4 : 2), rep = 0, i = 0, seg = SEG_DS;
 	for (; i < n; i++) {
 		uint8_t p = b[i];
 		if (p == 0x66) osz = def32 ? 2 : 4;
 		else if (p == 0x67) asz = long64 ? 4 : (def32 ? 2 : 4);
-		else if (p == 0xF3 || p == 0xF2) rep = 1;   /* F2 is REP too for STOS */
-		else if (p == 0x26 || p == 0x2E || p == 0x36 || p == 0x3E || p == 0x64 || p == 0x65) continue;   /* ES is fixed */
+		else if (p == 0xF3 || p == 0xF2) rep = 1;   /* both repeat STOS and MOVS */
+		else if (p == 0x26) seg = SEG_ES;           /* overrides name the MOVS source */
+		else if (p == 0x2E) seg = SEG_CS;
+		else if (p == 0x36) seg = SEG_SS;
+		else if (p == 0x3E) seg = SEG_DS;
+		else if (p == 0x64) seg = SEG_FS;
+		else if (p == 0x65) seg = SEG_GS;
 		else break;
 	}
 	if (long64 && i < n && (b[i] & 0xF0) == 0x40) { if (b[i] & 8) osz = 8; i++; }
-	if (i >= n || (b[i] != 0xAA && b[i] != 0xAB)) return 0;
-	int size = b[i] == 0xAA ? 1 : osz, len = i + 1;
+	if (i >= n) return 0;
+	uint8_t op = b[i];
+	if (op != 0xAA && op != 0xAB && op != 0xA4 && op != 0xA5) return 0;
+	int movs = op == 0xA4 || op == 0xA5;
+	int size = (op == 0xAA || op == 0xA4) ? 1 : osz, len = i + 1;
 	uint64_t amask = asz == 8 ? ~0ULL : asz == 4 ? 0xFFFFFFFFULL : 0xFFFFULL;
-	struct kvm_run *run = v->run;
 	uint64_t cx = v->g.r[R_CX] & amask;
-	if (rep && cx == 0) {                          /* nothing to store: only RIP moves */
+	if (rep && cx == 0) {                          /* nothing to do: only RIP moves */
 		vmwrite(GUEST_RIP, vmread(GUEST_RIP) + (uint64_t)len);
 		return 2;
 	}
 	uint64_t val = v->g.r[R_AX];
-	int down = (vmread(GUEST_RFLAGS) >> 10) & 1;   /* DF */
-	uint64_t di = ((v->g.r[R_DI] & amask) + (down ? -(uint64_t)size : (uint64_t)size)) & amask;
-	/* a 32-bit address zero-extends into RDI; a 16-bit one keeps the rest */
-	v->g.r[R_DI] = asz == 2 ? (v->g.r[R_DI] & ~0xFFFFULL) | di : di;
-	if (rep) {
-		cx = (cx - 1) & amask;
-		v->g.r[R_CX] = asz == 2 ? (v->g.r[R_CX] & ~0xFFFFULL) | cx : cx;
+	if (movs) {
+		/* the fault must be the destination; the source is read from guest RAM */
+		uint64_t dla = (long64 ? 0 : vmread(GUEST_ES_BASE)) + (v->g.r[R_DI] & amask), dgpa, sgpa;
+		uint64_t sbase = long64 && seg != SEG_FS && seg != SEG_GS ? 0 : vmread(GUEST_ES_BASE + 2 * seg);
+		int r = walk(v, dla, &dgpa);
+		if (r == -EAGAIN) return 3;
+		if (r || (dgpa >> 12) != (gpa >> 12)) return 0;   /* the source is the device: refused */
+		r = walk(v, sbase + (v->g.r[R_SI] & amask), &sgpa);
+		if (r == -EAGAIN) return 3;
+		if (r || kvm_slot_present(v->vm, sgpa) != 1) return 0;
+		val = 0;
+		r = kvm_gpa_read(v->vm, sgpa, &val, (size_t)size, &v->prefault);
+		if (r == -EAGAIN) return 3;
+		if (r) return 0;
 	}
-	if (!rep || cx == 0) vmwrite(GUEST_RIP, vmread(GUEST_RIP) + (uint64_t)len);
+	int down = (vmread(GUEST_RFLAGS) >> 10) & 1;   /* DF */
+	uint64_t step = down ? -(uint64_t)size : (uint64_t)size;
+	/* a 32-bit address zero-extends into the register; a 16-bit one keeps the rest */
+#define STR_ADVANCE(R, by) do { uint64_t x_ = ((v->g.r[R] & amask) + (by)) & amask; \
+		v->g.r[R] = asz == 2 ? (v->g.r[R] & ~0xFFFFULL) | x_ : x_; } while (0)
+	STR_ADVANCE(R_DI, step);
+	if (movs) STR_ADVANCE(R_SI, step);
+	if (rep) STR_ADVANCE(R_CX, (uint64_t)-1);
+#undef STR_ADVANCE
+	if (!rep || (v->g.r[R_CX] & amask) == 0) vmwrite(GUEST_RIP, vmread(GUEST_RIP) + (uint64_t)len);
+	struct kvm_run *run = v->run;
 	run->exit_reason = KVM_EXIT_MMIO;
 	run->mmio.phys_addr = gpa;
 	run->mmio.len = (uint32_t)size;
@@ -302,8 +332,9 @@ int kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa)
 	if (r == -EAGAIN) return KVM_MMIO_RETRY;   /* map the code page, run the access again */
 	struct kvm_run *run = v->run;
 	kvm_mmio_t d;
-	int st = r ? 0 : mmio_stos(v, b, n, gpa);
+	int st = r ? 0 : mmio_string(v, b, n, gpa);
 	if (st == 2) return KVM_MMIO_GUEST;
+	if (st == 3) return KVM_MMIO_RETRY;
 	if (st == 1) {
 		uint64_t val = 0;
 		memcpy(&val, run->mmio.data, run->mmio.len);
