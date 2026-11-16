@@ -11,9 +11,13 @@
  * (kvm_mmio_finish).
  *
  * Only the instructions compilers emit for device registers are decoded: MOV
- * in its register, immediate and accumulator/offset forms, and MOVZX/MOVSX. A
- * string move or a read-modify-write to device memory is refused (the VMM sees
- * an internal error with the instruction bytes), which names what to add.
+ * in its register, immediate and accumulator/offset forms, and MOVZX/MOVSX;
+ * and the read-modify-writes a compiler makes of "reg |= bit" (ADD OR AND SUB
+ * XOR CMP TEST, register and immediate forms), flags included: done here for
+ * the vcpu's own APIC, and for the VMM's devices as a load to userspace, then
+ * at the next KVM_RUN the store (Linux's KVM does the same two trips). A
+ * string move is refused (the VMM sees an internal error with the instruction
+ * bytes), which names what to add.
  *
  * Fetching the instruction needs the guest's own page tables: the four paging
  * modes are walked for translation only (the guest just ran the instruction,
@@ -140,10 +144,30 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 		two = 1;
 		op = b[i++];
 	}
-	int has_modrm = 1, imm_bytes = 0;
+	int has_modrm = 1, imm_bytes = 0, group = 0;   /* group: the ModRM reg field is the operation */
 	d->reg_size = (uint8_t)osz;
+	d->alu = -1;
+	d->to_reg = 0;
 	if (!two) {
 		switch (op) {
+		case 0x01: case 0x09: case 0x21: case 0x29: case 0x31: case 0x39:   /* op r/m, reg */
+			d->alu = (int8_t)(op >> 3);
+			d->write = 1;
+			d->size = (uint8_t)osz;
+			break;
+		case 0x03: case 0x0B: case 0x13: case 0x1B: case 0x23: case 0x2B: case 0x33: case 0x3B:
+			d->alu = (int8_t)(op >> 3);                                    /* op reg, r/m */
+			d->to_reg = 1;
+			d->size = (uint8_t)osz;
+			break;
+		case 0x85:                                                         /* TEST r/m, reg */
+			d->alu = 8;
+			d->size = (uint8_t)osz;
+			break;
+		case 0x80: d->write = 1; d->size = 1; imm_bytes = 1; group = 1; break;
+		case 0x81: d->write = 1; d->size = (uint8_t)osz; imm_bytes = osz == 2 ? 2 : 4; group = 1; break;
+		case 0x83: d->write = 1; d->size = (uint8_t)osz; imm_bytes = 1; group = 1; break;
+		case 0xF7: d->size = (uint8_t)osz; imm_bytes = osz == 2 ? 2 : 4; group = 2; break;
 		case 0x88: d->write = 1; d->size = 1; break;
 		case 0x89: d->write = 1; d->size = (uint8_t)osz; break;
 		case 0x8A: d->size = 1; d->reg_size = 1; break;
@@ -175,6 +199,8 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 		int mod = m >> 6, reg = (m >> 3) & 7, rm = m & 7;
 		if (mod == 3) return -1;   /* a register operand: not a memory access */
 		if ((op == 0xC6 || op == 0xC7) && !two && reg != 0) return -1;
+		if (group == 1) d->alu = (int8_t)reg;
+		if (group == 2) { if (reg != 0) return -1; d->alu = 8; }   /* only F7 /0, TEST r/m, imm */
 		d->reg = (int8_t)(reg | ((rex & 4) ? 8 : 0));
 		/* AH, CH, DH, BH: byte registers 4-7 without a REX prefix */
 		if (d->size == 1 && d->reg_size == 1 && !rex && reg >= 4) { d->high8 = 1; d->reg = (int8_t)(reg - 4); }
@@ -196,6 +222,7 @@ static int decode(kvm_vcpu_t *v, const uint8_t *b, int n, kvm_mmio_t *d)
 		uint64_t imm = 0;
 		memcpy(&imm, b + i, (size_t)imm_bytes);
 		if (imm_bytes == 4 && d->size == 8) imm = (uint64_t)(int64_t)(int32_t)imm;
+		if (imm_bytes == 1 && op == 0x83) imm = (uint64_t)(int64_t)(int8_t)imm;   /* sign-extended */
 		d->imm = imm;
 		d->reg = -1;
 		i += imm_bytes;
@@ -238,7 +265,14 @@ int kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa)
 	run->mmio.len = d.size;
 	run->mmio.is_write = d.write;
 	memset(run->mmio.data, 0, sizeof(run->mmio.data));
-	if (d.write) {
+	if (d.alu >= 0) {   /* the load now; the store, if any, from kvm_mmio_finish */
+		v->rmw_gpa = gpa;
+		v->rmw_src = reg_read(v, &d);
+		v->rmw_flags = vmread(GUEST_RFLAGS);
+		run->mmio.is_write = 0;
+		v->mmio = d;
+		v->mmio_pending = 1;
+	} else if (d.write) {
 		uint64_t val = reg_read(v, &d);
 		if (kvm_ioeventfd_hit(v->vm, 0, gpa, d.size, val)) {
 			vmwrite(GUEST_RIP, vmread(GUEST_RIP) + d.len);
@@ -254,6 +288,7 @@ int kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa)
 }
 
 static void load_reg(kvm_vcpu_t *v, const kvm_mmio_t *d, uint64_t val);
+static uint64_t alu_op(int op, uint64_t a, uint64_t b, int size, uint64_t *flags);
 
 /* KVM_RUN after a load: put userspace's data in the register */
 void kvm_mmio_finish(kvm_vcpu_t *v)
@@ -262,7 +297,71 @@ void kvm_mmio_finish(kvm_vcpu_t *v)
 	v->mmio_pending = 0;
 	uint64_t val = 0;
 	memcpy(&val, v->run->mmio.data, v->mmio.size);
-	load_reg(v, &v->mmio, val);
+	if (v->mmio.alu < 0) { load_reg(v, &v->mmio, val); return; }
+	v->rmw_flags_set = 1;
+	if (v->mmio.to_reg) {   /* "op mem, %reg": the result is the register's */
+		uint64_t res = alu_op(v->mmio.alu, v->rmw_src, val, v->mmio.size, &v->rmw_flags);
+		if (v->mmio.alu != 7) load_reg(v, &v->mmio, res);
+		return;
+	}
+	v->rmw_val = alu_op(v->mmio.alu, val, v->rmw_src, v->mmio.size, &v->rmw_flags);
+	v->rmw_store = v->mmio.alu != 7 && v->mmio.alu != 8;   /* CMP and TEST only read */
+}
+
+int kvm_mmio_rmw_store(kvm_vcpu_t *v)
+{
+	if (!v->rmw_store) return 0;
+	v->rmw_store = 0;
+	struct kvm_run *run = v->run;
+	run->exit_reason = KVM_EXIT_MMIO;
+	run->mmio.phys_addr = v->rmw_gpa;
+	run->mmio.len = v->mmio.size;
+	run->mmio.is_write = 1;
+	memset(run->mmio.data, 0, sizeof(run->mmio.data));
+	memcpy(run->mmio.data, &v->rmw_val, v->mmio.size);
+	return 1;
+}
+
+void kvm_mmio_flags(kvm_vcpu_t *v)
+{
+	if (!v->rmw_flags_set) return;
+	v->rmw_flags_set = 0;
+	vmwrite(GUEST_RFLAGS, v->rmw_flags);
+}
+
+/* a op b at size bytes, with the arithmetic flags in *flags as the CPU sets
+ * them (SDM Vol. 1 3.4.3.1). ADC and SBB take CF from *flags. */
+static uint64_t alu_op(int op, uint64_t a, uint64_t b, int size, uint64_t *flags)
+{
+	uint64_t mask = size >= 8 ? ~0ULL : (1ULL << (8 * size)) - 1, sign = 1ULL << (8 * size - 1);
+	uint64_t cf_in = *flags & 1, r;
+	a &= mask;
+	b &= mask;
+	int arith = 1;
+	switch (op) {
+	case 0: r = a + b; break;
+	case 2: r = a + b + cf_in; break;
+	case 3: r = a - b - cf_in; break;
+	case 5: case 7: r = a - b; break;
+	case 1: r = a | b; arith = 0; break;
+	case 6: r = a ^ b; arith = 0; break;
+	default: r = a & b; arith = 0; break;   /* AND, TEST */
+	}
+	r &= mask;
+	uint64_t f = *flags & ~0x8D5ULL;   /* CF PF AF ZF SF OF */
+	if (arith) {
+		int sub = op == 3 || op == 5 || op == 7;
+		int cf = sub ? (a < b || (op == 3 && cf_in && a == b)) : (r < a || (op == 2 && cf_in && r == a));
+		int of = sub ? (((a ^ b) & (a ^ r) & sign) != 0) : (((a ^ r) & (b ^ r) & sign) != 0);
+		if (cf) f |= 1;
+		if (of) f |= 1ULL << 11;
+		if ((a ^ b ^ r) & 0x10) f |= 1ULL << 4;
+	}
+	if (!r) f |= 1ULL << 6;
+	if (r & sign) f |= 1ULL << 7;
+	if (!(__builtin_popcount((unsigned)(r & 0xFF)) & 1)) f |= 1ULL << 2;
+	*flags = f;
+	return r;
 }
 
 /* An access to the vcpu's own APIC page, done here: a load lands in its
@@ -275,7 +374,7 @@ int kvm_mmio_apic(kvm_vcpu_t *v, uint64_t gpa)
 	int r = fetch(v, b, &n);
 	if (r == -EAGAIN) return KVM_MMIO_RETRY;
 	kvm_mmio_t d;
-	if (r || decode(v, b, n, &d) || d.size > 4) {
+	if (r || decode(v, b, n, &d) || d.size > 4 || (d.alu >= 0 && d.size != 4)) {
 		struct kvm_run *run = v->run;
 		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 		run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
@@ -286,11 +385,25 @@ int kvm_mmio_apic(kvm_vcpu_t *v, uint64_t gpa)
 	}
 	uint32_t off = (uint32_t)(gpa & 0xFFF);
 	vmwrite(GUEST_RIP, vmread(GUEST_RIP) + d.len);
-	if (!d.write) {
+	if (!d.write && d.alu < 0) {
 		load_reg(v, &d, kvm_lapic_read(v, off));
 		return KVM_MMIO_GUEST;
 	}
-	int vec = kvm_lapic_write(v, off, (uint32_t)reg_read(v, &d));
+	uint32_t val = (uint32_t)reg_read(v, &d);
+	if (d.alu >= 0 && d.to_reg) {   /* the register is the destination */
+		uint64_t flags = vmread(GUEST_RFLAGS);
+		uint64_t res = alu_op(d.alu, val, kvm_lapic_read(v, off), d.size, &flags);
+		vmwrite(GUEST_RFLAGS, flags);
+		if (d.alu != 7) load_reg(v, &d, res);
+		return KVM_MMIO_GUEST;
+	}
+	if (d.alu >= 0) {
+		uint64_t flags = vmread(GUEST_RFLAGS);
+		val = (uint32_t)alu_op(d.alu, kvm_lapic_read(v, off), val, d.size, &flags);
+		vmwrite(GUEST_RFLAGS, flags);
+		if (d.alu == 7 || d.alu == 8) return KVM_MMIO_GUEST;   /* CMP, TEST: flags only */
+	}
+	int vec = kvm_lapic_write(v, off, val);
 	if (vec < 0) return KVM_MMIO_GUEST;
 	v->run->exit_reason = KVM_EXIT_IOAPIC_EOI;
 	v->run->eoi.vector = (uint8_t)vec;

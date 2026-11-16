@@ -88,6 +88,8 @@ typedef struct kvm_mmio {
 	uint8_t  reg_size;   /* bytes of the register a load writes */
 	uint8_t  high8;      /* AH CH DH BH */
 	int8_t   reg;        /* register number, -1: the immediate */
+	int8_t   alu;        /* -1 a move; else read-modify-write: ADD OR ADC SBB AND SUB XOR CMP, 8 TEST */
+	uint8_t  to_reg;     /* the ALU result goes to the register ("sub mem, %reg"), not memory */
 	uint64_t imm;
 } kvm_mmio_t;
 
@@ -106,6 +108,11 @@ typedef struct kvm_vcpu {
 	uint32_t    pio_in;      /* an IN is waiting for userspace's data: its size */
 	uint64_t    prefault;    /* guest-physical page to map before the next entry, or ~0 */
 	kvm_mmio_t  mmio;        /* a load waiting for userspace's data, when mmio_pending */
+	/* a read-modify-write of device memory: the load went out, then the
+	 * store goes out at the next KVM_RUN; its flags reach RFLAGS at the next
+	 * entry (kvm_mmio_finish, kvm_mmio_flags) */
+	uint64_t    rmw_gpa, rmw_src, rmw_val, rmw_flags;
+	uint8_t     rmw_store, rmw_flags_set;
 	/* an INS waiting for userspace's data: where its elements go */
 	uint64_t    ins_gpa;     /* the lowest address of the block */
 	uint32_t    ins_bytes;   /* 0: none */
@@ -179,6 +186,8 @@ int  kvm_msr_index_list(struct kvm_msr_list *ul);
 #define KVM_MMIO_USER_ERROR 3   /* not emulated: an internal error for userspace */
 int  kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa);
 void kvm_mmio_finish(kvm_vcpu_t *v);
+int  kvm_mmio_rmw_store(kvm_vcpu_t *v);   /* 1: the store of a read-modify-write goes out now */
+void kvm_mmio_flags(kvm_vcpu_t *v);       /* VMCS loaded: its flags into RFLAGS */
 int  kvm_pio_string(kvm_vcpu_t *v, uint64_t qual);   /* INS/OUTS exit: KVM_MMIO_* */
 int  kvm_mmio_apic(kvm_vcpu_t *v, uint64_t gpa);      /* an access to the APIC page: KVM_MMIO_* */
 int  kvm_pio_string_finish(kvm_vcpu_t *v);           /* KVM_RUN after INS: may sleep */

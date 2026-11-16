@@ -14,8 +14,9 @@
  * from another address space, immediate_exit.
  *
  * A second guest covers what a VMM such as QEMU needs: CPUID from the table
- * KVM_SET_CPUID2 gave, RDMSR/WRMSR against KVM_GET/SET_MSRS, a store and a load
- * to device memory (KVM_EXIT_MMIO, both decoded forms), a port write an
+ * KVM_SET_CPUID2 gave, RDMSR/WRMSR against KVM_GET/SET_MSRS, a store, a load and
+ * an OR to device memory (KVM_EXIT_MMIO; the OR as its load, then its store), a
+ * port write an
  * ioeventfd takes without an exit, REP OUTS forwards and backwards and REP INS,
  * and an interrupt injected with
  * KVM_INTERRUPT after HLT, served by the guest's real-mode handler. Also
@@ -23,7 +24,8 @@
  * events round trips.
  *
  * A third VM has its local APICs in the kernel (KVM_CAP_SPLIT_IRQCHIP), moved
- * to 0xF0000 so real-mode code reaches them: the APIC timer wakes a HLT, an MSI
+ * to 0xF0000 so real-mode code reaches them: OR, TEST and ADD-from on an APIC
+ * register (read-modify-writes done in the kernel), the APIC timer wakes a HLT, an MSI
  * from KVM_SIGNAL_MSI and one from an irqfd are taken, an INIT level de-assert
  * sent to everyone leaves the sender running, and INIT then SIPI start the
  * second vcpu (waiting in KVM_RUN on its own thread) at the SIPI's page.
@@ -98,6 +100,7 @@ __asm__(
 	"	mov %ax, %ds\n"
 	"	movb $0x5A, 0x10\n"              /* MMIO store, immediate */
 	"	mov 0x20, %bx\n"                 /* MMIO load, 16 bits */
+	"	orw $0x101, 0x30\n"              /* MMIO read-modify-write: load, then store */
 	"	xor %ax, %ax\n"
 	"	mov %ax, %ds\n"
 	"	mov %bx, %ax\n"
@@ -141,7 +144,17 @@ __asm__(
 	".code16\n"
 	"	mov $0xF000, %ax\n"
 	"	mov %ax, %ds\n"
-	"	movl $0x1FF, 0xF0\n"             /* SVR: on, spurious vector 0xFF */
+	"	movl $0xFF, 0xF0\n"              /* SVR: spurious vector 0xFF, */
+	"	orl $0x100, 0xF0\n"              /* on, as a read-modify-write */
+	"	testl $0x100, 0xF0\n"            /* and its flags */
+	"	jnz 1f\n"
+	"	out %al, $0x3F\n"                /* (TEST said zero) */
+	"1:	xor %ebx, %ebx\n"
+	"	addl 0xF0, %ebx\n"               /* an APIC register as an ALU source */
+	"	cmp $0x1FF, %ebx\n"
+	"	je 2f\n"
+	"	out %al, $0x3E\n"                /* (ADD did not load SVR) */
+	"2:\n"
 	"	movl $0xB, 0x3E0\n"              /* divide by 1 */
 	"	movl $0x30, 0x320\n"             /* timer: vector 0x30, one-shot */
 	"	movl $200000, 0x380\n"           /* 200 us */
@@ -374,6 +387,7 @@ static void run_guest2(int vcpu, struct kvm_run *run, int efd)
 {
 	struct { unsigned port, size, val; } want[] = {
 		{ 0x10, 1, 'R' }, { 0x11, 1, 0x44 }, { 0, 0, 0 } /* MMIO store */, { 1, 0, 0 } /* MMIO load */,
+		{ 7, 0, 0 } /* OR: its load */, { 8, 0, 0 } /* OR: its store */,
 		{ 0x12, 2, 0x1234 }, { 4, 0, 0 } /* OUTS */, { 5, 0, 0 } /* OUTS, DF set */, { 6, 0, 0 } /* INS */,
 		{ 2, 0, 0 } /* HLT, inject */, { 0x14, 1, 0x77 }, { 3, 0, 0 } /* HLT */,
 	};
@@ -429,6 +443,25 @@ static void run_guest2(int vcpu, struct kvm_run *run, int efd)
 		}
 		case 3:
 			if (run->exit_reason != KVM_EXIT_HLT) FAIL("guest2 end: exit %u", run->exit_reason);
+			break;
+		case 7:
+			if (run->exit_reason != KVM_EXIT_MMIO || run->mmio.is_write || run->mmio.phys_addr != 0x20030 ||
+			    run->mmio.len != 2) {
+				FAIL("guest2 OR load: exit %u w%u addr 0x%llx len %u", run->exit_reason, run->mmio.is_write,
+				     (unsigned long long)run->mmio.phys_addr, run->mmio.len);
+				return;
+			}
+			run->mmio.data[0] = 0x00;
+			run->mmio.data[1] = 0x10;
+			break;
+		case 8:
+			if (run->exit_reason != KVM_EXIT_MMIO || !run->mmio.is_write || run->mmio.phys_addr != 0x20030 ||
+			    run->mmio.len != 2 || run->mmio.data[0] != 0x01 || run->mmio.data[1] != 0x11) {
+				FAIL("guest2 OR store: exit %u w%u addr 0x%llx len %u data %02x%02x", run->exit_reason,
+				     run->mmio.is_write, (unsigned long long)run->mmio.phys_addr, run->mmio.len,
+				     run->mmio.data[1], run->mmio.data[0]);
+				return;
+			}
 			break;
 		case 4: case 5: case 6: {
 			static const struct { unsigned port, dir, count; const char *data; } str[] = {

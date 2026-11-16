@@ -931,6 +931,7 @@ static int run_loaded(kvm_vcpu_t *v)
 	if (cpu < 0) return cpu;
 	host_state();
 	kvm_msr_host_save(v);
+	kvm_mmio_flags(v);
 	if (v->apic) apic_events(v);
 	fpu_load(v);
 	v->guest_cpu = cpu;
@@ -1010,6 +1011,7 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 	v->thread = task_current();
 	pio_finish(v);
 	kvm_mmio_finish(v);
+	if (kvm_mmio_rmw_store(v)) return 0;   /* the store half goes to userspace first */
 	int fr = kvm_pio_string_finish(v);
 	if (fr) return fr;
 	if (run->immediate_exit) {
