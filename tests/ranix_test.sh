@@ -225,6 +225,19 @@ psi_io() {
 check "proc-pressure-format" "ok"  "$(psi_fmt)"
 check "proc-pressure-cpu"    "ok"  "$(psi_cpu)"
 check "proc-pressure-io"     "ok"  "$(psi_io)"
+# Many shells exec'ing and closing files on every CPU while the dentry cache
+# drops inodes: a close and the cache must never both free one inode
+# ("kfree bad ptr" / panic, found running this suite in QEMU-KVM inside Ranix).
+close_race() {
+	n=$(grep -c ^processor /proc/cpuinfo)
+	for r in 1 2 3 4 5 6 7 8 9 10; do
+		pids=""
+		for i in $(seq 1 $((n * 3))); do ( end=$(( $(date +%s) + 2 )); while [ $(date +%s) -lt $end ]; do :; done ) & pids="$pids $!"; done
+		wait $pids
+	done
+	dmesg | grep -c "kfree bad\|double free\|use-after-free"
+}
+check "vfs-close-race"   "0"   "$(close_race)"
 check "proc-ino-unique"  "0"       "$(ls -i /proc /proc/net /proc/1 /proc/sys/kernel 2>/dev/null | awk 'NF==2 {print $1}' | sort | uniq -d | wc -l)"
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
 check "dmesg-format"     "0"       "$(dmesg 2>/dev/null | grep -v -c -E '^\[ *[0-9]+\.[0-9]{6}\] [a-z%][a-z0-9_-]{1,15}: [ -~]+$')"

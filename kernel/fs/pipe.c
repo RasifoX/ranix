@@ -223,9 +223,17 @@ out:
     return ret;
 }
 
+/* The pipe's inode is the pipe's own (cached = 1): the last end frees it here.
+ * So no end's file may reach it after this returns: the other end may be
+ * closing on another CPU and free it the moment the lock drops. file->inode is
+ * cleared before that, and fput / vfs_file_put, which run after ->close, see
+ * no inode. (They read it after close: the last close freed the inode, its
+ * memory went to someone else, and fput freed that: "kfree bad ptr", panic.) */
 static int pipe_close(vfs_file_t *file)
 {
     pipe_t *pipe = (pipe_t *)file->inode->priv;
+    vfs_inode_t *inode = file->inode;
+    file->inode = NULL;
     uint64_t f = spin_lock_irq(&pipe->lock);
 
     if ((file->flags & 3) == O_RDONLY) { if (--pipe->readers == 0) pipe->out_gen++; }
@@ -239,7 +247,6 @@ static int pipe_close(vfs_file_t *file)
     if (pipe->readers == 0 && pipe->writers == 0) {
         spin_unlock_irq(&pipe->lock, f);
         pipe_buffer_undo(pipe);
-        vfs_inode_t *inode = file->inode;
         kfree(pipe);
         kfree(inode);
     } else {
