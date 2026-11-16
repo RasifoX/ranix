@@ -13,6 +13,14 @@
  * group, a second VM type, slot and vcpu errors, an unknown ioctl, a vcpu run
  * from another address space, immediate_exit.
  *
+ * A second guest covers what a VMM such as QEMU needs: CPUID from the table
+ * KVM_SET_CPUID2 gave, RDMSR/WRMSR against KVM_GET/SET_MSRS, a store and a load
+ * to device memory (KVM_EXIT_MMIO, both decoded forms), a port write an
+ * ioeventfd takes without an exit, and an interrupt injected with
+ * KVM_INTERRUPT after HLT, served by the guest's real-mode handler. Also
+ * KVM_GET_SUPPORTED_CPUID, the MSR index list, the FPU, XCR0 and vcpu
+ * events round trips.
+ *
  * Prints OK, or SKIP where the CPU has no VMX (or is not x86), else FAIL lines. */
 #include <stdio.h>
 #include <stdint.h>
@@ -24,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/eventfd.h>
 #include <grp.h>
 #include "../include/uapi/kvm.h"
 
@@ -55,6 +64,46 @@ __asm__(
 	"guest16_msg: .asciz \"Ranix KVM\\n\"\n"
 	".code64\n"
 	"guest16_end:\n"
+	".popsection\n");
+
+/* The second guest, also at 0x1000, in 16-bit code with 32-bit registers. */
+extern const unsigned char guest2_start[], guest2_end[];
+__asm__(
+	".pushsection .rodata\n"
+	".globl guest2_start, guest2_end\n"
+	"guest2_start:\n"
+	".code16\n"
+	"	xor %eax, %eax\n"
+	"	cpuid\n"                         /* leaf 0 from the vcpu's table */
+	"	mov %bl, %al\n"
+	"	out %al, $0x10\n"
+	"	mov $0xC0000081, %ecx\n"         /* STAR, set by userspace */
+	"	rdmsr\n"
+	"	mov %dl, %al\n"                  /* STAR bits 39:32 */
+	"	out %al, $0x11\n"
+	"	mov $0xC0000082, %ecx\n"         /* LSTAR, read back by userspace */
+	"	mov $0x66554433, %eax\n"
+	"	mov $0xFFFF8877, %edx\n"         /* canonical, or WRMSR would #GP */
+	"	wrmsr\n"
+	"	mov $0x2000, %ax\n"              /* DS at 0x20000: no memory slot there */
+	"	mov %ax, %ds\n"
+	"	movb $0x5A, 0x10\n"              /* MMIO store, immediate */
+	"	mov 0x20, %bx\n"                 /* MMIO load, 16 bits */
+	"	xor %ax, %ax\n"
+	"	mov %ax, %ds\n"
+	"	mov %bx, %ax\n"
+	"	out %ax, $0x12\n"
+	"	out %al, $0x50\n"                /* the ioeventfd's port */
+	"	sti\n"
+	"	hlt\n"                           /* userspace injects vector 0x20 here */
+	"	cli\n"
+	"	hlt\n"
+	".org guest2_start + 0x800\n"        /* 0x1800: the handler of vector 0x20 */
+	"	mov $0x77, %al\n"
+	"	out %al, $0x14\n"
+	"	iret\n"
+	".code64\n"
+	"guest2_end:\n"
 	".popsection\n");
 
 #define MEM_SIZE 0x10000
@@ -205,6 +254,188 @@ static void test_guest(int kvm)
 	munmap(mem, MEM_SIZE);
 }
 
+/* KVM_GET_SUPPORTED_CPUID, the MSR index list: what a VMM reads first */
+static void test_tables(int kvm)
+{
+	struct { struct kvm_cpuid2 h; struct kvm_cpuid_entry2 e[100]; } c;
+	c.h.nent = 1;
+	expect_errno("supported CPUID into one entry", ioctl(kvm, KVM_GET_SUPPORTED_CPUID, &c), E2BIG);
+	c.h.nent = 100;
+	if (ioctl(kvm, KVM_GET_SUPPORTED_CPUID, &c) != 0) { FAIL("KVM_GET_SUPPORTED_CPUID: %s", strerror(errno)); return; }
+	int leaf1 = 0;
+	for (unsigned i = 0; i < c.h.nent; i++) {
+		if (c.e[i].function != 1) continue;
+		leaf1 = 1;
+		if (c.e[i].ecx & (1U << 5)) FAIL("supported CPUID offers VMX");
+		if (!(c.e[i].ecx & (1U << 31))) FAIL("supported CPUID lacks the hypervisor bit");
+	}
+	if (!leaf1) FAIL("supported CPUID has no leaf 1");
+	struct { struct kvm_msr_list h; uint32_t idx[64]; } l;
+	l.h.nmsrs = 64;
+	if (ioctl(kvm, KVM_GET_MSR_INDEX_LIST, &l) != 0) { FAIL("KVM_GET_MSR_INDEX_LIST: %s", strerror(errno)); return; }
+	int lstar = 0;
+	for (unsigned i = 0; i < l.h.nmsrs; i++) lstar |= l.idx[i] == 0xC0000082;
+	if (!lstar) FAIL("MSR index list without LSTAR");
+}
+
+static int msr_io(int vcpu, unsigned long req, uint32_t idx, uint64_t *val)
+{
+	struct { struct kvm_msrs h; struct kvm_msr_entry e; } m;
+	memset(&m, 0, sizeof(m));
+	m.h.nmsrs = 1;
+	m.e.index = idx;
+	m.e.data = *val;
+	int r = ioctl(vcpu, req, &m);
+	*val = m.e.data;
+	return r;
+}
+
+/* the second guest: one stop at a time, each checked */
+static void run_guest2(int vcpu, struct kvm_run *run, int efd)
+{
+	struct { unsigned port, size, val; } want[] = {
+		{ 0x10, 1, 'R' }, { 0x11, 1, 0x44 }, { 0, 0, 0 } /* MMIO store */, { 1, 0, 0 } /* MMIO load */,
+		{ 0x12, 2, 0x1234 }, { 2, 0, 0 } /* HLT, inject */, { 0x14, 1, 0x77 }, { 3, 0, 0 } /* HLT */,
+	};
+	for (unsigned i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+		if (ioctl(vcpu, KVM_RUN, 0) != 0) { FAIL("guest2 KVM_RUN %u: %s", i, strerror(errno)); return; }
+		if (want[i].size) {
+			if (run->exit_reason != KVM_EXIT_IO) {
+				FAIL("guest2 stop %u: exit %u, want port 0x%x (internal %u %llx %llx)", i, run->exit_reason,
+				     want[i].port, run->internal.suberror, (unsigned long long)run->internal.data[0],
+				     (unsigned long long)run->internal.data[1]);
+				return;
+			}
+			uint8_t *data = (uint8_t *)run + run->io.data_offset;
+			unsigned v = run->io.size == 2 ? (unsigned)(data[0] | data[1] << 8) : data[0];
+			if (run->io.port != want[i].port || run->io.size != want[i].size || v != want[i].val) {
+				FAIL("guest2 stop %u: exit %u port 0x%x size %u value 0x%x", i, run->exit_reason,
+				     run->io.port, run->io.size, v);
+				return;
+			}
+			continue;
+		}
+		switch (want[i].port) {
+		case 0:
+			if (run->exit_reason != KVM_EXIT_MMIO || !run->mmio.is_write || run->mmio.phys_addr != 0x20010 ||
+			    run->mmio.len != 1 || run->mmio.data[0] != 0x5A) {
+				FAIL("guest2 MMIO store: exit %u w%u addr 0x%llx len %u data 0x%x (internal %u %llx %llx)",
+				     run->exit_reason, run->mmio.is_write, (unsigned long long)run->mmio.phys_addr,
+				     run->mmio.len, run->mmio.data[0], run->internal.suberror,
+				     (unsigned long long)run->internal.data[0], (unsigned long long)run->internal.data[1]);
+				return;
+			}
+			break;
+		case 1:
+			if (run->exit_reason != KVM_EXIT_MMIO || run->mmio.is_write || run->mmio.phys_addr != 0x20020 ||
+			    run->mmio.len != 2) {
+				FAIL("guest2 MMIO load: exit %u w%u addr 0x%llx len %u", run->exit_reason,
+				     run->mmio.is_write, (unsigned long long)run->mmio.phys_addr, run->mmio.len);
+				return;
+			}
+			run->mmio.data[0] = 0x34;
+			run->mmio.data[1] = 0x12;
+			break;
+		case 2: {
+			if (run->exit_reason != KVM_EXIT_HLT) { FAIL("guest2: exit %u, want HLT", run->exit_reason); return; }
+			uint64_t n = 0;
+			if (read(efd, &n, sizeof(n)) != sizeof(n) || n != 1) FAIL("ioeventfd count %llu", (unsigned long long)n);
+			if (!run->if_flag || !run->ready_for_interrupt_injection)
+				FAIL("after STI; HLT: if_flag %u ready %u", run->if_flag, run->ready_for_interrupt_injection);
+			struct kvm_interrupt irq = { 0x20 };
+			if (ioctl(vcpu, KVM_INTERRUPT, &irq) != 0) FAIL("KVM_INTERRUPT: %s", strerror(errno));
+			expect_errno("a second KVM_INTERRUPT", ioctl(vcpu, KVM_INTERRUPT, &irq), EEXIST);
+			break;
+		}
+		case 3:
+			if (run->exit_reason != KVM_EXIT_HLT) FAIL("guest2 end: exit %u", run->exit_reason);
+			break;
+		}
+	}
+}
+
+static void test_guest2(int kvm)
+{
+	int vm = ioctl(kvm, KVM_CREATE_VM, 0);
+	uint8_t *mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (vm < 0 || mem == MAP_FAILED) { FAIL("guest2 VM"); return; }
+	memcpy(mem + 0x1000, guest2_start, (size_t)(guest2_end - guest2_start));
+	mem[0x80] = 0x00; mem[0x81] = 0x18; mem[0x82] = 0; mem[0x83] = 0;   /* IVT[0x20] = 0000:1800 */
+	if (set_slot(vm, 0, 0, MEM_SIZE, mem) != 0) FAIL("guest2 slot: %s", strerror(errno));
+	int efd = eventfd(0, EFD_NONBLOCK);
+	struct kvm_ioeventfd io = { .addr = 0x50, .len = 1, .fd = efd, .flags = KVM_IOEVENTFD_FLAG_PIO };
+	if (ioctl(vm, KVM_IOEVENTFD, &io) != 0) FAIL("KVM_IOEVENTFD: %s", strerror(errno));
+	expect_errno("the same ioeventfd twice", ioctl(vm, KVM_IOEVENTFD, &io), EEXIST);
+	struct kvm_ioeventfd bad = io;
+	bad.fd = vm;
+	bad.addr = 0x51;
+	expect_errno("an ioeventfd that is no eventfd", ioctl(vm, KVM_IOEVENTFD, &bad), EINVAL);
+
+	int vcpu = ioctl(vm, KVM_CREATE_VCPU, 0);
+	size_t msz = (size_t)ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);   /* port data is past kvm_run */
+	struct kvm_run *run = mmap(NULL, msz, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu, 0);
+	if (vcpu < 0 || run == MAP_FAILED) { FAIL("guest2 vcpu"); return; }
+	struct { struct kvm_cpuid2 h; struct kvm_cpuid_entry2 e[1]; } c;
+	memset(&c, 0, sizeof(c));
+	c.h.nent = 1;
+	c.e[0].function = 0;
+	c.e[0].eax = 1;
+	c.e[0].ebx = 'R';
+	if (ioctl(vcpu, KVM_SET_CPUID2, &c) != 0) FAIL("KVM_SET_CPUID2: %s", strerror(errno));
+	uint64_t star = 0x1122334455667788ULL, junk = 1;
+	if (msr_io(vcpu, KVM_SET_MSRS, 0xC0000081, &star) != 1) FAIL("KVM_SET_MSRS STAR");
+	if (msr_io(vcpu, KVM_SET_MSRS, 0x12345, &junk) != 0) FAIL("KVM_SET_MSRS took an MSR that is not there");
+
+	struct kvm_sregs sregs;
+	ioctl(vcpu, KVM_GET_SREGS, &sregs);
+	sregs.cs.selector = 0;
+	sregs.cs.base = 0;
+	ioctl(vcpu, KVM_SET_SREGS, &sregs);
+	struct kvm_regs regs;
+	memset(&regs, 0, sizeof(regs));
+	regs.rip = 0x1000;
+	regs.rflags = 0x2;
+	regs.rsp = 0x8000;
+	ioctl(vcpu, KVM_SET_REGS, &regs);
+
+	run_guest2(vcpu, run, efd);
+	uint64_t lstar = 0;
+	if (msr_io(vcpu, KVM_GET_MSRS, 0xC0000082, &lstar) != 1 || lstar != 0xFFFF887766554433ULL)
+		FAIL("LSTAR the guest wrote reads back as %llx", (unsigned long long)lstar);
+
+	struct kvm_fpu fpu;
+	if (ioctl(vcpu, KVM_GET_FPU, &fpu) != 0) FAIL("KVM_GET_FPU: %s", strerror(errno));
+	if (fpu.fcw != 0x37F) FAIL("FCW %x", fpu.fcw);
+	fpu.mxcsr = 0x1F80 | 0x6000;   /* round toward zero */
+	ioctl(vcpu, KVM_SET_FPU, &fpu);
+	memset(&fpu, 0, sizeof(fpu));
+	ioctl(vcpu, KVM_GET_FPU, &fpu);
+	if (fpu.mxcsr != (0x1F80 | 0x6000)) FAIL("MXCSR after KVM_SET_FPU %x", fpu.mxcsr);
+	fpu.mxcsr = 0x10000;
+	expect_errno("a reserved MXCSR bit", ioctl(vcpu, KVM_SET_FPU, &fpu), EINVAL);
+
+	struct kvm_xcrs x;
+	memset(&x, 0, sizeof(x));
+	x.nr_xcrs = 1;
+	x.xcrs[0].value = 2;   /* SSE without x87 */
+	expect_errno("XCR0 without x87", ioctl(vcpu, KVM_SET_XCRS, &x), EINVAL);
+
+	struct kvm_vcpu_events ev;
+	if (ioctl(vcpu, KVM_GET_VCPU_EVENTS, &ev) != 0) FAIL("KVM_GET_VCPU_EVENTS: %s", strerror(errno));
+	ev.nmi.masked = 1;
+	ev.flags = 0;
+	if (ioctl(vcpu, KVM_SET_VCPU_EVENTS, &ev) != 0) FAIL("KVM_SET_VCPU_EVENTS: %s", strerror(errno));
+	memset(&ev, 0, sizeof(ev));
+	ioctl(vcpu, KVM_GET_VCPU_EVENTS, &ev);
+	if (!ev.nmi.masked) FAIL("NMI mask did not stick");
+
+	munmap(run, msz);
+	close(vcpu);
+	close(efd);
+	close(vm);
+	munmap(mem, MEM_SIZE);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   /* a hang still shows how far it got */
@@ -216,6 +447,8 @@ int main(void)
 	if (api != KVM_API_VERSION) FAIL("KVM_GET_API_VERSION %d", api);
 	expect_errno("unknown /dev/kvm ioctl", ioctl(kvm, KVM_IO(0xFE), 0), ENOTTY);
 	test_guest(kvm);
+	test_tables(kvm);
+	test_guest2(kvm);
 	close(kvm);
 	printf(fails ? "FAILED %d\n" : "OK\n", fails);
 	return fails != 0;

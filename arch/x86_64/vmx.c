@@ -49,6 +49,7 @@
 #include <kernel/errno.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
+#include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
 
 #define CR0_PE (1ULL << 0)
@@ -57,7 +58,6 @@
 #define CR0_CD (1ULL << 30)
 #define CR0_PG (1ULL << 31)
 #define CR4_PAE     (1ULL << 5)
-#define CR4_OSXSAVE (1ULL << 18)
 #define RFLAGS_IF   (1ULL << 9)
 
 /* inner-loop results */
@@ -120,23 +120,25 @@ int vmx_probe(void)
 	int tru = (basic & VMX_BASIC_TRUE_CTLS) != 0;
 
 	if (ctl_adjust(tru ? MSR_IA32_VMX_TRUE_PINBASED : MSR_IA32_VMX_PINBASED,
-	               PIN_EXT_INTR_EXIT | PIN_NMI_EXIT, 0, &vmx.pin) ||
+	               PIN_EXT_INTR_EXIT | PIN_NMI_EXIT | PIN_VIRTUAL_NMIS, 0, &vmx.pin) ||
 	    ctl_adjust(tru ? MSR_IA32_VMX_TRUE_PROCBASED : MSR_IA32_VMX_PROCBASED,
 	               CPU_HLT_EXIT | CPU_UNCOND_IO_EXIT | CPU_MWAIT_EXIT | CPU_MONITOR_EXIT |
-	               CPU_CR8_LOAD_EXIT | CPU_CR8_STORE_EXIT | CPU_SECONDARY, 0, &vmx.cpu) ||
+	               CPU_CR8_LOAD_EXIT | CPU_CR8_STORE_EXIT | CPU_MOV_DR_EXIT | CPU_TSC_OFFSET |
+	               CPU_SECONDARY, 0, &vmx.cpu) ||
 	    ctl_adjust(MSR_IA32_VMX_PROCBASED2, CPU2_EPT | CPU2_UNRESTRICTED_GUEST, 0, &vmx.cpu2) ||
 	    ctl_adjust(tru ? MSR_IA32_VMX_TRUE_EXIT : MSR_IA32_VMX_EXIT,
 	               EXIT_HOST_ADDR64 | EXIT_SAVE_EFER | EXIT_LOAD_EFER | EXIT_SAVE_PAT | EXIT_LOAD_PAT,
 	               0, &vmx.exit) ||
 	    ctl_adjust(tru ? MSR_IA32_VMX_TRUE_ENTRY : MSR_IA32_VMX_ENTRY,
 	               ENTRY_LOAD_EFER | ENTRY_LOAD_PAT, 0, &vmx.entry)) {
-		kprintf(KERN_INFO "kvm: VT-x lacks a control this KVM needs (EPT, unrestricted guest, EFER/PAT switch)\n");
+		kprintf(KERN_INFO "kvm: VT-x lacks a control this KVM needs (EPT, unrestricted guest, virtual NMIs, EFER/PAT switch)\n");
 		return -ENODEV;
 	}
 	/* No TPR shadow: a guest's CR8 is the VMM's, through the CR8 exits. A CPU
 	 * that forced it on would want a virtual-APIC page. */
 	if (vmx.cpu & CPU_TPR_SHADOW) return -ENODEV;
 	vmx.entry &= ~ENTRY_IA32E_GUEST;   /* set per vcpu from its EFER.LMA */
+	vmx.cpu &= ~(CPU_INTR_WINDOW_EXIT | CPU_NMI_WINDOW_EXIT);   /* per vcpu, when an event waits */
 
 	uint64_t ept = vmx_rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
 	uint64_t ept_need = EPT_CAP_WALK4 | EPT_CAP_WB | EPT_CAP_INVEPT | EPT_CAP_INVEPT_SINGLE;
@@ -192,7 +194,7 @@ static int vmx_cpu_on(int cpu)
 
 /* Make v's VMCS current on this CPU: interrupts go off and stay off until
  * vmcs_put. Returns the CPU, or a negative errno with interrupts as they were. */
-static int vmcs_load(kvm_vcpu_t *v, uint64_t *irqf)
+int vmcs_load(kvm_vcpu_t *v, uint64_t *irqf)
 {
 	*irqf = irq_save();
 	int cpu = this_cpu();
@@ -202,7 +204,7 @@ static int vmcs_load(kvm_vcpu_t *v, uint64_t *irqf)
 	return cpu;
 }
 
-static void vmcs_put(kvm_vcpu_t *v, uint64_t irqf)
+void vmcs_put(kvm_vcpu_t *v, uint64_t irqf)
 {
 	vmx_clear(v->vmcs);
 	irq_restore(irqf);
@@ -218,7 +220,7 @@ static void seg_write(int i, uint16_t sel, uint64_t base, uint32_t limit, uint32
 	vmwrite(GUEST_ES_AR + 2 * i, ar);
 }
 
-static void seg_set(int i, const struct kvm_segment *s)
+void vmx_seg_set(int i, const struct kvm_segment *s)
 {
 	uint32_t ar;
 	if (s->unusable || !s->present)
@@ -229,7 +231,7 @@ static void seg_set(int i, const struct kvm_segment *s)
 	seg_write(i, s->selector, s->base, s->limit, ar);
 }
 
-static void seg_get(int i, struct kvm_segment *s)
+void vmx_seg_get(int i, struct kvm_segment *s)
 {
 	uint32_t ar = (uint32_t)vmread(GUEST_ES_AR + 2 * i);
 	memset(s, 0, sizeof(*s));
@@ -248,7 +250,7 @@ static void seg_get(int i, struct kvm_segment *s)
 }
 
 /* EFER and the entry control that must agree with its LMA bit */
-static void efer_apply(kvm_vcpu_t *v)
+void vmx_efer_update(kvm_vcpu_t *v)
 {
 	vmwrite(GUEST_IA32_EFER, v->efer);
 	uint32_t entry = vmx.entry | ((v->efer & EFER_LMA) ? ENTRY_IA32E_GUEST : 0);
@@ -258,7 +260,7 @@ static void efer_apply(kvm_vcpu_t *v)
 /* The guest's CR0 is what it wrote (the read shadow shows it back); the CPU
  * runs with the bits VMX operation fixes, and with caching on: CD and NW stay
  * the VMM's, as on Linux's KVM. PE and PG are free under unrestricted guest. */
-static void cr0_apply(kvm_vcpu_t *v)
+void vmx_cr0_apply(kvm_vcpu_t *v)
 {
 	uint64_t hw = (v->cr0 | (vmx.cr0_fixed0 & ~(CR0_PE | CR0_PG))) & vmx.cr0_fixed1;
 	hw &= ~(CR0_CD | CR0_NW);
@@ -266,7 +268,7 @@ static void cr0_apply(kvm_vcpu_t *v)
 	vmwrite(CR0_READ_SHADOW, v->cr0);
 }
 
-static void cr4_apply(kvm_vcpu_t *v)
+void vmx_cr4_apply(kvm_vcpu_t *v)
 {
 	vmwrite(GUEST_CR4, (v->cr4 | vmx.cr4_fixed0) & vmx.cr4_fixed1);
 	vmwrite(CR4_READ_SHADOW, v->cr4);
@@ -279,14 +281,14 @@ static void cr0_write(kvm_vcpu_t *v, uint64_t val)
 	v->cr0 = val;
 	if ((val & CR0_PG) && (v->efer & EFER_LME)) v->efer |= EFER_LMA;
 	if (!(val & CR0_PG)) v->efer &= ~EFER_LMA;
-	cr0_apply(v);
-	efer_apply(v);
+	vmx_cr0_apply(v);
+	vmx_efer_update(v);
 }
 
 /* PAE paging outside long mode takes its four PDPTEs from the VMCS, not from
  * memory: load them when CR0, CR3 or CR4 changes. -EAGAIN when the guest page
  * holding them is not mapped yet (v->prefault names it). */
-static int pdptrs_load(kvm_vcpu_t *v)
+int vmx_pdptrs_load(kvm_vcpu_t *v)
 {
 	if (!(v->cr0 & CR0_PG) || !(v->cr4 & CR4_PAE) || (v->efer & EFER_LMA)) return 0;
 	uint64_t pdpte[4];
@@ -333,9 +335,16 @@ static void vmcs_setup(kvm_vcpu_t *v)
 	vmwrite(PF_ERROR_CODE_MASK, 0);
 	vmwrite(PF_ERROR_CODE_MATCH, 0);
 	vmwrite(CR3_TARGET_COUNT, 0);
+	/* the switched MSRs: guest values loaded on entry and stored back on
+	 * exit in one area, the host's loaded on exit from the other half */
+	vmwrite(VM_ENTRY_MSR_LOAD_ADDR, v->msr_page);
+	vmwrite(VM_EXIT_MSR_STORE_ADDR, v->msr_page);
+	vmwrite(VM_EXIT_MSR_LOAD_ADDR, v->msr_page + PAGE_SIZE / 2);
 	vmwrite(VM_EXIT_MSR_STORE_COUNT, 0);
 	vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0);
 	vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0);
+	v->msr_count = 0;
+	v->cpu_ctl = vmx.cpu;
 	vmwrite(VM_ENTRY_INTR_INFO, 0);
 	vmwrite(EPT_POINTER, v->vm->eptp);
 	vmwrite(VMCS_LINK_POINTER, ~0ULL);
@@ -381,16 +390,23 @@ static void vmcs_setup(kvm_vcpu_t *v)
 	v->cr0 = 0x60000010;   /* CD, NW, ET */
 	v->cr4 = 0;
 	v->efer = 0;
-	cr0_apply(v);
-	cr4_apply(v);
-	efer_apply(v);
+	vmx_cr0_apply(v);
+	vmx_cr4_apply(v);
+	vmx_efer_update(v);
 }
 
 int vmx_vcpu_init(kvm_vcpu_t *v)
 {
 	uint64_t vmcs = (uint64_t)buddy_alloc(0);
 	uint64_t fpu = (uint64_t)buddy_alloc(0);
-	if (!vmcs || !fpu) goto nomem;
+	uint64_t msr = (uint64_t)buddy_alloc(0);
+	if (!vmcs || !fpu || !msr) goto nomem;
+	memset((void *)PHYS_TO_VIRT(msr), 0, PAGE_SIZE);
+	v->msr_page = msr;
+	v->msr_guest = (struct kvm_msr_entry *)PHYS_TO_VIRT(msr);
+	v->msr_host = (struct kvm_msr_entry *)PHYS_TO_VIRT(msr + PAGE_SIZE / 2);
+	kvm_msr_reset(v);
+	v->irq_pending = -1;
 	memset((void *)PHYS_TO_VIRT(vmcs), 0, PAGE_SIZE);
 	*(uint32_t *)PHYS_TO_VIRT(vmcs) = vmx.rev;
 	v->vmcs = vmcs;
@@ -421,8 +437,10 @@ nomem:
 fail:
 	if (vmcs) buddy_free(vmcs, 0);
 	if (fpu) buddy_free(fpu, 0);
+	if (msr) buddy_free(msr, 0);
 	v->vmcs = 0;
 	v->fpu = NULL;
+	v->msr_page = 0;
 	return r;
 }
 
@@ -431,8 +449,12 @@ void vmx_vcpu_free(kvm_vcpu_t *v)
 	/* never current anywhere: every load ends in VMCLEAR */
 	if (v->vmcs) buddy_free(v->vmcs, 0);
 	if (v->fpu) buddy_free(VIRT_TO_PHYS(v->fpu), 0);
+	if (v->msr_page) buddy_free(v->msr_page, 0);
+	kfree(v->cpuid);
 	v->vmcs = 0;
 	v->fpu = NULL;
+	v->msr_page = 0;
+	v->cpuid = NULL;
 }
 
 /* ── exits ────────────────────────────────────────────────── */
@@ -487,6 +509,10 @@ static int exit_io(kvm_vcpu_t *v)
 	int in = (q >> 3) & 1, string = (q >> 4) & 1;
 	if (string || (size != 1 && size != 2 && size != 4))
 		return internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_IO, q);
+	if (!in && kvm_ioeventfd_hit(v->vm, 1, q >> 16, size, v->g.r[R_AX])) {
+		skip_instruction();
+		return RUN_GUEST;
+	}
 	struct kvm_run *run = v->run;
 	run->exit_reason = KVM_EXIT_IO;
 	run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
@@ -512,17 +538,10 @@ static void pio_finish(kvm_vcpu_t *v)
 	v->pio_in = 0;
 }
 
-/* CPUID answers the host's, minus what this KVM does not give a guest: VMX
- * (no nested guests), and OSXSAVE following the guest's own CR4. */
 static int exit_cpuid(kvm_vcpu_t *v)
 {
 	uint32_t r[4];
-	cpuid((uint32_t)v->g.r[R_AX], (uint32_t)v->g.r[R_CX], r);
-	if ((uint32_t)v->g.r[R_AX] == 1) {
-		r[2] &= ~((1U << 5) | (1U << 27));
-		if (v->cr4 & CR4_OSXSAVE) r[2] |= 1U << 27;
-		r[2] |= 1U << 31;   /* running under a hypervisor */
-	}
+	kvm_cpuid_guest(v, (uint32_t)v->g.r[R_AX], (uint32_t)v->g.r[R_CX], r);
 	v->g.r[R_AX] = r[0];
 	v->g.r[R_BX] = r[1];
 	v->g.r[R_CX] = r[2];
@@ -542,12 +561,22 @@ static int exit_cr(kvm_vcpu_t *v)
 		switch (cr) {
 		case 0: cr0_write(v, val); break;
 		case 3: vmwrite(GUEST_CR3, val); break;
-		case 4: v->cr4 = val; cr4_apply(v); break;
-		case 8: v->run->cr8 = val & 15; break;
+		case 4: v->cr4 = val; vmx_cr4_apply(v); break;
+		case 8: {
+			uint64_t old = v->run->cr8;
+			v->run->cr8 = val & 15;
+			if (v->run->cr8 < old) {
+				/* a lower TPR may unmask an interrupt the VMM holds */
+				skip_instruction();
+				v->run->exit_reason = KVM_EXIT_SET_TPR;
+				return RUN_USER;
+			}
+			break;
+		}
 		default: return internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_CR_ACCESS, q);
 		}
 		if (cr != 8) {
-			int r = pdptrs_load(v);
+			int r = vmx_pdptrs_load(v);
 			if (r == -EAGAIN) return RUN_OUTER;   /* map the PDPT, run the write again */
 			if (r) { inject_exception(v, 13, 1, 0); return RUN_GUEST; }
 		}
@@ -566,17 +595,15 @@ static int exit_cr(kvm_vcpu_t *v)
 	return RUN_GUEST;
 }
 
-/* XSETBV: XCR0 is loaded for the guest around each entry. Only states the
- * host has on (x87, SSE, AVX) are allowed, in the combinations the SDM does. */
+/* XSETBV: XCR0 is loaded for the guest around each entry (vmx_set_xcr0 says
+ * which values are allowed) */
 static int exit_xsetbv(kvm_vcpu_t *v)
 {
 	uint64_t val = (v->g.r[R_DX] << 32) | (uint32_t)v->g.r[R_AX];
-	if ((uint32_t)v->g.r[R_CX] != 0 || !avx_on || !(val & 1) || (val & ~7ULL) ||
-	    ((val & 4) && !(val & 2))) {
+	if ((uint32_t)v->g.r[R_CX] != 0 || vmx_set_xcr0(v, val)) {
 		inject_exception(v, 13, 1, 0);
 		return RUN_GUEST;
 	}
-	v->xcr0 = val;
 	skip_instruction();
 	return RUN_GUEST;
 }
@@ -616,6 +643,109 @@ static int fail_entry(kvm_vcpu_t *v, uint64_t why, int cpu)
 	return RUN_USER;
 }
 
+/* RDMSR/WRMSR: kvm_msr.c knows the MSRs; any other is a #GP, as on hardware */
+static int exit_msr(kvm_vcpu_t *v, int write)
+{
+	uint32_t idx = (uint32_t)v->g.r[R_CX];
+	if (write) {
+		uint64_t val = (v->g.r[R_DX] << 32) | (uint32_t)v->g.r[R_AX];
+		if (kvm_msr_set(v, idx, val)) { inject_exception(v, 13, 1, 0); return RUN_GUEST; }
+	} else {
+		uint64_t val;
+		if (kvm_msr_get(v, idx, &val)) { inject_exception(v, 13, 1, 0); return RUN_GUEST; }
+		v->g.r[R_AX] = (uint32_t)val;
+		v->g.r[R_DX] = val >> 32;
+	}
+	skip_instruction();
+	return RUN_GUEST;
+}
+
+/* MOV to or from a debug register. The guest's DR0-3 and DR6 are only kept
+ * here, never loaded: they are the host's registers too, and guest hardware
+ * breakpoints are not worth switching them. DR7 is a VMCS field, so the host's
+ * comes back on every exit. DR4/DR5 alias DR6/DR7 while CR4.DE is clear. */
+static int exit_dr(kvm_vcpu_t *v)
+{
+	uint64_t q = vmread(EXIT_QUALIFICATION);
+	int dr = q & 7, from = (q >> 4) & 1, reg = (q >> 8) & 15;
+	if ((dr == 4 || dr == 5) && !(v->cr4 & (1ULL << 3))) dr += 2;
+	if (dr == 4 || dr == 5) { inject_exception(v, 6, 0, 0); return RUN_GUEST; }   /* #UD */
+	if (from) {
+		uint64_t val = dr < 4 ? v->dr[dr] : dr == 6 ? v->dr6 : vmread(GUEST_DR7);
+		gpr_set(v, reg, val);
+	} else {
+		uint64_t val = gpr_get(v, reg);
+		if (dr < 4) v->dr[dr] = val;
+		else if (dr == 6) v->dr6 = (val & 0xF00F) | 0xFFFF0FF0ULL;
+		else vmwrite(GUEST_DR7, (val & 0xFFFFFFFF) | 0x400);
+	}
+	skip_instruction();
+	return RUN_GUEST;
+}
+
+/* A guest access to guest-physical memory it may not reach: a slot's page not
+ * mapped yet (map it, outside), or no slot at all, which is device memory. */
+static int exit_ept_violation(kvm_vcpu_t *v)
+{
+	uint64_t gpa = vmread(GUEST_PHYSICAL_ADDRESS);
+	int present = kvm_slot_present(v->vm, gpa);
+	if (present != 0) {
+		/* a slot (or the slots changing): map the page in the outer loop,
+		 * where a miss is decided under the lock */
+		v->prefault = gpa & ~(uint64_t)(PAGE_SIZE - 1);
+		return RUN_OUTER;
+	}
+	switch (kvm_mmio_exit(v, gpa)) {
+	case KVM_MMIO_RETRY: return RUN_OUTER;
+	case KVM_MMIO_GUEST: return RUN_GUEST;
+	default:             return RUN_USER;
+	}
+}
+
+static void set_cpu_ctl(kvm_vcpu_t *v, uint32_t ctl)
+{
+	if (ctl == v->cpu_ctl) return;
+	v->cpu_ctl = ctl;
+	vmwrite(CPU_BASED_CONTROLS, ctl);
+}
+
+/* Before an entry: deliver what KVM_NMI and KVM_INTERRUPT queued when the
+ * guest can take it, and otherwise ask for an exit at the moment it can (the
+ * NMI and interrupt windows). An event the CPU was delivering at the last exit
+ * (requeue_vectoring) goes first. */
+static void inject_events(kvm_vcpu_t *v)
+{
+	uint32_t ctl = v->cpu_ctl & ~(CPU_INTR_WINDOW_EXIT | CPU_NMI_WINDOW_EXIT);
+	if (!(vmread(VM_ENTRY_INTR_INFO) & INTR_INFO_VALID)) {
+		uint32_t is = (uint32_t)vmread(GUEST_INTERRUPTIBILITY);
+		int shadow = is & (INTERRUPTIBILITY_STI | INTERRUPTIBILITY_MOVSS);
+		if (v->nmi_pending && !shadow && !(is & INTERRUPTIBILITY_NMI)) {
+			vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_NMI | 2);
+			v->nmi_pending = 0;
+		} else if (v->irq_pending >= 0 && !shadow && (vmread(GUEST_RFLAGS) & RFLAGS_IF)) {
+			vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_EXT | (uint32_t)v->irq_pending);
+			v->irq_pending = -1;
+		}
+	}
+	if (v->nmi_pending) ctl |= CPU_NMI_WINDOW_EXIT;
+	if (v->irq_pending >= 0 || v->run->request_interrupt_window) ctl |= CPU_INTR_WINDOW_EXIT;
+	set_cpu_ctl(v, ctl);
+}
+
+/* What userspace reads after every KVM_RUN to decide on KVM_INTERRUPT */
+static void run_report(kvm_vcpu_t *v)
+{
+	struct kvm_run *run = v->run;
+	uint64_t rflags = vmread(GUEST_RFLAGS);
+	uint32_t is = (uint32_t)vmread(GUEST_INTERRUPTIBILITY);
+	run->if_flag = (rflags & RFLAGS_IF) != 0;
+	run->ready_for_interrupt_injection = run->if_flag &&
+		!(is & (INTERRUPTIBILITY_STI | INTERRUPTIBILITY_MOVSS)) &&
+		v->irq_pending < 0 && !(vmread(VM_ENTRY_INTR_INFO) & INTR_INFO_VALID);
+	run->apic_base = v->apic_base;
+	run->flags = 0;
+}
+
 static int handle_exit(kvm_vcpu_t *v, int cpu)
 {
 	uint32_t reason = (uint32_t)vmread(VM_EXIT_REASON);
@@ -652,9 +782,19 @@ static int handle_exit(kvm_vcpu_t *v, int cpu)
 	case EXIT_MONITOR:
 		skip_instruction();
 		return RUN_GUEST;
-	case EXIT_EPT_VIOLATION:
-		v->prefault = vmread(GUEST_PHYSICAL_ADDRESS) & ~(uint64_t)(PAGE_SIZE - 1);
-		return RUN_OUTER;
+	case EXIT_EPT_VIOLATION: return exit_ept_violation(v);
+	case EXIT_RDMSR:    return exit_msr(v, 0);
+	case EXIT_WRMSR:    return exit_msr(v, 1);
+	case EXIT_DR_ACCESS: return exit_dr(v);
+	case EXIT_VMCALL:   /* no hypercalls: #UD, as a CPU without VMX would */
+		inject_exception(v, 6, 0, 0);
+		return RUN_GUEST;
+	case EXIT_INTR_WINDOW:
+		if (v->irq_pending >= 0) return RUN_GUEST;   /* inject_events delivers it now */
+		v->run->exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
+		return RUN_USER;
+	case EXIT_NMI_WINDOW:
+		return RUN_GUEST;
 	default:
 		return internal_error(v, KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON, reason, (uint64_t)cpu);
 	}
@@ -680,9 +820,10 @@ static int run_loaded(kvm_vcpu_t *v)
 	int cpu = vmcs_load(v, &f);
 	if (cpu < 0) return cpu;
 	host_state();
+	kvm_msr_host_save(v);
 	fpu_load(v);
 	v->guest_cpu = cpu;
-	smp_mb();   /* guest_cpu before ept_gen: see kvm_ept_quiesce */
+	smp_mb();   /* guest_cpu before ept_gen: see kvm_vm_quiesce */
 	int launched = 0, ret;
 	for (;;) {
 		uint64_t gen = vm->ept_gen;
@@ -691,6 +832,16 @@ static int run_loaded(kvm_vcpu_t *v)
 			vm->cpu_gen[cpu] = gen;
 		}
 		v->seen_gen = gen;
+		/* SYSCALL and SWAPGS reach the switched MSRs only with EFER.SCE
+		 * or in long mode; a guest using neither need not pay for them */
+		uint32_t nmsr = (v->efer & (EFER_SCE | EFER_LMA)) ? KVM_SWITCHED_MSRS : 0;
+		if (nmsr != v->msr_count) {
+			vmwrite(VM_ENTRY_MSR_LOAD_COUNT, nmsr);
+			vmwrite(VM_EXIT_MSR_STORE_COUNT, nmsr);
+			vmwrite(VM_EXIT_MSR_LOAD_COUNT, nmsr);
+			v->msr_count = nmsr;
+		}
+		inject_events(v);
 		if (v->xcr0 != 7 && avx_on) xsetbv(v->xcr0);
 		int bad = vmx_enter(&v->g, launched);
 		if (v->xcr0 != 7 && avx_on) xsetbv(7);
@@ -703,6 +854,7 @@ static int run_loaded(kvm_vcpu_t *v)
 		if (ret != RUN_GUEST) break;
 	}
 	v->guest_cpu = -1;
+	if (ret == RUN_USER) run_report(v);
 	fpu_save(v);
 	vmcs_put(v, f);
 	return ret;
@@ -712,6 +864,7 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 {
 	struct kvm_run *run = v->run;
 	pio_finish(v);
+	kvm_mmio_finish(v);
 	if (run->immediate_exit) {
 		run->exit_reason = KVM_EXIT_INTR;
 		return -EINTR;
@@ -726,108 +879,11 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 			v->prefault = NO_PREFAULT;
 			int r = kvm_ept_fault(v->vm, gpa);
 			if (r < 0) return r;
-			if (r == 0) {
-				/* no memory slot there: device memory, which needs an
-				 * instruction emulator this KVM does not have yet */
-				internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_EPT_VIOLATION, gpa);
-				return 0;
-			}
+			/* r == 0: the slot went away meanwhile; the guest's access
+			 * exits again and is decided as device memory then */
 		}
 		int r = run_loaded(v);
 		if (r < 0) return r;
 		if (r == RUN_USER) return 0;
 	}
-}
-
-/* ── register ioctls ──────────────────────────────────────── */
-
-int vmx_get_regs(kvm_vcpu_t *v, struct kvm_regs *r)
-{
-	uint64_t f;
-	int cpu = vmcs_load(v, &f);
-	if (cpu < 0) return cpu;
-	r->rax = v->g.r[R_AX]; r->rbx = v->g.r[R_BX]; r->rcx = v->g.r[R_CX]; r->rdx = v->g.r[R_DX];
-	r->rsi = v->g.r[R_SI]; r->rdi = v->g.r[R_DI]; r->rbp = v->g.r[R_BP];
-	r->r8  = v->g.r[8];  r->r9  = v->g.r[9];  r->r10 = v->g.r[10]; r->r11 = v->g.r[11];
-	r->r12 = v->g.r[12]; r->r13 = v->g.r[13]; r->r14 = v->g.r[14]; r->r15 = v->g.r[15];
-	r->rsp = vmread(GUEST_RSP);
-	r->rip = vmread(GUEST_RIP);
-	r->rflags = vmread(GUEST_RFLAGS);
-	vmcs_put(v, f);
-	return 0;
-}
-
-int vmx_set_regs(kvm_vcpu_t *v, const struct kvm_regs *r)
-{
-	uint64_t f;
-	int cpu = vmcs_load(v, &f);
-	if (cpu < 0) return cpu;
-	v->g.r[R_AX] = r->rax; v->g.r[R_BX] = r->rbx; v->g.r[R_CX] = r->rcx; v->g.r[R_DX] = r->rdx;
-	v->g.r[R_SI] = r->rsi; v->g.r[R_DI] = r->rdi; v->g.r[R_BP] = r->rbp;
-	v->g.r[8]  = r->r8;  v->g.r[9]  = r->r9;  v->g.r[10] = r->r10; v->g.r[11] = r->r11;
-	v->g.r[12] = r->r12; v->g.r[13] = r->r13; v->g.r[14] = r->r14; v->g.r[15] = r->r15;
-	vmwrite(GUEST_RSP, r->rsp);
-	vmwrite(GUEST_RIP, r->rip);
-	vmwrite(GUEST_RFLAGS, (r->rflags & ~0x8028ULL) | 0x2);   /* reserved bits as the CPU has them */
-	vmcs_put(v, f);
-	v->pio_in = 0;   /* userspace replaced the registers an IN would finish into */
-	return 0;
-}
-
-/* kvm_sregs keeps the segments in this order */
-static const int sregs_seg[8] = { SEG_CS, SEG_DS, SEG_ES, SEG_FS, SEG_GS, SEG_SS, SEG_TR, SEG_LDTR };
-
-int vmx_get_sregs(kvm_vcpu_t *v, struct kvm_sregs *s)
-{
-	uint64_t f;
-	memset(s, 0, sizeof(*s));
-	int cpu = vmcs_load(v, &f);
-	if (cpu < 0) return cpu;
-	struct kvm_segment *segs = &s->cs;
-	for (int i = 0; i < 8; i++) seg_get(sregs_seg[i], &segs[i]);
-	s->gdt.base = vmread(GUEST_GDTR_BASE);
-	s->gdt.limit = (uint16_t)vmread(GUEST_GDTR_LIMIT);
-	s->idt.base = vmread(GUEST_IDTR_BASE);
-	s->idt.limit = (uint16_t)vmread(GUEST_IDTR_LIMIT);
-	s->cr3 = vmread(GUEST_CR3);
-	vmcs_put(v, f);
-	s->cr0 = v->cr0;
-	s->cr2 = v->g.cr2;
-	s->cr4 = v->cr4;
-	s->cr8 = v->run->cr8;
-	s->efer = v->efer;
-	s->apic_base = v->apic_base;
-	return 0;
-}
-
-int vmx_set_sregs(kvm_vcpu_t *v, const struct kvm_sregs *s)
-{
-	/* PAE paging reads its PDPTEs from guest memory: map that page now, while
-	 * this thread may still sleep */
-	if ((s->cr0 & CR0_PG) && (s->cr4 & CR4_PAE) && !(s->efer & EFER_LMA)) {
-		int r = kvm_ept_fault(v->vm, s->cr3 & ~0xFFFULL);
-		if (r < 0) return r;
-	}
-	uint64_t f;
-	int cpu = vmcs_load(v, &f);
-	if (cpu < 0) return cpu;
-	const struct kvm_segment *segs = &s->cs;
-	for (int i = 0; i < 8; i++) seg_set(sregs_seg[i], &segs[i]);
-	vmwrite(GUEST_GDTR_BASE, s->gdt.base);
-	vmwrite(GUEST_GDTR_LIMIT, s->gdt.limit);
-	vmwrite(GUEST_IDTR_BASE, s->idt.base);
-	vmwrite(GUEST_IDTR_LIMIT, s->idt.limit);
-	vmwrite(GUEST_CR3, s->cr3);
-	v->g.cr2 = s->cr2;
-	v->cr0 = s->cr0;
-	v->cr4 = s->cr4;
-	v->efer = s->efer;   /* as given, LMA too: userspace restores a state, it does not switch modes */
-	v->run->cr8 = s->cr8 & 15;
-	v->apic_base = s->apic_base;
-	cr0_apply(v);
-	cr4_apply(v);
-	efer_apply(v);
-	int r = pdptrs_load(v);
-	vmcs_put(v, f);
-	return r == -EAGAIN ? -EFAULT : r;
 }

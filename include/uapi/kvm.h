@@ -74,6 +74,155 @@ struct kvm_sregs {
 	uint64_t interrupt_bitmap[(KVM_NR_INTERRUPTS + 63) / 64];
 };
 
+struct kvm_cpuid_entry2 {
+	uint32_t function;
+	uint32_t index;
+	uint32_t flags;
+	uint32_t eax, ebx, ecx, edx;
+	uint32_t padding[3];
+};
+#define KVM_CPUID_FLAG_SIGNIFCANT_INDEX (1U << 0)   /* the spelling is the API's */
+
+struct kvm_cpuid2 {
+	uint32_t nent;
+	uint32_t padding;
+	struct kvm_cpuid_entry2 entries[];
+};
+
+struct kvm_msr_entry {
+	uint32_t index;
+	uint32_t reserved;
+	uint64_t data;
+};
+
+struct kvm_msrs {
+	uint32_t nmsrs;
+	uint32_t pad;
+	struct kvm_msr_entry entries[];
+};
+
+struct kvm_msr_list {
+	uint32_t nmsrs;
+	uint32_t indices[];
+};
+
+struct kvm_interrupt {
+	uint32_t irq;
+};
+
+struct kvm_fpu {
+	uint8_t  fpr[8][16];
+	uint16_t fcw;
+	uint16_t fsw;
+	uint8_t  ftwx;      /* in fxsave format */
+	uint8_t  pad1;
+	uint16_t last_opcode;
+	uint64_t last_ip;
+	uint64_t last_dp;
+	uint8_t  xmm[16][16];
+	uint32_t mxcsr;
+	uint32_t pad2;
+};
+
+struct kvm_xsave {
+	uint32_t region[1024];   /* the XSAVE area, non-compacted */
+};
+
+struct kvm_xcr {
+	uint32_t xcr;
+	uint32_t reserved;
+	uint64_t value;
+};
+
+struct kvm_xcrs {
+	uint32_t nr_xcrs;
+	uint32_t flags;
+	struct kvm_xcr xcrs[16];
+	uint64_t padding[16];
+};
+
+struct kvm_vcpu_events {
+	struct {
+		uint8_t  injected;
+		uint8_t  nr;
+		uint8_t  has_error_code;
+		uint8_t  pending;
+		uint32_t error_code;
+	} exception;
+	struct {
+		uint8_t injected;
+		uint8_t nr;
+		uint8_t soft;
+		uint8_t shadow;
+	} interrupt;
+	struct {
+		uint8_t injected;
+		uint8_t pending;
+		uint8_t masked;
+		uint8_t pad;
+	} nmi;
+	uint32_t sipi_vector;
+	uint32_t flags;
+	struct {
+		uint8_t smm;
+		uint8_t pending;
+		uint8_t smm_inside_nmi;
+		uint8_t latched_init;
+	} smi;
+	struct {
+		uint8_t pending;
+	} triple_fault;
+	uint8_t  reserved[26];
+	uint8_t  exception_has_payload;
+	uint64_t exception_payload;
+};
+#define KVM_VCPUEVENT_VALID_NMI_PENDING 0x00000001
+#define KVM_VCPUEVENT_VALID_SIPI_VECTOR 0x00000002
+#define KVM_VCPUEVENT_VALID_SHADOW      0x00000004
+#define KVM_X86_SHADOW_INT_MOV_SS 0x01
+#define KVM_X86_SHADOW_INT_STI    0x02
+
+struct kvm_debugregs {
+	uint64_t db[4];
+	uint64_t dr6;
+	uint64_t dr7;
+	uint64_t flags;
+	uint64_t reserved[9];
+};
+
+struct kvm_mp_state {
+	uint32_t mp_state;
+};
+#define KVM_MP_STATE_RUNNABLE 0
+
+struct kvm_clock_data {
+	uint64_t clock;
+	uint32_t flags;
+	uint32_t pad0;
+	uint64_t realtime;
+	uint64_t host_tsc;
+	uint32_t pad[4];
+};
+
+struct kvm_enable_cap {
+	uint32_t cap;
+	uint32_t flags;
+	uint64_t args[4];
+	uint8_t  pad[64];
+};
+
+struct kvm_ioeventfd {
+	uint64_t datamatch;
+	uint64_t addr;
+	uint32_t len;
+	int32_t  fd;
+	uint32_t flags;
+	uint8_t  pad[36];
+};
+#define KVM_IOEVENTFD_FLAG_DATAMATCH (1U << 0)
+#define KVM_IOEVENTFD_FLAG_PIO       (1U << 1)
+#define KVM_IOEVENTFD_FLAG_DEASSIGN  (1U << 2)
+
 /* kvm_run.exit_reason */
 #define KVM_EXIT_UNKNOWN          0
 #define KVM_EXIT_EXCEPTION        1
@@ -86,6 +235,7 @@ struct kvm_sregs {
 #define KVM_EXIT_SHUTDOWN         8
 #define KVM_EXIT_FAIL_ENTRY       9
 #define KVM_EXIT_INTR             10
+#define KVM_EXIT_SET_TPR          11
 #define KVM_EXIT_INTERNAL_ERROR   17
 
 #define KVM_EXIT_IO_IN  0
@@ -151,12 +301,21 @@ struct kvm_run {
 /* ioctls on /dev/kvm */
 #define KVM_GET_API_VERSION        KVM_IO(0x00)
 #define KVM_CREATE_VM              KVM_IO(0x01)   /* arg: machine type, 0 */
-#define KVM_CHECK_EXTENSION        KVM_IO(0x03)
+#define KVM_GET_MSR_INDEX_LIST     KVM_IOWR(0x02, struct kvm_msr_list)
+#define KVM_CHECK_EXTENSION        KVM_IO(0x03)   /* also on a VM fd */
 #define KVM_GET_VCPU_MMAP_SIZE     KVM_IO(0x04)
+#define KVM_GET_SUPPORTED_CPUID    KVM_IOWR(0x05, struct kvm_cpuid2)
+#define KVM_X86_GET_MCE_CAP_SUPPORTED KVM_IOR(0x9d, uint64_t)
 
 /* ioctls on a VM fd */
 #define KVM_CREATE_VCPU            KVM_IO(0x41)   /* arg: vcpu id */
 #define KVM_SET_USER_MEMORY_REGION KVM_IOW(0x46, struct kvm_userspace_memory_region)
+#define KVM_SET_TSS_ADDR           KVM_IO(0x47)
+#define KVM_SET_IDENTITY_MAP_ADDR  KVM_IOW(0x48, uint64_t)
+#define KVM_IOEVENTFD              KVM_IOW(0x79, struct kvm_ioeventfd)
+#define KVM_SET_CLOCK              KVM_IOW(0x7b, struct kvm_clock_data)
+#define KVM_GET_CLOCK              KVM_IOR(0x7c, struct kvm_clock_data)
+#define KVM_ENABLE_CAP             KVM_IOW(0xa3, struct kvm_enable_cap)   /* also on a vcpu fd */
 
 /* ioctls on a vcpu fd */
 #define KVM_RUN                    KVM_IO(0x80)
@@ -164,12 +323,55 @@ struct kvm_run {
 #define KVM_SET_REGS               KVM_IOW(0x82, struct kvm_regs)
 #define KVM_GET_SREGS              KVM_IOR(0x83, struct kvm_sregs)
 #define KVM_SET_SREGS              KVM_IOW(0x84, struct kvm_sregs)
+#define KVM_INTERRUPT              KVM_IOW(0x86, struct kvm_interrupt)
+#define KVM_GET_MSRS               KVM_IOWR(0x88, struct kvm_msrs)
+#define KVM_SET_MSRS               KVM_IOW(0x89, struct kvm_msrs)
+#define KVM_GET_FPU                KVM_IOR(0x8c, struct kvm_fpu)
+#define KVM_SET_FPU                KVM_IOW(0x8d, struct kvm_fpu)
+#define KVM_SET_CPUID2             KVM_IOW(0x90, struct kvm_cpuid2)
+#define KVM_GET_CPUID2             KVM_IOWR(0x91, struct kvm_cpuid2)
+#define KVM_GET_MP_STATE           KVM_IOR(0x98, struct kvm_mp_state)
+#define KVM_SET_MP_STATE           KVM_IOW(0x99, struct kvm_mp_state)
+#define KVM_NMI                    KVM_IO(0x9a)
+#define KVM_X86_SETUP_MCE          KVM_IOW(0x9c, uint64_t)
+#define KVM_GET_VCPU_EVENTS        KVM_IOR(0x9f, struct kvm_vcpu_events)
+#define KVM_SET_VCPU_EVENTS        KVM_IOW(0xa0, struct kvm_vcpu_events)
+#define KVM_GET_DEBUGREGS          KVM_IOR(0xa1, struct kvm_debugregs)
+#define KVM_SET_DEBUGREGS          KVM_IOW(0xa2, struct kvm_debugregs)
+#define KVM_SET_TSC_KHZ            KVM_IO(0xa2)
+#define KVM_GET_TSC_KHZ            KVM_IO(0xa3)
+#define KVM_GET_XSAVE              KVM_IOR(0xa4, struct kvm_xsave)
+#define KVM_SET_XSAVE              KVM_IOW(0xa5, struct kvm_xsave)
+#define KVM_GET_XCRS               KVM_IOR(0xa6, struct kvm_xcrs)
+#define KVM_SET_XCRS               KVM_IOW(0xa7, struct kvm_xcrs)
 
 /* KVM_CHECK_EXTENSION */
-#define KVM_CAP_USER_MEMORY 3
-#define KVM_CAP_NR_VCPUS    9
-#define KVM_CAP_NR_MEMSLOTS 10
-#define KVM_CAP_MAX_VCPUS   66
-#define KVM_CAP_IMMEDIATE_EXIT 136
+#define KVM_CAP_HLT                         1
+#define KVM_CAP_USER_MEMORY                 3
+#define KVM_CAP_SET_TSS_ADDR                4
+#define KVM_CAP_EXT_CPUID                   7
+#define KVM_CAP_NR_VCPUS                    9
+#define KVM_CAP_NR_MEMSLOTS                 10
+#define KVM_CAP_MP_STATE                    14
+#define KVM_CAP_DESTROY_MEMORY_REGION_WORKS 21
+#define KVM_CAP_USER_NMI                    22
+#define KVM_CAP_IRQ_ROUTING                 25
+#define KVM_CAP_MCE                         31
+#define KVM_CAP_JOIN_MEMORY_REGIONS_WORKS   30
+#define KVM_CAP_IOEVENTFD                   36
+#define KVM_CAP_SET_IDENTITY_MAP_ADDR       37
+#define KVM_CAP_ADJUST_CLOCK                39
+#define KVM_CAP_INTERNAL_ERROR_DATA         40
+#define KVM_CAP_VCPU_EVENTS                 41
+#define KVM_CAP_DEBUGREGS                   50
+#define KVM_CAP_X86_ROBUST_SINGLESTEP       51
+#define KVM_CAP_ENABLE_CAP                  54
+#define KVM_CAP_XSAVE                       55
+#define KVM_CAP_XCRS                        56
+#define KVM_CAP_GET_TSC_KHZ                 61
+#define KVM_CAP_SIGNAL_MSI                  77
+#define KVM_CAP_MAX_VCPUS                   66
+#define KVM_CAP_IOEVENTFD_ANY_LENGTH        122
+#define KVM_CAP_IMMEDIATE_EXIT              136
 
 #endif

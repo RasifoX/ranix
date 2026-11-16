@@ -87,6 +87,19 @@ kvm_slot_t *kvm_slot_find(kvm_vm_t *vm, uint64_t gpa)
 	return NULL;
 }
 
+/* Whether a slot covers gpa, from a vcpu that cannot take vm->lock (between
+ * two guest entries, interrupts off): slots_seq is odd while vm_set_memory
+ * changes the table and moves on after, so a read that saw it change is
+ * retried. */
+int kvm_slot_present(kvm_vm_t *vm, uint64_t gpa)
+{
+	uint32_t seq = __atomic_load_n(&vm->slots_seq, __ATOMIC_ACQUIRE);
+	if (seq & 1) return -1;
+	int found = kvm_slot_find(vm, gpa) != NULL;
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	return __atomic_load_n(&vm->slots_seq, __ATOMIC_RELAXED) == seq ? found : -1;
+}
+
 /* Map the page at gpa from its slot. The caller is the VM owner's thread, in
  * process context (pinning may fault the page in and sleep). */
 int kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa)
@@ -115,7 +128,7 @@ out:
  * read, so either the vcpu sees the new generation (and flushes) or it is seen
  * running and is kicked out of the guest until it has. CPUs no vcpu runs on
  * flush when one next enters there (cpu_gen). Caller holds vm->lock. */
-static void kvm_ept_quiesce(kvm_vm_t *vm)
+void kvm_vm_quiesce(kvm_vm_t *vm)
 {
 	uint64_t gen = __atomic_add_fetch(&vm->ept_gen, 1, __ATOMIC_SEQ_CST);
 	smp_mb();
@@ -143,7 +156,7 @@ void kvm_ept_unmap(kvm_vm_t *vm, uint64_t gpa, uint64_t size)
 		if (leaf && (*leaf & EPT_PINNED)) { *leaf &= ~EPT_RWX; any = 1; }
 	}
 	if (!any) return;
-	kvm_ept_quiesce(vm);
+	kvm_vm_quiesce(vm);
 	for (uint64_t a = gpa; a < end; a += PAGE_SIZE) {
 		uint64_t *leaf = ept_leaf(vm, a, 0);
 		if (!leaf || !(*leaf & EPT_PINNED)) continue;

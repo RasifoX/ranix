@@ -61,6 +61,7 @@
 #define PIN_VIRTUAL_NMIS           (1U << 5)
 
 #define CPU_INTR_WINDOW_EXIT       (1U << 2)
+#define CPU_TSC_OFFSET             (1U << 3)
 #define CPU_HLT_EXIT               (1U << 7)
 #define CPU_INVLPG_EXIT            (1U << 9)
 #define CPU_MWAIT_EXIT             (1U << 10)
@@ -224,6 +225,7 @@ enum { SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS, SEG_LDTR, SEG_TR };
 #define EXIT_RDPMC           15
 #define EXIT_VMCALL          18
 #define EXIT_CR_ACCESS       28
+#define EXIT_DR_ACCESS       29
 #define EXIT_IO              30
 #define EXIT_RDMSR           31
 #define EXIT_WRMSR           32
@@ -250,6 +252,7 @@ enum { SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS, SEG_LDTR, SEG_TR };
 /* guest interruptibility state */
 #define INTERRUPTIBILITY_STI   (1U << 0)
 #define INTERRUPTIBILITY_MOVSS (1U << 1)
+#define INTERRUPTIBILITY_NMI   (1U << 3)
 
 /* ── instructions ─────────────────────────────────────────── */
 static inline uint64_t vmx_rdmsr(uint32_t msr)

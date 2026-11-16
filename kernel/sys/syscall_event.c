@@ -97,6 +97,21 @@ static vfs_fops_t eventfd_fops = {
     .close = eventfd_close_vfs,
 };
 
+int eventfd_is(vfs_file_t *f)
+{
+    return f && f->inode && f->inode->fops == &eventfd_fops;
+}
+
+void eventfd_signal_file(vfs_file_t *f, uint64_t n)
+{
+    eventfd_t *efd = (eventfd_t *)f->inode->priv;
+    uint64_t fl = spin_lock_irq(&efd->lock);
+    if ((uint64_t)-2 - efd->count >= n) efd->count += n;
+    wake_up(&efd->rd_wait);
+    spin_unlock_irq(&efd->lock, fl);
+    poll_notify_key(efd);
+}
+
 static long sys_eventfd2(unsigned int initval, int flags)
 {
     if (flags & ~(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC)) return -EINVAL;

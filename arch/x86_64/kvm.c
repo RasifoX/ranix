@@ -25,6 +25,8 @@
 #include <kernel/vfs.h>
 #include <kernel/proc.h>
 #include <kernel/syscall.h>
+#include <kernel/time.h>
+#include <asm/cpu.h>
 #include <kernel/hal.h>
 #include <kernel/kprintf.h>
 #include <kernel/errno.h>
@@ -60,12 +62,50 @@ static int kvm_new_fd(vfs_fops_t *fops, void *priv)
 	return fd;
 }
 
+/* An ioctl a VMM sent that this KVM lacks: said once each in the log (the
+ * first few), which names what a VMM needs next. */
+static int kvm_unknown(const char *fd, uint32_t cmd)
+{
+	static int told;
+	if (told < 16) {
+		told++;
+		kprintf(KERN_INFO "kvm: %s ioctl 0x%x not supported\n", fd, cmd);
+	}
+	return -ENOTTY;
+}
+
 static int kvm_check_extension(uint64_t cap)
 {
 	switch (cap) {
+	case KVM_CAP_HLT:
 	case KVM_CAP_USER_MEMORY:
+	case KVM_CAP_SET_TSS_ADDR:
+	case KVM_CAP_EXT_CPUID:
+	case KVM_CAP_MP_STATE:
+	case KVM_CAP_DESTROY_MEMORY_REGION_WORKS:
+	case KVM_CAP_USER_NMI:
+	case KVM_CAP_JOIN_MEMORY_REGIONS_WORKS:
+	case KVM_CAP_IOEVENTFD:
+	case KVM_CAP_IOEVENTFD_ANY_LENGTH:
+	case KVM_CAP_SET_IDENTITY_MAP_ADDR:
+	case KVM_CAP_ADJUST_CLOCK:
+	case KVM_CAP_INTERNAL_ERROR_DATA:
+	case KVM_CAP_VCPU_EVENTS:
+	case KVM_CAP_DEBUGREGS:
+	case KVM_CAP_X86_ROBUST_SINGLESTEP:
+	case KVM_CAP_XSAVE:
+	case KVM_CAP_XCRS:
+	case KVM_CAP_GET_TSC_KHZ:
 	case KVM_CAP_IMMEDIATE_EXIT:
 		return 1;
+	case KVM_CAP_SIGNAL_MSI:
+	case KVM_CAP_IRQ_ROUTING:
+		/* a VMM requires it, but it is for an in-kernel interrupt
+		 * controller; without one (kernel-irqchip=off) the VMM delivers
+		 * MSIs itself and never sends KVM_SIGNAL_MSI */
+		return 1;
+	case KVM_CAP_MCE:
+		return 1;   /* with no banks: machine checks are not offered in CPUID */
 	case KVM_CAP_NR_VCPUS:
 	case KVM_CAP_MAX_VCPUS:
 		return KVM_MAX_VCPUS;
@@ -81,6 +121,7 @@ static int kvm_check_extension(uint64_t cap)
 static void kvm_vm_put(kvm_vm_t *vm)
 {
 	if (__atomic_sub_fetch(&vm->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+	kvm_ioeventfd_free(vm);
 	kvm_ept_free(vm);
 	vm_destroy(vm->vs);
 	kfree(vm);
@@ -121,6 +162,148 @@ static uint64_t vcpu_mmap(vfs_file_t *f, off_t off)
 	return pa + ((uint64_t)off & (PAGE_SIZE - 1));
 }
 
+/* struct kvm_fpu is the FXSAVE image's fields, taken apart */
+static void fpu_get(kvm_vcpu_t *v, struct kvm_fpu *u)
+{
+	const uint8_t *a = v->fpu;
+	memset(u, 0, sizeof(*u));
+	memcpy(&u->fcw, a + 0, 2);
+	memcpy(&u->fsw, a + 2, 2);
+	u->ftwx = a[4];
+	memcpy(&u->last_opcode, a + 6, 2);
+	memcpy(&u->last_ip, a + 8, 8);
+	memcpy(&u->last_dp, a + 16, 8);
+	memcpy(&u->mxcsr, a + 24, 4);
+	memcpy(u->fpr, a + 32, sizeof(u->fpr));
+	memcpy(u->xmm, a + 160, sizeof(u->xmm));
+}
+
+static int fpu_set(kvm_vcpu_t *v, const struct kvm_fpu *u)
+{
+	uint8_t *a = v->fpu;
+	if (u->mxcsr & 0xFFFF0000U) return -EINVAL;
+	memcpy(a + 0, &u->fcw, 2);
+	memcpy(a + 2, &u->fsw, 2);
+	a[4] = u->ftwx;
+	memcpy(a + 6, &u->last_opcode, 2);
+	memcpy(a + 8, &u->last_ip, 8);
+	memcpy(a + 16, &u->last_dp, 8);
+	memcpy(a + 24, &u->mxcsr, 4);
+	memcpy(a + 32, u->fpr, sizeof(u->fpr));
+	memcpy(a + 160, u->xmm, sizeof(u->xmm));
+	a[512] |= 3;   /* XSTATE_BV: XRSTOR takes x87 and SSE from here now */
+	return 0;
+}
+
+/* host TSC frequency in kHz, from the calibrated ns = ticks * mult >> 28 */
+static uint32_t tsc_khz(void)
+{
+	return tsc_mult ? (uint32_t)((1000000ULL << 28) / tsc_mult) : 0;
+}
+
+#define COPY_IN(x)  (copy_from_user(&(x), uarg, sizeof(x)) ? -EFAULT : 0)
+#define COPY_OUT(x) (copy_to_user(uarg, &(x), sizeof(x)) ? -EFAULT : 0)
+
+/* the vcpu ioctls past the registers: events, MSRs, CPUID, FPU, debug */
+static int vcpu_ioctl_more(kvm_vcpu_t *v, uint32_t cmd, void *uarg)
+{
+	int r;
+	switch (cmd) {
+	case KVM_INTERRUPT: {
+		struct kvm_interrupt irq;
+		if ((r = COPY_IN(irq))) return r;
+		if (irq.irq >= KVM_NR_INTERRUPTS) return -EINVAL;
+		if (v->irq_pending >= 0) return -EEXIST;   /* one at a time, as ready_for_interrupt_injection says */
+		v->irq_pending = (int)irq.irq;
+		return 0;
+	}
+	case KVM_NMI:
+		v->nmi_pending = 1;
+		return 0;
+	case KVM_GET_MSRS: return vmx_get_msrs(v, uarg, 0);
+	case KVM_SET_MSRS: return vmx_get_msrs(v, uarg, 1);
+	case KVM_SET_CPUID2: return kvm_cpuid_set(v, uarg);
+	case KVM_GET_CPUID2: return kvm_cpuid_get(v, uarg);
+	case KVM_GET_FPU: {
+		struct kvm_fpu fpu;
+		fpu_get(v, &fpu);
+		return COPY_OUT(fpu);
+	}
+	case KVM_SET_FPU: {
+		struct kvm_fpu fpu;
+		if ((r = COPY_IN(fpu))) return r;
+		return fpu_set(v, &fpu);
+	}
+	case KVM_GET_XSAVE:
+		return copy_to_user(uarg, v->fpu, PAGE_SIZE) ? -EFAULT : 0;
+	case KVM_SET_XSAVE: {
+		uint8_t *area = kmalloc(PAGE_SIZE);
+		if (!area) return -ENOMEM;
+		r = copy_from_user(area, uarg, PAGE_SIZE) ? -EFAULT : vmx_set_xsave(v, area);
+		kfree(area);
+		return r;
+	}
+	case KVM_GET_XCRS: {
+		struct kvm_xcrs x;
+		memset(&x, 0, sizeof(x));
+		x.nr_xcrs = 1;
+		x.xcrs[0].value = v->xcr0;
+		return COPY_OUT(x);
+	}
+	case KVM_SET_XCRS: {
+		struct kvm_xcrs x;
+		if ((r = COPY_IN(x))) return r;
+		if (x.nr_xcrs > 16 || x.flags) return -EINVAL;
+		for (uint32_t i = 0; i < x.nr_xcrs; i++)
+			if (x.xcrs[i].xcr != 0 || vmx_set_xcr0(v, x.xcrs[i].value)) return -EINVAL;
+		return 0;
+	}
+	case KVM_GET_MP_STATE: {
+		struct kvm_mp_state mp = { KVM_MP_STATE_RUNNABLE };   /* the VMM keeps halts and SIPIs */
+		return COPY_OUT(mp);
+	}
+	case KVM_SET_MP_STATE: {
+		struct kvm_mp_state mp;
+		if ((r = COPY_IN(mp))) return r;
+		return mp.mp_state == KVM_MP_STATE_RUNNABLE ? 0 : -EINVAL;
+	}
+	case KVM_GET_VCPU_EVENTS: {
+		struct kvm_vcpu_events e;
+		if ((r = vmx_get_events(v, &e))) return r;
+		return COPY_OUT(e);
+	}
+	case KVM_SET_VCPU_EVENTS: {
+		struct kvm_vcpu_events e;
+		if ((r = COPY_IN(e))) return r;
+		return vmx_set_events(v, &e);
+	}
+	case KVM_GET_DEBUGREGS: {
+		struct kvm_debugregs d;
+		if ((r = vmx_get_debugregs(v, &d))) return r;
+		return COPY_OUT(d);
+	}
+	case KVM_SET_DEBUGREGS: {
+		struct kvm_debugregs d;
+		if ((r = COPY_IN(d))) return r;
+		return vmx_set_debugregs(v, &d);
+	}
+	case KVM_GET_TSC_KHZ:
+		return (int)tsc_khz();
+	case KVM_SET_TSC_KHZ:
+		/* the guest's TSC runs at the host's: only that rate is accepted */
+		return (uint32_t)(uintptr_t)uarg == tsc_khz() ? 0 : -EINVAL;
+	case KVM_X86_SETUP_MCE: {
+		uint64_t mcg_cap;
+		if ((r = COPY_IN(mcg_cap))) return r;
+		return mcg_cap ? -EINVAL : 0;
+	}
+	case KVM_ENABLE_CAP:
+		return -EINVAL;
+	default:
+		return kvm_unknown("vcpu", cmd);
+	}
+}
+
 static int vcpu_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
 	kvm_vcpu_t *v = f->priv;
@@ -159,7 +342,7 @@ static int vcpu_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		break;
 	}
 	default:
-		r = -ENOTTY;
+		r = vcpu_ioctl_more(v, cmd, uarg);
 	}
 	mutex_unlock(&v->lock);
 	return r;
@@ -239,6 +422,7 @@ static int vm_set_memory(kvm_vm_t *vm, const struct kvm_userspace_memory_region 
 		}
 	}
 	kvm_slot_t *s = &vm->slots[m->slot];
+	__atomic_add_fetch(&vm->slots_seq, 1, __ATOMIC_RELEASE);   /* odd: changing */
 	if (s->size) {
 		kvm_slot_t old = *s;
 		s->size = 0;   /* gone before the unmap, so no vcpu maps it back */
@@ -248,6 +432,7 @@ static int vm_set_memory(kvm_vm_t *vm, const struct kvm_userspace_memory_region 
 	s->hva = m->userspace_addr;
 	s->flags = m->flags;
 	s->size = m->memory_size;
+	__atomic_add_fetch(&vm->slots_seq, 1, __ATOMIC_RELEASE);
 out:
 	mutex_unlock(&vm->lock);
 	return r;
@@ -269,8 +454,32 @@ static int vm_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		if (copy_from_user(&m, (void *)(uintptr_t)arg, sizeof(m))) return -EFAULT;
 		return vm_set_memory(vm, &m);
 	}
+	case KVM_SET_TSS_ADDR:
+	case KVM_SET_IDENTITY_MAP_ADDR:
+		/* only a VT-x without unrestricted guest runs real mode through
+		 * these; this KVM requires it, so the addresses are not used */
+		return 0;
+	case KVM_GET_CLOCK: {
+		struct kvm_clock_data c;
+		memset(&c, 0, sizeof(c));
+		c.clock = mono_ns() + vm->clock_off;
+		return copy_to_user((void *)(uintptr_t)arg, &c, sizeof(c)) ? -EFAULT : 0;
+	}
+	case KVM_SET_CLOCK: {
+		struct kvm_clock_data c;
+		if (copy_from_user(&c, (void *)(uintptr_t)arg, sizeof(c))) return -EFAULT;
+		vm->clock_off = c.clock - mono_ns();
+		return 0;
+	}
+	case KVM_IOEVENTFD: {
+		struct kvm_ioeventfd a;
+		if (copy_from_user(&a, (void *)(uintptr_t)arg, sizeof(a))) return -EFAULT;
+		return kvm_ioeventfd(vm, &a);
+	}
+	case KVM_ENABLE_CAP:
+		return -EINVAL;
 	default:
-		return -ENOTTY;
+		return kvm_unknown("vm", cmd);
 	}
 }
 
@@ -318,8 +527,16 @@ static int kvm_dev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		return kvm_check_extension(arg);
 	case KVM_GET_VCPU_MMAP_SIZE:
 		return arg ? -EINVAL : KVM_MMAP_PAGES * PAGE_SIZE;
+	case KVM_GET_SUPPORTED_CPUID:
+		return kvm_cpuid_supported((struct kvm_cpuid2 *)(uintptr_t)arg);
+	case KVM_GET_MSR_INDEX_LIST:
+		return kvm_msr_index_list((struct kvm_msr_list *)(uintptr_t)arg);
+	case KVM_X86_GET_MCE_CAP_SUPPORTED: {
+		uint64_t mcg_cap = 0;   /* no banks, no MCG features */
+		return copy_to_user((void *)(uintptr_t)arg, &mcg_cap, sizeof(mcg_cap)) ? -EFAULT : 0;
+	}
 	default:
-		return -ENOTTY;
+		return kvm_unknown("/dev/kvm", cmd);
 	}
 }
 
@@ -334,6 +551,7 @@ void kvm_init(void)
 		kprintf(KERN_INFO "kvm: not available (%d)\n", r);
 		return;
 	}
+	kvm_cpuid_init();
 	devfs_register_device_gid("kvm", S_IFCHR | 0660, DEVFS_GID_KVM, KVM_DEV_RDEV, &kvm_dev_fops);
 	kprintf(KERN_INFO "kvm: VT-x with EPT and unrestricted guest, /dev/kvm\n");
 }
