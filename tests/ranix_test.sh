@@ -1103,6 +1103,9 @@ for i in range(200):
 print("PYOK", acc, collections.Counter("mississippi")["s"])'
 	check "c-python" "1" \
 	    "$(timeout 90 python3 -c "$PYPROG" 2>/dev/null | grep -c '^PYOK')"
+	# the C modules a service needs (Fjord's saat: struct, socket), built in statically
+	check "c-python-mods" "1" \
+	    "$(timeout 30 python3 -c 'import struct, socket, math, select, subprocess, datetime, random, binascii, array, unicodedata; print("PYMOD", struct.pack("<I", 1).hex())' 2>/dev/null | grep -c '^PYMOD 01000000')"
 fi
 
 # ── Stock glibc: a host-gcc binary running a real glibc ld.so/__libc_start_main

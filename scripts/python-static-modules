@@ -1,0 +1,36 @@
+# C modules built into the static python3 (make python): Modules/Setup.local
+# marks them *static*, with the sources from Modules/Setup.stdlib.in. Without
+# them only the bootstrap set is there and "import struct" fails (Fjord's saat,
+# 11-16). One name per line; changing this file rebuilds python3.
+_struct
+math
+cmath
+select
+_socket
+_posixsubprocess
+fcntl
+_datetime
+_random
+_bisect
+_heapq
+array
+binascii
+_json
+_contextvars
+_pickle
+unicodedata
+_statistics
+_queue
+mmap
+grp
+resource
+termios
+_opcode
+_csv
+_zoneinfo
+_asyncio
+_md5
+_sha1
+_sha2
+_sha3
+_blake2

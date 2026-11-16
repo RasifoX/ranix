@@ -772,11 +772,14 @@ $(PYTHON_HOST):
 # Cross-build: musl, static C extensions (no shared loader search), every
 # optional module needing an external lib (zlib/ssl/ctypes/curses/...) dropped.
 python: $(PYTHON_BIN)
-$(PYTHON_BIN): $(PYTHON_HOST)
+$(PYTHON_BIN): $(PYTHON_HOST) scripts/python-static-modules
 	@echo "Building CPython $(PY_VER) for $(ARCH)..."
 	@rm -rf "$(CACHE_DIR)/python-$(ARCH)"
 	@mkdir -p "$(CACHE_DIR)/python-$(ARCH)"
 	@tar xzf "$(CACHE_DIR)/Python-$(PY_VER).tgz" -C "$(CACHE_DIR)/python-$(ARCH)" --strip-components=1
+	@# LC_ALL=C: in tr_TR [A-Z] skips I, and every module named with an I was dropped
+	@{ echo '*static*'; LC_ALL=C sed 's/^@MODULE_[A-Z0-9_]*_TRUE@//' "$(CACHE_DIR)/python-$(ARCH)/Modules/Setup.stdlib.in" | \
+	    grep -E "^($$(grep -v '^#' scripts/python-static-modules | paste -sd'|')) "; } > "$(CACHE_DIR)/python-$(ARCH)/Modules/Setup.local"
 	@cd "$(CACHE_DIR)/python-$(ARCH)" && \
 	    CC="$(MUSL_CC)" CONFIG_SITE=/dev/null \
 	    PKG_CONFIG_LIBDIR=/nonexistent PKG_CONFIG_PATH= \
@@ -797,7 +800,9 @@ $(PYTHON_BIN): $(PYTHON_HOST)
 	                py_cv_module__uuid=n/a \
 	                >/dev/null 2>&1
 	@cd "$(CACHE_DIR)/python-$(ARCH)" && $(MAKE) python -j$$(nproc) >/dev/null 2>&1
-	@$(CURDIR)/$(PYTHON_HOST) scripts/py_stdlib_zip.py \
+	@# the host's own python3: it only packs .py files, and the bootstrap host
+	@# build may lack binascii, which zipfile imports
+	@python3 scripts/py_stdlib_zip.py \
 	    "$(CURDIR)/$(CACHE_DIR)/python-$(ARCH)/Lib" "$(CURDIR)/$(PYTHON_ZIP)"
 	@llvm-strip "$(PYTHON_BIN)" 2>/dev/null || strip "$(PYTHON_BIN)" 2>/dev/null || true
 	@echo "[OK] CPython $(PY_VER) for $(ARCH) ready (bin $$(du -h $(PYTHON_BIN)|cut -f1), stdlib $$(du -h $(PYTHON_ZIP)|cut -f1))"
