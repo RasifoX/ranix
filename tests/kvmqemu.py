@@ -13,11 +13,14 @@ kernel (linux-virt). Inside, QEMU runs two KVM guests:
   - Linux, through QEMU's SeaBIOS and its -kernel loader, to an /init (busybox
     from Ranix's initramfs) that writes the kernel's name and the CPU to COM1
     and reboots: real mode to long mode, paging, MSRs, interrupts from the
-    PIT through QEMU's PIC, string port I/O.
+    PIT through QEMU's PIC, string port I/O;
+  - the same Linux on QEMU's pc machine with two CPUs and the local APICs in
+    Ranix's KVM (kernel-irqchip=split): ACPI, the IOAPIC's interrupts as MSIs,
+    APIC timers, INIT/SIPI to start the second CPU, IPIs.
 
-The machine is isapc with kernel-irqchip=off: QEMU keeps its interrupt
-controllers in userspace, and refuses a userspace local APIC with KVM on the
-machines that have one.
+The first two use isapc with kernel-irqchip=off: every interrupt controller
+in QEMU. A machine with local APICs needs them in the kernel: QEMU refuses a
+userspace local APIC with KVM.
 
 QEMU comes from Alpine (v3.21, the same release Ranix's apk tests use), fetched
 once into .cache with the apk.static the build already has.
@@ -77,6 +80,14 @@ timeout 120 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=
 echo "KVMQ linux rc $?"
 grep -v "host doesn't support" /tmp/ql.out | sed 's/^/KVMQ linux err /'
 grep -a "LINUXQ" /tmp/linux.out | sed 's/^/KVMQ linux out /'
+echo "KVMQ smp basla"
+timeout 150 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine pc,accel=kvm,kernel-irqchip=split \
+    -cpu host -smp 2 -nodefaults -display none -no-reboot -serial file:/tmp/smp.out -m 256 \
+    -L /alp/usr/share/qemu -kernel /lnx/vmlinuz -initrd /lnx/initrd.cpio \
+    -append "console=ttyS0 panic=-1" > /tmp/qs.out 2>&1
+echo "KVMQ smp rc $?"
+grep -v "host doesn't support\|MCG_CAP" /tmp/qs.out | sed 's/^/KVMQ smp err /'
+grep -a "LINUXQ\|smp: Brought up\|TIMER: vector" /tmp/smp.out | sed 's/^/KVMQ smp out /'
 echo KVMQ-SON
 '''
 
@@ -154,7 +165,7 @@ def main():
     shutil.copytree(f"{QROOT}/lib", f"{root}/alp/lib", symlinks=True, copy_function=os.link)
     shutil.copytree(f"{QROOT}/usr/lib", f"{root}/alp/usr/lib", symlinks=True, copy_function=os.link)
     os.link(f"{QROOT}/usr/bin/qemu-system-x86_64", f"{root}/alp/usr/bin/qemu-system-x86_64")
-    for f in ("bios.bin", "bios-256k.bin", "linuxboot.bin", "linuxboot_dma.bin"):
+    for f in ("bios.bin", "bios-256k.bin", "linuxboot.bin", "linuxboot_dma.bin", "kvmvapic.bin"):
         os.link(f"{QROOT}/usr/share/qemu/{f}", f"{root}/alp/usr/share/qemu/{f}")
     shutil.copy(f"{B}/fw.bin", f"{root}/fw.bin")
     os.makedirs(f"{root}/lnx")
@@ -181,7 +192,7 @@ def main():
                                  "-boot", "d", "-cdrom", f"{B}/q.iso", "-vga", "none"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        end = time.time() + 360
+        end = time.time() + 480
         while time.time() < end and p.poll() is None:
             t = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
             if "KVMQ-SON" in t:
@@ -202,7 +213,13 @@ def main():
           ("QEMU printed the guest's line", f"KVMQ out {MARK}" in out, ""),
           ("QEMU exited with the guest's code", rc == "33", rc),
           ("Linux ran its /init in QEMU", "model name" in lout, lout),
-          ("QEMU ended with the guest's reboot", lrc == "0", lrc)]
+          ("QEMU ended with the guest's reboot", lrc == "0", lrc),
+          ("Linux on pc with the APICs in KVM ran its /init",
+           any(l.startswith("KVMQ smp out LINUXQ Linux ") for l in lines), ""),
+          ("it brought up its second CPU", any("Brought up 1 node, 2 CPUs" in l for l in lines), ""),
+          ("its timer came through the IOAPIC", any("TIMER: vector" in l for l in lines), ""),
+          ("QEMU ended with that guest's reboot",
+           next((l.split()[3] for l in lines if l.startswith("KVMQ smp rc ")), "") == "0", "")]
     for name, good, why in ok:
         print(("PASS: " if good else "FAIL: ") + name + ("" if good else f"  ({why})"))
     print(f"[kvmqemu] {sum(1 for _, g, _ in ok if g)}/{len(ok)} in {time.time() - t0:.0f}s")

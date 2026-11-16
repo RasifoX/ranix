@@ -12,6 +12,11 @@
  * addresses there, and only threads of that space may use it (EIO otherwise,
  * as on Linux).
  *
+ * Interrupt controllers: either all of them in the VMM (QEMU's
+ * kernel-irqchip=off), or the local APICs here and the IOAPIC and PIC in the
+ * VMM (kernel-irqchip=split, KVM_CAP_SPLIT_IRQCHIP, kvm_lapic.c). The PIC and
+ * IOAPIC in the kernel too (KVM_CREATE_IRQCHIP) are not offered.
+ *
  * /dev/kvm is 0660 root:kvm (gid 34, Alpine's kvm group): running a guest is a
  * privilege the machine's owner hands out.
  *
@@ -38,6 +43,7 @@
 #define KVM_DEV_RDEV ((10 << 8) | 232)
 #define MCG_CTL_P (1ULL << 8)   /* IA32_MCG_CAP: IA32_MCG_CTL exists */   /* misc major 10, minor 232, as on Linux */
 #define KVM_MMAP_PAGES 2                  /* kvm_run, then the port I/O data */
+#define KVM_MAX_ROUTES 1024
 
 static vfs_iops_t kvm_iops = { 0 };
 
@@ -99,12 +105,14 @@ static int kvm_check_extension(uint64_t cap)
 	case KVM_CAP_GET_TSC_KHZ:
 	case KVM_CAP_IMMEDIATE_EXIT:
 		return 1;
+	case KVM_CAP_IRQCHIP:          /* as the split one: local APICs here (KVM_CAP_SPLIT_IRQCHIP) */
+	case KVM_CAP_SPLIT_IRQCHIP:
 	case KVM_CAP_SIGNAL_MSI:
-	case KVM_CAP_IRQ_ROUTING:
-		/* a VMM requires it, but it is for an in-kernel interrupt
-		 * controller; without one (kernel-irqchip=off) the VMM delivers
-		 * MSIs itself and never sends KVM_SIGNAL_MSI */
+	case KVM_CAP_IRQ_INJECT_STATUS:
+	case KVM_CAP_IRQFD:
 		return 1;
+	case KVM_CAP_IRQ_ROUTING:
+		return KVM_MAX_ROUTES;   /* GSIs a routing table may name */
 	case KVM_CAP_MCE:
 		return KVM_MCE_BANKS;   /* the most banks KVM_X86_SETUP_MCE takes */
 	case KVM_CAP_NR_VCPUS:
@@ -123,6 +131,7 @@ static void kvm_vm_put(kvm_vm_t *vm)
 {
 	if (__atomic_sub_fetch(&vm->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
 	kvm_ioeventfd_free(vm);
+	kvm_irq_free(vm);
 	kvm_ept_free(vm);
 	vm_destroy(vm->vs);
 	kfree(vm);
@@ -142,8 +151,11 @@ static int vcpu_close(vfs_file_t *f)
 	if (!v) return 0;
 	kvm_vm_t *vm = v->vm;
 	mutex_lock(&vm->lock);
+	uint64_t f2 = spin_lock_irq(&vm->irq_lock);   /* no delivery is walking it then */
 	vm->vcpus[v->id] = NULL;
+	spin_unlock_irq(&vm->irq_lock, f2);
 	mutex_unlock(&vm->lock);
+	kvm_lapic_free(v);
 	vmx_vcpu_free(v);
 	/* a mapping of the pages holds its own reference */
 	pmm_free((void *)v->run_page);
@@ -260,13 +272,45 @@ static int vcpu_ioctl_more(kvm_vcpu_t *v, uint32_t cmd, void *uarg)
 		return 0;
 	}
 	case KVM_GET_MP_STATE: {
-		struct kvm_mp_state mp = { KVM_MP_STATE_RUNNABLE };   /* the VMM keeps halts and SIPIs */
+		/* without the APIC here the VMM keeps halts and SIPIs: always runnable */
+		struct kvm_mp_state mp = { v->mp_state };
 		return COPY_OUT(mp);
 	}
 	case KVM_SET_MP_STATE: {
 		struct kvm_mp_state mp;
 		if ((r = COPY_IN(mp))) return r;
-		return mp.mp_state == KVM_MP_STATE_RUNNABLE ? 0 : -EINVAL;
+		if (mp.mp_state == KVM_MP_STATE_RUNNABLE) { v->mp_state = mp.mp_state; return 0; }
+		if (!v->apic || mp.mp_state > KVM_MP_STATE_SIPI_RECEIVED) return -EINVAL;
+		if (mp.mp_state == KVM_MP_STATE_SIPI_RECEIVED) {   /* the SIPI arrived: start at its vector */
+			v->sipi_pending = 1;
+			mp.mp_state = KVM_MP_STATE_INIT_RECEIVED;
+		}
+		v->mp_state = mp.mp_state;
+		return 0;
+	}
+	case KVM_TPR_ACCESS_REPORTING:
+	case KVM_SET_VAPIC_ADDR:
+		/* QEMU's TPR patching for old 32-bit guests: it acts on TPR access
+		 * reports, which this KVM never sends, so it never starts. Taken
+		 * and left unused. */
+		return v->apic ? 0 : -ENXIO;
+	case KVM_GET_LAPIC: {
+		if (!v->apic) return -ENXIO;
+		struct kvm_lapic_state *st = kmalloc(sizeof(*st));
+		if (!st) return -ENOMEM;
+		kvm_lapic_get(v, st);
+		r = copy_to_user(uarg, st, sizeof(*st)) ? -EFAULT : 0;
+		kfree(st);
+		return r;
+	}
+	case KVM_SET_LAPIC: {
+		if (!v->apic) return -ENXIO;
+		struct kvm_lapic_state *st = kmalloc(sizeof(*st));
+		if (!st) return -ENOMEM;
+		r = copy_from_user(st, uarg, sizeof(*st)) ? -EFAULT : 0;
+		if (!r) kvm_lapic_set(v, st);
+		kfree(st);
+		return r;
 	}
 	case KVM_GET_VCPU_EVENTS: {
 		struct kvm_vcpu_events e;
@@ -379,6 +423,13 @@ static int vcpu_create(kvm_vm_t *vm, uint64_t id)
 	v->run = (struct kvm_run *)PHYS_TO_VIRT(v->run_page);
 	r = vmx_vcpu_init(v);
 	if (r) goto fail;
+	v->mp_state = KVM_MP_STATE_RUNNABLE;
+	if (vm->split_irqchip) {
+		r = kvm_lapic_create(v);
+		if (r) goto fail_vmx;
+		/* the others wait for their SIPI, as after power-on */
+		if (id != 0) v->mp_state = KVM_MP_STATE_UNINITIALIZED;
+	}
 
 	r = mutex_lock_killable(&vm->lock);
 	if (r) goto fail_vmx;
@@ -391,10 +442,13 @@ static int vcpu_create(kvm_vm_t *vm, uint64_t id)
 		r = fd;
 		goto fail_vmx;
 	}
+	uint64_t f2 = spin_lock_irq(&vm->irq_lock);
 	vm->vcpus[id] = v;
+	spin_unlock_irq(&vm->irq_lock, f2);
 	mutex_unlock(&vm->lock);
 	return fd;
 fail_vmx:
+	kvm_lapic_free(v);
 	vmx_vcpu_free(v);
 fail:
 	if (v->run_page) pmm_free((void *)v->run_page);
@@ -444,6 +498,23 @@ out:
 	return r;
 }
 
+/* KVM_ENABLE_CAP on the VM: only the split irqchip, before any vcpu (their
+ * APICs are made with them); args[0] is the IOAPIC's pin count, its routes */
+static int vm_enable_cap(kvm_vm_t *vm, const struct kvm_enable_cap *ec)
+{
+	if (ec->cap != KVM_CAP_SPLIT_IRQCHIP || ec->flags) return -EINVAL;
+	if (ec->args[0] > KVM_MAX_ROUTES) return -EINVAL;
+	int r = mutex_lock_killable(&vm->lock);
+	if (r) return r;
+	for (int i = 0; i < KVM_MAX_VCPUS; i++) if (vm->vcpus[i]) r = -EINVAL;
+	if (!r) {
+		if (vm->split_irqchip) r = -EEXIST;
+		else vm->split_irqchip = 1;
+	}
+	mutex_unlock(&vm->lock);
+	return r;
+}
+
 static int vm_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 {
 	kvm_vm_t *vm = f->priv;
@@ -482,8 +553,31 @@ static int vm_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		if (copy_from_user(&a, (void *)(uintptr_t)arg, sizeof(a))) return -EFAULT;
 		return kvm_ioeventfd(vm, &a);
 	}
-	case KVM_ENABLE_CAP:
-		return -EINVAL;
+	case KVM_ENABLE_CAP: {
+		struct kvm_enable_cap ec;
+		if (copy_from_user(&ec, (void *)(uintptr_t)arg, sizeof(ec))) return -EFAULT;
+		return vm_enable_cap(vm, &ec);
+	}
+	case KVM_IRQ_LINE:
+	case KVM_IRQ_LINE_STATUS: {
+		struct kvm_irq_level l;
+		if (copy_from_user(&l, (void *)(uintptr_t)arg, sizeof(l))) return -EFAULT;
+		int r = kvm_irq_line(vm, &l);
+		if (!r && cmd == KVM_IRQ_LINE_STATUS && copy_to_user((void *)(uintptr_t)arg, &l, sizeof(l))) r = -EFAULT;
+		return r;
+	}
+	case KVM_SET_GSI_ROUTING:
+		return vm->split_irqchip ? kvm_set_gsi_routing(vm, (struct kvm_irq_routing *)(uintptr_t)arg) : -ENXIO;
+	case KVM_SIGNAL_MSI: {
+		struct kvm_msi m;
+		if (copy_from_user(&m, (void *)(uintptr_t)arg, sizeof(m))) return -EFAULT;
+		return kvm_signal_msi(vm, &m);
+	}
+	case KVM_IRQFD: {
+		struct kvm_irqfd a;
+		if (copy_from_user(&a, (void *)(uintptr_t)arg, sizeof(a))) return -EFAULT;
+		return kvm_irqfd(vm, &a);
+	}
 	default:
 		return kvm_unknown("vm", cmd);
 	}
@@ -510,6 +604,7 @@ static int kvm_vm_create(uint64_t type)
 	if (!vm) return -ENOMEM;
 	memset(vm, 0, sizeof(*vm));
 	vm->lock = (mutex_t)MUTEX_INIT;
+	vm->irq_lock = (spinlock_t)SPINLOCK_INIT;
 	vm->refs = 1;
 	int r = kvm_ept_init(vm);
 	if (r) { kfree(vm); return r; }

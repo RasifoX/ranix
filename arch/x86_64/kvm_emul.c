@@ -253,14 +253,53 @@ int kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa)
 	return KVM_MMIO_USER;
 }
 
+static void load_reg(kvm_vcpu_t *v, const kvm_mmio_t *d, uint64_t val);
+
 /* KVM_RUN after a load: put userspace's data in the register */
 void kvm_mmio_finish(kvm_vcpu_t *v)
 {
 	if (!v->mmio_pending) return;
-	kvm_mmio_t *d = &v->mmio;
 	v->mmio_pending = 0;
 	uint64_t val = 0;
-	memcpy(&val, v->run->mmio.data, d->size);
+	memcpy(&val, v->run->mmio.data, v->mmio.size);
+	load_reg(v, &v->mmio, val);
+}
+
+/* An access to the vcpu's own APIC page, done here: a load lands in its
+ * register at once. A store that ends a level-triggered interrupt (EOI) goes
+ * to userspace's IOAPIC as KVM_EXIT_IOAPIC_EOI. */
+int kvm_mmio_apic(kvm_vcpu_t *v, uint64_t gpa)
+{
+	uint8_t b[15];
+	int n = 0;
+	int r = fetch(v, b, &n);
+	if (r == -EAGAIN) return KVM_MMIO_RETRY;
+	kvm_mmio_t d;
+	if (r || decode(v, b, n, &d) || d.size > 4) {
+		struct kvm_run *run = v->run;
+		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+		run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+		run->internal.ndata = 2;
+		run->internal.data[0] = gpa;
+		run->internal.data[1] = vmread(GUEST_RIP);
+		return KVM_MMIO_USER;
+	}
+	uint32_t off = (uint32_t)(gpa & 0xFFF);
+	vmwrite(GUEST_RIP, vmread(GUEST_RIP) + d.len);
+	if (!d.write) {
+		load_reg(v, &d, kvm_lapic_read(v, off));
+		return KVM_MMIO_GUEST;
+	}
+	int vec = kvm_lapic_write(v, off, (uint32_t)reg_read(v, &d));
+	if (vec < 0) return KVM_MMIO_GUEST;
+	v->run->exit_reason = KVM_EXIT_IOAPIC_EOI;
+	v->run->eoi.vector = (uint8_t)vec;
+	return KVM_MMIO_USER;
+}
+
+/* a load's value into its register, sized and extended as the instruction says */
+static void load_reg(kvm_vcpu_t *v, const kvm_mmio_t *d, uint64_t val)
+{
 	if (d->sign) val = d->size == 1 ? (uint64_t)(int64_t)(int8_t)val : (uint64_t)(int64_t)(int16_t)val;
 	uint64_t *r = &v->g.r[d->reg];   /* never RSP: no MMIO load targets the stack pointer here */
 	if (d->high8) { *r = (*r & ~0xFF00ULL) | ((val & 0xFF) << 8); return; }

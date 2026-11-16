@@ -377,6 +377,10 @@ void       task_sleep_until(uint64_t deadline);
 void       task_sleep_until_ns(uint64_t end_ns);   /* to a CLOCK_MONOTONIC instant (or a signal) */
 void       sched_note_wake_ns(uint64_t end_ns);    /* about to sleep, IRQs off: also end at end_ns */
 void       task_sleep_interruptible(void);
+/* Sleep until *flag is set, a signal, or end on the CLOCK_MONOTONIC (0: no end).
+ * The flag is tested under sched_lock: a waker that sets it and then
+ * task_wake()s this task is never lost between the test and the sleep. */
+void       task_sleep_flag_until_ns(volatile int *flag, uint64_t end);
 /* Sleep once if cond still holds, tested under sched_lock with interrupts off.
  * Whoever makes it false and then wakes the task cannot fall between the test and
  * the sleep, as with an unlocked check before task_sleep_interruptible(). cond must

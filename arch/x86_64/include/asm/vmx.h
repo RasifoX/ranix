@@ -59,6 +59,7 @@
 #define PIN_EXT_INTR_EXIT          (1U << 0)
 #define PIN_NMI_EXIT               (1U << 3)
 #define PIN_VIRTUAL_NMIS           (1U << 5)
+#define PIN_PREEMPT_TIMER          (1U << 6)
 
 #define CPU_INTR_WINDOW_EXIT       (1U << 2)
 #define CPU_TSC_OFFSET             (1U << 3)
@@ -171,6 +172,7 @@ enum vmcs_field {
 	GUEST_INTERRUPTIBILITY  = 0x4824,
 	GUEST_ACTIVITY_STATE    = 0x4826,
 	GUEST_SYSENTER_CS       = 0x482A,
+	VMX_PREEMPTION_TIMER    = 0x482E,
 	HOST_IA32_SYSENTER_CS   = 0x4C00,
 
 	CR0_GUEST_HOST_MASK     = 0x6000,
@@ -236,6 +238,7 @@ enum { SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS, SEG_LDTR, SEG_TR };
 #define EXIT_PAUSE           40
 #define EXIT_EPT_VIOLATION   48
 #define EXIT_EPT_MISCONFIG   49
+#define EXIT_PREEMPT_TIMER   52
 #define EXIT_WBINVD          54
 #define EXIT_XSETBV          55
 #define EXIT_REASON_ENTRY_FAILED (1U << 31)

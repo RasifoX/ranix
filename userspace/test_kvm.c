@@ -22,6 +22,12 @@
  * KVM_GET_SUPPORTED_CPUID, the MSR index list, the FPU, XCR0 and vcpu
  * events round trips.
  *
+ * A third VM has its local APICs in the kernel (KVM_CAP_SPLIT_IRQCHIP), moved
+ * to 0xF0000 so real-mode code reaches them: the APIC timer wakes a HLT, an MSI
+ * from KVM_SIGNAL_MSI and one from an irqfd are taken, an INIT level de-assert
+ * sent to everyone leaves the sender running, and INIT then SIPI start the
+ * second vcpu (waiting in KVM_RUN on its own thread) at the SIPI's page.
+ *
  * Prints OK, or SKIP where the CPU has no VMX (or is not x86), else FAIL lines. */
 #include <stdio.h>
 #include <stdint.h>
@@ -34,7 +40,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/eventfd.h>
+#include <pthread.h>
 #include <grp.h>
+#include <stdlib.h>
 #include "../include/uapi/kvm.h"
 
 static int fails;
@@ -120,6 +128,61 @@ __asm__(
 	"	iret\n"
 	".code64\n"
 	"guest2_end:\n"
+	".popsection\n");
+
+/* The APIC guest: vcpu 0 at 0x1000 with DS on the APIC page (0xF0000), vcpu 1
+ * started by SIPI vector 2 at 0x2000. Handlers at 0x1800 (timer, vector
+ * 0x30), 0x1820 (MSI, 0x31), 0x1840 (irqfd, 0x35). */
+extern const unsigned char guest3_start[], guest3_end[];
+__asm__(
+	".pushsection .rodata\n"
+	".globl guest3_start, guest3_end\n"
+	"guest3_start:\n"
+	".code16\n"
+	"	mov $0xF000, %ax\n"
+	"	mov %ax, %ds\n"
+	"	movl $0x1FF, 0xF0\n"             /* SVR: on, spurious vector 0xFF */
+	"	movl $0xB, 0x3E0\n"              /* divide by 1 */
+	"	movl $0x30, 0x320\n"             /* timer: vector 0x30, one-shot */
+	"	movl $200000, 0x380\n"           /* 200 us */
+	"	sti\n"                           /* STI; HLT: nothing is taken between them */
+	"	hlt\n"                           /* the timer ends it */
+	"	cli\n"
+	"	out %al, $0x31\n"                /* userspace sends an MSI here */
+	"	sti\n"
+	"	hlt\n"
+	"	cli\n"
+	"	out %al, $0x34\n"                /* userspace signals the irqfd here */
+	"	sti\n"
+	"	hlt\n"
+	"	movl $0x88500, 0x300\n"          /* INIT level de-assert to all, self too */
+	"	out %al, $0x36\n"                /* still here: it did not reset us */
+	"	movl $0x01000000, 0x310\n"       /* APIC ID 1 */
+	"	movl $0x4500, 0x300\n"           /* INIT */
+	"	movl $0x4602, 0x300\n"           /* SIPI, vector 2: 0x2000 */
+	"	out %al, $0x37\n"
+	".org guest3_start + 0x800\n"
+	"	mov $0x30, %al\n"
+	"	out %al, $0x30\n"
+	"	movl $0, 0xB0\n"                 /* EOI */
+	"	iret\n"
+	".org guest3_start + 0x820\n"
+	"	mov $0x33, %al\n"
+	"	out %al, $0x33\n"
+	"	movl $0, 0xB0\n"
+	"	iret\n"
+	".org guest3_start + 0x840\n"
+	"	mov $0x35, %al\n"
+	"	out %al, $0x35\n"
+	"	movl $0, 0xB0\n"
+	"	iret\n"
+	".org guest3_start + 0x1000\n"       /* 0x2000: vcpu 1 */
+	"	mov $0x41, %al\n"
+	"	out %al, $0x40\n"
+	"	cli\n"
+	"	hlt\n"
+	".code64\n"
+	"guest3_end:\n"
 	".popsection\n");
 
 #define MEM_SIZE 0x10000
@@ -472,6 +535,125 @@ static void test_guest2(int kvm)
 	munmap(mem, MEM_SIZE);
 }
 
+struct vcpu1 { int fd; struct kvm_run *run; int got; };
+
+/* vcpu 1 waits in KVM_RUN for its SIPI, then stops at its first port write */
+static void *vcpu1_thread(void *arg)
+{
+	struct vcpu1 *c = arg;
+	if (ioctl(c->fd, KVM_RUN, 0) == 0 && c->run->exit_reason == KVM_EXIT_IO && c->run->io.port == 0x40)
+		c->got = ((uint8_t *)c->run + c->run->io.data_offset)[0];
+	return NULL;
+}
+
+static int run_until_port(int vcpu, struct kvm_run *run, unsigned port)
+{
+	if (ioctl(vcpu, KVM_RUN, 0) != 0) { FAIL("apic KVM_RUN: %s", strerror(errno)); return -1; }
+	if (run->exit_reason != KVM_EXIT_IO || run->io.port != port) {
+		FAIL("apic guest: exit %u port 0x%x, want port 0x%x (internal %u %llx %llx)", run->exit_reason,
+		     run->io.port, port, run->internal.suberror, (unsigned long long)run->internal.data[0],
+		     (unsigned long long)run->internal.data[1]);
+		return -1;
+	}
+	return 0;
+}
+
+static void test_apic(int kvm)
+{
+	int vm = ioctl(kvm, KVM_CREATE_VM, 0);
+	uint8_t *mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (vm < 0 || mem == MAP_FAILED) { FAIL("apic VM"); return; }
+	struct kvm_irq_level line = { .irq = 5, .level = 1 };
+	expect_errno("KVM_IRQ_LINE without an irqchip", ioctl(vm, KVM_IRQ_LINE, &line), ENXIO);
+	struct kvm_enable_cap cap = { .cap = KVM_CAP_SPLIT_IRQCHIP, .args = { 24 } };
+	if (ioctl(vm, KVM_ENABLE_CAP, &cap) != 0) { FAIL("KVM_CAP_SPLIT_IRQCHIP: %s", strerror(errno)); return; }
+	memcpy(mem + 0x1000, guest3_start, (size_t)(guest3_end - guest3_start));
+	const struct { int vec; uint16_t off; } ivt[] = { { 0x30, 0x1800 }, { 0x31, 0x1820 }, { 0x35, 0x1840 } };
+	for (int i = 0; i < 3; i++) {
+		mem[ivt[i].vec * 4] = (uint8_t)ivt[i].off;
+		mem[ivt[i].vec * 4 + 1] = (uint8_t)(ivt[i].off >> 8);
+	}
+	if (set_slot(vm, 0, 0, MEM_SIZE, mem) != 0) FAIL("apic slot");
+	int v0 = ioctl(vm, KVM_CREATE_VCPU, 0), v1 = ioctl(vm, KVM_CREATE_VCPU, 1);
+	if (v0 < 0 || v1 < 0) { FAIL("apic vcpus: %s", strerror(errno)); return; }
+	expect_errno("split irqchip after the vcpus", ioctl(vm, KVM_ENABLE_CAP, &cap), EINVAL);
+	size_t msz = (size_t)ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
+	struct kvm_run *r0 = mmap(NULL, msz, PROT_READ | PROT_WRITE, MAP_SHARED, v0, 0);
+	struct kvm_run *r1 = mmap(NULL, msz, PROT_READ | PROT_WRITE, MAP_SHARED, v1, 0);
+	struct kvm_mp_state mp;
+	if (ioctl(v1, KVM_GET_MP_STATE, &mp) != 0 || mp.mp_state != KVM_MP_STATE_UNINITIALIZED)
+		FAIL("vcpu 1 is not waiting for its SIPI (%u)", mp.mp_state);
+	struct kvm_lapic_state *ls = malloc(sizeof(*ls));
+	if (ioctl(v1, KVM_GET_LAPIC, ls) != 0 || *(uint32_t *)&ls->regs[0x20] != 1U << 24)
+		FAIL("vcpu 1's APIC ID %x", *(uint32_t *)&ls->regs[0x20]);
+	free(ls);
+
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	for (int i = 0; i < 2; i++) {
+		int fd = i ? v1 : v0;
+		ioctl(fd, KVM_GET_SREGS, &sregs);
+		sregs.apic_base = 0xF0000 | (1 << 11) | (i ? 0 : 1 << 8);   /* reachable from real mode */
+		if (!i) { sregs.cs.selector = 0; sregs.cs.base = 0; }
+		if (ioctl(fd, KVM_SET_SREGS, &sregs) != 0) FAIL("apic KVM_SET_SREGS: %s", strerror(errno));
+	}
+	memset(&regs, 0, sizeof(regs));
+	regs.rip = 0x1000;
+	regs.rflags = 0x2;
+	regs.rsp = 0x8000;
+	ioctl(v0, KVM_SET_REGS, &regs);
+	memset(&regs, 0, sizeof(regs));
+	regs.rflags = 0x2;
+	regs.rsp = 0x9000;
+	ioctl(v1, KVM_SET_REGS, &regs);
+
+	struct vcpu1 c1 = { v1, r1, 0 };
+	pthread_t t;
+	pthread_create(&t, NULL, vcpu1_thread, &c1);
+
+	if (run_until_port(v0, r0, 0x30)) goto out;     /* the timer's handler */
+	if (run_until_port(v0, r0, 0x31)) goto out;
+	struct kvm_msi msi = { .address_lo = 0xFEE00000, .data = 0x31 };
+	if (ioctl(vm, KVM_SIGNAL_MSI, &msi) != 1) FAIL("KVM_SIGNAL_MSI: %s", strerror(errno));
+	if (run_until_port(v0, r0, 0x33)) goto out;     /* the MSI's handler */
+	if (run_until_port(v0, r0, 0x34)) goto out;
+	struct { struct kvm_irq_routing h; struct kvm_irq_routing_entry e[1]; } rt;
+	memset(&rt, 0, sizeof(rt));
+	rt.h.nr = 1;
+	rt.e[0].gsi = 5;
+	rt.e[0].type = KVM_IRQ_ROUTING_MSI;
+	rt.e[0].u.msi.address_lo = 0xFEE00000;
+	rt.e[0].u.msi.data = 0x35;
+	if (ioctl(vm, KVM_SET_GSI_ROUTING, &rt) != 0) FAIL("KVM_SET_GSI_ROUTING: %s", strerror(errno));
+	struct kvm_irq_level none = { .irq = 9, .level = 1 };
+	if (ioctl(vm, KVM_IRQ_LINE_STATUS, &none) != 0 || none.status != 0) FAIL("a GSI without a route was delivered");
+	int efd = eventfd(0, EFD_NONBLOCK);
+	struct kvm_irqfd ifd = { .fd = (uint32_t)efd, .gsi = 5 };
+	if (ioctl(vm, KVM_IRQFD, &ifd) != 0) FAIL("KVM_IRQFD: %s", strerror(errno));
+	uint64_t one = 1;
+	write(efd, &one, sizeof(one));
+	if (run_until_port(v0, r0, 0x35)) goto out;     /* the irqfd's handler */
+	uint64_t left = 0;
+	if (read(efd, &left, sizeof(left)) == sizeof(left)) FAIL("the irqfd left its count (%llu)", (unsigned long long)left);
+	if (run_until_port(v0, r0, 0x36)) goto out;     /* INIT de-assert did not reset vcpu 0 */
+	if (run_until_port(v0, r0, 0x37)) goto out;     /* INIT, SIPI sent */
+	pthread_join(t, NULL);
+	if (c1.got != 0x41) FAIL("vcpu 1 did not start at its SIPI vector (%d)", c1.got);
+	ifd.flags = KVM_IRQFD_FLAG_DEASSIGN;
+	if (ioctl(vm, KVM_IRQFD, &ifd) != 0) FAIL("KVM_IRQFD deassign: %s", strerror(errno));
+	close(efd);
+	munmap(r0, msz);
+	munmap(r1, msz);
+	close(v0);
+	close(v1);
+	close(vm);
+	munmap(mem, MEM_SIZE);
+	return;
+out:
+	FAIL("apic guest stopped early");
+	_exit(1);   /* vcpu 1's thread may still wait in KVM_RUN */
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   /* a hang still shows how far it got */
@@ -485,6 +667,7 @@ int main(void)
 	test_guest(kvm);
 	test_tables(kvm);
 	test_guest2(kvm);
+	test_apic(kvm);
 	close(kvm);
 	printf(fails ? "FAILED %d\n" : "OK\n", fails);
 	return fails != 0;

@@ -9,6 +9,19 @@
 
 #include <kernel/vfs.h>
 
+/* A kernel listener on an eventfd (KVM's irqfd): fn runs on every signal, from
+ * the signaller's context with the eventfd's lock held and interrupts off, so
+ * it must not sleep. It returns 1 to take the count (the eventfd reads empty
+ * after), 0 to leave it. Registered when the count is already up, it runs at
+ * once. */
+typedef struct eventfd_hook {
+	int  (*fn)(void *arg);
+	void  *arg;
+	struct eventfd_hook *next;
+} eventfd_hook_t;
+int  eventfd_hook_add(vfs_file_t *f, eventfd_hook_t *h);   /* -EINVAL: not an eventfd */
+void eventfd_hook_del(vfs_file_t *f, eventfd_hook_t *h);
+
 /* 1 when f is an eventfd */
 int eventfd_is(vfs_file_t *f);
 /* Add n to the count, as write(2) would, waking readers. It never sleeps:

@@ -31,6 +31,15 @@ typedef struct kvm_ioev {
 	struct vfs_file *volatile file;   /* the eventfd; NULL: a free entry */
 } kvm_ioev_t;
 
+/* a vcpu's local APIC, with a split irqchip (kvm_lapic.c) */
+typedef struct kvm_lapic {
+	uint32_t reg[256];        /* the 1 KB register page: reg[offset / 4] */
+	uint64_t timer_end;       /* monotonic ns it fires, 0: stopped */
+	uint64_t timer_period;    /* ns, for periodic mode */
+} kvm_lapic_t;
+
+struct kvm_irqfd_ent;
+
 typedef struct kvm_vm {
 	mutex_t     lock;        /* slots, vcpus[], every change to the EPT tables */
 	vm_space_t *vs;          /* the creator's address space: slots name its addresses */
@@ -40,7 +49,14 @@ typedef struct kvm_vm {
 	kvm_slot_t  slots[KVM_MAX_SLOTS];
 	volatile uint32_t slots_seq;   /* odd while slots[] changes: for kvm_slot_present */
 	uint64_t    clock_off;
-	kvm_ioev_t  ioev[KVM_MAX_IOEVENTFD];   /* KVM_SET_CLOCK: the VM's clock minus the host's monotonic */
+	kvm_ioev_t  ioev[KVM_MAX_IOEVENTFD];
+	/* split irqchip (kvm_irq.c): local APICs here, IOAPIC and PIC in the VMM.
+	 * irq_lock: vcpus[] for deliveries, and the routing table */
+	int         split_irqchip;
+	spinlock_t  irq_lock;
+	struct kvm_irq_routing_entry *routes;
+	uint32_t    nroutes;
+	struct kvm_irqfd_ent *irqfds;   /* under lock */   /* KVM_SET_CLOCK: the VM's clock minus the host's monotonic */
 	struct kvm_vcpu *vcpus[KVM_MAX_VCPUS];
 	/* EPT translations a CPU may still cache. ept_gen moves when a mapping is
 	 * taken away; a vcpu entering on a CPU whose cpu_gen is behind flushes it
@@ -98,6 +114,7 @@ typedef struct kvm_vcpu {
 	int         irq_pending; /* KVM_INTERRUPT vector not yet delivered, or -1 */
 	uint8_t     nmi_pending; /* KVM_NMI not yet delivered */
 	uint32_t    cpu_ctl;     /* primary controls as last written (interrupt/NMI windows) */
+	uint32_t    pin_ctl;     /* pin-based controls as last written (preemption timer) */
 	struct kvm_cpuid_entry2 *cpuid;   /* KVM_SET_CPUID2's table, NULL before */
 	uint32_t    ncpuid;
 	/* MSRs (kvm_msr.c): the switched ones in the VM-entry load / VM-exit store
@@ -107,6 +124,15 @@ typedef struct kvm_vcpu {
 	uint32_t    msr_count;   /* switched MSRs as last written to the VMCS */
 	uint64_t    misc_enable, mtrr_def, mtrr_var[16], mtrr_fix[11];
 	uint64_t    dr[4], dr6;  /* the guest's debug registers (DR7 is in the VMCS) */
+	/* split irqchip: the APIC, and being woken (kvm_vcpu_kick) */
+	kvm_lapic_t *apic;
+	struct process *thread;   /* the thread in KVM_RUN, for task_wake */
+	volatile int kick;        /* something for the vcpu to look at */
+	volatile int blocked;     /* asleep in HLT or waiting for a SIPI */
+	volatile int init_pending, sipi_pending, sipi_vector;
+	uint32_t    mp_state;     /* KVM_MP_STATE_* */
+	uint8_t     halt_if;      /* RFLAGS.IF when the guest halted */
+	uint8_t     do_reset, do_sipi;   /* INIT and SIPI, applied before the next entry */
 	/* machine-check registers, stored only: no error is ever raised */
 	uint64_t    mcg_cap, mcg_status, mcg_ctl;
 	uint64_t    mce_bank[KVM_MCE_BANKS * 4];   /* CTL STATUS ADDR MISC per bank */
@@ -154,6 +180,7 @@ int  kvm_msr_index_list(struct kvm_msr_list *ul);
 int  kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa);
 void kvm_mmio_finish(kvm_vcpu_t *v);
 int  kvm_pio_string(kvm_vcpu_t *v, uint64_t qual);   /* INS/OUTS exit: KVM_MMIO_* */
+int  kvm_mmio_apic(kvm_vcpu_t *v, uint64_t gpa);      /* an access to the APIC page: KVM_MMIO_* */
 int  kvm_pio_string_finish(kvm_vcpu_t *v);           /* KVM_RUN after INS: may sleep */
 
 /* vmx.c internals that vmx_state.c shares */
@@ -174,6 +201,32 @@ int  vmx_get_debugregs(kvm_vcpu_t *v, struct kvm_debugregs *d);
 int  vmx_set_debugregs(kvm_vcpu_t *v, const struct kvm_debugregs *d);
 int  vmx_set_xsave(kvm_vcpu_t *v, const uint8_t *area);
 int  vmx_set_xcr0(kvm_vcpu_t *v, uint64_t val);
+
+/* kvm_lapic.c */
+int  kvm_lapic_create(kvm_vcpu_t *v);
+void kvm_lapic_free(kvm_vcpu_t *v);
+void kvm_lapic_reset(kvm_vcpu_t *v);
+void kvm_vcpu_kick(kvm_vcpu_t *v);
+void kvm_lapic_deliver(kvm_vm_t *vm, kvm_vcpu_t *src, uint32_t dest, int logical, int shorthand,
+                       int mode, int vec, int level);
+void kvm_msi_deliver(kvm_vm_t *vm, uint64_t addr, uint32_t data);
+void kvm_lapic_timer_check(kvm_vcpu_t *v, uint64_t now);
+int  kvm_lapic_pending(kvm_vcpu_t *v);
+void kvm_lapic_ack(kvm_vcpu_t *v, int vec);
+int  kvm_lapic_accepts_pic(kvm_vcpu_t *v);
+uint32_t kvm_lapic_read(kvm_vcpu_t *v, uint32_t off);
+int  kvm_lapic_write(kvm_vcpu_t *v, uint32_t off, uint32_t val);   /* a level EOI's vector, else -1 */
+uint64_t kvm_lapic_cr8(kvm_vcpu_t *v);
+void kvm_lapic_set_cr8(kvm_vcpu_t *v, uint64_t cr8);
+void kvm_lapic_get(kvm_vcpu_t *v, struct kvm_lapic_state *s);
+void kvm_lapic_set(kvm_vcpu_t *v, const struct kvm_lapic_state *s);
+
+/* kvm_irq.c */
+int  kvm_set_gsi_routing(kvm_vm_t *vm, struct kvm_irq_routing *u);
+int  kvm_irq_line(kvm_vm_t *vm, struct kvm_irq_level *l);
+int  kvm_signal_msi(kvm_vm_t *vm, const struct kvm_msi *m);
+int  kvm_irqfd(kvm_vm_t *vm, const struct kvm_irqfd *a);
+void kvm_irq_free(kvm_vm_t *vm);
 
 /* kvm_ioev.c */
 int  kvm_ioeventfd(kvm_vm_t *vm, const struct kvm_ioeventfd *a);

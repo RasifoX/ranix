@@ -166,6 +166,8 @@ else ifeq ($(ARCH),x86_64)
         arch/x86_64/kvm_emul.c \
         arch/x86_64/kvm_ept.c \
         arch/x86_64/kvm_ioev.c \
+        arch/x86_64/kvm_irq.c \
+        arch/x86_64/kvm_lapic.c \
         arch/x86_64/kvm_msr.c \
         arch/x86_64/vmx.c \
         arch/x86_64/vmx_state.c

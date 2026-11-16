@@ -46,6 +46,7 @@
 #include <kernel/proc.h>
 #include <kernel/smp.h>
 #include <kernel/kprintf.h>
+#include <kernel/time.h>
 #include <kernel/errno.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
@@ -70,6 +71,8 @@
 static struct {
 	uint32_t rev;                     /* VMCS revision identifier */
 	uint32_t pin, cpu, cpu2, exit, entry;
+	int      preempt;               /* the VMX preemption timer is there */
+	uint32_t preempt_shift;
 	uint64_t cr0_fixed0, cr0_fixed1, cr4_fixed0, cr4_fixed1;
 } vmx;
 
@@ -120,7 +123,7 @@ int vmx_probe(void)
 	int tru = (basic & VMX_BASIC_TRUE_CTLS) != 0;
 
 	if (ctl_adjust(tru ? MSR_IA32_VMX_TRUE_PINBASED : MSR_IA32_VMX_PINBASED,
-	               PIN_EXT_INTR_EXIT | PIN_NMI_EXIT | PIN_VIRTUAL_NMIS, 0, &vmx.pin) ||
+	               PIN_EXT_INTR_EXIT | PIN_NMI_EXIT | PIN_VIRTUAL_NMIS, PIN_PREEMPT_TIMER, &vmx.pin) ||
 	    ctl_adjust(tru ? MSR_IA32_VMX_TRUE_PROCBASED : MSR_IA32_VMX_PROCBASED,
 	               CPU_HLT_EXIT | CPU_UNCOND_IO_EXIT | CPU_MWAIT_EXIT | CPU_MONITOR_EXIT |
 	               CPU_CR8_LOAD_EXIT | CPU_CR8_STORE_EXIT | CPU_MOV_DR_EXIT | CPU_TSC_OFFSET |
@@ -139,6 +142,11 @@ int vmx_probe(void)
 	if (vmx.cpu & CPU_TPR_SHADOW) return -ENODEV;
 	vmx.entry &= ~ENTRY_IA32E_GUEST;   /* set per vcpu from its EFER.LMA */
 	vmx.cpu &= ~(CPU_INTR_WINDOW_EXIT | CPU_NMI_WINDOW_EXIT);   /* per vcpu, when an event waits */
+	/* the preemption timer stops a guest at its APIC timer's deadline; it
+	 * counts TSC ticks shifted right by IA32_VMX_MISC[4:0] */
+	vmx.preempt = (vmx.pin & PIN_PREEMPT_TIMER) != 0;
+	vmx.pin &= ~PIN_PREEMPT_TIMER;
+	vmx.preempt_shift = (uint32_t)(vmx_rdmsr(MSR_IA32_VMX_MISC) & 0x1F);
 
 	uint64_t ept = vmx_rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
 	uint64_t ept_need = EPT_CAP_WALK4 | EPT_CAP_WB | EPT_CAP_INVEPT | EPT_CAP_INVEPT_SINGLE;
@@ -321,9 +329,10 @@ static void host_state(void)
 	vmwrite(HOST_IA32_PAT, vmx_rdmsr(MSR_IA32_PAT));
 }
 
+static void guest_reset(kvm_vcpu_t *v);
+
 /* Controls and the parts of the host state that never change, then the
- * architectural reset state (Intel SDM 9.1.1, as Linux's KVM presents it:
- * CS f000:fff0 with base ffff0000, real mode, caching off). */
+ * reset state */
 static void vmcs_setup(kvm_vcpu_t *v)
 {
 	vmwrite(PIN_BASED_CONTROLS, vmx.pin);
@@ -345,6 +354,7 @@ static void vmcs_setup(kvm_vcpu_t *v)
 	vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0);
 	v->msr_count = 0;
 	v->cpu_ctl = vmx.cpu;
+	v->pin_ctl = vmx.pin;
 	vmwrite(VM_ENTRY_INTR_INFO, 0);
 	vmwrite(EPT_POINTER, v->vm->eptp);
 	vmwrite(VMCS_LINK_POINTER, ~0ULL);
@@ -362,6 +372,13 @@ static void vmcs_setup(kvm_vcpu_t *v)
 	vmwrite(HOST_TR_SELECTOR, GDT_TSS);
 	vmwrite(HOST_RIP, (uint64_t)vmx_exit_entry);
 
+	guest_reset(v);
+}
+
+/* The architectural reset state (Intel SDM 9.1.1, as Linux's KVM presents it:
+ * CS f000:fff0 with base ffff0000, real mode, caching off). Power-on and INIT. */
+static void guest_reset(kvm_vcpu_t *v)
+{
 	seg_write(SEG_CS, 0xF000, 0xFFFF0000, 0xFFFF, 0x9B);   /* code, accessed, present */
 	seg_write(SEG_DS, 0, 0, 0xFFFF, 0x93);                 /* data, writable, accessed */
 	seg_write(SEG_ES, 0, 0, 0xFFFF, 0x93);
@@ -393,6 +410,30 @@ static void vmcs_setup(kvm_vcpu_t *v)
 	vmx_cr0_apply(v);
 	vmx_cr4_apply(v);
 	vmx_efer_update(v);
+	memset(v->g.r, 0, sizeof(v->g.r));
+	v->g.r[R_DX] = 0x600;   /* the reset value of EDX: family 6 */
+	v->g.cr2 = 0;
+	v->xcr0 = 1;
+	vmwrite(VM_ENTRY_INTR_INFO, 0);
+}
+
+/* INIT and SIPI from another vcpu's APIC: the reset, then the start at
+ * vector:0000 in real mode (SDM 8.4.4). VMCS loaded. */
+static void apic_events(kvm_vcpu_t *v)
+{
+	if (v->do_reset) {
+		v->do_reset = 0;
+		guest_reset(v);
+		uint64_t base = v->apic_base;
+		kvm_lapic_reset(v);
+		v->apic_base = base;
+	}
+	if (v->do_sipi) {
+		v->do_sipi = 0;
+		uint32_t vec = (uint32_t)v->sipi_vector & 0xFF;
+		seg_write(SEG_CS, (uint16_t)(vec << 8), (uint64_t)vec << 12, 0xFFFF, 0x9B);
+		vmwrite(GUEST_RIP, 0);
+	}
 }
 
 int vmx_vcpu_init(kvm_vcpu_t *v)
@@ -416,7 +457,6 @@ int vmx_vcpu_init(kvm_vcpu_t *v)
 	*(uint32_t *)&v->fpu[24] = 0x1F80;   /* MXCSR */
 	v->xcr0 = 1;
 	v->apic_base = 0xFEE00000ULL | (1ULL << 11) | (v->id == 0 ? 1ULL << 8 : 0);   /* enabled, BSP */
-	v->g.r[R_DX] = 0x600;   /* the reset value of EDX: family 6 */
 	v->prefault = NO_PREFAULT;
 	v->guest_cpu = -1;
 
@@ -571,6 +611,7 @@ static int exit_cr(kvm_vcpu_t *v)
 		case 3: vmwrite(GUEST_CR3, val); break;
 		case 4: v->cr4 = val; vmx_cr4_apply(v); break;
 		case 8: {
+			if (v->apic) { kvm_lapic_set_cr8(v, val); break; }
 			uint64_t old = v->run->cr8;
 			v->run->cr8 = val & 15;
 			if (v->run->cr8 < old) {
@@ -590,7 +631,7 @@ static int exit_cr(kvm_vcpu_t *v)
 		}
 	} else if (type == 1) {
 		if (cr == 3) gpr_set(v, reg, vmread(GUEST_CR3));
-		else if (cr == 8) gpr_set(v, reg, v->run->cr8);
+		else if (cr == 8) gpr_set(v, reg, v->apic ? kvm_lapic_cr8(v) : v->run->cr8);
 		else return internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_CR_ACCESS, q);
 	} else if (type == 2) {
 		cr0_write(v, v->cr0 & ~CR0_TS);
@@ -696,6 +737,13 @@ static int exit_dr(kvm_vcpu_t *v)
 static int exit_ept_violation(kvm_vcpu_t *v)
 {
 	uint64_t gpa = vmread(GUEST_PHYSICAL_ADDRESS);
+	if (v->apic && (v->apic_base & (1ULL << 11)) && (gpa & ~0xFFFULL) == (v->apic_base & ~0xFFFULL)) {
+		switch (kvm_mmio_apic(v, gpa)) {
+		case KVM_MMIO_RETRY: return RUN_OUTER;
+		case KVM_MMIO_GUEST: return RUN_GUEST;
+		default:             return RUN_USER;
+		}
+	}
 	int present = kvm_slot_present(v->vm, gpa);
 	if (present != 0) {
 		/* a slot (or the slots changing): map the page in the outer loop,
@@ -707,6 +755,30 @@ static int exit_ept_violation(kvm_vcpu_t *v)
 	case KVM_MMIO_RETRY: return RUN_OUTER;
 	case KVM_MMIO_GUEST: return RUN_GUEST;
 	default:             return RUN_USER;
+	}
+}
+
+static uint64_t tsc_khz_now(void)
+{
+	return tsc_mult ? (1000000ULL << 28) / tsc_mult : 0;
+}
+
+/* Stop the guest at its APIC timer's deadline: the preemption timer counts
+ * down the TSC shifted by preempt_shift. Without one, the host's own timer
+ * interrupts end each run often enough for kvm_lapic_timer_check. */
+static void preempt_timer(kvm_vcpu_t *v)
+{
+	uint32_t pin = vmx.pin;
+	if (vmx.preempt && v->apic && v->apic->timer_end) {
+		uint64_t now = mono_ns(), end = v->apic->timer_end;
+		uint64_t ns = end > now ? end - now : 0;
+		uint64_t ticks = (ns * tsc_khz_now() / 1000000) >> vmx.preempt_shift;
+		vmwrite(VMX_PREEMPTION_TIMER, ticks > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : ticks);
+		pin |= PIN_PREEMPT_TIMER;
+	}
+	if (pin != v->pin_ctl) {
+		v->pin_ctl = pin;
+		vmwrite(PIN_BASED_CONTROLS, pin);
 	}
 }
 
@@ -730,14 +802,25 @@ static void inject_events(kvm_vcpu_t *v)
 		if (v->nmi_pending && !shadow && !(is & INTERRUPTIBILITY_NMI)) {
 			vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_NMI | 2);
 			v->nmi_pending = 0;
-		} else if (v->irq_pending >= 0 && !shadow && (vmread(GUEST_RFLAGS) & RFLAGS_IF)) {
-			vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_EXT | (uint32_t)v->irq_pending);
-			v->irq_pending = -1;
+		} else if (!shadow && (vmread(GUEST_RFLAGS) & RFLAGS_IF)) {
+			int vec;
+			if (v->irq_pending >= 0) {   /* the VMM's PIC (ExtINT) */
+				vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_EXT | (uint32_t)v->irq_pending);
+				v->irq_pending = -1;
+			} else if ((vec = kvm_lapic_pending(v)) >= 0) {
+				vmwrite(VM_ENTRY_INTR_INFO, INTR_INFO_VALID | INTR_TYPE_EXT | (uint32_t)vec);
+				kvm_lapic_ack(v, vec);
+			}
 		}
 	}
 	if (v->nmi_pending) ctl |= CPU_NMI_WINDOW_EXIT;
-	if (v->irq_pending >= 0 || v->run->request_interrupt_window) ctl |= CPU_INTR_WINDOW_EXIT;
+	/* the VMM's window is for its PIC: only worth an exit while the APIC
+	 * takes PIC interrupts, or the guest would exit at every entry */
+	if (v->irq_pending >= 0 || kvm_lapic_pending(v) >= 0 ||
+	    (v->run->request_interrupt_window && kvm_lapic_accepts_pic(v)))
+		ctl |= CPU_INTR_WINDOW_EXIT;
 	set_cpu_ctl(v, ctl);
+	preempt_timer(v);
 }
 
 /* What userspace reads after every KVM_RUN to decide on KVM_INTERRUPT */
@@ -749,9 +832,18 @@ static void run_report(kvm_vcpu_t *v)
 	run->if_flag = (rflags & RFLAGS_IF) != 0;
 	run->ready_for_interrupt_injection = run->if_flag &&
 		!(is & (INTERRUPTIBILITY_STI | INTERRUPTIBILITY_MOVSS)) &&
-		v->irq_pending < 0 && !(vmread(VM_ENTRY_INTR_INFO) & INTR_INFO_VALID);
+		v->irq_pending < 0 && !(vmread(VM_ENTRY_INTR_INFO) & INTR_INFO_VALID) &&
+		kvm_lapic_accepts_pic(v);
+	if (v->apic) run->cr8 = kvm_lapic_cr8(v);
 	run->apic_base = v->apic_base;
 	run->flags = 0;
+}
+
+/* What ends a HLT: an NMI or INIT always, an interrupt when IF was set */
+static int halt_wakes(kvm_vcpu_t *v)
+{
+	if (v->nmi_pending || v->init_pending) return 1;
+	return v->halt_if && (v->irq_pending >= 0 || kvm_lapic_pending(v) >= 0);
 }
 
 static int handle_exit(kvm_vcpu_t *v, int cpu)
@@ -765,7 +857,7 @@ static int handle_exit(kvm_vcpu_t *v, int cpu)
 		 * nop: an interrupt is recognised only after the instruction that
 		 * follows STI. */
 		__asm__ volatile("sti; nop; cli" ::: "memory");
-		return host_wants_cpu() ? RUN_OUTER : RUN_GUEST;
+		return host_wants_cpu() || v->init_pending ? RUN_OUTER : RUN_GUEST;
 	case EXIT_EXCEPTION_NMI: {
 		uint32_t info = (uint32_t)vmread(VM_EXIT_INTR_INFO);
 		if ((info & INTR_TYPE_MASK) == INTR_TYPE_NMI) {
@@ -783,8 +875,17 @@ static int handle_exit(kvm_vcpu_t *v, int cpu)
 	case EXIT_XSETBV:   return exit_xsetbv(v);
 	case EXIT_HLT:
 		skip_instruction();
+		if (v->apic) {
+			/* the APIC is here: the halt is too, until an interrupt */
+			v->halt_if = (vmread(GUEST_RFLAGS) & RFLAGS_IF) != 0;
+			if (halt_wakes(v)) return RUN_GUEST;
+			v->mp_state = KVM_MP_STATE_HALTED;
+			return RUN_OUTER;
+		}
 		v->run->exit_reason = KVM_EXIT_HLT;
 		return RUN_USER;
+	case EXIT_PREEMPT_TIMER:
+		return RUN_GUEST;   /* the APIC timer fires at the next entry */
 	case EXIT_INVD:     /* nothing cached the guest could lose: as WBINVD */
 	case EXIT_MWAIT:    /* not offered in CPUID: a no-op, as Linux's KVM */
 	case EXIT_MONITOR:
@@ -798,7 +899,8 @@ static int handle_exit(kvm_vcpu_t *v, int cpu)
 		inject_exception(v, 6, 0, 0);
 		return RUN_GUEST;
 	case EXIT_INTR_WINDOW:
-		if (v->irq_pending >= 0) return RUN_GUEST;   /* inject_events delivers it now */
+		if (v->irq_pending >= 0 || !v->run->request_interrupt_window || !kvm_lapic_accepts_pic(v))
+			return RUN_GUEST;   /* ours to deliver (inject_events), not the VMM's */
 		v->run->exit_reason = KVM_EXIT_IRQ_WINDOW_OPEN;
 		return RUN_USER;
 	case EXIT_NMI_WINDOW:
@@ -829,6 +931,7 @@ static int run_loaded(kvm_vcpu_t *v)
 	if (cpu < 0) return cpu;
 	host_state();
 	kvm_msr_host_save(v);
+	if (v->apic) apic_events(v);
 	fpu_load(v);
 	v->guest_cpu = cpu;
 	smp_mb();   /* guest_cpu before ept_gen: see kvm_vm_quiesce */
@@ -840,6 +943,7 @@ static int run_loaded(kvm_vcpu_t *v)
 			vm->cpu_gen[cpu] = gen;
 		}
 		v->seen_gen = gen;
+		if (v->apic) kvm_lapic_timer_check(v, mono_ns());
 		/* SYSCALL and SWAPGS reach the switched MSRs only with EFER.SCE
 		 * or in long mode; a guest using neither need not pay for them */
 		uint32_t nmsr = (v->efer & (EFER_SCE | EFER_LMA)) ? KVM_SWITCHED_MSRS : 0;
@@ -868,9 +972,42 @@ static int run_loaded(kvm_vcpu_t *v)
 	return ret;
 }
 
+/* Sleep until kicked, a signal, or end (0: none) */
+static void vcpu_block(kvm_vcpu_t *v, uint64_t end)
+{
+	__atomic_store_n(&v->blocked, 1, __ATOMIC_SEQ_CST);
+	task_sleep_flag_until_ns(&v->kick, end);
+	__atomic_store_n(&v->blocked, 0, __ATOMIC_SEQ_CST);
+}
+
+/* With the APIC here, a vcpu may have nothing to run: waiting for its SIPI,
+ * or halted. 1: go into the guest; 0: it slept, look again. */
+static int vcpu_ready(kvm_vcpu_t *v)
+{
+	__atomic_store_n(&v->kick, 0, __ATOMIC_SEQ_CST);   /* before the tests: a later kick wakes the sleep */
+	if (v->init_pending) {
+		v->init_pending = 0;
+		v->do_reset = 1;
+		v->mp_state = KVM_MP_STATE_INIT_RECEIVED;
+	}
+	if (v->mp_state == KVM_MP_STATE_UNINITIALIZED || v->mp_state == KVM_MP_STATE_INIT_RECEIVED) {
+		if (!v->sipi_pending) { vcpu_block(v, 0); return 0; }
+		v->sipi_pending = 0;
+		v->do_sipi = 1;
+		v->mp_state = KVM_MP_STATE_RUNNABLE;
+	}
+	if (v->mp_state == KVM_MP_STATE_HALTED) {
+		kvm_lapic_timer_check(v, mono_ns());
+		if (!halt_wakes(v)) { vcpu_block(v, v->apic->timer_end); return 0; }
+		v->mp_state = KVM_MP_STATE_RUNNABLE;
+	}
+	return 1;
+}
+
 int vmx_vcpu_run(kvm_vcpu_t *v)
 {
 	struct kvm_run *run = v->run;
+	v->thread = task_current();
 	pio_finish(v);
 	kvm_mmio_finish(v);
 	int fr = kvm_pio_string_finish(v);
@@ -884,6 +1021,7 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 			run->exit_reason = KVM_EXIT_INTR;
 			return -EINTR;
 		}
+		if (v->apic && !vcpu_ready(v)) continue;
 		if (v->prefault != NO_PREFAULT) {
 			uint64_t gpa = v->prefault;
 			v->prefault = NO_PREFAULT;
