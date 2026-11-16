@@ -50,6 +50,9 @@ typedef struct {
 	uint64_t valid;                   /* ValidDataLength: past it, zeros */
 	int      nofat;                   /* contiguous, no FAT chain */
 	int      is_dir;
+	/* the last cluster found, (index << 32) | cluster: reading a chained file in
+	 * order walks the FAT once, not from the start for every read (fat.c, 11-16) */
+	uint64_t hint;
 } exfat_priv_t;
 
 static vfs_iops_t exfat_dir_iops;
@@ -72,7 +75,7 @@ static uint32_t fat_next(exfat_fs_t *fs, uint32_t c)
 {
 	uint8_t sec[512];
 	uint64_t off = (uint64_t)c * 4;
-	if (fs->bdev->read(fs->bdev, fs->fat_lba + off / 512, sec, 1) != 0) return EXFAT_EOC;
+	if (block_read(fs->bdev, fs->fat_lba + off / 512, sec, 1) != 0) return EXFAT_EOC;
 	return rd32(sec + off % 512);
 }
 
@@ -83,9 +86,13 @@ static uint32_t nth_clus(exfat_priv_t *pv, uint64_t n)
 		uint64_t c = (uint64_t)pv->first + n;
 		return c < (uint64_t)pv->fs->clus_count + 2 ? (uint32_t)c : 0;
 	}
+	uint64_t want = n, h = __atomic_load_n(&pv->hint, __ATOMIC_RELAXED);
 	uint32_t c = pv->first;
+	if (h && (h >> 32) <= want) { c = (uint32_t)h; n -= h >> 32; }
 	while (n-- && clus_ok(pv->fs, c)) c = fat_next(pv->fs, c);
-	return clus_ok(pv->fs, c) ? c : 0;
+	if (!clus_ok(pv->fs, c)) return 0;
+	if (want <= 0xFFFFFFFFu) __atomic_store_n(&pv->hint, want << 32 | c, __ATOMIC_RELAXED);
+	return c;
 }
 
 static vfs_inode_t *make_inode(exfat_fs_t *fs, uint32_t first, uint64_t size, uint64_t valid,
@@ -96,7 +103,7 @@ static vfs_inode_t *make_inode(exfat_fs_t *fs, uint32_t first, uint64_t size, ui
 	if (!vi || !pv) { kfree(vi); kfree(pv); return NULL; }
 	memset(vi, 0, sizeof(*vi));
 	pv->fs = fs; pv->first = first; pv->size = size; pv->valid = valid > size ? size : valid;
-	pv->nofat = nofat; pv->is_dir = is_dir;
+	pv->nofat = nofat; pv->is_dir = is_dir; pv->hint = 0;
 	vi->ino      = first ? first : (uint64_t)(uintptr_t)pv;
 	vi->mode     = is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644);
 	vi->size     = size;
@@ -129,7 +136,7 @@ static const uint8_t *dir_entry(dirwalk_t *w, uint64_t i)
 		uint32_t c = nth_clus(w->dir, byte / cb);
 		if (!c) return NULL;
 		uint64_t lba = clus_lba(fs, c) + (byte % cb) / 512;
-		if (fs->bdev->read(fs->bdev, lba, w->sec, 1) != 0) return NULL;
+		if (block_read(fs->bdev, lba, w->sec, 1) != 0) return NULL;
 		w->at = first;
 	}
 	return w->sec + (byte % 512);
@@ -276,7 +283,7 @@ static ssize_t exfat_read(vfs_file_t *f, void *buf, size_t len)
 		if (span > RUN_MAX - (in % 512)) span = RUN_MAX - (in % 512);
 		uint64_t lba = clus_lba(fs, c) + in / 512;
 		uint64_t secs = (in % 512 + span + 511) / 512;
-		if (fs->bdev->read(fs->bdev, lba, run, secs) != 0) break;
+		if (block_read(fs->bdev, lba, run, secs) != 0) break;
 		if (copy_fop_to_user((uint8_t *)buf + done, run + in % 512, (size_t)span)) break;
 		done += (size_t)span;
 	}
@@ -294,7 +301,7 @@ int exfat_mount(vfs_mount_t *mnt, void *data)
 {
 	block_device_t *bdev = data;
 	uint8_t bs[512];
-	if (!bdev || bdev->read(bdev, 0, bs, 1) != 0) return -1;
+	if (!bdev || block_read(bdev, 0, bs, 1) != 0) return -1;
 	if (memcmp(bs + 3, "EXFAT   ", 8) != 0 || bs[510] != 0x55 || bs[511] != 0xAA) return -1;
 	uint32_t sec_shift = bs[108], clus_shift = bs[109];
 	if (sec_shift < 9 || sec_shift > 12 || sec_shift + clus_shift > 25) return -1;

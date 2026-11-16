@@ -38,7 +38,7 @@ static uint32_t rd32le(const uint8_t *p) { return p[0] | (p[1]<<8) | (p[2]<<16) 
 /* read one 2048-byte ISO sector (= 4 of the 512-byte block-device sectors) */
 static int iso_rd(iso_fs_t *fs, uint32_t iso_sec, uint8_t *buf)
 {
-	return fs->bdev->read(fs->bdev, (uint64_t)iso_sec * 4, buf, 4);
+	return block_read(fs->bdev, (uint64_t)iso_sec * 4, buf, 4);
 }
 
 static vfs_inode_t *iso_make_inode(iso_fs_t *fs, uint32_t extent, uint32_t size, int is_dir)
