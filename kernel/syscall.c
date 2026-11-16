@@ -292,6 +292,11 @@ static long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, const void *ui
 #include "sys/syscall_sig.c"
 #include "sys/syscall_compat.c"
 
+void syscall_eintr_final(void)
+{
+	task_current()->sys_eintr_final = 1;
+}
+
 /* SA_RESTART restarts a call a signal interrupted, except those that exist to wait
  * for a signal or a deadline: those report EINTR whatever the handler's flags. */
 static int syscall_restartable(long n)
@@ -1150,11 +1155,12 @@ void syscall_handle(arch_context_t *ctx)
 	slowsys_exit(n, ret, sargs, ss_s, ss_ns);
 	CTX_SYSCALL_RET(ctx, ret);
 	task_current()->ctx = ctx;
-	if (ret == -EINTR && syscall_restartable(n)) {
+	if (ret == -EINTR && syscall_restartable(n) && !task_current()->sys_eintr_final) {
 		process_t *cur = task_current();
 		cur->sys_intr = 1;
 		cur->sys_arg0 = (uint64_t)arg0;
 	}
+	task_current()->sys_eintr_final = 0;
 	syscall_freeze_wait();
 	task_current()->in_syscall = 0;
 	ptrace_stop_check(ctx, 1);

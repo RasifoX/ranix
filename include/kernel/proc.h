@@ -182,6 +182,7 @@ typedef struct process {
 	uint64_t        ptimer_interval;
 	int             in_syscall;       /* 1 while executing a syscall (kernel CPU time) */
 	uint8_t         sys_intr;             /* the syscall just ending returned EINTR, restartable */
+	uint8_t         sys_eintr_final;      /* its EINTR is the answer, not a restart (syscall_eintr_final) */
 	uint64_t        sys_arg0;             /* its first argument, which aarch64's return overwrites */
 	int             fault_sig;            /* a synchronous fault's signal, until delivered */
 	int             fault_code;           /* si_code */
