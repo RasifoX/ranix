@@ -5,10 +5,13 @@
 /* slot: run a command in one of N slots of a shared resource (Metastaz slot standard).
  * Kernel side: slot claims on /dev/claim (include/uapi/claim.h, kernel/claim.c).
  *
- *   slot NAME N [--mem MB] [--wait SEC] [--purpose TEXT] -- CMD...
+ *   slot NAME N [--mem MB] [--mem-pressure PCT] [--wait SEC] [--purpose TEXT] -- CMD...
  *       takes the first free of N slots of NAME and runs CMD while holding it; when all
  *       N are held, waits for the first to free (at most SEC, default 1800; exit 75 after).
  *       --mem MB: start only while at least MB of memory is available (MemAvailable).
+ *       --mem-pressure PCT: start only while memory pressure is under PCT (the "some
+ *       avg10" of /proc/pressure/memory: the share of the last 10 s someone waited
+ *       for memory). A machine already struggling takes no new heavy job.
  *       CMD gets SLOT_NO (1..N) in its environment. The slot ends when CMD ends, or
  *       when slot itself dies; "ranix-ajan stop ID" ends CMD.
  *   slot [NAME] --status
@@ -36,7 +39,7 @@ struct claim_req {
 
 static void usage(void)
 {
-	fprintf(stderr, "usage: slot NAME N [--mem MB] [--wait SEC] [--purpose TEXT] -- CMD...\n"
+	fprintf(stderr, "usage: slot NAME N [--mem MB] [--mem-pressure PCT] [--wait SEC] [--purpose TEXT] -- CMD...\n"
 	                "       slot [NAME] --status\n");
 }
 
@@ -48,6 +51,24 @@ static long mem_available_mb(void)
 	while (fgets(l, sizeof l, f)) if (sscanf(l, "MemAvailable: %ld kB", &kb) == 1) break;
 	fclose(f);
 	return kb < 0 ? -1 : kb / 1024;
+}
+
+/* "some avg10" of /proc/pressure/memory, in percent; -1 without it */
+static double mem_pressure(void)
+{
+	FILE *f = fopen("/proc/pressure/memory", "r");
+	double v = -1;
+	if (!f) return -1;
+	if (fscanf(f, "some avg10=%lf", &v) != 1) v = -1;
+	fclose(f);
+	return v;
+}
+
+static int memory_ok(long mem_mb, double max_pressure)
+{
+	if (mem_mb > 0) { long a = mem_available_mb(); if (a >= 0 && a < mem_mb) return 0; }
+	if (max_pressure > 0) { double p = mem_pressure(); if (p >= 0 && p >= max_pressure) return 0; }
+	return 1;
 }
 
 /* tiny scanner over the kernel's own JSON: "key": value after p, before end */
@@ -103,10 +124,11 @@ int main(int argc, char **argv)
 	const char *name = argv[1];
 	char *e; long n = strtol(argv[2], &e, 10);
 	if (*e || n < 1 || n > 64) { fprintf(stderr, "slot: N must be 1..64\n"); return 2; }
-	long mem = 0, wait = 1800; const char *purpose = NULL; int argi = 0;
+	long mem = 0, wait = 1800; double max_pressure = 0; const char *purpose = NULL; int argi = 0;
 	for (int i = 3; i < argc; i++) {
 		if (!strcmp(argv[i], "--")) { argi = i + 1; break; }
 		else if (!strcmp(argv[i], "--mem") && i + 1 < argc) mem = atol(argv[++i]);
+		else if (!strcmp(argv[i], "--mem-pressure") && i + 1 < argc) max_pressure = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--wait") && i + 1 < argc) wait = atol(argv[++i]);
 		else if (!strcmp(argv[i], "--purpose") && i + 1 < argc) purpose = argv[++i];
 		else { usage(); return 2; }
@@ -139,7 +161,7 @@ int main(int argc, char **argv)
 	struct claim_req q;
 	int got = 0;
 	while (!got) {
-		while (mem > 0 && mem_available_mb() >= 0 && mem_available_mb() < mem) {
+		while (!memory_ok(mem, max_pressure)) {
 			if (time(NULL) >= deadline) goto timeout;
 			sleep(2);
 		}
