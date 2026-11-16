@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/syscall.h>
+#include <kernel/psi.h>
 #include <kernel/eventfd.h>
 #include <uapi/vdso.h>
 #include <kernel/capabilities.h>

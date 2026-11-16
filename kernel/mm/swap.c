@@ -19,6 +19,7 @@
  * swap, goes. Locks: vs->fault_lock, then swap_lock, then pmm_lock. No I/O
  * is done under a spinlock. Design: arastirma/swap.md. */
 #include "swap_area.h"
+#include <kernel/psi.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/oom.h>
@@ -380,7 +381,9 @@ int swap_fault(vm_space_t *vs, uint64_t va, uint64_t e, int is_write)
 {
 	(void)is_write;   /* a write to a shared page faults again and copies */
 	uint64_t pa = 0;
+	unsigned psi = psi_enter(PSI_MEM);         /* a swap-in is a memory stall */
 	int r = swap_in_page(e, &pa);
+	psi_leave(psi);
 	uint64_t lf = spin_lock_irq(&vs->fault_lock);
 	uint64_t *pte = arch_pte_find(vs, va);
 	int moved = !pte || *pte != e;

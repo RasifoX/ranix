@@ -34,6 +34,7 @@
 #include <kernel/vdso.h>
 #include <kernel/watchdog.h>
 #include <kernel/sysvipc.h>
+#include <kernel/psi.h>
 
 /*
  * procfs — virtual filesystem at /proc.
@@ -622,6 +623,7 @@ typedef struct {
 #define PROC_F_SYS_RANIX_DEADLINE 94
 #define PROC_F_SYS_TAINTED        95
 #define PROC_F_SYS_RANIX_SPLASH   100
+#define PROC_F_PRESSURE           101  /* 101..103: /proc/pressure/{cpu,memory,io} */
 #define PROC_F_SYS_IPC_FIRST      51   /* 51..56: shmmax shmmni shmall msgmax msgmnb msgmni */
 #define PROC_F_SYS_SEM            57
 #define PROC_F_SYS_PIPE_MAX       61
@@ -837,6 +839,10 @@ static ssize_t procfs_file_read(vfs_file_t *f, void *buf, size_t len)
 	case PROC_F_UPTIME:   n = fill_uptime(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_STAT:     n = fill_stat(tmp,     PROCFS_BUF_SIZE); break;
 	case PROC_F_LOADAVG:  n = fill_loadavg(tmp,  PROCFS_BUF_SIZE); break;
+	case PROC_F_PRESSURE:
+	case PROC_F_PRESSURE + 1:
+	case PROC_F_PRESSURE + 2:
+		n = psi_show(pr->type - PROC_F_PRESSURE, tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_INTERRUPTS: n = fill_interrupts(tmp, PROCFS_BUF_SIZE); break;
 	case PROC_F_HWDIAG:   n = hwdiag_fill(tmp,   PROCFS_BUF_SIZE); break;
 	case PROC_F_ASESS_STATUS: n = fill_asess_status((uint64_t)pr->pid, tmp, PROCFS_BUF_SIZE); break;
@@ -3290,6 +3296,41 @@ static vfs_inode_t *procfs_sysvipcdir_inode(void)
 	return &d;
 }
 
+/* /proc/pressure: stall information (kernel/psi.c), in PSI_RES_* order */
+static const char *const pressure_names[] = { "cpu", "memory", "io" };
+static vfs_inode_t *procfs_pressuredir_lookup(vfs_inode_t *dir, const char *name)
+{
+	(void)dir;
+	for (int i = 0; i < 3; i++)
+		if (strcmp(pressure_names[i], name) == 0)
+			return procfs_inode_file(-1, PROC_F_PRESSURE + i);
+	return NULL;
+}
+static int procfs_pressuredir_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
+{
+	(void)dir;
+	if (idx >= 3) return -1;
+	out->ino = proc_file_ino(-1, PROC_F_PRESSURE + (int)idx); out->mode = S_IFREG | 0444; out->next_off = idx + 1;
+	size_t l = strlen(pressure_names[idx]);
+	memcpy(out->name, pressure_names[idx], l + 1);
+	return 0;
+}
+static vfs_iops_t procfs_pressuredir_iops = {
+	.lookup  = procfs_pressuredir_lookup,
+	.readdir = procfs_pressuredir_readdir,
+	.stat    = procfs_syssubdir_stat,
+};
+static vfs_inode_t *procfs_pressuredir_inode(void)
+{
+	static vfs_inode_t d; static int init = 0;
+	if (!init) {
+		memset(&d, 0, sizeof(d)); d.ino = 0xa600; d.mode = S_IFDIR | 0555;
+		d.nlink = 2; d.refcount = 1; d.iops = &procfs_pressuredir_iops;
+		d.fops = &procfs_dir_fops; d.cached = 1; init = 1;
+	}
+	return &d;
+}
+
 /* /proc/sys root — contains kernel/, net/, fs/, vm/ */
 static vfs_inode_t *procfs_sysdir_lookup(vfs_inode_t *dir, const char *name)
 {
@@ -3393,6 +3434,8 @@ static vfs_inode_t *procfs_root_lookup(vfs_inode_t *dir, const char *name)
 		return procfs_sysdir_inode();
 	if (strcmp(name, "sysvipc") == 0)
 		return procfs_sysvipcdir_inode();
+	if (strcmp(name, "pressure") == 0)
+		return procfs_pressuredir_inode();
 
 	if (strcmp(name, "asess") == 0)
 		return procfs_asessroot_inode();
@@ -3483,6 +3526,15 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 	}
 	idx--;
 
+	if (idx == 0) {
+		out->ino      = 0xa600;
+		out->mode     = S_IFDIR | 0555;
+		out->next_off = ROOT_FILES_N + 6;
+		memcpy(out->name, "pressure", 9);
+		return 0;
+	}
+	idx--;
+
 	/* per-process dirs: the idx-th process visible in the caller's pid namespace,
 	 * named by its pid as seen in that namespace (vnr). */
 	pid_namespace_t *cur_ns = current_pid_ns();
@@ -3500,7 +3552,7 @@ static int procfs_root_readdir(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out
 		{
 			out->ino      = 0x8000 + (uint64_t)vnr * 100 + 50;
 			out->mode     = S_IFDIR | 0555;
-			out->next_off = ROOT_FILES_N + 5 + (uint32_t)i + 1;
+			out->next_off = ROOT_FILES_N + 6 + (uint32_t)i + 1;
 			char tmp[16]; int ti = 0;
 			uint32_t v = (uint32_t)vnr;
 			if (v == 0) { tmp[ti++] = '0'; }
@@ -3534,7 +3586,7 @@ static int procfs_session_allows(const char *name)
 {
 	static const char *const allowed[] = {
 		"self", "sys", "version", "cpuinfo", "meminfo", "mounts", "uptime", "stat",
-		"loadavg", "filesystems",
+		"loadavg", "filesystems", "pressure",
 	};
 	if (name[0] >= '0' && name[0] <= '9') return 1;
 	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)

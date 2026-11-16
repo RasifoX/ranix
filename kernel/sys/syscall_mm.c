@@ -24,11 +24,14 @@
 static void *mm_alloc_page_oom(void)
 {
 	void *pg = buddy_alloc(0);
+	if (pg) return pg;
+	unsigned psi = psi_enter(PSI_MEM);           /* waiting for memory from here on */
 	for (int i = 0; !pg && i < 8; i++) {
 		if (swap_active() && swap_reclaim(32, RECLAIM_ANON) > 0) { pg = buddy_alloc(0); continue; }   /* swap first */
 		if (oom_kill_alloc_ex(1) != OOM_KILLED_OTHER) break;
 		pg = buddy_alloc(0);
 	}
+	psi_leave(psi);
 	return pg;
 }
 

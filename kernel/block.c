@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/block.h>
+#include <kernel/psi.h>
 #include <kernel/sync.h>
 #include <kernel/lib/string.h>
 #include <kernel/mm/heap.h>
@@ -32,10 +33,12 @@ int block_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 {
     if (!dev || !dev->read) return -EIO;
     if (!block_in_range(dev, lba, count)) return -EIO;
+    unsigned psi = psi_enter(PSI_IO);
     mutex_lock(&dev->lock);
     int r = dev->read(dev, lba, buf, count);
     if (r == 0) { dev->nr_reads++; dev->nr_read_secs += count; }
     mutex_unlock(&dev->lock);
+    psi_leave(psi);
     return r;
 }
 
@@ -43,10 +46,12 @@ int block_read(block_device_t *dev, uint64_t lba, void *buf, uint64_t count)
 static int block_write_through(block_device_t *dev, uint64_t lba, const void *buf, uint64_t count)
 {
     if (!block_in_range(dev, lba, count)) return -EIO;
+    unsigned psi = psi_enter(PSI_IO);
     mutex_lock(&dev->lock);
     int r = dev->drv_write(dev, lba, buf, count);
     if (r == 0) dev->dirty = 1;
     mutex_unlock(&dev->lock);
+    psi_leave(psi);
     return r;
 }
 

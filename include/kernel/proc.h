@@ -270,6 +270,7 @@ typedef struct process {
 	int             oom_victim;                 /* killed for memory, not gone yet */
 	int             on_cpu;            /* 1 when currently executing on a CPU, protects against wake-up race condition */
 	int             in_rq;             /* 1 when queued in a CPU runqueue (guards double-enqueue) */
+	unsigned        psi;               /* PSI_MEM/PSI_IO while stalled (kernel/psi.c) */
 
 	/* ── signal alternate stack ───────────────── */
 	stack_t         altstack;

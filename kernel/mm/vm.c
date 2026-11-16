@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
+#include <kernel/psi.h>
 #include <kernel/mm/vm.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/mm/pmm.h>
@@ -364,7 +365,9 @@ int vm_handle_fault_irq(uint64_t vaddr, int is_write, int irqs_on)
 		int last = !may_sleep || !swap_active() || pass >= RECLAIM_PASSES;
 		ret = fault_resolve(p, vaddr, is_write, last, may_sleep);
 		if (ret != FAULT_NOMEM) break;
+		unsigned psi = psi_enter(PSI_MEM);   /* a fault that waits for reclaim */
 		swap_reclaim(32, RECLAIM_ANON);
+		psi_leave(psi);
 	}
 	irq_restore(irqf);
 	return ret;

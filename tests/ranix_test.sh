@@ -202,6 +202,29 @@ proc_ino_same() {
 }
 check "proc-ino-stable"  "ok"      "$(proc_ino_same)"
 check "proc-cp"          "ok"      "$(rm -f /tmp/pv.$$; cp /proc/version /tmp/pv.$$ 2>/dev/null && [ -s /tmp/pv.$$ ] && [ "$(cat /tmp/pv.$$)" = "$(cat /proc/version)" ] && echo ok; rm -f /tmp/pv.$$)"
+# /proc/pressure (PSI), Linux's format: some/full lines, avg10/60/300 and a total in us
+psi_fmt() {
+	for r in cpu memory io; do
+		[ "$(grep -cE '^(some|full) avg10=[0-9]+\.[0-9]{2} avg60=[0-9]+\.[0-9]{2} avg300=[0-9]+\.[0-9]{2} total=[0-9]+$' /proc/pressure/$r 2>/dev/null)" = 2 ] || { echo "$r: $(cat /proc/pressure/$r 2>&1 | head -2)"; return; }
+	done
+	echo ok
+}
+psi_total() { sed -n "s/^$2 .*total=//p" /proc/pressure/$1; }
+psi_cpu() {
+	a=$(psi_total cpu some); n=$(grep -c ^processor /proc/cpuinfo); pids=""
+	for i in $(seq 1 $((n * 2 + 1))); do ( end=$(( $(date +%s) + 4 )); while [ $(date +%s) -lt $end ]; do :; done ) & pids="$pids $!"; done
+	wait $pids
+	b=$(psi_total cpu some); avg=$(sed -n 's/^some avg10=\([0-9.]*\).*/\1/p' /proc/pressure/cpu)
+	[ -n "$a" ] && [ "$b" -gt "$a" ] && [ "$avg" != "0.00" ] && echo ok || echo "$a -> $b avg10=$avg"
+}
+psi_io() {
+	d=/dev/vblk0; [ -b $d ] || d=/dev/sata0; [ -b $d ] || { echo ok; return; }
+	a=$(psi_total io some); dd if=$d of=/dev/null bs=64k count=256 2>/dev/null; b=$(psi_total io some)
+	[ -n "$a" ] && [ "$b" -gt "$a" ] && echo ok || echo "$a -> $b"
+}
+check "proc-pressure-format" "ok"  "$(psi_fmt)"
+check "proc-pressure-cpu"    "ok"  "$(psi_cpu)"
+check "proc-pressure-io"     "ok"  "$(psi_io)"
 check "proc-ino-unique"  "0"       "$(ls -i /proc /proc/net /proc/1 /proc/sys/kernel 2>/dev/null | awk 'NF==2 {print $1}' | sort | uniq -d | wc -l)"
 check "dmesg-works"      "yes"     "$(dmesg 2>/dev/null | head -1 | grep -q . && echo yes)"
 check "dmesg-format"     "0"       "$(dmesg 2>/dev/null | grep -v -c -E '^\[ *[0-9]+\.[0-9]{6}\] [a-z%][a-z0-9_-]{1,15}: [ -~]+$')"

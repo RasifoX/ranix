@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 #include <kernel/board.h>
+#include <kernel/psi.h>
 #include <kernel/proc.h>
 #include <kernel/nsproxy.h>
 #include <kernel/pid_namespace.h>
@@ -863,6 +864,7 @@ void sched_tick(void)
 {
 	{
 		cpu_context_t *bc = arch_get_cpu_ctx();
+		psi_tick(bc->tick_slow ? TICK_SLOW : 1);
 		kernel_ticks += bc->tick_slow ? TICK_SLOW : 1;
 		if (bc->tick_slow && !bsp_may_slow()) bsp_fast(bc);
 		else if (!bc->tick_slow && (!task_current() || !task_current()->pid)) {

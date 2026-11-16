@@ -17,6 +17,7 @@
  * they then go only to save a failing allocation. MADV_PAGEOUT sends a range
  * out at once. Design: arastirma/swap.md. */
 #include "swap_area.h"
+#include <kernel/psi.h>
 #include <kernel/mm/pmm.h>
 #include <kernel/mm/buddy.h>
 #include <kernel/proc.h>
@@ -193,7 +194,7 @@ void swap_memory_check(void)
 	if (!swap_active() || vm_swappiness == 0) return;
 	uint64_t free = buddy_free_pages(), min = wmark_min();
 	if (free < 2 * min) kswapd_wake();
-	if (free < min) swap_reclaim(BATCH, RECLAIM_ANON);
+	if (free < min) { unsigned psi = psi_enter(PSI_MEM); swap_reclaim(BATCH, RECLAIM_ANON); psi_leave(psi); }
 }
 
 /* Keep free memory between the low and high marks while swap is on. Sleeps up
