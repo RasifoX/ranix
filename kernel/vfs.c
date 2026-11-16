@@ -172,6 +172,17 @@ int vfs_inode_removexattr(vfs_inode_t *in, const char *name)
 void vfs_inode_free(vfs_inode_t *in)
 {
 	if (!in || in->cached) return; /* cached=1: owned by dentry tree, pipe, or static */
+	/* An inode whose own private pointer is no heap block, though it says it
+	 * owns it: in is not an inode any more (freed, its memory someone else's).
+	 * Report who freed it and leave it alone rather than free foreign memory. */
+	if (in->priv && !in->priv_static && !kmem_is_block(in->priv)) {
+		void *by[3] = { 0, 0, 0 };
+		int known = kmem_last_free(in, by);
+		kprintf(KERN_ERR "vfs: inode %p freed again from %p %p; its priv %p is no heap block. "
+		        "Freed before%s by %p %p %p\n", in, __builtin_return_address(0), __builtin_return_address(1),
+		        in->priv, known ? "" : " (not in the ring)", by[0], by[1], by[2]);
+		return;
+	}
 	if (in->iops && in->iops->release) in->iops->release(in);
 	vfs_inode_free_xattrs(in);
 	if (in->priv && !in->priv_static) kfree(in->priv);
@@ -449,18 +460,30 @@ static void dentry_unhold(vfs_dentry_t *d)
  * its last fd closes here. Returns 1 if the caller must not free the inode:
  * the filesystem frees it, or another open still uses it (/proc/self/fd/N
  * opened a second description of a /proc or /sys file); 0 otherwise. */
+/* A file lets go of its inode. Returns 1 when the caller must free the inode:
+ * this was the last open, no dentry holds it (cached 0) and the grave does not
+ * take it. The count and the cached test are one step under grave_lock: the
+ * dentry cache drops an inode (grave_free: cached = 0, then free unless open)
+ * under the same lock, so exactly one of the two frees it. (Unlocked, a close
+ * that took open_refs to 0 and only then read cached could see the 0 the cache
+ * had just written after freeing it, and free it again: "kfree bad ptr", with
+ * the freed inode's memory already someone else's.) */
 static int vfs_inode_drop_open(vfs_inode_t *in)
 {
-	if (!in || in->open_refs == 0) return 0;
-	if (!in->iops || !in->iops->evict)
-		return atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1) != 0;
+	if (!in) return 0;
 	uint64_t f = spin_lock_irq(&grave_lock);
+	if (in->open_refs == 0) {                   /* a file that never counted as an open */
+		int free_it = !in->cached;
+		spin_unlock_irq(&grave_lock, f);
+		return free_it;
+	}
 	int last = atomic_sub_fetch32((volatile uint32_t *)&in->open_refs, 1) == 0;
-	int orphan = in->deferred_unlink;
+	int orphan = in->iops && in->iops->evict && in->deferred_unlink;
 	if (last && orphan) inode_retire_if_idle(in);
+	int free_it = last && !orphan && !in->cached;
 	spin_unlock_irq(&grave_lock, f);
 	if (orphan) grave_advance();
-	return orphan;
+	return free_it;
 }
 
 /* ── permission check ────────────────────────────────────── */
@@ -789,8 +812,15 @@ void vfs_dentry_free_tree(vfs_dentry_t *root, int free_inodes)
 		vfs_dentry_t *up = d == root ? NULL : d->parent;
 		dentry_unlink(d);
 		if (free_inodes && d->inode) {
-			d->inode->cached = 0;
-			if (!d->inode->open_refs) vfs_inode_free(d->inode);
+			/* as in vfs_inode_drop_open: cached and open_refs are decided
+			 * together under grave_lock, so this and a last close never both
+			 * free the inode (lock order vfs_lock -> grave_lock, as dentry_retire) */
+			vfs_inode_t *in = d->inode;
+			uint64_t g = spin_lock_irq(&grave_lock);
+			in->cached = 0;
+			int free_it = !in->open_refs;
+			spin_unlock_irq(&grave_lock, g);
+			if (free_it) vfs_inode_free(in);
 		}
 		dentry_retire(d);
 		dentry_count--;
@@ -2302,7 +2332,7 @@ void fput(vfs_file_t *f)
 	notify_file(f, (f->flags & 3) != 0 ? IN_CLOSE_WRITE : IN_CLOSE_NOWRITE);
 	if (f->inode && f->inode->fops && f->inode->fops->close)
 		f->inode->fops->close(f);
-	if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
+	if (vfs_inode_drop_open(f->inode))
 		vfs_inode_free(f->inode);
 	file_free(f);
 }
@@ -2743,7 +2773,7 @@ void vfs_file_put(vfs_file_t *f)
 		notify_file(f, (f->flags & 3) != 0 ? IN_CLOSE_WRITE : IN_CLOSE_NOWRITE);
 		if (f->inode && f->inode->fops && f->inode->fops->close)
 			f->inode->fops->close(f);
-		if (!vfs_inode_drop_open(f->inode) && f->inode && !f->inode->cached)
+		if (vfs_inode_drop_open(f->inode))
 			vfs_inode_free(f->inode);
 		file_free(f);
 	}
