@@ -13,7 +13,7 @@
  *       avg10" of /proc/pressure/memory: the share of the last 10 s someone waited
  *       for memory). A machine already struggling takes no new heavy job.
  *       CMD gets SLOT_NO (1..N) in its environment. The slot ends when CMD ends, or
- *       when slot itself dies; "ranix-ajan stop ID" ends CMD.
+ *       when slot itself dies; "ranix-agent stop ID" ends CMD.
  *   slot [NAME] --status
  *       who holds which slot (all slot claims, or NAME's).
  * The holder's name is $RANIX_AGENT, else $USER, else the process name. */

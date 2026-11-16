@@ -349,7 +349,7 @@ $(BUILD_DIR)/kernel/vdso.o: $(BUILD_DIR)/vdso_image.h
 all: initramfs $(TARGET)
 
 # Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
-USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test userspace/ranix-sess userspace/ranix-ajan userspace/slot
+USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test userspace/ranix-sess userspace/ranix-agent userspace/slot
 # Auto-discovered: the bench harness plus every userspace/test_*.c. Adding a
 # test_*.c is enough — no hand-editing this list (and no more merge conflicts
 # from everyone appending to it).
@@ -575,6 +575,7 @@ $(BUILD_DIR)/initramfs.cpio: $(USER_CORE_BINS) $(USER_TEST_BINS) $(BASH_CACHED) 
 	@mkdir -p $(BUILD_DIR)/initramfs/bin $(BUILD_DIR)/initramfs/etc \
 	           $(BUILD_DIR)/initramfs/home/test $(CACHE_DIR)
 	@cp $(USER_CORE_BINS) $(BUILD_DIR)/initramfs/bin/
+	@ln -sf ranix-agent $(BUILD_DIR)/initramfs/bin/ranix-ajan   # its old name, for scripts that still call it
 	@if [ -z "$(DEMO)" ]; then cp $(USER_TEST_BINS) $(BUILD_DIR)/initramfs/bin/; fi
 	@if [ -z "$(DEMO)" ] && [ -f $(BUILD_DIR)/initramfs/bin/test_suidhelper ]; then \
 		chmod u+s $(BUILD_DIR)/initramfs/bin/test_suidhelper; fi

@@ -2,17 +2,17 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* ranix-ajan: claims on machine resources, for agents and people.
+/* ranix-agent: claims on machine resources, for agents and people.
  * Kernel side: kernel/claim.c, include/uapi/claim.h (/dev/claim).
  *
- *   ranix-ajan [list] [--json]          who holds what (JSON: the /dev/claim snapshot)
- *   ranix-ajan claim RES "PURPOSE" [-t 30m] [-a NAME] [--shared] [--wait] [--pid PID]
+ *   ranix-agent [list] [--json]          who holds what (JSON: the /dev/claim snapshot)
+ *   ranix-agent claim RES "PURPOSE" [-t 30m] [-a NAME] [--shared] [--wait] [--pid PID]
  *                                        detached claim, ends at expiry or release; prints id
- *   ranix-ajan run RES "PURPOSE" [-t DUR] [-a NAME] [--shared] [--wait] -- CMD...
+ *   ranix-agent run RES "PURPOSE" [-t DUR] [-a NAME] [--shared] [--wait] -- CMD...
  *                                        claim held while CMD runs; "stop" ends CMD
- *   ranix-ajan release ID|RES [-a NAME]  ranix-ajan extend ID DUR   ranix-ajan stop ID
- *   ranix-ajan check RES [-a NAME]       exit 0 free (or ours), 1 busy (says who)
- *   ranix-ajan watch                     one JSON line per change
+ *   ranix-agent release ID|RES [-a NAME]  ranix-agent extend ID DUR   ranix-agent stop ID
+ *   ranix-agent check RES [-a NAME]       exit 0 free (or ours), 1 busy (says who)
+ *   ranix-agent watch                     one JSON line per change
  * NAME defaults to $RANIX_AGENT, else $USER. Resources: display input gpu reboot
  * network wifi disk audio usb camera, or any [a-z0-9._:-]{1,15}. */
 #include <errno.h>
@@ -45,7 +45,7 @@ struct claim_req {
 static int dev(void)
 {
 	int fd = open("/dev/claim", O_RDWR);
-	if (fd < 0) { fprintf(stderr, "ranix-ajan: /dev/claim: %s (kernel without claims?)\n", strerror(errno)); exit(2); }
+	if (fd < 0) { fprintf(stderr, "ranix-agent: /dev/claim: %s (kernel without claims?)\n", strerror(errno)); exit(2); }
 	return fd;
 }
 
@@ -179,7 +179,7 @@ int main(int argc, char **argv)
 	const char *c = argc > 1 ? argv[1] : "list";
 	if (!strcmp(c, "list") || !strcmp(c, "--json")) return cmd_list((argc > 1 && !strcmp(argv[argc - 1], "--json")));
 	if (!strcmp(c, "-h") || !strcmp(c, "--help") || !strcmp(c, "help")) {
-		fprintf(stderr, "usage: ranix-ajan [list] [--json] | claim RES PURPOSE [-t DUR] [-a NAME] [--shared] [--wait] [--pid PID]\n"
+		fprintf(stderr, "usage: ranix-agent [list] [--json] | claim RES PURPOSE [-t DUR] [-a NAME] [--shared] [--wait] [--pid PID]\n"
 		                "       | run RES PURPOSE [opts] -- CMD... | release ID|RES | extend ID DUR | stop ID | check RES | watch\n");
 		return 0;
 	}
@@ -266,6 +266,6 @@ int main(int argc, char **argv)
 		printf("free\n");
 		return 0;
 	}
-	fprintf(stderr, "ranix-ajan: bad command (try --help)\n");
+	fprintf(stderr, "ranix-agent: bad command (try --help)\n");
 	return 2;
 }
