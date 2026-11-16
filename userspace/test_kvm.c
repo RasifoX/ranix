@@ -16,7 +16,8 @@
  * A second guest covers what a VMM such as QEMU needs: CPUID from the table
  * KVM_SET_CPUID2 gave, RDMSR/WRMSR against KVM_GET/SET_MSRS, a store and a load
  * to device memory (KVM_EXIT_MMIO, both decoded forms), a port write an
- * ioeventfd takes without an exit, and an interrupt injected with
+ * ioeventfd takes without an exit, REP OUTS forwards and backwards and REP INS,
+ * and an interrupt injected with
  * KVM_INTERRUPT after HLT, served by the guest's real-mode handler. Also
  * KVM_GET_SUPPORTED_CPUID, the MSR index list, the FPU, XCR0 and vcpu
  * events round trips.
@@ -93,11 +94,26 @@ __asm__(
 	"	mov %ax, %ds\n"
 	"	mov %bx, %ax\n"
 	"	out %ax, $0x12\n"
+	"	cld\n"                           /* string port I/O, one exit each */
+	"	mov $0x16, %dx\n"
+	"	mov $(0x1000 + g2_msg - guest2_start), %si\n"
+	"	mov $5, %cx\n"
+	"	rep outsb\n"                     /* \"Ranix\", forwards */
+	"	std\n"
+	"	mov $(0x1000 + g2_msg + 7 - guest2_start), %si\n"
+	"	mov $3, %cx\n"
+	"	rep outsb\n"                     /* \"KVM\" from its end: M, V, K */
+	"	cld\n"
+	"	mov $0x17, %dx\n"
+	"	mov $0x3000, %di\n"
+	"	mov $4, %cx\n"
+	"	rep insb\n"                      /* four bytes from userspace to 0x3000 */
 	"	out %al, $0x50\n"                /* the ioeventfd's port */
 	"	sti\n"
 	"	hlt\n"                           /* userspace injects vector 0x20 here */
 	"	cli\n"
 	"	hlt\n"
+	"g2_msg: .ascii \"RanixKVM\"\n"
 	".org guest2_start + 0x800\n"        /* 0x1800: the handler of vector 0x20 */
 	"	mov $0x77, %al\n"
 	"	out %al, $0x14\n"
@@ -295,7 +311,8 @@ static void run_guest2(int vcpu, struct kvm_run *run, int efd)
 {
 	struct { unsigned port, size, val; } want[] = {
 		{ 0x10, 1, 'R' }, { 0x11, 1, 0x44 }, { 0, 0, 0 } /* MMIO store */, { 1, 0, 0 } /* MMIO load */,
-		{ 0x12, 2, 0x1234 }, { 2, 0, 0 } /* HLT, inject */, { 0x14, 1, 0x77 }, { 3, 0, 0 } /* HLT */,
+		{ 0x12, 2, 0x1234 }, { 4, 0, 0 } /* OUTS */, { 5, 0, 0 } /* OUTS, DF set */, { 6, 0, 0 } /* INS */,
+		{ 2, 0, 0 } /* HLT, inject */, { 0x14, 1, 0x77 }, { 3, 0, 0 } /* HLT */,
 	};
 	for (unsigned i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
 		if (ioctl(vcpu, KVM_RUN, 0) != 0) { FAIL("guest2 KVM_RUN %u: %s", i, strerror(errno)); return; }
@@ -350,6 +367,24 @@ static void run_guest2(int vcpu, struct kvm_run *run, int efd)
 		case 3:
 			if (run->exit_reason != KVM_EXIT_HLT) FAIL("guest2 end: exit %u", run->exit_reason);
 			break;
+		case 4: case 5: case 6: {
+			static const struct { unsigned port, dir, count; const char *data; } str[] = {
+				{ 0x16, KVM_EXIT_IO_OUT, 5, "Ranix" }, { 0x16, KVM_EXIT_IO_OUT, 3, "MVK" },
+				{ 0x17, KVM_EXIT_IO_IN, 4, "ABCD" },
+			};
+			unsigned k = want[i].port - 4;
+			uint8_t *data = (uint8_t *)run + run->io.data_offset;
+			if (run->exit_reason != KVM_EXIT_IO || run->io.port != str[k].port || run->io.direction != str[k].dir ||
+			    run->io.size != 1 || run->io.count != str[k].count) {
+				FAIL("guest2 string I/O %u: exit %u port 0x%x dir %u size %u count %u (internal %u %llx)", k,
+				     run->exit_reason, run->io.port, run->io.direction, run->io.size, run->io.count,
+				     run->internal.suberror, (unsigned long long)run->internal.data[1]);
+				return;
+			}
+			if (str[k].dir == KVM_EXIT_IO_IN) memcpy(data, str[k].data, str[k].count);
+			else if (memcmp(data, str[k].data, str[k].count)) FAIL("OUTS %u sent '%.*s'", k, (int)str[k].count, data);
+			break;
+		}
 		}
 	}
 }
@@ -399,6 +434,7 @@ static void test_guest2(int kvm)
 	ioctl(vcpu, KVM_SET_REGS, &regs);
 
 	run_guest2(vcpu, run, efd);
+	if (memcmp(mem + 0x3000, "ABCD", 4)) FAIL("INS stored '%.4s'", mem + 0x3000);
 	uint64_t lstar = 0;
 	if (msr_io(vcpu, KVM_GET_MSRS, 0xC0000082, &lstar) != 1 || lstar != 0xFFFF887766554433ULL)
 		FAIL("LSTAR the guest wrote reads back as %llx", (unsigned long long)lstar);

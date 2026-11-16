@@ -35,7 +35,8 @@
 #include <kernel/mm/pmm.h>
 #include <kernel/lib/string.h>
 
-#define KVM_DEV_RDEV ((10 << 8) | 232)   /* misc major 10, minor 232, as on Linux */
+#define KVM_DEV_RDEV ((10 << 8) | 232)
+#define MCG_CTL_P (1ULL << 8)   /* IA32_MCG_CAP: IA32_MCG_CTL exists */   /* misc major 10, minor 232, as on Linux */
 #define KVM_MMAP_PAGES 2                  /* kvm_run, then the port I/O data */
 
 static vfs_iops_t kvm_iops = { 0 };
@@ -105,7 +106,7 @@ static int kvm_check_extension(uint64_t cap)
 		 * MSIs itself and never sends KVM_SIGNAL_MSI */
 		return 1;
 	case KVM_CAP_MCE:
-		return 1;   /* with no banks: machine checks are not offered in CPUID */
+		return KVM_MCE_BANKS;   /* the most banks KVM_X86_SETUP_MCE takes */
 	case KVM_CAP_NR_VCPUS:
 	case KVM_CAP_MAX_VCPUS:
 		return KVM_MAX_VCPUS;
@@ -295,7 +296,12 @@ static int vcpu_ioctl_more(kvm_vcpu_t *v, uint32_t cmd, void *uarg)
 	case KVM_X86_SETUP_MCE: {
 		uint64_t mcg_cap;
 		if ((r = COPY_IN(mcg_cap))) return r;
-		return mcg_cap ? -EINVAL : 0;
+		if ((mcg_cap & 0xFF) == 0 || (mcg_cap & 0xFF) > KVM_MCE_BANKS || (mcg_cap & ~(MCG_CTL_P | 0xFFULL)))
+			return -EINVAL;
+		v->mcg_cap = mcg_cap;
+		v->mcg_ctl = ~0ULL;
+		for (int i = 0; i < KVM_MCE_BANKS; i++) v->mce_bank[i * 4] = ~0ULL;   /* every error reported */
+		return 0;
 	}
 	case KVM_ENABLE_CAP:
 		return -EINVAL;
@@ -532,7 +538,7 @@ static int kvm_dev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 	case KVM_GET_MSR_INDEX_LIST:
 		return kvm_msr_index_list((struct kvm_msr_list *)(uintptr_t)arg);
 	case KVM_X86_GET_MCE_CAP_SUPPORTED: {
-		uint64_t mcg_cap = 0;   /* no banks, no MCG features */
+		uint64_t mcg_cap = MCG_CTL_P | KVM_MCE_BANKS;   /* IA32_MCG_CTL, and banks; nothing else */
 		return copy_to_user((void *)(uintptr_t)arg, &mcg_cap, sizeof(mcg_cap)) ? -EFAULT : 0;
 	}
 	default:

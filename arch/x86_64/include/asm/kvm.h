@@ -60,7 +60,8 @@ typedef struct vmx_gregs {
 enum { R_AX, R_CX, R_DX, R_BX, R_SP, R_BP, R_SI, R_DI };
 
 #define KVM_MAX_CPUID_ENTRIES 256
-#define KVM_SWITCHED_MSRS 5   /* STAR LSTAR CSTAR SFMASK KERNEL_GS_BASE (kvm_msr.c) */
+#define KVM_SWITCHED_MSRS 5
+#define KVM_MCE_BANKS 32   /* STAR LSTAR CSTAR SFMASK KERNEL_GS_BASE (kvm_msr.c) */
 
 /* a decoded MMIO load or store (kvm_emul.c) */
 typedef struct kvm_mmio {
@@ -89,6 +90,10 @@ typedef struct kvm_vcpu {
 	uint32_t    pio_in;      /* an IN is waiting for userspace's data: its size */
 	uint64_t    prefault;    /* guest-physical page to map before the next entry, or ~0 */
 	kvm_mmio_t  mmio;        /* a load waiting for userspace's data, when mmio_pending */
+	/* an INS waiting for userspace's data: where its elements go */
+	uint64_t    ins_gpa;     /* the lowest address of the block */
+	uint32_t    ins_bytes;   /* 0: none */
+	uint8_t     ins_size, ins_down;
 	uint8_t     mmio_pending;
 	int         irq_pending; /* KVM_INTERRUPT vector not yet delivered, or -1 */
 	uint8_t     nmi_pending; /* KVM_NMI not yet delivered */
@@ -102,6 +107,9 @@ typedef struct kvm_vcpu {
 	uint32_t    msr_count;   /* switched MSRs as last written to the VMCS */
 	uint64_t    misc_enable, mtrr_def, mtrr_var[16], mtrr_fix[11];
 	uint64_t    dr[4], dr6;  /* the guest's debug registers (DR7 is in the VMCS) */
+	/* machine-check registers, stored only: no error is ever raised */
+	uint64_t    mcg_cap, mcg_status, mcg_ctl;
+	uint64_t    mce_bank[KVM_MCE_BANKS * 4];   /* CTL STATUS ADDR MISC per bank */
 	/* kvm_vm_quiesce: the CPU running this vcpu with the VMCS loaded (-1 none)
 	 * and the ept_gen it flushed for before its last entry */
 	volatile int      guest_cpu;
@@ -142,8 +150,11 @@ int  kvm_msr_index_list(struct kvm_msr_list *ul);
 #define KVM_MMIO_USER  0   /* kvm_run says what to do */
 #define KVM_MMIO_GUEST 1   /* done here (an ioeventfd): enter the guest again */
 #define KVM_MMIO_RETRY 2   /* v->prefault must be mapped first */
+#define KVM_MMIO_USER_ERROR 3   /* not emulated: an internal error for userspace */
 int  kvm_mmio_exit(kvm_vcpu_t *v, uint64_t gpa);
 void kvm_mmio_finish(kvm_vcpu_t *v);
+int  kvm_pio_string(kvm_vcpu_t *v, uint64_t qual);   /* INS/OUTS exit: KVM_MMIO_* */
+int  kvm_pio_string_finish(kvm_vcpu_t *v);           /* KVM_RUN after INS: may sleep */
 
 /* vmx.c internals that vmx_state.c shares */
 int  vmcs_load(kvm_vcpu_t *v, uint64_t *irqf);   /* the CPU, or <0; interrupts off until vmcs_put */
@@ -177,6 +188,7 @@ int  kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa);   /* 1 mapped, 0 no slot there, 
 void kvm_ept_unmap(kvm_vm_t *vm, uint64_t gpa, uint64_t size);
 /* -EAGAIN: *missing is a page not mapped yet */
 int  kvm_gpa_read(kvm_vm_t *vm, uint64_t gpa, void *buf, size_t n, uint64_t *missing);
+int  kvm_gpa_write(kvm_vm_t *vm, uint64_t gpa, const void *buf, size_t n, uint64_t *missing);
 kvm_slot_t *kvm_slot_find(kvm_vm_t *vm, uint64_t gpa);
 int  kvm_slot_present(kvm_vm_t *vm, uint64_t gpa);  /* without the lock: 1, 0, or -1 changing */
 

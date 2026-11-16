@@ -4,12 +4,16 @@
 """QEMU with -enable-kvm inside Ranix: an unmodified VMM on /dev/kvm.
 
 Ranix boots in a VM whose CPU has VMX (-cpu host on a VT-x host); its initramfs
-carries Alpine's qemu-system-x86_64 and a 64 KB firmware image. Inside, QEMU
-runs that firmware as a KVM guest: the reset vector jumps to code that writes a
-line to the emulated COM1, which QEMU prints, and leaves through isa-debug-exit,
-whose code QEMU exits with. The line and the exit code show the guest ran on
-Ranix's KVM, through QEMU's own start-up (capabilities, CPUID, MSRs, memory
-slots, vcpu state) and its port I/O devices.
+carries Alpine's qemu-system-x86_64, a 64 KB firmware image and Alpine's Linux
+kernel (linux-virt). Inside, QEMU runs two KVM guests:
+  - the firmware: the reset vector jumps to code that writes a line to the
+    emulated COM1, which QEMU prints, and leaves through isa-debug-exit, whose
+    code QEMU exits with. QEMU's own start-up (capabilities, CPUID, MSRs, memory
+    slots, vcpu state) and its port I/O devices;
+  - Linux, through QEMU's SeaBIOS and its -kernel loader, to an /init (busybox
+    from Ranix's initramfs) that writes the kernel's name and the CPU to COM1
+    and reboots: real mode to long mode, paging, MSRs, interrupts from the
+    PIT through QEMU's PIC, string port I/O.
 
 The machine is isapc with kernel-irqchip=off: QEMU keeps its interrupt
 controllers in userspace, and refuses a userspace local APIC with KVM on the
@@ -27,6 +31,7 @@ QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -c
 ALPINE = "https://dl-cdn.alpinelinux.org/alpine/v3.21"
 APK = ".cache/apk-x86_64"
 QROOT = ".cache/qemu-alpine-x86_64"
+KERNEL = ".cache/alpine-linux-virt-x86_64"
 MARK = "KVMQEMU-ICERDE-4127"
 
 FIRMWARE = r'''
@@ -64,7 +69,23 @@ timeout 60 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=k
     -device isa-debug-exit,iobase=0x501,iosize=1 > /tmp/q.out 2>&1
 echo "KVMQ rc $?"
 sed 's/^/KVMQ out /' /tmp/q.out
+echo "KVMQ linux basla"
+timeout 120 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=kvm,kernel-irqchip=off \
+    -cpu host,-apic -nodefaults -display none -no-reboot -serial file:/tmp/linux.out -m 256 \
+    -L /alp/usr/share/qemu -kernel /lnx/vmlinuz -initrd /lnx/initrd.cpio \
+    -append "console=ttyS0 nolapic noapic panic=-1" > /tmp/ql.out 2>&1
+echo "KVMQ linux rc $?"
+grep -v "host doesn't support" /tmp/ql.out | sed 's/^/KVMQ linux err /'
+grep -a "LINUXQ" /tmp/linux.out | sed 's/^/KVMQ linux out /'
 echo KVMQ-SON
+'''
+
+# /init of the Linux guest: busybox, run by the guest's Linux
+LINUX_INIT = r'''#!/bin/busybox sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t devtmpfs dev /dev
+echo "LINUXQ $(/bin/busybox uname -sr) | $(/bin/busybox grep -m1 'model name' /proc/cpuinfo)" > /dev/ttyS0
+/bin/busybox reboot -f
 '''
 
 
@@ -83,8 +104,39 @@ def fetch_qemu():
     os.rename(tmp, QROOT)
 
 
+def fetch_kernel():
+    """vmlinuz-virt out of Alpine's linux-virt package (an apk is gzip'd tars back to back)"""
+    if os.path.exists(f"{KERNEL}/vmlinuz-virt"):
+        return
+    import gzip, io, tarfile, urllib.request
+    url = f"{ALPINE}/main/x86_64"
+    index = tarfile.open(fileobj=io.BytesIO(urllib.request.urlopen(f"{url}/APKINDEX.tar.gz", timeout=60).read()))
+    text = index.extractfile("APKINDEX").read().decode()
+    rec = next(r for r in text.split("\n\n") if "\nP:linux-virt\n" in "\n" + r + "\n")
+    ver = next(l[2:] for l in rec.split("\n") if l.startswith("V:"))
+    apk = urllib.request.urlopen(f"{url}/linux-virt-{ver}.apk", timeout=120).read()
+    tar = tarfile.open(fileobj=io.BytesIO(gzip.decompress(apk)), ignore_zeros=True)
+    os.makedirs(KERNEL + ".tmp", exist_ok=True)
+    open(f"{KERNEL}.tmp/vmlinuz-virt", "wb").write(tar.extractfile("boot/vmlinuz-virt").read())
+    os.rename(KERNEL + ".tmp", KERNEL)
+
+
+def linux_initrd(path):
+    d = f"{B}/linitrd"
+    os.makedirs(f"{d}/bin")
+    os.makedirs(f"{d}/proc")
+    os.makedirs(f"{d}/dev")
+    shutil.copy("build/initramfs/bin/busybox", f"{d}/bin/busybox")
+    open(f"{d}/init", "w").write(LINUX_INIT)
+    os.chmod(f"{d}/init", 0o755)
+    subprocess.run(f"cd {d} && find . -print0 | cpio --null -o -H newc --owner=0:0 > {os.path.abspath(path)} 2>/dev/null",
+                   shell=True, check=True)
+    shutil.rmtree(d)
+
+
 def main():
     fetch_qemu()
+    fetch_kernel()
     shutil.rmtree(B, ignore_errors=True)
     os.makedirs(B)
     open(f"{B}/fw.S", "w").write(FIRMWARE % {"mark": MARK})
@@ -96,12 +148,18 @@ def main():
     for f in ("test.sh", "reboot-on-exit"):
         if os.path.lexists(f"{root}/{f}"):
             os.unlink(f"{root}/{f}")
-    # QEMU and its libraries only: the firmware is ours
+    # QEMU, its libraries, and the firmware it loads for an isapc with -kernel
     os.makedirs(f"{root}/alp/usr/bin")
+    os.makedirs(f"{root}/alp/usr/share/qemu")
     shutil.copytree(f"{QROOT}/lib", f"{root}/alp/lib", symlinks=True, copy_function=os.link)
     shutil.copytree(f"{QROOT}/usr/lib", f"{root}/alp/usr/lib", symlinks=True, copy_function=os.link)
     os.link(f"{QROOT}/usr/bin/qemu-system-x86_64", f"{root}/alp/usr/bin/qemu-system-x86_64")
+    for f in ("bios.bin", "bios-256k.bin", "linuxboot.bin", "linuxboot_dma.bin"):
+        os.link(f"{QROOT}/usr/share/qemu/{f}", f"{root}/alp/usr/share/qemu/{f}")
     shutil.copy(f"{B}/fw.bin", f"{root}/fw.bin")
+    os.makedirs(f"{root}/lnx")
+    os.link(f"{KERNEL}/vmlinuz-virt", f"{root}/lnx/vmlinuz")
+    linux_initrd(f"{root}/lnx/initrd.cpio")
     open(f"{root}/test.sh", "w").write(GUEST)
     os.chmod(f"{root}/test.sh", 0o755)
     subprocess.run(f"cd {root} && find . -print0 | cpio --null -o -H newc --owner=0:0 > ../initramfs.cpio 2>/dev/null",
@@ -123,7 +181,7 @@ def main():
                                  "-boot", "d", "-cdrom", f"{B}/q.iso", "-vga", "none"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        end = time.time() + 240
+        end = time.time() + 360
         while time.time() < end and p.poll() is None:
             t = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
             if "KVMQ-SON" in t:
@@ -138,9 +196,13 @@ def main():
     for l in lines:
         print(l)
     rc = next((l.split()[2] for l in lines if l.startswith("KVMQ rc ")), "")
+    lrc = next((l.split()[3] for l in lines if l.startswith("KVMQ linux rc ")), "")
+    lout = next((l for l in lines if l.startswith("KVMQ linux out LINUXQ Linux ")), "")
     ok = [("the VM booted and ran the test", "KVMQ basla" in out, ""),
           ("QEMU printed the guest's line", f"KVMQ out {MARK}" in out, ""),
-          ("QEMU exited with the guest's code", rc == "33", rc)]
+          ("QEMU exited with the guest's code", rc == "33", rc),
+          ("Linux ran its /init in QEMU", "model name" in lout, lout),
+          ("QEMU ended with the guest's reboot", lrc == "0", lrc)]
     for name, good, why in ok:
         print(("PASS: " if good else "FAIL: ") + name + ("" if good else f"  ({why})"))
     print(f"[kvmqemu] {sum(1 for _, g, _ in ok if g)}/{len(ok)} in {time.time() - t0:.0f}s")

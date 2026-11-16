@@ -507,8 +507,16 @@ static int exit_io(kvm_vcpu_t *v)
 	uint64_t q = vmread(EXIT_QUALIFICATION);
 	uint32_t size = (uint32_t)(q & 7) + 1;
 	int in = (q >> 3) & 1, string = (q >> 4) & 1;
-	if (string || (size != 1 && size != 2 && size != 4))
+	if (size != 1 && size != 2 && size != 4)
 		return internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_IO, q);
+	if (string) {
+		switch (kvm_pio_string(v, q)) {
+		case KVM_MMIO_GUEST: return RUN_GUEST;
+		case KVM_MMIO_RETRY: return RUN_OUTER;
+		case KVM_MMIO_USER:  return RUN_USER;
+		default: return internal_error(v, KVM_INTERNAL_ERROR_EMULATION, EXIT_IO, q);
+		}
+	}
 	if (!in && kvm_ioeventfd_hit(v->vm, 1, q >> 16, size, v->g.r[R_AX])) {
 		skip_instruction();
 		return RUN_GUEST;
@@ -865,6 +873,8 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 	struct kvm_run *run = v->run;
 	pio_finish(v);
 	kvm_mmio_finish(v);
+	int fr = kvm_pio_string_finish(v);
+	if (fr) return fr;
 	if (run->immediate_exit) {
 		run->exit_reason = KVM_EXIT_INTR;
 		return -EINTR;

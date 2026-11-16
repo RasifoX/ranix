@@ -37,6 +37,8 @@
 #define MSR_MTRRCAP          0xFE
 #define MSR_MCG_CAP          0x179
 #define MSR_MCG_STATUS       0x17A
+#define MSR_MCG_CTL          0x17B
+#define MSR_MC0_CTL          0x400   /* CTL STATUS ADDR MISC for each bank */
 #define MSR_MISC_ENABLE      0x1A0
 #define MSR_DEBUGCTL         0x1D9
 #define MSR_MTRR_PHYS0       0x200   /* base/mask pairs to 0x20F */
@@ -83,6 +85,15 @@ static int switched_slot(uint32_t idx)
 	for (int i = 0; i < KVM_SWITCHED_MSRS; i++)
 		if (switched[i] == idx) return i;
 	return -1;
+}
+
+/* the machine-check MSRs a VMM set up (KVM_X86_SETUP_MCE): their slot, or -1 */
+static uint64_t *mce_reg(kvm_vcpu_t *v, uint32_t idx)
+{
+	uint32_t banks = (uint32_t)(v->mcg_cap & 0xFF);
+	if (idx == MSR_MCG_CTL) return (v->mcg_cap & (1ULL << 8)) ? &v->mcg_ctl : NULL;
+	if (idx >= MSR_MC0_CTL && idx < MSR_MC0_CTL + 4 * banks) return &v->mce_bank[idx - MSR_MC0_CTL];
+	return NULL;
 }
 
 /* the 11 fixed-range MTRRs as one array */
@@ -148,8 +159,8 @@ int kvm_msr_get(kvm_vcpu_t *v, uint32_t idx, uint64_t *val)
 	case MSR_IA32_FEATURE_CONTROL: *val = FEATURE_CONTROL_LOCK; return 0;   /* locked, VMX off */
 	case MSR_PLATFORM_ID:
 	case MSR_BIOS_SIGN_ID:
-	case MSR_MCG_CAP:
-	case MSR_MCG_STATUS:        *val = 0; return 0;
+	case MSR_MCG_CAP:           *val = v->mcg_cap; return 0;
+	case MSR_MCG_STATUS:        *val = v->mcg_status; return 0;
 	case MSR_MISC_ENABLE:       *val = v->misc_enable; return 0;
 	case MSR_KVM_WALL_CLOCK:
 	case MSR_KVM_SYSTEM_TIME:
@@ -163,6 +174,8 @@ int kvm_msr_get(kvm_vcpu_t *v, uint32_t idx, uint64_t *val)
 		return 0;
 	}
 	if ((s = fixed_slot(idx)) >= 0) { *val = v->mtrr_fix[s]; return 0; }
+	uint64_t *mce = mce_reg(v, idx);
+	if (mce) { *val = *mce; return 0; }
 	if ((s = switched_slot(idx)) >= 0) { *val = v->msr_guest[s].data; return 0; }
 	return msr_unknown(idx, 0);
 }
@@ -196,8 +209,8 @@ int kvm_msr_set(kvm_vcpu_t *v, uint32_t idx, uint64_t val)
 	case MSR_GS_BASE_: if (!canonical(val)) return -1; vmwrite(GUEST_ES_BASE + 2 * SEG_GS, val); return 0;
 	case MSR_TSC:        vmwrite(TSC_OFFSET, val - rdtsc()); return 0;
 	case MSR_APIC_BASE:  v->apic_base = val; return 0;
-	case MSR_BIOS_SIGN_ID:
-	case MSR_MCG_STATUS: return 0;   /* a microcode update check, a cleared status */
+	case MSR_BIOS_SIGN_ID: return 0;   /* a microcode update check */
+	case MSR_MCG_STATUS: v->mcg_status = val; return 0;
 	case MSR_MISC_ENABLE: v->misc_enable = val; return 0;
 	case MSR_KVM_WALL_CLOCK:
 	case MSR_KVM_SYSTEM_TIME:
@@ -211,6 +224,8 @@ int kvm_msr_set(kvm_vcpu_t *v, uint32_t idx, uint64_t val)
 		return 0;
 	}
 	if ((s = fixed_slot(idx)) >= 0) { v->mtrr_fix[s] = val; return 0; }
+	uint64_t *mce = mce_reg(v, idx);
+	if (mce) { *mce = val; return 0; }
 	if ((s = switched_slot(idx)) >= 0) {
 		if (idx != MSR_STAR && idx != MSR_SFMASK && !canonical(val)) return -1;
 		v->msr_guest[s].data = val;

@@ -183,6 +183,26 @@ void kvm_ept_free(kvm_vm_t *vm)
 	vm->ept_root = 0;
 }
 
+/* Write guest-physical memory through the EPT, without sleeping: -EAGAIN with
+ * *missing for a page that is not mapped (writable) yet. */
+int kvm_gpa_write(kvm_vm_t *vm, uint64_t gpa, const void *buf, size_t n, uint64_t *missing)
+{
+	const uint8_t *in = buf;
+	while (n) {
+		if (gpa >= EPT_GPA_END) return -EFAULT;
+		size_t off = gpa & (PAGE_SIZE - 1), chunk = PAGE_SIZE - off;
+		if (chunk > n) chunk = n;
+		uint64_t *leaf = ept_leaf(vm, gpa, 0);
+		if (!leaf || !(*leaf & EPT_W)) {
+			*missing = gpa & ~(uint64_t)(PAGE_SIZE - 1);
+			return -EAGAIN;
+		}
+		memcpy((uint8_t *)PHYS_TO_VIRT(*leaf & EPT_ADDR) + off, in, chunk);
+		in += chunk; gpa += chunk; n -= chunk;
+	}
+	return 0;
+}
+
 /* Read guest-physical memory through the EPT, without sleeping (the caller may
  * be between two guest entries with interrupts off). A page the guest has not
  * touched yet is not mapped: -EAGAIN, with *missing set to it so the caller can

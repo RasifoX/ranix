@@ -19,6 +19,9 @@
  * modes are walked for translation only (the guest just ran the instruction,
  * so it was allowed to).
  *
+ * String port I/O (INS, OUTS, with REP) is here too: it is the other guest
+ * instruction whose memory operand the exit does not hand over as data.
+ *
  * Provenance: instruction encodings (prefixes, REX, ModRM/SIB, the opcodes
  * above) from the Intel SDM Vol. 2 (chapter 2 and the instruction pages);
  * paging structures from Vol. 3 chapter 4. Original code. */
@@ -28,6 +31,7 @@
 #include <uapi/kvm.h>
 #include <kernel/errno.h>
 #include <kernel/lib/string.h>
+#include <kernel/mm/pmm.h>
 
 #define PTE_P   1ULL
 #define PTE_PS  (1ULL << 7)
@@ -266,4 +270,94 @@ void kvm_mmio_finish(kvm_vcpu_t *v)
 	case 4: *r = val & 0xFFFFFFFFULL; break;   /* a 32-bit destination clears the upper half */
 	default: *r = val;
 	}
+}
+
+/* ── string port I/O ─────────────────────────────────────── */
+
+/* INS and OUTS, with or without REP, as KVM_EXIT_IO with count elements in
+ * the data page: as many as lie on the memory operand's page, so one exit moves
+ * at most a page and needs one translation. A REP with more to do leaves RIP on
+ * the instruction, which runs again for the rest. OUTS data is copied out now;
+ * INS data goes to guest memory at the next KVM_RUN (kvm_pio_string_finish).
+ * The memory operand's linear address is the VMCS's (guest linear address);
+ * the address size comes from the VM-exit instruction information. */
+int kvm_pio_string(kvm_vcpu_t *v, uint64_t q)
+{
+	uint32_t size = (uint32_t)(q & 7) + 1;
+	int in = (q >> 3) & 1, rep = (q >> 5) & 1;
+	uint32_t info = (uint32_t)vmread(VMX_INSTRUCTION_INFO);
+	int asz = (info >> 7) & 7;   /* 0: 16-bit, 1: 32-bit, 2: 64-bit */
+	uint64_t amask = asz == 2 ? ~0ULL : asz == 1 ? 0xFFFFFFFFULL : 0xFFFFULL;
+	uint64_t la = vmread(GUEST_LINEAR_ADDRESS);
+	int down = (vmread(GUEST_RFLAGS) >> 10) & 1;   /* DF */
+	uint64_t rcx = v->g.r[R_CX] & amask;
+	if (rep && rcx == 0) {
+		vmwrite(GUEST_RIP, vmread(GUEST_RIP) + vmread(VM_EXIT_INSTRUCTION_LEN));
+		return KVM_MMIO_GUEST;
+	}
+	uint64_t off = la & 4095;
+	if (off + size > 4096) return KVM_MMIO_USER_ERROR;   /* an element across a page: not done */
+	uint64_t fit = down ? off / size + 1 : (4096 - off) / size;
+	uint64_t count = rep ? (rcx < fit ? rcx : fit) : 1;
+	uint64_t gpa;
+	int r = walk(v, la, &gpa);
+	if (r == -EAGAIN) return KVM_MMIO_RETRY;
+	if (r) return KVM_MMIO_USER_ERROR;
+	uint64_t lo = down ? gpa - (count - 1) * size : gpa;   /* the block, lowest address first */
+	uint8_t *data = (uint8_t *)PHYS_TO_VIRT(v->pio_page);
+	if (in) {
+		uint8_t probe;
+		if ((r = kvm_gpa_read(v->vm, lo, &probe, 1, &v->prefault)) == -EAGAIN) return KVM_MMIO_RETRY;
+		v->ins_gpa = lo;
+		v->ins_bytes = (uint32_t)(count * size);
+		v->ins_size = (uint8_t)size;
+		v->ins_down = (uint8_t)down;
+	} else {
+		if ((r = kvm_gpa_read(v->vm, lo, data, count * size, &v->prefault)) == -EAGAIN) return KVM_MMIO_RETRY;
+		if (r) return KVM_MMIO_USER_ERROR;
+		if (down)   /* the elements in the order the instruction sends them */
+			for (uint64_t i = 0; i < count / 2; i++)
+				for (uint32_t b = 0; b < size; b++) {
+					uint8_t t = data[i * size + b];
+					data[i * size + b] = data[(count - 1 - i) * size + b];
+					data[(count - 1 - i) * size + b] = t;
+				}
+	}
+	int idx = in ? R_DI : R_SI;
+	uint64_t delta = count * size, reg = v->g.r[idx];
+	reg = down ? reg - delta : reg + delta;
+	v->g.r[idx] = (v->g.r[idx] & ~amask) | (reg & amask);
+	if (rep) v->g.r[R_CX] = (v->g.r[R_CX] & ~amask) | ((rcx - count) & amask);
+	if (!rep || rcx == count)
+		vmwrite(GUEST_RIP, vmread(GUEST_RIP) + vmread(VM_EXIT_INSTRUCTION_LEN));
+	struct kvm_run *run = v->run;
+	run->exit_reason = KVM_EXIT_IO;
+	run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
+	run->io.size = (uint8_t)size;
+	run->io.port = (uint16_t)(q >> 16);
+	run->io.count = (uint32_t)count;
+	run->io.data_offset = PAGE_SIZE;
+	return KVM_MMIO_USER;
+}
+
+int kvm_pio_string_finish(kvm_vcpu_t *v)
+{
+	if (!v->ins_bytes) return 0;
+	uint8_t *data = (uint8_t *)PHYS_TO_VIRT(v->pio_page);
+	uint32_t n = v->ins_bytes, size = v->ins_size;
+	if (v->ins_down)   /* userspace gave them in execution order: highest address first */
+		for (uint32_t i = 0; i < n / size / 2; i++)
+			for (uint32_t b = 0; b < size; b++) {
+				uint8_t t = data[i * size + b];
+				data[i * size + b] = data[n - (i + 1) * size + b];
+				data[n - (i + 1) * size + b] = t;
+			}
+	v->ins_bytes = 0;
+	for (int tries = 0; tries < 3; tries++) {
+		uint64_t missing;
+		int r = kvm_gpa_write(v->vm, v->ins_gpa, data, n, &missing);
+		if (r != -EAGAIN) return r;
+		if ((r = kvm_ept_fault(v->vm, missing)) <= 0) return r ? r : -EFAULT;
+	}
+	return -EFAULT;
 }
