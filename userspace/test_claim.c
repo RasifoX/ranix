@@ -35,7 +35,7 @@
 #define CLAIM_F_WAIT   0x4
 struct claim_req {
 	char res[16]; char holder[32]; char purpose[80];
-	uint32_t secs, flags; int32_t stop_pid; uint32_t pad; uint64_t id;
+	uint32_t secs, flags; int32_t stop_pid; uint32_t slots; uint64_t id;
 	char busy_holder[32]; char busy_purpose[80]; int64_t busy_until; uint64_t busy_id;
 };
 #define TAKE 0xC1A0
@@ -55,6 +55,21 @@ static int take(int fd, const char *res, const char *holder, const char *purpose
 	snprintf(q.purpose, sizeof q.purpose, "%s", purpose);
 	q.secs = secs; q.flags = flags;
 	int r = ioctl(fd, TAKE, &q);
+	if (out) *out = q;
+	return r < 0 ? -errno : 0;
+}
+
+/* one of at most n holders of res; *no = the slot number taken */
+static int take_slot(int fd, const char *res, const char *holder, unsigned n, unsigned flags, unsigned *no,
+                     struct claim_req *out)
+{
+	struct claim_req q; memset(&q, 0, sizeof q);
+	snprintf(q.res, sizeof q.res, "%s", res);
+	snprintf(q.holder, sizeof q.holder, "%s", holder);
+	snprintf(q.purpose, sizeof q.purpose, "slot test");
+	q.slots = n; q.flags = flags;
+	int r = ioctl(fd, TAKE, &q);
+	if (no) *no = q.slots;
 	if (out) *out = q;
 	return r < 0 ? -errno : 0;
 }
@@ -269,6 +284,38 @@ int main(void)
 	x.stop_pid = 999999;
 	if (ioctl(b, TAKE, &x) == 0 || errno != ESRCH) FAIL("stop_pid of no process accepted");
 	printf("ok closed wall: group claim, stop_pid checked, pid reuse safe\n");
+	/* slots: at most N holders of res at once, each its own claim with a number */
+	{
+		int s1 = open("/dev/claim", O_RDWR), s2 = open("/dev/claim", O_RDWR), s3 = open("/dev/claim", O_RDWR);
+		unsigned n1 = 0, n2 = 0, n3 = 0;
+		if (take_slot(s1, "test.slot", "A", 2, 0, &n1, NULL)) FAIL("slot 1 refused");
+		if (take_slot(s2, "test.slot", "A", 2, 0, &n2, NULL)) FAIL("slot 2 refused (same holder is a second slot)");
+		if (n1 != 1 || n2 != 2) FAIL("slot numbers %u %u, want 1 2", n1, n2);
+		if (take_slot(s3, "test.slot", "B", 2, 0, NULL, &q) != -EBUSY) FAIL("third holder of 2 slots let in");
+		if (take(s3, "test.slot", "B", "x", 5, 0, NULL) != -EBUSY) FAIL("exclusive claim over slots let in");
+		char *j = snap();
+		if (!strstr(j, "\"mode\":\"slot\",\"slot\":1,\"slots\":2") || !strstr(j, "\"slot\":2,\"slots\":2"))
+			FAIL("slots not shown: %.300s", j);
+		close(s1);                               /* slot 1 frees: the next taker gets number 1 */
+		if (take_slot(s3, "test.slot", "B", 2, 0, &n3, NULL) || n3 != 1) FAIL("freed slot not reused (%u)", n3);
+		close(s2);                               /* a waiter gets in when one frees */
+		int s4 = open("/dev/claim", O_RDWR);
+		take_slot(s4, "test.slot", "C", 2, 0, NULL, NULL);
+		pid_t w = fork();
+		if (w == 0) { sleep(1); close(s3); _exit(0); }
+		close(s3);
+		int s5 = open("/dev/claim", O_RDWR);
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		if (take_slot(s5, "test.slot", "D", 2, CLAIM_F_WAIT, &n3, NULL)) FAIL("slot wait");
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		waitpid(w, NULL, 0);
+		struct claim_req bad; memset(&bad, 0, sizeof bad);
+		snprintf(bad.res, sizeof bad.res, "test.slot2"); bad.slots = 2; bad.flags = CLAIM_F_SHARED;
+		if (ioctl(s5, TAKE, &bad) == 0 || errno != EINVAL) FAIL("shared slot claim accepted");
+		close(s4); close(s5);
+		printf("ok slots: 2 holders, numbers 1 2, third busy, freed number reused, wait (%ld ms)\n",
+		       (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
+	}
 	close(b);
 	if (strstr(snap(), "\"res\":\"test.")) FAIL("test claims left behind: %.300s", snap());
 	printf("OK\n");

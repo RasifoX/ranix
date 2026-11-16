@@ -23,6 +23,10 @@
  * Lifetime: by default a claim belongs to the open file: it ends on close (or
  * when its holder dies). CLAIM_F_DETACH keeps it until release or expiry.
  * Every claim may carry an expiry (secs); detached claims must.
+ * Slots: a TAKE with slots = N is one of at most N holders of res at once
+ * ("browser", 3: three headless browsers, the fourth waits). Each take is its
+ * own claim, even by the same holder, and gets the lowest free slot number.
+ * Slot claims conflict with exclusive and shared claims on the same res.
  */
 
 #include <uapi/types.h>
@@ -42,7 +46,8 @@ struct claim_req {
 	uint32_t secs;                         /* 0 = no expiry (attached claims only) */
 	uint32_t flags;
 	int32_t  stop_pid;                     /* process group leader a "stop" ends; 0 = the caller */
-	uint32_t pad;
+	uint32_t slots;                        /* TAKE in: N > 0 makes a slot claim (below); out: the
+	                                        * slot taken, 1..N. 0 = exclusive or shared by flags */
 	uint64_t id;                           /* out: TAKE; in: RELEASE, EXTEND, STOP */
 	/* out on EBUSY: the claim in the way */
 	char     busy_holder[CLAIM_HOLDER_MAX];

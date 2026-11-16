@@ -349,7 +349,7 @@ $(BUILD_DIR)/kernel/vdso.o: $(BUILD_DIR)/vdso_image.h
 all: initramfs $(TARGET)
 
 # Userspace programs in the initramfs. Core always ships; tests ship unless DEMO=1.
-USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test userspace/ranix-sess userspace/ranix-ajan
+USER_CORE_BINS = userspace/init userspace/hello userspace/echo_server userspace/httpd_test userspace/ranix-sess userspace/ranix-ajan userspace/slot
 # Auto-discovered: the bench harness plus every userspace/test_*.c. Adding a
 # test_*.c is enough — no hand-editing this list (and no more merge conflicts
 # from everyone appending to it).

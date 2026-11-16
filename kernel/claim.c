@@ -51,6 +51,7 @@ struct claim {
 	char       holder[CLAIM_HOLDER_MAX];
 	char       purpose[CLAIM_PURPOSE_MAX];
 	uint32_t   flags;
+	uint32_t   slots, slot;    /* slot claim: one of `slots` holders, number `slot`; 0 = not one */
 	uid_t      uid;
 	pid_t      pid, stop_pid;
 	uint64_t   stop_start;     /* start_tick of stop_pid when taken: a reused pid is not it */
@@ -108,6 +109,7 @@ static void changed(void) { poll_notify(); }
 static int conflicts(const struct claim *c, const char *res, uint32_t flags, const char *holder, uid_t uid)
 {
 	if (!c->used || strcmp(c->res, res) != 0) return 0;
+	if (c->slots) return 1;            /* a slot claim in the way of a non-slot one */
 	if (strcmp(c->holder, holder) == 0 && c->uid == uid) return 0;   /* same holder: re-take */
 	if ((c->flags & CLAIM_F_SHARED) && (flags & CLAIM_F_SHARED)) return 0;
 	return 1;
@@ -128,15 +130,18 @@ static void put_claim(kout_t *o, const struct claim *c, int json, int64_t now)
 	long left = c->expire_tick ? (long)((c->expire_tick > kernel_ticks ? c->expire_tick - kernel_ticks : 0) / TIMER_HZ) : -1;
 	if (!json) {
 		kout_s(o, "claim "); kout_u(o, c->id); kout_c(o, ' '); kout_s(o, c->res);
-		kout_s(o, (c->flags & CLAIM_F_SHARED) ? " shared " : " exclusive ");
+		if (c->slots) { kout_s(o, " slot "); kout_u(o, c->slot); kout_c(o, '/'); kout_u(o, c->slots); kout_c(o, ' '); }
+		else kout_s(o, (c->flags & CLAIM_F_SHARED) ? " shared " : " exclusive ");
 		kout_s(o, "holder=\""); kout_s(o, c->holder); kout_s(o, "\" purpose=\""); kout_s(o, c->purpose);
 		kout_s(o, "\" pid="); kout_i(o, c->pid); kout_s(o, " left_s="); kout_i(o, left); kout_c(o, '\n');
 		return;
 	}
 	kout_s(o, "{\"id\":"); kout_u(o, c->id);
 	kout_s(o, ",\"res\":\""); kout_js(o, c->res, sizeof c->res);
-	kout_s(o, "\",\"mode\":\""); kout_s(o, (c->flags & CLAIM_F_SHARED) ? "shared" : "exclusive");
-	kout_s(o, "\",\"holder\":\""); kout_js(o, c->holder, sizeof c->holder);
+	kout_s(o, "\",\"mode\":\""); kout_s(o, c->slots ? "slot" : (c->flags & CLAIM_F_SHARED) ? "shared" : "exclusive");
+	kout_c(o, '"');
+	if (c->slots) { kout_s(o, ",\"slot\":"); kout_u(o, c->slot); kout_s(o, ",\"slots\":"); kout_u(o, c->slots); }
+	kout_s(o, ",\"holder\":\""); kout_js(o, c->holder, sizeof c->holder);
 	kout_s(o, "\",\"purpose\":\""); kout_js(o, c->purpose, sizeof c->purpose);
 	kout_s(o, "\",\"uid\":"); kout_u(o, c->uid);
 	kout_s(o, ",\"pid\":"); kout_i(o, c->pid);
@@ -236,6 +241,7 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 	if (!q->holder[0]) cpy(q->holder, me->name, sizeof q->holder);
 	if ((q->flags & CLAIM_F_DETACH) && !q->secs) return -EINVAL;   /* a detached claim must end by itself */
 	if (q->secs > 7 * 24 * 3600) return -EINVAL;
+	if (q->slots > 64 || (q->slots && (q->flags & CLAIM_F_SHARED))) return -EINVAL;
 	uid_t uid = me->euid;
 	pid_t stop_pid;
 	uint64_t stop_start;
@@ -246,11 +252,20 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 		uint64_t f = spin_lock_irq(&cl_lock);
 		int swept = sweep_locked();
 		struct claim *busy = 0, *same = 0, *free_slot = 0;
-		int mine = 0;
+		int mine = 0, held = 0;
+		uint64_t used_nos = 0;             /* slot numbers taken on res, bit n-1 for slot n */
 		for (int i = 0; i < NCLAIM; i++) {
 			struct claim *c = &tab[i];
 			if (!c->used) { if (!free_slot) free_slot = c; continue; }
 			if (c->uid == uid) mine++;
+			if (q->slots) {                /* a slot: in the way are non-slot claims and N holders */
+				if (strcmp(c->res, q->res) != 0) continue;
+				if (!c->slots) { if (!busy) busy = c; continue; }
+				held++;
+				if (c->slot >= 1 && c->slot <= 64) used_nos |= 1ULL << (c->slot - 1);
+				if (held >= (int)q->slots && !busy) busy = c;
+				continue;
+			}
 			if (conflicts(c, q->res, q->flags, q->holder, uid)) { if (!busy) busy = c; }
 			else if (strcmp(c->res, q->res) == 0 && strcmp(c->holder, q->holder) == 0 && c->uid == uid &&
 			         ((c->flags ^ q->flags) & CLAIM_F_SHARED) == 0) same = c;
@@ -269,6 +284,11 @@ static int do_take(vfs_file_t *file, struct claim_req *q)
 			/* same holder taking again: refresh purpose, expiry and ownership */
 			cpy(c->purpose, q->purpose, sizeof c->purpose);
 			c->flags = q->flags & (CLAIM_F_SHARED | CLAIM_F_DETACH);
+			if (q->slots) {
+				uint32_t n = 1;
+				while (n < 64 && (used_nos & (1ULL << (n - 1)))) n++;
+				c->slots = q->slots; c->slot = n; q->slots = n;
+			}
 			c->pid = (pid_t)me->tgid;
 			c->stop_pid = stop_pid;
 			c->stop_start = stop_start;
