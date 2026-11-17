@@ -2843,6 +2843,7 @@ off_t vfs_seek(int fd, off_t off, int whence)
 	/* pipes and character devices are not seekable */
 	if (f->inode && (f->inode->mode & 0170000) == 0010000) return -ESPIPE;   /* S_IFIFO */
 	if (f->inode && (f->inode->mode & 0170000) == 0020000) return -ESPIPE;   /* S_IFCHR */
+	if (f->inode && (f->inode->mode & 0170000) == 0140000) return -ESPIPE;   /* S_IFSOCK: pread/pwrite too */
 
 	if (f->inode->fops && f->inode->fops->seek)
 		return f->inode->fops->seek(f, off, whence);

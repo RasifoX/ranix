@@ -234,6 +234,10 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
 {
     socket_t *s = (socket_t *)file->inode->priv;
     if (!s) return -EBADF;
+    /* a read of nothing is 0 at once, the data left queued (Linux). The stream
+     * loop below copies nothing for 0 and finds the data still there, so it
+     * went round for good, past SIGKILL. */
+    if (len == 0) return 0;
     if (s->domain == AF_NETLINK) {
         k_iovec v = { buf, len };
         int mflags;
