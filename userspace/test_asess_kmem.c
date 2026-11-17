@@ -116,7 +116,12 @@ static void unix_stream(void)
 	long first = 0;
 	while (npairs < PAIRS && !at_budget && sent <= 4 * LIMIT) {
 		int *p = pr[npairs];
-		if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, p) != 0) break;
+		if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, p) != 0) {
+			/* the budget may refuse the next socket itself rather than its data:
+			 * which comes first depends on what else the session holds */
+			if (errno == ENOMEM && npairs > 0) at_budget = 1;
+			break;
+		}
 		npairs++;
 		long here = 0;
 		for (;;) {
