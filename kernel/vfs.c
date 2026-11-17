@@ -3264,6 +3264,11 @@ int vfs_readdir(const char *path, uint32_t idx, vfs_dirent_t *out)
 {
 	vfs_dentry_t *d = vfs_dentry_resolve(path);
 	if (!d || !d->inode) return -1;
+	/* The caller's earlier stat is no promise: another task can have put a file
+	 * under the name since, and a filesystem's readdir reads the inode's private
+	 * data as a directory list (rmdir racing creat: a ramfs page taken for list
+	 * entries, a kernel page fault, found by test_fuzz). */
+	if (!S_ISDIR(d->inode->mode)) return -ENOTDIR;
 	if (d->inode->iops && d->inode->iops->readdir)
 		return d->inode->iops->readdir(d->inode, idx, out);
 	return -1;

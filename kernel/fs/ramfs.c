@@ -229,6 +229,7 @@ static int ramfs_unlink_locked(vfs_inode_t *dir, const char *name)
 
 static int ramfs_readdir_locked(vfs_inode_t *dir, uint32_t idx, vfs_dirent_t *out)
 {
+	if (!S_ISDIR(dir->mode)) return -ENOTDIR;   /* a file's priv is its pages */
 	ramfs_dir_t *rd = dir->priv;
 	if (!rd) return -1;
 	/* Synthesize "." and ".." — POSIX directories must list them, and readdir

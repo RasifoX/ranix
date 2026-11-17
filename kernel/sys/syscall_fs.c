@@ -98,12 +98,17 @@ static long sys_mkdirat(int dirfd, const char *path, mode_t mode)
 
 /* A directory holds only "." and ".." when empty. The cursor belongs to the
  * filesystem (a byte offset on ext2), so step by next_off as getdents does. */
+/* 1 empty, 0 not, -ENOTDIR when the name is no longer a directory */
 static int dir_is_empty(const char *kp)
 {
 	vfs_dirent_t de;
-	for (uint32_t idx = 0; vfs_readdir(kp, idx, &de) == 0; idx = de.next_off)
+	int r;
+	uint32_t idx = 0;
+	while ((r = vfs_readdir(kp, idx, &de)) == 0) {
 		if (strcmp(de.name, ".") != 0 && strcmp(de.name, "..") != 0) return 0;
-	return 1;
+		idx = de.next_off;
+	}
+	return r == -ENOTDIR ? -ENOTDIR : 1;
 }
 
 static long sys_unlink(const char *path)
@@ -129,7 +134,7 @@ static long sys_unlinkat(int dirfd, const char *path, int flags)
 	if (flags & AT_REMOVEDIR) {
 		if (!S_ISDIR(vs.mode)) return -ENOTDIR;
 		if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -EROFS;
-		if (!dir_is_empty(kp)) return -ENOTEMPTY;
+		{ int e = dir_is_empty(kp); if (e < 0) return e; if (!e) return -ENOTEMPTY; }
 	} else {
 		if (S_ISDIR(vs.mode)) return -EISDIR;
 	}
@@ -180,7 +185,7 @@ static long sys_rmdir(const char *path)
 	if (vfs_lstat(kp, &vs) != 0) return -ENOENT;
 	if (!S_ISDIR(vs.mode)) return -ENOTDIR;
 	if (vfs_path_mnt_flags(kp) & MS_RDONLY) return -EROFS;
-	if (!dir_is_empty(kp)) return -ENOTEMPTY;
+	{ int e = dir_is_empty(kp); if (e < 0) return e; if (!e) return -ENOTEMPTY; }
 	r = vfs_unlink(kp);
 	return r == -30 || r == -16 || r == -13 || r == -1 ? r : (r == 0 ? 0 : -2);
 }
