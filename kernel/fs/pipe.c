@@ -338,8 +338,13 @@ static int fifo_open(vfs_inode_t *inode, vfs_file_t *file, int flags)
     if (acc != O_WRONLY) { pipe->readers++; pipe->r_opens++; }
     if (acc != O_RDONLY) { pipe->writers++; pipe->w_opens++; }
     uint32_t r_seen = pipe->r_opens, w_seen = pipe->w_opens;
+    /* the other end already open now: no wait. (Counting only opens after this
+     * one missed a writer that opened first, was woken by this open, wrote and
+     * closed before this reader looked again: the reader slept for good.) */
+    int peer = acc == O_RDONLY ? pipe->writers > 0 : acc == O_WRONLY ? pipe->readers > 0 : 1;
     wake_up(&pipe->open_wait);
     spin_unlock_irq(&pipe->lock, f);
+    if (peer) return 0;
 
     /* Wait for the other end to have opened, not to be open now: a writer that
      * opened, wrote and closed before this reader ran still ends the wait. */
