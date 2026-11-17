@@ -482,6 +482,7 @@ check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail 
 check "c-recvzero"    "OK"            "$(timeout 40 /bin/test_recvzero 2>&1 | tail -1)"
 check "c-splicerule"  "OK"            "$(timeout 40 /bin/test_splicerule 2>&1 | tail -1)"
 check "c-rmdirrace"   "OK"            "$(timeout 40 /bin/test_rmdirrace 2>&1 | tail -1)"
+check "c-deaddir"     "OK"            "$(timeout 40 /bin/test_deaddir 2>&1 | tail -1)"
 check "c-brkbig"      "OK"            "$(timeout 60 /bin/test_brkbig 2>&1 | tail -1)"
 check "c-renameloop"  "OK"            "$(timeout 60 /bin/test_renameloop 2>&1 | tail -1)"
 check "c-unixbuf"     "OK"            "$(timeout 60 /bin/test_unixbuf 2>&1 | tail -1)"
