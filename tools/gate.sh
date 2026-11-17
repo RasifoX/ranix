@@ -16,6 +16,8 @@
 #   binary  a built ELF binary in the source tree (outside build/): make may run it instead of
 #           rebuilding from the newer source, and git never sees it
 #   lang    a Turkish letter anywhere in the tree outside test data (tests/ntfs): English only
+#   secret  an API key, token, private key, clear password, private path, home network address
+#           or private e-mail anywhere in the tree: nothing private is published
 #   overwrite with GATE_BASE=<tree before the change>: a userspace/test_*.c that exists in both trees
 #           but lost more than 80% of its lines (another test written over it)
 # The baseline only shrinks: when you fix an exception, run --baseline and commit it.
@@ -150,6 +152,40 @@ for dp, dn, fn in os.walk('.'):
             if re.search('[\u00e7\u011f\u0131\u015f\u00f6\u00fc\u00c7\u011e\u0130\u015e\u00d6\u00dc]', l):
                 lang_bad.append(f'lang\t{q}:{i}   (not English: translate it)')
 
+# secret: nothing private may be published. API keys and tokens, private keys,
+# passwords in the clear, the maintainers' own paths and home network, private
+# e-mail addresses (a third-party copyright line may name its author).
+SECRET = [
+    ('api key or token', r'sk-ant-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{32,}|\b(AKIA|ASIA)[A-Z0-9]{16}\b'
+                         r'|\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}'
+                         r'|\bAIza[0-9A-Za-z_-]{35}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}'
+                         r'|\beyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.'),
+    ('private key', r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
+    ('password in the clear', r'(?i)\b(password|passwd|secret|api[_-]?key|token)\s*[=:]\s*["\'][^"\'\s$]{8,}["\']'),
+    ('private path', r'/home/[a-z]+/|\.config/[a-z0-9_-]+/'),
+    ('home network address', r'\b192\.168\.\d{1,3}\.\d{1,3}\b'),
+    ('private e-mail', r'[A-Za-z0-9._%+-]+@(gmail|hotmail|outlook|yahoo|icloud)\.com'),
+]
+# A maintainer's own private names (directories, hosts) stay out of the tree:
+# GATE_PRIVATE names a local file of extra patterns, one per line.
+if os.environ.get('GATE_PRIVATE'):
+    for l in open(os.environ['GATE_PRIVATE']):
+        if l.strip() and not l.startswith('#'): SECRET.append(('private name', l.strip()))
+SECRET_OK = ('rasifox34@gmail.com',)   # the licensor's published address (SPDX, CONTRIBUTING)
+secret_bad = []
+import subprocess
+tracked = subprocess.run(['git', 'ls-files', '-co', '--exclude-standard'], capture_output=True, text=True).stdout.split('\n')
+for q in sorted(t for t in tracked if t and t != 'tools/gate.sh' and not t.startswith('build/')):   # this file names the patterns
+    if True:
+        try: txt = open(q, encoding='utf-8').read()
+        except (OSError, UnicodeDecodeError): continue
+        for i, l in enumerate(txt.split('\n'), 1):
+            for what, rx in SECRET:
+                m = re.search(rx, l)
+                if not m: continue
+                if what == 'private e-mail' and ('Copyright' in l or m.group(0) in SECRET_OK): continue
+                secret_bad.append(f'secret\t{q}:{i}   ({what}: remove it before it is published)')
+
 def fmt(e): return '\t'.join(str(x) for x in e)
 if sys.argv[1:] == ['--baseline']:
     with open(BASELINE, 'w') as f:
@@ -171,7 +207,7 @@ for e in sorted(found, key=fmt):
 keys = {tuple(str(x) for x in (e[:-1] if e[0] in ('fn', 'names') else e)) for e in found}
 note += ['\t'.join(k) + '   (fixed: run --baseline)' for k in base if k not in keys]
 for n in note: print('gate: note  ', n)
-bad += dup_bad + overwrite_bad + binary_bad + lang_bad
+bad += dup_bad + overwrite_bad + binary_bad + lang_bad + secret_bad
 for b in bad: print('gate: FAIL  ', b)
 print(f'gate: {len(found)} known exceptions, {len(bad)} new' + (' -- needs a fix or a human decision' if bad else ', ok'))
 sys.exit(1 if bad else 0)
