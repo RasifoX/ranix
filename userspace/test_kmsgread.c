@@ -4,7 +4,9 @@
  */
 /* /dev/kmsg read side, Linux semantics: one record a read; a buffer too small
  * for the record is EINVAL and the reader stays put; each write is one record;
- * a line longer than any record is cut, never a wall the reader cannot pass.
+ * a record longer than the reader's buffer is cut, never a wall the reader cannot
+ * pass (a write is at most 1024 bytes, as on Linux; with its header the record
+ * is longer than a 1024-byte buffer).
  * The last line is OK. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -30,8 +32,8 @@ static void log_line(const char *s, size_t n)
 
 int main(void)
 {
-	/* a 3000-byte write without a newline, then two separate marker writes */
-	static char big[3000];
+	/* a 1024-byte write without a newline, then two separate marker writes */
+	static char big[1024];
 	memset(big, 'x', sizeof(big));
 	memcpy(big, "kmsgread-long ", 14);
 	log_line(big, sizeof(big));

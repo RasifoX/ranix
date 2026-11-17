@@ -182,6 +182,8 @@ static int kmsg_level(const char *kb, size_t n)
 
 /* Every line of a write may start with its own "<N>"; a line with only the
  * prefix logs an empty line at that level. */
+#define KMSG_RECORD_MAX 1024
+
 static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 {
 	(void)f;
@@ -189,6 +191,10 @@ static ssize_t kmsg_write(vfs_file_t *f, const void *buf, size_t len)
 	char kb[256], last = 0;
 	size_t done = 0;
 	int bol = 1;                                 /* at the start of a line */
+	/* one write is one record, at most 1024 bytes (Linux PRINTKRB_RECORD_MAX):
+	 * a longer one went to the console a character at a time, a CPU held for
+	 * as long as it took */
+	if (len > KMSG_RECORD_MAX) return -EINVAL;
 	while (done < len) {
 		size_t n = len - done < sizeof(kb) ? len - done : sizeof(kb);
 		if (copy_fop_from_user(kb, (const uint8_t *)buf + done, n) != 0) break;

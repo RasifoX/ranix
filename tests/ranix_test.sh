@@ -485,6 +485,7 @@ check "c-rmdirrace"   "OK"            "$(timeout 40 /bin/test_rmdirrace 2>&1 | t
 check "c-unixbuf"     "OK"            "$(timeout 60 /bin/test_unixbuf 2>&1 | tail -1)"
 check "c-sockzero"     "OK"            "$(timeout 40 /bin/test_sockzero 2>&1 | tail -1)"
 check "c-ramfsfull"    "OK"            "$(timeout 120 /bin/test_ramfsfull 2>&1 | tail -1)"
+check "c-kmsglen"      "OK"            "$(timeout 30 /bin/test_kmsglen 2>&1 | tail -1)"
 # the claims tool by its English name, and its old name still answering
 check "ranix-agent-name" "ok"         "$(ranix-agent list >/dev/null 2>&1 && ranix-ajan list >/dev/null 2>&1 && echo ok)"
 # KVM (arch/x86_64/kvm.c, vmx.c): a real-mode guest through /dev/kvm. It needs VMX
