@@ -142,6 +142,13 @@ static int sock_close_vfs(vfs_file_t *file)
     return 0;
 }
 
+/* A reader took from s's queue: a sender to it waiting for room (blocked in
+ * unix_send_wait or in poll for POLLOUT) looks again. Only the key is used. */
+static void unix_dequeued(socket_t *s)
+{
+    if (s->domain == AF_UNIX && s->unix_peer) poll_notify_key(s->unix_peer);
+}
+
 static int sock_poll_vfs(vfs_file_t *file)
 {
     socket_t *s = (socket_t *)file->inode->priv;
@@ -177,6 +184,7 @@ static int sock_poll_vfs(vfs_file_t *file)
         s->poll_out_blocked = 1;
         out = tcp_can_send(s) ? 0x0004 : 0;   /* an ACK may have just gone by */
     }
+    if (s->domain == AF_UNIX && !unix_can_send(s)) out = 0;   /* the peer's queue is full */
     /* the read side is closed (own SHUT_RD, or the peer's FIN or SHUT_WR):
      * POLLRDHUP, as Linux gives for a stream socket */
     int eof = sock_at_eof(s);
@@ -243,6 +251,7 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
                 s->recv_head = skb->next;
                 if (!s->recv_head) s->recv_tail = NULL;
                 spin_unlock_irq(&s->recv_lock, f);
+                unix_dequeued(s);
                 size_t n = skb->len < (len - total) ? skb->len : (len - total);
                 if (n && copy_fop_to_user((char *)buf + total, skb->data, n) != 0) {
                     skb_free(skb);
@@ -271,6 +280,7 @@ static ssize_t sock_read_vfs(vfs_file_t *file, void *buf, size_t len)
             s->recv_head = skb->next;
             if (!s->recv_head) s->recv_tail = NULL;
             spin_unlock_irq(&s->recv_lock, f);
+            unix_dequeued(s);
             size_t n = skb->len < len ? skb->len : len;
             int bad = n && copy_fop_to_user(buf, skb->data, n) != 0;
             skb_free(skb);
@@ -1597,6 +1607,7 @@ static long recvfrom_stream(socket_t *s, const k_iovec *iov, uint64_t niov, int 
             s->recv_head = skb->next;
             if (!s->recv_head) s->recv_tail = NULL;
             spin_unlock_irq(&s->recv_lock, f);
+            unix_dequeued(s);
 
             size_t n = skb->len < (len - total) ? skb->len : (len - total);
             if (n && iov_put(iov, niov, total, skb->data, n) != 0) {
@@ -1703,6 +1714,7 @@ static long recvfrom_dgram(socket_t *s, const k_iovec *iov, uint64_t niov, int n
             s->recv_head = skb->next;
             if (!s->recv_head) s->recv_tail = NULL;
             spin_unlock_irq(&s->recv_lock, f);
+            unix_dequeued(s);
             size_t n = skb->len < len ? skb->len : len;
             if (n && iov_put(iov, niov, 0, skb->data, n) != 0) {
                 skb_free(skb);
@@ -2016,6 +2028,7 @@ static long recvmsg_unix(socket_t *s, int fd, int flags, void *umsg, k_msghdr m,
         s->recv_head = skb->next;
         if (!s->recv_head) s->recv_tail = NULL;
         spin_unlock_irq(&s->recv_lock, f);
+        unix_dequeued(s);
         if (!have_cred) {
             have_cred = 1;
             cr_pid = skb->cred_pid; cr_uid = skb->cred_uid; cr_gid = skb->cred_gid;

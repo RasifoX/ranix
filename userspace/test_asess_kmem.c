@@ -104,29 +104,49 @@ static void unix_stream(void)
 	CHECK(WIFEXITED(st) && !WEXITSTATUS(st), "writer finished");
 	close(sv[1]);
 
+	/* One unread socket stops at its send buffer (as on Linux, a few hundred KB),
+	 * so the budget is reached with many: one stops short there, the data is
+	 * charged, and reading gives everything back. */
 	long base = used();
-	CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sv) == 0, "socketpair");
+	enum { PAIRS = 160 };   /* 160 send buffers are about twice the budget */
+	static int pr[PAIRS][2];
 	long sent = 0;
 	static char pkt[1024];
-	for (;;) {
-		ssize_t w = write(sv[0], pkt, sizeof(pkt));
-		if (w <= 0) break;
-		sent += w;
-		if (sent > 4 * LIMIT) break;
+	int npairs = 0, at_budget = 0;
+	long first = 0;
+	while (npairs < PAIRS && !at_budget && sent <= 4 * LIMIT) {
+		int *p = pr[npairs];
+		if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, p) != 0) break;
+		npairs++;
+		long here = 0;
+		for (;;) {
+			ssize_t w = write(p[0], pkt, sizeof(pkt));
+			if (w <= 0) break;
+			here += w;
+		}
+		CHECK(errno == EAGAIN, "a full socket says EAGAIN");
+		/* well short of what the first took: the budget refused (each stream
+		 * still takes one receive window past it, so a session at its limit
+		 * can talk at all) */
+		if (npairs == 1) first = here;
+		else if (here < first * 3 / 4) at_budget = 1;
+		sent += here;
 	}
-	CHECK(sent <= LIMIT, "an unread socket stops at the budget");
-	CHECK(errno == EAGAIN, "and says so");
+	CHECK(at_budget, "unread sockets stop at the budget");
+	CHECK(sent <= LIMIT + npairs * 65536L, "and not past it by more than a window each");
 	CHECK(used() > base + LIMIT / 2, "unread data is charged");
 	long got = 0;
-	for (;;) {
-		ssize_t r = read(sv[1], pkt, sizeof(pkt));
-		if (r <= 0) break;
-		got += r;
+	for (int i = 0; i < npairs; i++) {
+		for (;;) {
+			ssize_t r = read(pr[i][1], pkt, sizeof(pkt));
+			if (r <= 0) break;
+			got += r;
+		}
+		close(pr[i][0]);
+		close(pr[i][1]);
 	}
 	CHECK(got == sent, "everything queued reads back");
 	CHECK(used() <= base + SLACK, "read gives back");
-	close(sv[0]);
-	close(sv[1]);
 
 	/* a blocking writer waits for room rather than losing bytes: this moves twice
 	 * the budget through one socket */

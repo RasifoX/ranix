@@ -253,6 +253,7 @@ long netlink_recv(socket_t *s, const k_iovec *iov, uint64_t niov, int flags,
 
 /* AF_UNIX send */
 int unix_send(socket_t *s, const void *data, uint16_t len);
+int unix_can_send(socket_t *s);
 int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int nfiles);
 
 #endif

@@ -482,6 +482,7 @@ check "c-claim"       "OK"            "$(timeout 40 /bin/test_claim 2>&1 | tail 
 check "c-recvzero"    "OK"            "$(timeout 40 /bin/test_recvzero 2>&1 | tail -1)"
 check "c-splicerule"  "OK"            "$(timeout 40 /bin/test_splicerule 2>&1 | tail -1)"
 check "c-rmdirrace"   "OK"            "$(timeout 40 /bin/test_rmdirrace 2>&1 | tail -1)"
+check "c-unixbuf"     "OK"            "$(timeout 60 /bin/test_unixbuf 2>&1 | tail -1)"
 # the claims tool by its English name, and its old name still answering
 check "ranix-agent-name" "ok"         "$(ranix-agent list >/dev/null 2>&1 && ranix-ajan list >/dev/null 2>&1 && echo ok)"
 # KVM (arch/x86_64/kvm.c, vmx.c): a real-mode guest through /dev/kvm. It needs VMX

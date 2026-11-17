@@ -178,9 +178,28 @@ static void unix_skb_cred(skb_t *skb)
  * as Linux's net.unix.max_dgram_qlen: past that a sender gets EAGAIN (and a
  * blocking one waits) instead of queueing until memory runs out. */
 #define UNIX_DGRAM_QLEN 512
-static int unix_peer_full(socket_t *peer)
+
+/* A stream's unread bytes are bounded by the sender's send buffer, as on Linux
+ * (212992 by default, SO_SNDBUF clamped to 1 MB here). Each skb counts its data
+ * and a fixed overhead, so a stream of one-byte writes is bounded too. There was
+ * no bound at all: a writer whose reader never read queued until the OOM killer
+ * took bystanders, the memory in no process (found by test_fuzz). */
+#define UNIX_STREAM_SNDBUF     212992u
+#define UNIX_STREAM_SNDBUF_MAX (1u << 20)
+#define UNIX_SKB_OVERHEAD      512u
+
+static int unix_peer_full(const socket_t *s, socket_t *peer)
 {
-    if (peer->type == SOCK_STREAM) return 0;
+    if (peer->type == SOCK_STREAM) {
+        uint32_t limit = s->so_sndbuf < UNIX_STREAM_SNDBUF ? UNIX_STREAM_SNDBUF : s->so_sndbuf;
+        if (limit > UNIX_STREAM_SNDBUF_MAX) limit = UNIX_STREAM_SNDBUF_MAX;
+        uint32_t queued = 0;
+        uint64_t f = spin_lock_irq(&peer->recv_lock);
+        for (skb_t *q = peer->recv_head; q && queued < limit; q = q->next)
+            queued += q->len + UNIX_SKB_OVERHEAD;
+        spin_unlock_irq(&peer->recv_lock, f);
+        return queued >= limit;
+    }
     int n = 0;
     uint64_t f = spin_lock_irq(&peer->recv_lock);
     for (skb_t *q = peer->recv_head; q && n < UNIX_DGRAM_QLEN; q = q->next) n++;
@@ -188,12 +207,19 @@ static int unix_peer_full(socket_t *peer)
     return n >= UNIX_DGRAM_QLEN;
 }
 
+/* 1 when a send on s would not wait for its peer's queue (poll's POLLOUT) */
+int unix_can_send(socket_t *s)
+{
+    socket_t *peer = s->unix_peer;
+    return !peer || !unix_peer_full(s, peer);
+}
+
 int unix_send(socket_t *s, const void *data, uint16_t len)
 {
     socket_t *peer = s->unix_peer;
     if (!peer || s->unix_wr_shut) return -EPIPE;
     if (!len) return 0;
-    if (unix_peer_full(peer)) return -EAGAIN;
+    if (unix_peer_full(s, peer)) return -EAGAIN;
     /* a datagram (or seqpacket) is one message, whole: a stream is cut to skbs */
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
@@ -218,7 +244,7 @@ int unix_send_scm(socket_t *s, const void *data, uint16_t len, void **files, int
 {
     socket_t *peer = s->unix_peer;
     if (!peer || s->unix_wr_shut) return -EPIPE;
-    if (unix_peer_full(peer)) return -EAGAIN;
+    if (unix_peer_full(s, peer)) return -EAGAIN;
     int whole = s->type != SOCK_STREAM;
     skb_t *skb = whole ? skb_alloc_big(len) : skb_alloc();
     if (!skb) return -ENOMEM;
