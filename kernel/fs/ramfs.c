@@ -28,6 +28,27 @@
  * Inode numbers are assigned sequentially.
  */
 
+/* File data stops at a reserve of free memory (ENOSPC), as a full tmpfs does.
+ * ramfs is the live root, so a size cap like Linux's half-of-RAM tmpfs rootfs
+ * could be smaller than the system it holds; but with no bound at all, one
+ * writer (test_fuzz: 1 GB by sendfile) left the OOM killer to take bystanders.
+ * The reserve is what the rest of the system keeps: a sixteenth of RAM,
+ * at least 16 MB. Nothing is held, so uncharging has nothing to give back. */
+#define RAMFS_RESERVE_MIN_PAGES 4096u
+
+static int ramfs_charge(void *ctx, uint64_t n)
+{
+	(void)ctx;
+	uint64_t reserve = buddy_total_pages() / 16;
+	if (reserve < RAMFS_RESERVE_MIN_PAGES) reserve = RAMFS_RESERVE_MIN_PAGES;
+	uint64_t need = (n + PAGE_SIZE - 1) / PAGE_SIZE;
+	return buddy_free_pages() < reserve + need ? -1 : 0;
+}
+
+static void ramfs_uncharge(void *ctx, uint64_t n) { (void)ctx; (void)n; }
+
+static const pagefile_limit_t ramfs_limit = { ramfs_charge, ramfs_uncharge };
+
 typedef struct ramfs_entry {
 	char                name[256];
 	vfs_inode_t        *inode;
@@ -104,7 +125,7 @@ static int ramfs_create_locked(vfs_inode_t *dir, const char *name, mode_t mode)
 	vfs_inode_t *in = ramfs_inode_alloc(mode | S_IFREG);
 	if (!in) return -1;
 
-	pagefile_t *pf = pagefile_new(NULL, NULL);
+	pagefile_t *pf = pagefile_new(&ramfs_limit, NULL);
 	if (!pf) { kfree(in); return -1; }
 	in->priv = pf;
 	in->fops = &ramfs_fops;
@@ -480,7 +501,7 @@ vfs_inode_t *ramfs_create_anon(void)
 {
 	vfs_inode_t *in = ramfs_inode_alloc(S_IFREG | 0600);
 	if (!in) return NULL;
-	pagefile_t *pf = pagefile_new(NULL, NULL);
+	pagefile_t *pf = pagefile_new(&ramfs_limit, NULL);
 	if (!pf) { kfree(in); return NULL; }
 	in->priv = pf;
 	in->fops = &ramfs_fops;
