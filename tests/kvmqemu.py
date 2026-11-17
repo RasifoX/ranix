@@ -64,7 +64,7 @@ msg:	.asciz "%(mark)s\n"
 '''
 
 GUEST = r'''#!/bin/bash
-echo "KVMQ basla"
+echo "KVMQ start"
 L="/alp/lib/ld-musl-x86_64.so.1 --library-path /alp/usr/lib:/alp/lib"
 cd /tmp
 timeout 60 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=kvm,kernel-irqchip=off \
@@ -72,7 +72,7 @@ timeout 60 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=k
     -device isa-debug-exit,iobase=0x501,iosize=1 > /tmp/q.out 2>&1
 echo "KVMQ rc $?"
 sed 's/^/KVMQ out /' /tmp/q.out
-echo "KVMQ linux basla"
+echo "KVMQ linux start"
 timeout 120 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=kvm,kernel-irqchip=off \
     -cpu host,-apic -nodefaults -display none -no-reboot -serial file:/tmp/linux.out -m 256 \
     -L /alp/usr/share/qemu -kernel /lnx/vmlinuz -initrd /lnx/initrd.cpio \
@@ -80,7 +80,7 @@ timeout 120 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine isapc,accel=
 echo "KVMQ linux rc $?"
 grep -v "host doesn't support" /tmp/ql.out | sed 's/^/KVMQ linux err /'
 grep -a "LINUXQ" /tmp/linux.out | sed 's/^/KVMQ linux out /'
-echo "KVMQ smp basla"
+echo "KVMQ smp start"
 timeout 150 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine pc,accel=kvm,kernel-irqchip=split \
     -cpu host -smp 2 -nodefaults -display none -no-reboot -serial file:/tmp/smp.out -m 256 \
     -L /alp/usr/share/qemu -kernel /lnx/vmlinuz -initrd /lnx/initrd.cpio \
@@ -88,7 +88,7 @@ timeout 150 $L /alp/usr/bin/qemu-system-x86_64 -enable-kvm -machine pc,accel=kvm
 echo "KVMQ smp rc $?"
 grep -v "host doesn't support\|MCG_CAP" /tmp/qs.out | sed 's/^/KVMQ smp err /'
 grep -a "LINUXQ\|smp: Brought up\|TIMER: vector" /tmp/smp.out | sed 's/^/KVMQ smp out /'
-echo KVMQ-SON
+echo KVMQ-END
 '''
 
 # /init of the Linux guest: busybox, run by the guest's Linux
@@ -195,7 +195,7 @@ def main():
         end = time.time() + 480
         while time.time() < end and p.poll() is None:
             t = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
-            if "KVMQ-SON" in t:
+            if "KVMQ-END" in t:
                 break
             time.sleep(1)
     finally:
@@ -209,7 +209,7 @@ def main():
     rc = next((l.split()[2] for l in lines if l.startswith("KVMQ rc ")), "")
     lrc = next((l.split()[3] for l in lines if l.startswith("KVMQ linux rc ")), "")
     lout = next((l for l in lines if l.startswith("KVMQ linux out LINUXQ Linux ")), "")
-    ok = [("the VM booted and ran the test", "KVMQ basla" in out, ""),
+    ok = [("the VM booted and ran the test", "KVMQ start" in out, ""),
           ("QEMU printed the guest's line", f"KVMQ out {MARK}" in out, ""),
           ("QEMU exited with the guest's code", rc == "33", rc),
           ("Linux ran its /init in QEMU", "model name" in lout, lout),

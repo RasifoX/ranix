@@ -23,10 +23,10 @@ if [ -e $P/ranix-previous ]; then
     echo "PSTPREV iz $(grep -c %(mark)s $P/console-ramoops-0)"
     echo "PSTPREV boyut $(cat $P/console-ramoops-0 | wc -c) $(stat -c %%s $P/console-ramoops-0)"
     echo "PSTPREV liste $(ls $P | tr '\n' ' ')"
-    echo PSTPREV-SON
+    echo PSTPREV-END
 else
-    echo "PSTPREV ilk $(ls /sys/fs 2>&1 | tr '\n' ' ')"
-    [ -n "$(ls $P 2>/dev/null)" ] && echo "PSTPREV ilk-bos-degil"
+    echo "PSTPREV first $(ls /sys/fs 2>&1 | tr '\n' ' ')"
+    [ -n "$(ls $P 2>/dev/null)" ] && echo "PSTPREV first-not-empty"
     echo "%(mark)s" > /dev/kmsg
     sleep 1
     reboot -f
@@ -66,7 +66,7 @@ def main():
         end = time.time() + 240
         while time.time() < end and p.poll() is None:
             t = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
-            if "PSTPREV-SON" in t or t.count("PSTPREV ilk") >= 3:
+            if "PSTPREV-END" in t or t.count("PSTPREV first") >= 3:
                 time.sleep(1)
                 break
             time.sleep(1)
@@ -82,7 +82,7 @@ def main():
     info = (re.findall(r"^PSTPREV info (.*)$", out, re.M) or [""])[-1]
     iz = (re.findall(r"^PSTPREV iz (\d+)$", out, re.M) or ["0"])[-1]
     boy = (re.findall(r"^PSTPREV boyut (\d+) (\d+)$", out, re.M) or [("0", "-1")])[-1]
-    ok = [("the first boot had no previous log", "PSTPREV ilk" in out and "ilk-bos-degil" not in out, ""),
+    ok = [("the first boot had no previous log", "PSTPREV first" in out and "first-not-empty" not in out, ""),
           ("the second boot sees the first", "PSTPREV ikinci" in out, ""),
           ("its log holds the mark", int(iz) >= 1, iz),
           ("it ended in a clean reboot", "clean reboot" in info, info),

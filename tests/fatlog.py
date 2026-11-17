@@ -19,7 +19,7 @@ SIZE = 1 << 20          # the log file, preallocated
 GUEST = r'''#!/bin/bash
 for d in /dev/vda /dev/vdb /dev/sda /dev/sdb; do [ -b $d ] && mount -t vfat $d /mnt 2>/dev/null && break; done
 grep " /mnt " /proc/mounts | sed 's/^/FATLOG mount: /'; ls -l /mnt | sed 's/^/FATLOG ls: /'
-grep -q " /mnt " /proc/mounts || { echo "FATLOG mount yok: $(ls /dev | tr '\n' ' ')"; echo FATLOG-SON; exit; }
+grep -q " /mnt " /proc/mounts || { echo "FATLOG mount yok: $(ls /dev | tr '\n' ' ')"; echo FATLOG-END; exit; }
 f=/mnt/RANIX-LOG.TXT
 printf 'RANIX-BASLA\n' | dd of=$f conv=notrunc 2>/tmp/e1; echo "FATLOG yaz1 rc=$? $(tail -1 /tmp/e1)"
 # across a sector (510) and a cluster (4096 with -s 8) edge
@@ -32,9 +32,9 @@ echo "FATLOG liste $(ls /mnt | tr '\n' ' ')"
 # every disk's read count (/sys/block names it vblk0, not after /dev/vda)
 reads() { n=0; for b in /sys/block/*/stat; do n=$((n + $(cut -d' ' -f1 $b))); done; echo $n; }
 r0=$(reads); dd if=$f of=/dev/null bs=4096 2>/dev/null; r1=$(reads)
-echo "FATLOG okuma $((r1 - r0))"
+echo "FATLOG reads $((r1 - r0))"
 sync; umount /mnt; echo "FATLOG umount rc=$?"
-echo FATLOG-SON
+echo FATLOG-END
 '''
 
 
@@ -80,7 +80,7 @@ def main():
     try:
         end = time.time() + 180
         while time.time() < end and p.poll() is None:
-            if os.path.exists(log) and "FATLOG-SON" in open(log, "rb").read().decode("utf-8", "replace"):
+            if os.path.exists(log) and "FATLOG-END" in open(log, "rb").read().decode("utf-8", "replace"):
                 time.sleep(1)
                 break
             time.sleep(1)
@@ -103,9 +103,9 @@ def main():
     ok.append(("past the end stopped at the size", data[SIZE - 10:] == b"Z" * 10, data[SIZE - 12:]))
     names = (re.findall(r"^FATLOG liste (.*)$", out, re.M) or [""])[-1].split()
     ok.append(("readdir lists the 13-character name", "RANIX-LOG.TXT" in names, names))
-    reads = int((re.findall(r"^FATLOG okuma (\d+)$", out, re.M) or ["-1"])[-1])
+    reads = int((re.findall(r"^FATLOG reads (\d+)$", out, re.M) or ["-1"])[-1])
     # 1 MB of 4 KB clusters: 2048 data sectors and ~256 FAT steps; walking the chain
-    # from the start on every 4 KB read is ~33000 (the USB log hung on wc, 11-16)
+    # from the start on every 4 KB read is ~33000 (a log on a USB stick hung wc)
     ok.append(("a sequential read walks the chain once", 0 <= reads <= 4 * (SIZE // 512), reads))
     readme = subprocess.run(["mtype", "-i", img, "::README.TXT"], capture_output=True).stdout
     ok.append(("the other file untouched", readme == b"Ranix boot log partition\n", readme))

@@ -209,9 +209,9 @@ int main(int argc, char **argv)
 	};
 	/* bench NAME: that one only, ten times as long (for /dev/prof) */
 	for (size_t i = 0; argc > 1 && i < sizeof all / sizeof all[0]; i++)
-		if (!strcmp(argv[1], all[i].name)) { all[i].f(all[i].n * 10); unlink(tmpf); printf("BENCH bitti\n"); return 0; }
+		if (!strcmp(argv[1], all[i].name)) { all[i].f(all[i].n * 10); unlink(tmpf); printf("BENCH done\n"); return 0; }
 	for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) measure(all[i].name, all[i].f, all[i].n);
 	unlink(tmpf);
-	printf("BENCH bitti\n");
+	printf("BENCH done\n");
 	return 0;
 }

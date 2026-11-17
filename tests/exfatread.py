@@ -7,7 +7,7 @@ The host makes an exFAT image with mkfs.exfat and, through a loop mount, two fil
 written in turns, 4 KB at a time, so each is a FAT chain rather than one contiguous
 run. A KVM guest mounts it, reads one file in 4 KB pieces and prints its md5 and
 the disk reads that took: the bytes must match, and the chain is walked once, not
-from its start for every read (the FAT driver's USB log hang, 11-16).
+from its start for every read (as the FAT driver once did).
 
 Usage: sudo python3 tests/exfatread.py   (root for the loop mount; after make ARCH=x86_64 iso)"""
 import hashlib, os, re, shlex, shutil, signal, subprocess, sys, time
@@ -17,14 +17,14 @@ QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -c
 PIECES = 256            # 1 MB per file, 4 KB clusters
 GUEST = r'''#!/bin/bash
 for d in /dev/vblk0 /dev/vda /dev/vdb /dev/sda /dev/sdb; do [ -b $d ] && mount -t exfat $d /mnt 2>/dev/null && break; done
-grep -q " /mnt " /proc/mounts || { echo "EXREAD mount yok: $(ls /dev | tr '\n' ' ')"; echo EXREAD-SON; exit; }
+grep -q " /mnt " /proc/mounts || { echo "EXREAD mount yok: $(ls /dev | tr '\n' ' ')"; echo EXREAD-END; exit; }
 echo "EXREAD liste $(ls /mnt | tr '\n' ' ')"
 reads() { n=0; for b in /sys/block/*/stat; do n=$((n + $(cut -d' ' -f1 $b))); done; echo $n; }
 r0=$(reads); dd if=/mnt/a.bin of=/tmp/a bs=4096 2>/dev/null; r1=$(reads)
-echo "EXREAD okuma $((r1 - r0))"
+echo "EXREAD reads $((r1 - r0))"
 # the test root has busybox without its applet links
 echo "EXREAD md5 $(busybox md5sum /tmp/a | cut -d' ' -f1)"
-umount /mnt; echo EXREAD-SON
+umount /mnt; echo EXREAD-END
 '''
 
 
@@ -80,7 +80,7 @@ def main():
     try:
         end = time.time() + 180
         while time.time() < end and p.poll() is None:
-            if os.path.exists(log) and "EXREAD-SON" in open(log, "rb").read().decode("utf-8", "replace"):
+            if os.path.exists(log) and "EXREAD-END" in open(log, "rb").read().decode("utf-8", "replace"):
                 time.sleep(1)
                 break
             time.sleep(1)
@@ -94,7 +94,7 @@ def main():
             print(l)
 
     got = (re.findall(r"^EXREAD md5 (\w+)$", out, re.M) or [""])[-1]
-    reads = int((re.findall(r"^EXREAD okuma (\d+)$", out, re.M) or ["-1"])[-1])
+    reads = int((re.findall(r"^EXREAD reads (\d+)$", out, re.M) or ["-1"])[-1])
     ok = [("the fragmented file reads back whole", got == want, got),
           # 2048 data sectors and ~256 FAT steps; from the chain's start each time ~33000
           ("a sequential read walks the chain once", 0 <= reads <= 4 * PIECES * 8, reads)]

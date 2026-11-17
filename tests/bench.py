@@ -16,7 +16,7 @@ GUEST = "#!/bin/bash\n/bin/bench\necho BENCH-END\n"
 PROF = os.environ.get("BENCH_PROF")
 GUEST_PROF = """#!/bin/bash
 echo 1 > /dev/prof; echo "PROF-AC rc=$? $(ls -l /dev/prof)"; /bin/bench %s; echo "PROF-BOY $(wc -c < /dev/prof)"; echo 0 > /dev/prof
-echo PROF-BASLA; busybox base64 /dev/prof; echo PROF-SON
+echo PROF-BASLA; busybox base64 /dev/prof; echo PROF-END
 echo BENCH-END
 """
 
@@ -28,10 +28,10 @@ def symbols():
 
 
 def report(out):
-    if "PROF-BASLA" not in out or "PROF-SON" not in out:
+    if "PROF-BASLA" not in out or "PROF-END" not in out:
         print("PROF yok (no profile in the serial output)")
         return
-    b64 = out.split("PROF-BASLA", 1)[1].split("PROF-SON", 1)[0]
+    b64 = out.split("PROF-BASLA", 1)[1].split("PROF-END", 1)[0]
     d = b"".join(base64.b64decode(l.strip()) for l in b64.split("\n") if l.strip())
     open(f"{B}/prof.bin", "wb").write(d)
     addrs, names = symbols()
@@ -48,7 +48,7 @@ def report(out):
         n += 1
         fn[name(rip)] += 1
         pair[(name(rip), name(caller) if caller else "-")] += 1
-    print(f"PROF {n} ornek")
+    print(f"PROF {n} samples")
     for f, c in fn.most_common(25):
         print(f"PROF {100 * c / n:5.1f}% {f}")
     raw = collections.Counter(struct.unpack_from("<Q", d, i + 8)[0] for i in range(0, len(d) - 23, 24)
@@ -107,6 +107,6 @@ def main():
 
 if __name__ == "__main__":
     # an outer timeout's SIGTERM unwinds through main's finally, which stops the VM:
-    # without it a panicked guest's QEMU outlived the run (11-15, 1.5 h, ppid 1)
+    # without it a panicked guest's QEMU outlived the run (reparented to init)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(124))
     sys.exit(main())
