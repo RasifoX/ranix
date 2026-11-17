@@ -4,7 +4,7 @@
 # Flake hunter — run the test suite N times and report any test that is not
 # 100% green across all runs. Intermittent (0 < fails < runs) = flake;
 # (fails == runs) = hard failure. This is the systematic replacement for
-# chasing flakes by hand one incident at a time ("SIFIR flake toleransı").
+# chasing flakes by hand one incident at a time (zero flake tolerance).
 #
 #   ITERS=30 ARCH=x86_64 ./tests/flakehunt.sh
 #   ITERS=20 ARCH=aarch64 BOARD=virt ./tests/flakehunt.sh

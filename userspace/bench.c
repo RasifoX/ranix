@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /*
- * bench: the speed baseline (FLOWING-PLAN stage 0, HIZ0 11-15). The same static binary runs on
+ * bench: the speed baseline (compared against Linux on the same machine). The same static binary runs on
  * Linux and on Ranix, on the same machine, and prints one line per measure:
- *   HIZ <name> <median ns/op> <min ns/op> <runs>
+ *   BENCH <name> <median ns/op> <min ns/op> <runs>
  * Time is CLOCK_MONOTONIC (the vDSO on both), the median of RUNS rounds.
- * Build: the userspace rule, or cc -O2 -static -o bench bench.c on Linux. tests/hiz.py runs it in KVM.
+ * Build: the userspace rule, or cc -O2 -static -o bench bench.c on Linux. tests/bench.py runs it in KVM.
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -55,7 +55,7 @@ static void measure(const char *name, fn f, long n)
 		r[i] = (ns() - t0) / n;
 	}
 	qsort(r, RUNS, sizeof r[0], cmp);
-	printf("HIZ %-14s %10lld %10lld %d\n", name, (long long)r[RUNS / 2], (long long)r[0], RUNS);
+	printf("BENCH %-14s %10lld %10lld %d\n", name, (long long)r[RUNS / 2], (long long)r[0], RUNS);
 	fflush(stdout);
 }
 
@@ -170,7 +170,7 @@ static void b_tcprtt(long n)        /* 1-byte round trip over loopback TCP */
 	int l = socket(AF_INET, SOCK_STREAM, 0), one = 1;
 	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
 	socklen_t sl = sizeof sa;
-	if (l < 0 || bind(l, (void *)&sa, sizeof sa) || listen(l, 1) || getsockname(l, (void *)&sa, &sl)) { printf("HIZ tcp_rtt yok\n"); return; }
+	if (l < 0 || bind(l, (void *)&sa, sizeof sa) || listen(l, 1) || getsockname(l, (void *)&sa, &sl)) { printf("BENCH tcp_rtt yok\n"); return; }
 	pid_t p = fork();
 	if (p == 0) {
 		int c = accept(l, 0, 0);
@@ -181,7 +181,7 @@ static void b_tcprtt(long n)        /* 1-byte round trip over loopback TCP */
 	}
 	int c = socket(AF_INET, SOCK_STREAM, 0);
 	char x = 0;
-	if (connect(c, (void *)&sa, sizeof sa)) { printf("HIZ tcp_rtt yok\n"); kill(p, 9); waitpid(p, 0, 0); return; }
+	if (connect(c, (void *)&sa, sizeof sa)) { printf("BENCH tcp_rtt yok\n"); kill(p, 9); waitpid(p, 0, 0); return; }
 	setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 	for (long i = 0; i < n; i++) { if (write(c, &x, 1) != 1 || read(c, &x, 1) != 1) break; }
 	close(c); close(l);
@@ -198,7 +198,7 @@ int main(int argc, char **argv)
 	if (fd < 0 || write(fd, b, sizeof b) != sizeof b) { perror("tmp"); return 1; }
 	close(fd);
 	struct utsname_like { char s[65], n[65], r[65], v[65], m[65], d[65]; } u;
-	if (syscall(SYS_uname, &u) == 0) printf("HIZ uname %s %s %s\n", u.s, u.r, u.m);
+	if (syscall(SYS_uname, &u) == 0) printf("BENCH uname %s %s %s\n", u.s, u.r, u.m);
 	static const struct { const char *name; fn f; long n; } all[] = {
 		{ "syscall", b_syscall, 1000000 }, { "clock_vdso", b_clock, 5000000 },
 		{ "open_close", b_openclose, 100000 }, { "stat", b_stat, 200000 },
@@ -209,9 +209,9 @@ int main(int argc, char **argv)
 	};
 	/* bench NAME: that one only, ten times as long (for /dev/prof) */
 	for (size_t i = 0; argc > 1 && i < sizeof all / sizeof all[0]; i++)
-		if (!strcmp(argv[1], all[i].name)) { all[i].f(all[i].n * 10); unlink(tmpf); printf("HIZ bitti\n"); return 0; }
+		if (!strcmp(argv[1], all[i].name)) { all[i].f(all[i].n * 10); unlink(tmpf); printf("BENCH bitti\n"); return 0; }
 	for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) measure(all[i].name, all[i].f, all[i].n);
 	unlink(tmpf);
-	printf("HIZ bitti\n");
+	printf("BENCH bitti\n");
 	return 0;
 }

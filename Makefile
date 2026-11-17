@@ -888,7 +888,7 @@ iso: initramfs $(TARGET)
 	@cp $(BUILD_DIR)/initramfs.cpio iso/boot/initramfs.cpio
 	@printf 'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf $(ISO_CMDLINE)\n  module2 /boot/initramfs.cpio\n}\n' > iso/boot/grub/grub.cfg
 	grub-mkrescue -o ranix.iso iso/ 2>/dev/null
-	@echo "[OK] ranix.iso hazır"
+	@echo "[OK] ranix.iso ready"
 
 qemu-iso: iso
 	$(QEMU_CMD) -m 512M -nographic -cdrom ranix.iso
@@ -979,7 +979,7 @@ qemu-disk: iso disk-image
 
 image: all
 	llvm-objcopy -O binary $(TARGET) kernel8.img
-	@echo "[OK] kernel8.img hazır"
+	@echo "[OK] kernel8.img ready"
 
 # Minimal bash-only Ranix for Raspberry Pi 4 — no tests, just a shell.
 # Output: pi4-dist/ {kernel8.img, initramfs.cpio, config.txt}. Copy onto an SD

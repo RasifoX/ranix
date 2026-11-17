@@ -1,0 +1,27 @@
+# tools/gate.sh baseline: existing exceptions, to be fixed and removed, never added to.
+names	arch/aarch64/include/asm/context.h	1
+names	arch/x86_64/include/asm/context.h	1
+names	include/kernel/asess.h	1
+names	include/kernel/fs/devfs.h	1
+names	include/kernel/input.h	1
+names	include/kernel/proc.h	2
+names	include/uapi/asess.h	1
+names	include/uapi/claim.h	3
+names	kernel/asess.c	1
+names	kernel/claim.c	3
+names	kernel/fs/devfs.c	1
+names	kernel/fs/hugetlbfs.c	1
+names	kernel/fs/procfs.c	1
+names	kernel/signal.c	1
+names	kernel/sys/syscall_misc.c	1
+extern	kernel/mm/mmu.c	extern void enable_mmu(uint64_t table_addr);
+mode	kernel/fs/pty.c	"ptmx"
+mode	kernel/fs/pty.c	names[i]
+mode	kernel/tty/tty_core.c	"tty"
+test	test_asess_dynprobe
+test	test_dns
+test	test_fpsig
+test	test_http
+test	test_suidhelper
+test	test_tcpperf
+test	test_tls

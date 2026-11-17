@@ -257,7 +257,7 @@ void netdev_rx_enqueue(netdev_t *dev, skb_t *skb)
     spin_unlock_irq(&dev->rx_lock, f);
     /* a loopback frame of a send that drains after itself: no RX thread hop.
      * Through the thread a 1-byte TCP round trip was 4 switches, 28 us under
-     * KVM against Linux's 13 us bare (HIZ1 11-15); Linux runs it in the
+     * KVM against Linux's 13 us bare; Linux runs it in the
      * sender's softirq. */
     process_t *p = skb->looped ? task_current() : NULL;
     if (p && p->net_lo_inline) { p->net_lo_pending = 1; return; }

@@ -1,38 +1,39 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 RasifoX
 # SPDX-License-Identifier: EUPL-1.2
-# Pre-merge gate (kod-kalitesi-denetimi.md §3.6, §5). Run from the source root:
-#   tools/kapi.sh            check the tree against tools/kapi-taban.txt
-#   tools/kapi.sh --taban    write the current exceptions as the new baseline
+# Pre-merge gate (docs/CODING-STYLE.md). Run from the source root:
+#   tools/gate.sh              check the tree against tools/gate-baseline.txt
+#   tools/gate.sh --baseline   write the current exceptions as the new baseline
 # Fails (exit 1) on anything new that is not in the baseline:
 #   extern  an extern declaration in a kernel .c file (put it in a header)
 #   fn      a function over 120 lines, or a listed one that grew
 #   mode    a device node registered world-writable (mode & 0002)
-#   ad      "agent", "ajan" or "AI" in kernel code (principle 1: neutral names)
+#   names   "agent", "ajan" or "AI" in kernel code (principle 1: neutral names)
 #   test    a userspace/test_*.c that no script under tests/ runs
 #   dup     a check name tests/ranix_test.sh runs twice: twice at top level, or at top level and
 #           inside a block (alternatives inside if/else branches are fine). Allowed repeats, by a
-#           human decision only: tools/kapi-dup-taban.txt
-#   ikili   a built ELF binary in the source tree (outside build/): make may run it instead of
+#           human decision only: tools/gate-dup-allowed.txt
+#   binary  a built ELF binary in the source tree (outside build/): make may run it instead of
 #           rebuilding from the newer source, and git never sees it
-#   ezme    with KAPI_BASE=<tree before the change>: a userspace/test_*.c that exists in both trees
+#   lang    a Turkish letter anywhere in the tree outside test data (tests/ntfs): English only
+#   overwrite with GATE_BASE=<tree before the change>: a userspace/test_*.c that exists in both trees
 #           but lost more than 80% of its lines (another test written over it)
-# The baseline only shrinks: when you fix an exception, run --taban and commit it.
+# The baseline only shrinks: when you fix an exception, run --baseline and commit it.
 cd "$(dirname "$0")/.." || exit 2
 exec python3 -I - "$@" <<'PY'
 import os, re, sys
-TABAN = 'tools/kapi-taban.txt'
-KOD = ('kernel', 'drivers', 'arch', 'include')
-DIS = ('acpica', 'linuxkpi', 'doomgeneric')    # vendored code keeps its own style
+BASELINE = 'tools/gate-baseline.txt'
+CODE = ('kernel', 'drivers', 'arch', 'include')
+VENDORED = ('acpica', 'linuxkpi', 'doomgeneric')    # vendored code keeps its own style
 MAXF = 120
 
-def files(exts, roots=KOD):
+def files(exts, roots=CODE):
     for r in roots:
         for dp, dn, fn in os.walk(r):
             dn.sort()
             for f in sorted(fn):
                 p = os.path.join(dp, f)
-                if f.endswith(exts) and not any(d in p for d in DIS): yield p
+                if f.endswith(exts) and not any(d in p for d in VENDORED): yield p
 
 def code_lines(p):
     """(line number, text) with comments blanked, strings kept."""
@@ -87,7 +88,7 @@ for p in files(('.c',)):
 for p in files(('.c', '.h', '.S')):
     n = sum(len(re.findall(r'agent|ajan', l, re.I)) + len(re.findall(r'\bAI\b', l))
             for l in open(p, errors='replace'))
-    if n: found.add(('ad', p, n))
+    if n: found.add(('names', p, n))
 # every userspace test is run by some script under tests/
 run = ''.join(open(p, errors='replace').read() for p in files(('.sh', '.py', ''), ('tests',)) if os.path.isfile(p))
 for p in sorted(os.listdir('userspace')):
@@ -95,20 +96,20 @@ for p in sorted(os.listdir('userspace')):
     if m and not re.search(r'\b' + m.group(1) + r'\b', run): found.add(('test', m.group(1)))
 
 # dup: a check that runs twice hides a missing test and inflates the count
-DUPTABAN = 'tools/kapi-dup-taban.txt'
+DUP_ALLOWED = 'tools/gate-dup-allowed.txt'
 top, inner = {}, {}
 for n, l in enumerate(open('tests/ranix_test.sh', errors='replace'), 1):
     m = re.match(r'(\s*)check\s+"([^"]+)"', l)
     if m: (inner if m.group(1) else top).setdefault(m.group(2), []).append(n)
-dup_ok = {l.split()[0] for l in open(DUPTABAN) if l.strip() and not l.startswith('#')} if os.path.exists(DUPTABAN) else set()
+dup_ok = {l.split()[0] for l in open(DUP_ALLOWED) if l.strip() and not l.startswith('#')} if os.path.exists(DUP_ALLOWED) else set()
 dup_bad = []
 for name in sorted(set(top) | set(inner)):
     t, i = top.get(name, []), inner.get(name, [])
     if (len(t) > 1 or (t and i)) and name not in dup_ok:
         dup_bad.append(f'dup\ttests/ranix_test.sh\t{name}\tlines {",".join(map(str, sorted(t + i)))}')
 
-# ikili: built binaries belong in build/, never next to their sources
-ikili_bad = []
+# binary: built binaries belong in build/, never next to their sources
+binary_bad = []
 for dp, dn, fn in os.walk('.'):
     dn[:] = sorted(d for d in dn if not (dp == '.' and d in ('build', '.git', '.cache')))
     for f in sorted(fn):
@@ -116,10 +117,10 @@ for dp, dn, fn in os.walk('.'):
         try:
             with open(q, 'rb') as h: magic = h.read(4)
         except OSError: continue
-        if magic == b'\x7fELF': ikili_bad.append(f'ikili\t{q[2:]}   (built binary in the source tree: delete it)')
+        if magic == b'\x7fELF': binary_bad.append(f'binary\t{q[2:]}   (built binary in the source tree: delete it)')
 
-# ezme: a test file overwritten by another test (needs the tree before the change)
-ezme_bad, kb = [], os.environ.get('KAPI_BASE')
+# overwrite: a test file overwritten by another test (needs the tree before the change)
+overwrite_bad, kb = [], os.environ.get('GATE_BASE')
 if kb:
     import difflib
     for f in sorted(os.listdir('userspace')):
@@ -130,33 +131,48 @@ if kb:
         if len(a) < 10: continue
         kept = sum(bl.size for bl in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
         gone = (len(a) - kept) / len(a)
-        if gone > 0.80: ezme_bad.append(f'ezme\tuserspace/{f}\t{int(gone * 100)}% of {len(a)} lines gone   (another test written over it?)')
+        if gone > 0.80: overwrite_bad.append(f'overwrite\tuserspace/{f}\t{int(gone * 100)}% of {len(a)} lines gone   (another test written over it?)')
 else:
-    print('kapi: note   ezme check skipped: set KAPI_BASE=<tree before the change>')
+    print('gate: note   overwrite check skipped: set GATE_BASE=<tree before the change>')
+
+# lang: the source tree is English (docs/CODING-STYLE.md). Turkish letters are
+# allowed only in test data that needs them on purpose.
+LANG_DATA = ('tests/ntfs/',)
+lang_bad = []
+for dp, dn, fn in os.walk('.'):
+    dn[:] = sorted(d for d in dn if not (dp == '.' and d in ('build', '.git', '.cache')))
+    for f in sorted(fn):
+        q = os.path.join(dp, f)[2:]
+        if q.startswith(LANG_DATA) or any(d in q for d in VENDORED): continue
+        try: txt = open(q, encoding='utf-8').read()
+        except (OSError, UnicodeDecodeError): continue
+        for i, l in enumerate(txt.split('\n'), 1):
+            if re.search('[\u00e7\u011f\u0131\u015f\u00f6\u00fc\u00c7\u011e\u0130\u015e\u00d6\u00dc]', l):
+                lang_bad.append(f'lang\t{q}:{i}   (not English: translate it)')
 
 def fmt(e): return '\t'.join(str(x) for x in e)
-if sys.argv[1:] == ['--taban']:
-    with open(TABAN, 'w') as f:
-        f.write('# tools/kapi.sh baseline: existing exceptions, to be fixed and removed, never added to.\n')
+if sys.argv[1:] == ['--baseline']:
+    with open(BASELINE, 'w') as f:
+        f.write('# tools/gate.sh baseline: existing exceptions, to be fixed and removed, never added to.\n')
         for e in sorted(found, key=fmt): f.write(fmt(e) + '\n')
-    print(f'kapi: baseline written, {len(found)} entries'); sys.exit(0)
+    print(f'gate: baseline written, {len(found)} entries'); sys.exit(0)
 base = {}
-for l in open(TABAN):
+for l in open(BASELINE):
     if l.startswith('#') or not l.strip(): continue
-    e = l.rstrip('\n').split('\t'); base[tuple(e[:-1]) if e[0] in ('fn', 'ad') else tuple(e)] = e[-1]
+    e = l.rstrip('\n').split('\t'); base[tuple(e[:-1]) if e[0] in ('fn', 'names') else tuple(e)] = e[-1]
 bad, note = [], []
 for e in sorted(found, key=fmt):
-    if e[0] in ('fn', 'ad'):
+    if e[0] in ('fn', 'names'):
         k = tuple(str(x) for x in e[:-1]); was = base.get(k)
         if was is None: bad.append(fmt(e) + ('   (new function over %d lines)' % MAXF if e[0] == 'fn' else '   (new)'))
         elif int(e[-1]) > int(was): bad.append(fmt(e) + f'   (grew from {was})')
-        elif int(e[-1]) < int(was): note.append(fmt(e) + f'   (was {was}: run --taban)')
+        elif int(e[-1]) < int(was): note.append(fmt(e) + f'   (was {was}: run --baseline)')
     elif tuple(str(x) for x in e) not in base: bad.append(fmt(e))
-keys = {tuple(str(x) for x in (e[:-1] if e[0] in ('fn', 'ad') else e)) for e in found}
-note += ['\t'.join(k) + '   (fixed: run --taban)' for k in base if k not in keys]
-for n in note: print('kapi: note  ', n)
-bad += dup_bad + ezme_bad + ikili_bad
-for b in bad: print('kapi: FAIL  ', b)
-print(f'kapi: {len(found)} known exceptions, {len(bad)} new' + (' -- needs a fix or a human decision' if bad else ', ok'))
+keys = {tuple(str(x) for x in (e[:-1] if e[0] in ('fn', 'names') else e)) for e in found}
+note += ['\t'.join(k) + '   (fixed: run --baseline)' for k in base if k not in keys]
+for n in note: print('gate: note  ', n)
+bad += dup_bad + overwrite_bad + binary_bad + lang_bad
+for b in bad: print('gate: FAIL  ', b)
+print(f'gate: {len(found)} known exceptions, {len(bad)} new' + (' -- needs a fix or a human decision' if bad else ', ok'))
 sys.exit(1 if bad else 0)
 PY

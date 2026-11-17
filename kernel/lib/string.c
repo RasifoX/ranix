@@ -13,7 +13,7 @@
 
 /* User copy whose faulting access exits through __ex_table, so a bad user
  * address returns the count not copied instead of panicking. It was a byte loop:
- * every read, write and exec paid ~1 ns a byte (4 KB pread 3.7x Linux, HIZ0 11-15).
+ * every read, write and exec paid ~1 ns a byte (4 KB pread 3.7x Linux).
  * x86_64: rep movsb (ERMS); on a fault rcx is still the bytes left.
  * aarch64: 8 bytes at a time while 8 are left; an 8-byte access that faults
  * (it may straddle into an unmapped page) falls back to bytes, so the count
@@ -160,7 +160,7 @@ void *memcpy(void *dst, const void *src, size_t n)
 {
 #if defined(__x86_64__)
     /* ERMS: one rep movsb beats the loops below from ~64 bytes, aligned or not
-     * (HIZ0 11-15: the unaligned path was a byte loop) */
+     * (the unaligned path was a byte loop) */
     if (n >= 64) {
         void *d0 = dst;
         __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) :: "memory");

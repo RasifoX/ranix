@@ -168,10 +168,10 @@ static void paint(void)
 	bar_y = ty + 32 + 28;
 	msg_y = bar_y - 6;
 	if (state == SPL_DOWN)
-		draw_text(down_reboot ? "Yeniden başlatılıyor" : "Kapanıyor", cx, msg_y, 1, C_TEXT);
+		draw_text(down_reboot ? "Restarting" : "Shutting down", cx, msg_y, 1, C_TEXT);
 	else
 		paint_bar();
-	if (H >= 200) draw_text("Ayrıntılar için Esc", cx, H - 40, 1, C_HINT);
+	if (H >= 200) draw_text("Esc for details", cx, H - 40, 1, C_HINT);
 }
 
 /* ---- the log back on the screen ---- */

@@ -1041,7 +1041,7 @@ check "devshm-write" "ok"        "$(echo ok > /run/shm/t && cat /run/shm/t && rm
 # ── 44. signalfd + epoll ──────────────────────────────────────
 check "c-signalfd"   "OK"  "$(timeout 5 /bin/test_signalfd 2>/dev/null | tail -1)"
 
-# ── 45. su — kullanıcı değiştirme ────────────────────────────
+# ── 45. su — switching user ────────────────────────────
 check "su-switches-uid"  "1000" \
     "$(timeout 5 su test -c 'id -u' 2>/dev/null)"
 check "su-switches-gid"  "1000" \

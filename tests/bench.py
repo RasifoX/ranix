@@ -2,22 +2,22 @@
 # SPDX-FileCopyrightText: 2026 RasifoX
 # SPDX-License-Identifier: EUPL-1.2
 """The speed baseline in KVM: boot build/ranix.elf with /test.sh running /bin/bench
-(userspace/bench.c) and print its HIZ lines. The same bench binary, static, runs
+(userspace/bench.c) and print its BENCH lines. The same bench binary, static, runs
 on Linux for the reference (FLOWING-PLAN stage 0).
 
-Usage: python3 tests/hiz.py   (after make ARCH=x86_64 iso; QEMU_CMD as for make test)
-HIZ_PROF=NAME: run only that measure under /dev/prof (the tick sampler) and print
+Usage: python3 tests/bench.py   (after make ARCH=x86_64 iso; QEMU_CMD as for make test)
+BENCH_PROF=NAME: run only that measure under /dev/prof (the tick sampler) and print
 where the kernel spent its ticks, by function and by caller."""
 import base64, bisect, collections, os, shlex, shutil, signal, struct, subprocess, sys, time
 
-B = "build/hiz"
+B = "build/bench"
 QEMU = shlex.split(os.environ.get("QEMU_CMD", "qemu-system-x86_64 -enable-kvm -cpu host"))
-GUEST = "#!/bin/bash\n/bin/bench\necho HIZ-SON\n"
-PROF = os.environ.get("HIZ_PROF")
+GUEST = "#!/bin/bash\n/bin/bench\necho BENCH-END\n"
+PROF = os.environ.get("BENCH_PROF")
 GUEST_PROF = """#!/bin/bash
 echo 1 > /dev/prof; echo "PROF-AC rc=$? $(ls -l /dev/prof)"; /bin/bench %s; echo "PROF-BOY $(wc -c < /dev/prof)"; echo 0 > /dev/prof
 echo PROF-BASLA; busybox base64 /dev/prof; echo PROF-SON
-echo HIZ-SON
+echo BENCH-END
 """
 
 
@@ -79,18 +79,18 @@ def main():
     open(f"{iso}/boot/grub/grub.cfg", "w").write(
         'set timeout=0\nset default=0\nmenuentry "Ranix" {\n  multiboot2 /boot/ranix.elf\n'
         '  module2 /boot/initramfs.cpio\n}\n')
-    subprocess.run(["grub-mkrescue", "-o", f"{B}/hiz.iso", iso], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    subprocess.run(["grub-mkrescue", "-o", f"{B}/bench.iso", iso], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     shutil.rmtree(iso)
     log = f"{B}/serial.log"
     p = subprocess.Popen(QEMU + ["-smp", "2", "-m", "2G", "-display", "none", "-no-reboot", "-serial", f"file:{log}",
-                                 "-boot", "d", "-cdrom", f"{B}/hiz.iso", "-vga", "none"],
+                                 "-boot", "d", "-cdrom", f"{B}/bench.iso", "-vga", "none"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     out = ""
     try:
         end = time.time() + 900
         while time.time() < end and p.poll() is None:
             out = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""
-            if "HIZ-SON" in out:
+            if "BENCH-END" in out:
                 break
             time.sleep(1)
     finally:
@@ -98,11 +98,11 @@ def main():
             os.killpg(p.pid, 9)
             p.wait()
     out = open(log, "rb").read().decode("utf-8", "replace") if os.path.exists(log) else ""   # the guest may exit between reads
-    lines = [l.strip() for l in out.replace("\r", "").split("\n") if l.startswith("HIZ ")]
+    lines = [l.strip() for l in out.replace("\r", "").split("\n") if l.startswith("BENCH ")]
     print("\n".join(lines))
     if PROF:
         report(out.replace("\r", ""))
-    return 0 if any(l.startswith("HIZ bitti") for l in lines) else 1
+    return 0 if any(l.startswith("BENCH done") for l in lines) else 1
 
 
 if __name__ == "__main__":

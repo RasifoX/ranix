@@ -601,7 +601,7 @@ void kernel_main(void)
 	splash_progress(30);
 	fbdev_init();
 #ifdef __x86_64__
-	prof_init();                    /* /dev/prof, root only: the tick sampler (tests/hiz.py HIZ_PROF) */
+	prof_init();                    /* /dev/prof, root only: the tick sampler (tests/bench.py BENCH_PROF) */
 #endif
 	drm_init();                     /* /dev/dri: KMS on the firmware's mode */
 	thermal_guard_init();           /* package temperature limit until ACPI drives the fan */

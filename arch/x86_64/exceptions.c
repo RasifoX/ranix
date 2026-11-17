@@ -187,7 +187,7 @@ void prof_sample(arch_context_t *ctx)
 		caller = *(uint64_t *)ctx->rsp;
 		/* irq_restore: the tick waited behind its popf and lands on the epilogue,
 		 * pop %rbp (the return address one slot up) or ret (on top): the caller
-		 * is whose IRQs-off stretch it was (HIZ1 11-15: 24-35% "irq_restore") */
+		 * is whose IRQs-off stretch it was, not irq_restore itself */
 		uint8_t op = *(const uint8_t *)ctx->rip;
 		if (ctx->rip - (uint64_t)irq_restore < 64 && (op == 0x5d || op == 0xc3))
 			caller = *(uint64_t *)(ctx->rsp + (op == 0x5d ? 8 : 0));

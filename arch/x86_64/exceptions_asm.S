@@ -5,7 +5,7 @@
 .macro save_context
 	/* DF is the user's to set (std, or a sigreturn frame) and no IDT gate clears it:
 	 * with it set the kernel's rep movsb/stosb run backwards, and a page fault's
-	 * memset of a fresh page zeroed the page below it, kernel heap (HIZ1 11-15).
+	 * memset of a fresh page zeroed the page below it, kernel heap.
 	 * iretq gives the user's back. The syscall entry clears it through SFMASK. */
 	cld
 	pushq %rax

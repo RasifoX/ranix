@@ -322,7 +322,7 @@ out:
  * the same space comes back, and an idle CPU keeps the last one). A single-threaded
  * process that migrated away from a CPU and back, past an unmap done meanwhile
  * without a shootdown, wrote through the stale entry into the freed page: kernel
- * heap pages zeroed under the syscall fuzzer (HIZ1 11-15). */
+ * heap pages zeroed under the syscall fuzzer. */
 int vm_tlb_elsewhere(vm_space_t *vs)
 {
 	if (vs->refcount > 1) return 1;   /* a sibling thread may run there now: shoot down */
