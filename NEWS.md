@@ -1,5 +1,61 @@
 # Ranix release notes
 
+## 0.9.1 (2026-11-17)
+
+Replaces 0.9.0, which was withdrawn: its source tree carried a developer's
+sync script with private paths and a home-network address (no keys or
+passwords). The history was rewritten without it. Still experimental:
+x86_64 only, do not run it on a machine whose data you cannot afford to lose.
+
+### Robustness (found by the syscall fuzzer)
+
+- A zero-length read of a socket with data queued no longer spins in the
+  kernel; sockets do not seek (`lseek`, `pread`, `pwrite` are `ESPIPE`).
+- An AF_UNIX stream's unread data is bounded by the send buffer, and an
+  AF_UNIX datagram receiver holds at most 512 messages.
+- File data in the in-memory root filesystem (and memfd) stops at a
+  free-memory reserve with `ENOSPC` instead of waking the OOM killer.
+- `splice` needs a pipe at one end and `copy_file_range` regular files;
+  long copies give the CPU up.
+- `readdir` of a directory replaced by a file is `ENOTDIR` (was a panic).
+- A `/dev/kmsg` write is one record of at most 1024 bytes.
+- A directory can no longer be renamed under itself through a symlink or
+  `..`, nor by two renames racing each other (was a cycle cut off from the
+  tree and a panic in the path walk); renames are serialised.
+- Unmapping memory shoots down the other CPUs once per batch of pages, not
+  once per page: a threaded process giving back 1 GB of heap took 11 s in
+  the kernel and could not be killed meanwhile, now 0.26 s.
+- `DF` is cleared on every interrupt and exception entry; a page is freed
+  only once no other CPU can still translate to it; pipe close no longer
+  races its last reader; a forged RST or SYN no longer closes a connection.
+
+### New
+
+- `/dev/kvm` on Intel VT-x: an unmodified QEMU runs Linux guests with
+  `-enable-kvm` (in-kernel local APICs, kvm-clock, dirty page logging).
+- Suspend: s2idle and S3 (behind `ranix.s3=1`), `/sys/power`, RTC wake alarm.
+- Swap to compressed RAM (zram), swap partitions and files.
+- Networking: an IPv4 routing table with rtnetlink, `SO_BINDTODEVICE`,
+  AF_PACKET, `SIOCSIFMTU`, two virtio-net NICs, a firewall policy.
+- Timers on one-shot hardware: sleeps, poll/epoll timeouts, timerfd and
+  POSIX timers end on `CLOCK_MONOTONIC` instants, never early.
+- `/proc/pressure` (PSI), inotify events, pstore of the previous boot,
+  virtio-gpu 2D, USB serial adapters and game controllers.
+
+### Speed
+
+- User copies, `memcpy` and pipes no longer move a byte at a time; idle CPUs
+  that will wake soon stay in shallow states; TCP loopback avoids a thread
+  hop. On the same laptop Ranix is faster than Linux 6.1 in 9 of 12
+  micro-benchmarks (`tests/bench.py`); open/close, pipe and TCP round trip
+  are still about 1.5x slower.
+
+### For contributors
+
+- `docs/CODING-STYLE.md` and `docs/LAYERS.md`; everything in the tree is
+  English. `tools/gate.sh` checks style, language and that nothing private
+  (keys, tokens, private paths or addresses) is in the tree.
+
 ## 0.9.0 (release candidate, 2026-11-09)
 
 First release under the EUPL v1.2. Ranix is experimental: do not run it on a

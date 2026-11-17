@@ -11,7 +11,7 @@ __attribute__((weak)) const unsigned long ksym_count    = 0;
 __attribute__((weak)) const unsigned long ksym_addrs[1] = { 0 };
 __attribute__((weak)) const char *const   ksym_names[1] = { 0 };
 
-__attribute__((weak)) const char ranix_version[]   = "0.9.0";
+__attribute__((weak)) const char ranix_version[]   = "0.9.1";
 __attribute__((weak)) const char ranix_gitrev[]    = "unknown";
 __attribute__((weak)) const char ranix_builddate[] = "?";
 __attribute__((weak)) const char ranix_arch[]      = "?";
