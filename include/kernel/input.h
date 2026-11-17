@@ -38,7 +38,7 @@ void input_sync(void);
 void input_report_switch(uint16_t code, int32_t value);   /* EV_SW and a SYN: the lid */
 void input_inject_ascii(uint8_t c);
 
-/* Where input came from (docs: arastirma/ajan-insan-ozellikleri.md, item 3).
+/* Where input came from.
  * hw: a real keyboard, pad, mouse, USB device or the serial console. injected:
  * bytes software wrote into /dev/input/rawkbd or /dev/input/mice (they come
  * back through the i8042 and would otherwise look like a person typing).

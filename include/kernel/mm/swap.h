@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /* Swap: private anonymous pages go out to a swap area when memory runs short
- * and come back on the next touch. Design: arastirma/swap.md.
+ * and come back on the next touch.
  *   kernel/mm/swap.c     slots, the swap cache, swap-in, page-table entries
  *   kernel/mm/swapon.c   swapon/swapoff, the mkswap header, /proc/swaps
  *   kernel/mm/reclaim.c  which pages go: a second-chance clock, kswapd */

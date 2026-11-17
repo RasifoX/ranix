@@ -403,7 +403,7 @@ void       task_sleep_unlock(spinlock_t *lock, uint64_t lock_flags);
 void       task_wake(process_t *p);
 void       task_wake_no_resched(process_t *p);
 int        task_has_actionable_signal(void);
-/* Kill-always-wins (docs: arastirma/ajan-insan-ozellikleri.md). fatal_signal_pending:
+/* Kill-always-wins (kernel/kwatch.c). fatal_signal_pending:
  * p must die (SIGKILL posted, its group is exiting). kloop_should_stop: for long or
  * data-driven kernel loops; yields when the tick asks and returns 1 when the caller
  * must abandon the loop (return -EINTR). Call it at least once per iteration of any

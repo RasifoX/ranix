@@ -9,7 +9,7 @@
 #include <kernel/nsproxy.h>
 #include <kernel/proc.h>
 
-/* Agent sessions (arastirma/TASARIM.md section 6). */
+/* Agent sessions (kernel/asess.c). */
 
 struct asess;
 

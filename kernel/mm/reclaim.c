@@ -15,7 +15,7 @@
  * first, and a fault whose allocation fails swaps before the OOM killer runs.
  * vm.swappiness 0 keeps kswapd and the min-mark check off anonymous pages:
  * they then go only to save a failing allocation. MADV_PAGEOUT sends a range
- * out at once. Design: arastirma/swap.md. */
+ * out at once. */
 #include "swap_area.h"
 #include <kernel/psi.h>
 #include <kernel/mm/pmm.h>

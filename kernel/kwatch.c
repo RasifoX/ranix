@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /* ── kill-always-wins watch ───────────────────────────────────────────────────
- * Two invariants the 2026-11-08 Casper wedge broke (an ioctl looping forever
+ * Two invariants a wedged machine once broke (an ioctl looping forever
  * while holding drm_lock; SIGKILL lost; shutdown waited on it for good):
  *   kill:   a task with SIGKILL pending must be gone within KW_KILL_SECS.
  *   kstall: a task must not run inside one syscall for KW_STALL_SECS without

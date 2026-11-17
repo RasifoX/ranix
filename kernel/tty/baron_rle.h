@@ -2,8 +2,8 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* The Ranix orca (Baron) for the boot screen: edition/tasarim/baron-maske.py made
- * these from site/baron.png (edition/src/baron_mask.h, copied as is). Run length:
+/* The Ranix orca (Baron) for the boot screen, generated from the Baron artwork
+ * outside this tree (copied as is). Run length:
  * top two bits 0 empty, 1 body, 2 white; low six bits run-1; rows of SIZE pixels. */
 #ifndef BARON_RLE_H
 #define BARON_RLE_H

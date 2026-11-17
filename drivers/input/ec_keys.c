@@ -19,7 +19,7 @@
  * Doors: none. Off by default: asking is new traffic to an EC that is still a
  * suspect in this machine's power cuts, so it runs only with ranix.ec_events=1
  * (ranix.ec_keys=1 is the old name) on the command line, and only on a board
- * with a table in ec_hotkey.c (now the Casper, matched by casper_ec.c).
+ * with a table in ec_hotkey.c (now the Casper Nirvana, matched by casper_ec.c).
  * /proc/hwdiag "input ec_keys" counts what was seen.
  */
 #include <uapi/types.h>

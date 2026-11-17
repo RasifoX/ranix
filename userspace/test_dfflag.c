@@ -5,7 +5,7 @@
 /* The direction flag is the user's; the kernel must not run with it.
  *  1. Fresh anonymous pages first touched with DF set read as zero: the page
  *     fault's memset of the new page runs forwards (rep stosb with DF set
- *     zeroed the page below it, kernel heap: the fuzzer's corruption, 11-15).
+ *     zeroed the page below it, kernel heap: a corruption the fuzzer found).
  *  2. A signal handler starts with DF clear (SysV ABI; Linux clears it).
  * x86_64 only; elsewhere it prints OK. */
 #include <signal.h>

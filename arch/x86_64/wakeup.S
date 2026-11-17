@@ -185,7 +185,7 @@ sleep_save_cpu:
 sleep_resume_entry:
 	/* the stack first: RSP is still the firmware's real-mode SP (0xF70 on SeaBIOS), and
 	 * the null guard leaves that page unmapped: the lretq below faulted, a triple
-	 * fault (SUSP1 TCG 11-15). The saved one is mapped in every top table. */
+	 * fault. The saved one is mapped in every top table. */
 	movq SC_RSP(%rdi), %rsp
 	movq SC_CR4(%rdi), %rax
 	movq %rax, %cr4

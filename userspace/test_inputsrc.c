@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* Input source marking (docs: arastirma/ajan-insan-ozellikleri.md, item 3).
+/* Input source marking (include/kernel/input.h).
  * Bytes software writes into /dev/input/rawkbd and /dev/input/mice come back
  * through the i8042 like a device's; the kernel must count them as source=injected,
  * never as a person. Checks:
@@ -13,7 +13,7 @@
  *  - write "injected" counts a mark; anything else is EINVAL;
  *  - poll on the source fd stays quiet for injected input (it is for people only);
  * The hw side (a real key counts as hw and wakes poll) needs a
- * real keyboard and is checked on Casper. */
+ * real keyboard and is checked on hardware. */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>

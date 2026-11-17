@@ -89,7 +89,7 @@ int VNAME(clock_gettime)(int clk, struct vts *ts)
 		if (clk == 7) { sec += v->boot_off_sec; nsec += v->boot_off_nsec; }   /* BOOTTIME: + time asleep */
 		/* the counter can go away between the check above and this period (the
 		 * sleep's refresh): the snapshot alone is the refresh's time, behind what
-		 * this reader already returned (SUSP1 KVM 11-15: back 46-67 ns per sleep) */
+		 * this reader already returned (46-67 ns back per sleep) */
 		if (!v->cnt_valid)
 			return (int)vsyscall2(SYS_clock_gettime_, clk, (long)ts);
 		uint64_t delta = read_cnt() - v->cnt_base;

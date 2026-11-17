@@ -174,7 +174,7 @@ void arch_pat_init(void)
 }
 
 /* Let the CPU choose its own frequency (HWP): left alone it sits at the base
- * clock with no turbo. Measured on Casper: one thread 30% slower than Linux, four
+ * clock with no turbo. Measured on a Kaby Lake laptop: one thread 30% slower than Linux, four
  * threads 64%. Asks for the full range, leaning to performance as Linux does. */
 void arch_hwp_init(void)
 {

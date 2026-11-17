@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* NVIDIA GPU, step 2 of the feasibility plan: find the
+/* NVIDIA GPU, the probe step: find the
  * GPU on PCI, bring it to D0, map BAR0 and BAR1 uncached, read NV_PMC_BOOT_0, set
  * up an MSI vector. Nothing else: no bus mastering, no GPU interrupt is enabled,
  * no engine is touched, no firmware is loaded. */

@@ -25,7 +25,7 @@
  *     (UPDATE_CURSOR, MOVE_CURSOR), so moving it costs no repaint.
  *
  * No interrupts: the used rings are read from the 1 ms tick and by whoever
- * waits. No 3D yet (see arastirma/virtio-gpu-3d.md); the render node has only
+ * waits. No 3D yet; the render node has only
  * the generic dumb/PRIME ioctls. Spec: OASIS virtio 1.2, section 5.7.
  */
 #include <kernel/mm/heap.h>

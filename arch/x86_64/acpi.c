@@ -259,7 +259,7 @@ static inline uint64_t rdtsc_(void)
 /* kvm-clock (pvclock), as a Linux guest uses it: under KVM the guest is often not
  * told the TSC is invariant (QEMU's -cpu host leaves invtsc out), and without a
  * TSC every clock read was the HPET, a trap to the VMM's user space: 12 us a
- * clock_gettime on Casper, the vDSO off, and the idle path's own clock reads made
+ * clock_gettime on a Kaby Lake laptop, the vDSO off, and the idle path's own clock reads made
  * 2.5 ms sleeps end 0.25-0.4 ms late (test_clockfast, test_sleeptail). KVM gives
  * the TSC's exact rate in the pvclock page; with its "stable" feature the TSC is
  * the same on every vCPU, so it can be used as the invariant one is. Returns the
@@ -347,7 +347,7 @@ void tsc_calibrate(void)
 	tsc_ns0 = h1;
 	uint64_t mult = ((h1 - h0) << 28) / (t1 - t0);
 	/* The CPU can say its TSC rate exactly: crystal times a ratio (CPUID 15h).
-	 * 20 ms against the HPET came out 0.28 % off on Casper, ten seconds an hour.
+	 * 20 ms against the HPET came out 0.28 % off on a Kaby Lake laptop, ten seconds an hour.
 	 * The crystal is left out on Sky Lake and Kaby Lake clients: 24 MHz there. */
 	uint32_t eax, ebx, ecx, edx, max;
 	__asm__ volatile("cpuid" : "=a"(max), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
@@ -379,7 +379,7 @@ void tsc_calibrate(void)
 
 /* tsc0/tsc_ns0 change after boot only in arch_clock_rebase (the resume). A reader
  * parked by the sleep IPI between its loads came back to a TSC read before the
- * sleep against the anchor after it: 2^64 ns (SUSP1 KVM 11-15, R2). tsc_seq
+ * sleep against the anchor after it: 2^64 ns. tsc_seq
  * makes it read again; a count before the anchor is the anchor, never a wrap. */
 static volatile uint32_t tsc_seq;
 
@@ -392,9 +392,9 @@ static uint64_t tsc_ns_from(uint64_t tsc, uint64_t t0, uint64_t ns0)
 
 /* The clock at a TSC value already read. The vDSO's vvar takes its base count
  * and its clock from ONE read through this: read twice, an SMI between the two
- * (~16 us on Casper, IRQs off do not stop it) put a whole 10 ms vvar period that
+ * (~16 us on a Kaby Lake laptop, IRQs off do not stop it) put a whole 10 ms vvar period that
  * far ahead, and a 2.5 ms sleep across its end measured 7-14 us short in user
- * space (test_sleeptail 3/60000 on the bare Casper, 0 under KVM; TSC1). */
+ * space (test_sleeptail 3/60000 on bare metal, 0 under KVM). */
 uint64_t tsc_ns_at(uint64_t tsc)
 {
 	if (!tsc_mult)

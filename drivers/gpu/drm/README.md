@@ -79,7 +79,7 @@ firmware framebuffer. Spec: OASIS virtio 1.2 §5.7, over the modern virtio-PCI t
 - Cursor: up to 64x64 on the host's cursor queue (UPDATE/MOVE_CURSOR), so it stays on while
   buffers are flipped; bigger ones are drawn by KMS.
 - `ranix_flip` shows `virtio-gpu mode= pref= screen= res= flips= damages= cursor= err=`.
-- No 3D yet (arastirma/virtio-gpu-3d.md). Test: `userspace/test_virtio_gpu.c` (`c-virtio-gpu`;
+- No 3D yet. Test: `userspace/test_virtio_gpu.c` (`c-virtio-gpu`;
   the suite VM has `TEST_GPU`, `make test TEST_GPU=` runs it on the firmware framebuffer).
 
 ## Measured on Casper (i5-7200U, HD 620, 1366x768 eDP, 2026-11-08)

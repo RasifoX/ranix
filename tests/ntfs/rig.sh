@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: 2026 RasifoX
 # SPDX-License-Identifier: EUPL-1.2
-# One KVM run. Under the shared Casper lock, in ~/ranix-nt, -smp 2 -m 2G (KILIT.md).
+# One KVM run. Under the test machine's shared lock, in ~/ranix-nt, -smp 2 -m 2G.
 # usage: rig.sh TAG SECONDS GUESTSCRIPT "cmdline" -- qemu disk args...
 export PATH=/usr/sbin:/sbin:$PATH
 O=~/ranix-nt; T=$1; S=$2; G=$3; X=$4; shift 5

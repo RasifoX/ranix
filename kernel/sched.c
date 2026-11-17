@@ -1410,7 +1410,7 @@ static void hr_early_learn(uint64_t now)
 /* How long this CPU's idles last, a moving average: a deep state (C6) takes tens of
  * us to leave, which a wake every few us pays each time. Below IDLE_DEEP_MIN the
  * next idle is likely short too and stays shallow (HLT, C1), as Linux's menu
- * governor does. Bare Casper 11-15: a pipe and a loopback TCP round trip waking
+ * governor does. On bare metal a pipe and a loopback TCP round trip waking
  * the other CPU were 1.4x and 2x Linux with C6 on every idle. */
 #define IDLE_DEEP_MIN 400000ULL     /* ns */
 static uint64_t idle_avg_ns[MAX_CPUS];

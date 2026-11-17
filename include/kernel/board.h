@@ -10,7 +10,7 @@
 
 /* The one tick rate. Include this header wherever TIMER_HZ is used; a local
  * fallback ("#ifndef TIMER_HZ / #define TIMER_HZ 100") silently made several
- * files count seconds 10x short (fixed 2026-11-08). */
+ * files count seconds 10x short. */
 #define TIMER_HZ 1000
 #define USER_HZ  100                  /* what user space is told a clock tick is */
 #define TICKS_USER(t) ((t) / (TIMER_HZ / USER_HZ))

@@ -5,7 +5,7 @@
 /* Symlinks keep working once the dentry cache is full. Past its limit a name
  * looked up for the first time is not cached but held for the one walk, and a
  * relative symlink met that way must still be followed from its own directory.
- * Found on Casper (2026-11-08/09): after a long boot "/bin/cp -> ../usr/bin/
+ * A regression: after a long boot "/bin/cp -> ../usr/bin/
  * coreutils" gave "not found" while /bin/../usr/bin/coreutils worked.
  *
  *   test_dcachefull DEV MNT [MAX]   DEV ext2 at MNT; MAX the cache limit (131072)

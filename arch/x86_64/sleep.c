@@ -4,7 +4,7 @@
  */
 /*
  * Suspend on x86_64: the CPUs, the interrupt lines, the RTC alarm, S3.
- * kernel/suspend.c drives it; the design is ozel-SUSP1/TASARIM.md.
+ * kernel/suspend.c drives it; include/kernel/sleep.h has the overview.
  *
  * Parking. Every other CPU takes the 0xF3 IPI, masks its local timer and waits
  * in the handler with IRQs off. An IPI is taken only with IRQs on, so a parked
@@ -21,7 +21,7 @@
  * time. Anything else (a device's MSI) is served and the CPU sleeps again.
  *
  * deep (ACPI S3, only with ranix.s3=1): \_S3_ from the DSDT (no AML runs, so
- * _PTS and _WAK do not: on Casper they talk to the EC, see TASARIM.md), the
+ * _PTS and _WAK do not: on some laptops they talk to the EC), the
  * FACS waking vector at the wake page, SLP_TYP then SLP_EN.
  */
 #include <uapi/types.h>
@@ -80,14 +80,14 @@ static void probe(void)
 	int usable = 0;
 	mb2_foreach_mem_region(page_ok, &usable);
 	int r = SI.dsdt ? acpi_sleep_type(SI.dsdt, SI.dsdt_len, 3, &s3_a, &s3_b) : SLEEP_TYPE_NONE;
-	char v[8];   /* "force": 4 bytes cut it to "for" and q35's S3 test never slept deep (11-15) */
+	char v[8];   /* "force": 4 bytes cut it to "for" and q35's S3 test never slept deep */
 	if (r == SLEEP_TYPE_NONE)              deep_why = "no \\_S3_ in the DSDT";
 	else if (r == SLEEP_TYPE_COND)         deep_why = "\\_S3_ depends on AML Ranix does not run";
 	else if (!SI.facs)                     deep_why = "no FACS for the waking vector";
 	else if (!usable)                      deep_why = "the wake page is not usable RAM";
 	/* code + data on the one wake page; the code's own limit (WAKE_DATA) is the
 	 * assembler's .org. The old check compared the whole page with WAKE_DATA and
-	 * kept deep off everywhere (SUSP1 KVM 11-13: 0xF56 > 0xF00) */
+	 * kept deep off everywhere (0xF56 > 0xF00) */
 	else if (sleep_wake_end - sleep_wake_start > 0x1000) deep_why = "wake page longer than a page";
 	else if (!(cmdline_get("ranix.s3", v, sizeof v) && (!strcmp(v, "1") || !strcmp(v, "force"))))
 		deep_why = "a test feature for now: ranix.s3=1";
@@ -447,6 +447,6 @@ void arch_sleep_init(void)
 	hwdiag_register(sleep_diag);
 	/* now, at boot: the probe walks the boot loader's memory map, which a system
 	 * call (the first read of /sys/power/mem_sleep) can no longer reach -- it
-	 * faulted there on CR2 0x9b72d8 (SUSP1 KVM, 11-13) */
+	 * faulted there */
 	probe();
 }

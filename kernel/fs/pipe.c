@@ -51,7 +51,7 @@ static int pipe_writable(const pipe_t *pipe)
 }
 
 /* The ring in at most two runs: size is a power of two. A byte loop with a %
- * per byte took 1.4 ms per 64 KB, 96x Linux (HIZ0 on Casper, 11-15). */
+ * per byte took 1.4 ms per 64 KB, 96x Linux. */
 static void ring_out(pipe_t *pipe, uint8_t *dst, uint32_t n)
 {
     uint32_t a = pipe->size - pipe->tail;

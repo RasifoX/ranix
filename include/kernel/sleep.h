@@ -6,7 +6,7 @@
 #define KERNEL_SLEEP_H
 
 /* Suspend and resume (kernel/suspend.c, arch/x86_64/sleep.c, kernel/lib/sleep_math.c).
- * The design: ozel-SUSP1/TASARIM.md. Two kinds, named as Linux names them:
+ * Two kinds, named as Linux names them:
  *   s2idle  devices stay powered, the CPUs idle, an interrupt wakes (K1)
  *   deep    ACPI S3: RAM in self refresh, the firmware jumps back to us (K2, ranix.s3=1)
  * CLOCK_MONOTONIC stands still while asleep; BOOTTIME and REALTIME move on. */

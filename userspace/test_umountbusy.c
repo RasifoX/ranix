@@ -6,7 +6,7 @@
  * it is open, or a page of it is mapped, umount must say EBUSY and leave the
  * filesystem working; once the last user is gone umount goes through and the
  * device mounts again. A namespace copy keeps its own view alive after the
- * original umount. Found by code reading (2026-11-09): ext2 freed its in-memory
+ * original umount. Found by code reading: ext2 freed its in-memory
  * state on umount while files were still open.
  *
  *   test_umountbusy DEV MNT [CASE]   DEV ext2 at MNT with MNT/marker.txt

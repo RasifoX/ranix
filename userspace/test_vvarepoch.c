@@ -8,7 +8,7 @@
  * (the two floor()s of the same product differ by at most 1 ns).
  *
  * The tick read the base count and the clock with two TSC reads. Whatever came
- * between them stayed in the whole period: on the bare Casper an SMI (~16 us)
+ * between them stayed in the whole period: on bare metal an SMI (~16 us)
  * put a 10 ms period 16 us ahead once a minute or so, and a 2.5 ms sleep across
  * its end measured 7-14 us short (test_sleeptail 'woke early', 3 in 60000;
  * 0 under KVM, where only a few ns fall between the reads). This test sees the

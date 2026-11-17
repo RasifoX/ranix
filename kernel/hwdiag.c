@@ -14,7 +14,7 @@
  * throttling logs (Intel SDM vol. 3, "Thermal Monitoring and Protection",
  * IA32_THERM_STATUS 0x19C, IA32_PACKAGE_THERM_STATUS 0x1B1,
  * MSR_TEMPERATURE_TARGET 0x1A2). The power supply (AC, battery) line comes
- * from what a board driver read into the power_supply table (Casper: the EC);
+ * from what a board driver read into the power_supply table (casper_bat.c: the EC);
  * on other machines it lives in ACPI AML methods, which Ranix does not
  * interpret, so it is reported as unavailable rather than guessed.
  */

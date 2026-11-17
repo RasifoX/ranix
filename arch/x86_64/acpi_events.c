@@ -236,7 +236,7 @@ static void acpi_button_thread(void)
 /* ---- suspend (arch/x86_64/sleep.c) ----
  * arm=1 when the sleep begins: a press from before does not wake, and the SCI
  * count is the baseline. arm=0 in the sleep loop, IRQs off: WAKE_POWER for a
- * press, WAKE_SCI for any other SCI (the EC's, a lid on Casper), else 0. The
+ * press, WAKE_SCI for any other SCI (the EC's, a lid on some laptops), else 0. The
  * press that wakes is taken here and not passed on: no KEY_POWER, no SIGPWR,
  * or the desktop would shut down the machine it just woke (as Linux's button
  * driver does). */

@@ -8,7 +8,7 @@
  *
  * The CPU halts for such a sleep and is woken ahead of its end to spin the
  * rest (sched_idle_wait). In a guest on an idle host, the halted vCPU came
- * back 100-550 us late (Casper, 2026-11-11): with the margin learned too
+ * back 100-550 us late: with the margin learned too
  * briefly, 17-30 % of these sleeps ended ~0.5 ms late and c-sleepprec /
  * c-timerprec failed now and then in the full suite. */
 #define _GNU_SOURCE

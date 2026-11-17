@@ -51,7 +51,7 @@ typedef struct {
 	int      nofat;                   /* contiguous, no FAT chain */
 	int      is_dir;
 	/* the last cluster found, (index << 32) | cluster: reading a chained file in
-	 * order walks the FAT once, not from the start for every read (fat.c, 11-16) */
+	 * order walks the FAT once, not from the start for every read (as fat.c) */
 	uint64_t hint;
 } exfat_priv_t;
 

@@ -17,7 +17,7 @@
  * A swapped page stays charged to its cgroup, as Linux counts swap in the OOM
  * score; the charge goes when the last reference to the page, in RAM or on
  * swap, goes. Locks: vs->fault_lock, then swap_lock, then pmm_lock. No I/O
- * is done under a spinlock. Design: arastirma/swap.md. */
+ * is done under a spinlock. */
 #include "swap_area.h"
 #include <kernel/psi.h>
 #include <kernel/mm/pmm.h>

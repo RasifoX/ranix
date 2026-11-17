@@ -486,8 +486,8 @@ static const ps_t *supply(const char *name)
 
 static void put16(int off, unsigned v) { m.ram1[off] = (uint8_t)v; m.ram1[off + 1] = (uint8_t)(v >> 8); }
 
-/* ECW1 as the EC keeps it. bat 0: bay empty (EPWS bit1 clear), as on Casper with
- * the battery out. design/full: 0, 0xFFFF (the AML's Ones) or a capacity. */
+/* ECW1 as the EC keeps it. bat 0: bay empty (EPWS bit1 clear), as on a Casper Nirvana
+ * with the battery out. design/full: 0, 0xFFFF (the AML's Ones) or a capacity. */
 static void ecw1(int ac, int bat, unsigned rc, unsigned full, unsigned design)
 {
 	memset(m.ram1, 0, sizeof(m.ram1));
@@ -515,7 +515,7 @@ static void no_fake_battery(void)
 	assert(!strstr(m.klog, "-1%") && !strstr(m.klog, "battery unknown"));
 }
 
-/* Casper as Rasi runs it: adapter only, the bay empty, design/full 0 */
+/* a Casper Nirvana run on the adapter only: the bay empty, design/full 0 */
 static void t_bat_absent(void)
 {
 	ecw1(1, 0, 0, 0, 0);

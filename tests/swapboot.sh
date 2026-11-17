@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: 2026 RasifoX
 # SPDX-License-Identifier: EUPL-1.2
-# Swap under real pressure (arastirma/swap.md): a 256 MB machine fills twice its
+# Swap under real pressure: a 256 MB machine fills twice its
 # RAM with a pattern and gets every page back intact, first on zram (pages
 # that compress), then on a swap disk (half the pages random). Then RAM and a
 # small swap run out: the OOM killer ends the hog, and the machine stays up.

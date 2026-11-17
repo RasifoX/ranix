@@ -474,7 +474,7 @@ check "c-sigaltstack-size" "OK"     "$(timeout 8 /bin/test_sigaltstack_size 2>/d
 check "c-hwdiag"      "OK"            "$(timeout 15 /bin/test_hwdiag 2>&1 | tail -1)"
 check "c-deadline"    "OK"            "$(timeout 8 /bin/test_deadline 2>&1 | tail -1)"
 check "c-splash"      "OK"            "$(timeout 8 /bin/test_splash 2>&1 | tail -1)"
-# Agent+human (arastirma/ajan-insan-ozellikleri.md): kill always wins, rescue channel, claims
+# Agent+human: kill always wins, rescue channel, claims
 check "c-killwins"    "OK"            "$(timeout 60 /bin/test_killwins 2>&1 | tail -1)"
 check "c-kwatch"      "OK"            "$(timeout 40 /bin/test_killwins kwatch 2>&1 | tail -1)"
 check "c-rescue"      "OK"            "$(timeout 30 /bin/test_rescue 2>&1 | tail -1)"
@@ -626,7 +626,7 @@ check "c-compatfs"   "OK"           "$(timeout 20 /bin/test_compatfs /mnt 2>/dev
 IC=$(timeout 40 /bin/test_inodecoh /mnt 2>&1); echo "$IC" | grep -v "^PASS" | sed 's/^/  inodecoh: /'
 check "c-inodecoh"   "OK"           "$(echo "$IC" | tail -1)"
 # exec through symlinks on a disk fs, not only the initramfs: the root of a real
-# install is ext2 and a kernel once broke exactly this there (2026-11-08).
+# install is ext2 and a kernel once broke exactly this there.
 rm -rf /mnt/sl; mkdir -p /mnt/sl/r /mnt/sl/a && cp /bin/busybox /mnt/sl/bb 2>/dev/null
 ln -s bb /mnt/sl/echo; ln -s ../bb /mnt/sl/r/echo; ln -s /mnt/sl/bb /mnt/sl/a/echo
 check "ext-symlink-exec" "s r a"     "$(/mnt/sl/echo -n s 2>&1; /mnt/sl/r/echo -n " r" 2>&1; /mnt/sl/a/echo -n " a" 2>&1)"
@@ -695,7 +695,7 @@ check "c-ext2rw-4k"       "OK"                 "$(timeout 40 /bin/test_ext2rw /m
 check "ext4-log-active"   "yes"                "$(dmesg | grep -q 'ext2: log active' && echo yes)"
 check "c-fscrash-log-1k"  "OK"                 "$(mkdir -p /mnt/fsc; timeout 40 /bin/test_fscrash smoke /mnt/fsc 3 2>&1 | tail -1 | cut -c1-2; rm -rf /mnt/fsc)"
 check "c-fscrash-4k"      "OK"                 "$(mkdir -p /mnt2/fsc; timeout 40 /bin/test_fscrash smoke /mnt2/fsc 3 2>&1 | tail -1 | cut -c1-2; rm -rf /mnt2/fsc)"
-# names, rename across directories, every indirect level, EFBIG (ENOSPC runs on the small images of arac/casper/ev/hd-tur.sh)
+# names, rename across directories, every indirect level, EFBIG (ENOSPC runs on small disk images, outside this suite)
 check "c-ext2hard-log-1k" "OK"                 "$(mkdir -p /mnt/hard; timeout 180 /bin/test_ext2hard /mnt/hard nofill 2>&1 | tail -1; rm -rf /mnt/hard)"
 check "c-ext2hard-4k"     "OK"                 "$(mkdir -p /mnt2/hard; timeout 180 /bin/test_ext2hard /mnt2/hard nofill 2>&1 | tail -1; rm -rf /mnt2/hard)"
 # umount while a file, a directory or a mapped page is in use: EBUSY, and the
@@ -996,7 +996,7 @@ CR=$(timeout 10 /bin/test_kcmp 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  k
 check "c-kcmp"         "OK"  "$(echo "$CR" | tail -1)"
 check "c-devnodes"     "OK"  "$(timeout 5 /bin/test_devnodes 2>/dev/null | tail -1)"
 
-# ── swap (arastirma/swap.md): zram and a swap file, pages out and back ──
+# ── swap: zram and a swap file, pages out and back ──
 CR=$(timeout 90 /bin/test_swap zram 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-zram: /'
 check "c-swap-zram" "OK" "$(echo "$CR" | tail -1)"
 CR=$(timeout 90 /bin/test_swap cow 2>&1); echo "$CR" | grep -v "^OK$" | sed 's/^/  swap-cow: /'
@@ -1116,7 +1116,7 @@ kill -9 $DBPID 2>/dev/null
 check "c-ssh-session" "SSHWORKS" "$(grep -c SSHWORKS /tmp/d2 >/dev/null && echo SSHWORKS)"
 
 # ── SSH with a pty (ssh -tt): sshd opens the slave a second time by name and closes
-# it; that must not hang the terminal up. 11-12 on Casper the master read EOF once
+# it; that must not hang the terminal up. A regression: the master read EOF once
 # its buffer ran dry, dropbear closed it and the session got SIGHUP: a nested sh
 # printed nothing, an exec'd program was killed before its first write. The client
 # runs on a pty of its own (test_sshpty), as from a terminal: dbclient -t needs one. ─

@@ -6,7 +6,7 @@
  * Ranix thermal guard: keep the package below its trip point without ACPI.
  *
  * Ranix does not run the ACPI thermal zones or the fan yet, so under load the
- * package can heat until the platform cuts power (seen on Casper, 2026-11-08).
+ * package can heat until the platform cuts power.
  * Every 250 ms (from the timer tick on CPU0) this reads the package temperature
  * (IA32_PACKAGE_THERM_STATUS 0x1B1 against TjMax in MSR_TEMPERATURE_TARGET 0x1A2)
  * and limits the whole package through RAPL (MSR_PKG_POWER_LIMIT 0x610, PL1 and
@@ -17,7 +17,7 @@
  *   72-78 C  hold
  *   <  72 C  raise it by 2 W per second; at the firmware's own limit (read at
  *            boot) hand the register back. Stepping up, not jumping back to the
- *            firmware's 25 W, keeps it from oscillating (measured on Casper:
+ *            firmware's 25 W, keeps it from oscillating (measured on a laptop:
  *            123 step-downs and 17 restores in 3.5 min with the jump).
  *
  * Each step logs one kernel line. /sys/kernel/ranix_thermal (root only) reads the state.

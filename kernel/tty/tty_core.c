@@ -494,7 +494,7 @@ static int ctty_poll(vfs_file_t *f)
  * console's line holds what is typed at the machine, the lock screen's
  * password too, and a program another person left running (a desktop app,
  * setsid from a terminal) read it through /dev/tty, and could switch the
- * screen to text over the lock (KDSETMODE), found 2026-11-12. */
+ * screen to text over the lock (KDSETMODE). */
 static int ctty_open(vfs_inode_t *in, vfs_file_t *f, int flags)
 {
     (void)in; (void)f; (void)flags;

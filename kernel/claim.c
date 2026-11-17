@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /* ── Ranix claims: visible, expiring holds on machine resources ───────────────
- * 2026-11-08: several agents shared one laptop through a flock file on another
+ * Several agents once shared one laptop through a flock file on another
  * machine. A reboot by one cut another's GPU test; the people at the desk could
  * not see who was doing what. A claim is the kernel's answer: a named hold on a
  * resource ("gpu", "reboot", "display"), with holder, purpose and expiry, that
@@ -17,7 +17,7 @@
  *     is kept as pid + start_tick, so a reused pid is never hit,
  *   - is honoured where it matters: reboot(2) from anyone but init fails with
  *     EBUSY while somebody else holds "reboot"; fjord-sys asks CLAIM_IOC_CHECK.
- * uAPI: include/uapi/claim.h. Design: arastirma/ajan-insan-ozellikleri.md.
+ * uAPI: include/uapi/claim.h.
  * ─────────────────────────────────────────────────────────────────────────── */
 
 #include <kernel/proc.h>

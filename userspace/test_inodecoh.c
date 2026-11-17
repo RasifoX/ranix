@@ -4,7 +4,7 @@
  */
 /* Inode coherency on a disk filesystem: a change to a file's or directory's
  * attributes must hold for every later lookup, whichever in-memory copy of the
- * inode the path walk finds. Found on Casper (2026-11-08): on ext2, chmod 700 of
+ * inode the path walk finds. A regression: on ext2, chmod 700 of
  * a directory that was already looked up left it open to other users.
  *
  *   test_inodecoh [DIR]     DIR on the disk filesystem to test (default /mnt)
@@ -102,7 +102,7 @@ int main(int argc, char **argv)
 		result("chmod-narrow", r == 1, r == 0 ? "nobody still reads through a 0700 directory" : "unexpected error");
 	}
 
-	/* chmod-fresh: as on Casper, no lookup by anyone between create and chmod */
+	/* chmod-fresh: as in the original bug, no lookup by anyone between create and chmod */
 	snprintf(d, sizeof d, "%s/c", g_dir); snprintf(f, sizeof f, "%s/f", d);
 	mkdir(d, 0755);
 	put(f, "secret", 0644);

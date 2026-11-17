@@ -5,8 +5,8 @@
 /* drivers/gpu/nvidia (nv_chip.c, nv_probe.c) against a PCI and MMIO model.
  * QEMU has no NVIDIA GPU, so this is where the probe runs before real hardware.
  *
- * The 940MX model starts from the Casper's real config space (lspci -xxx -s 01:00.0
- * under Debian, 2026-11-16), with COMMAND and MSI enable cleared as a cold boot
+ * The 940MX model starts from a real config space (a Casper Nirvana, lspci -xxx
+ * -s 01:00.0 under Debian), with COMMAND and MSI enable cleared as a cold boot
  * leaves them. The model enforces what the hardware would punish or hide:
  * - BAR0 reads all ones unless the function is in D0 with memory decode on;
  * - a BAR may be sized only with memory decode off, and must be restored;

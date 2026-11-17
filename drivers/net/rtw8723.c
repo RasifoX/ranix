@@ -27,7 +27,7 @@
  *   /dev/wlan0  Ethernet frames between the network stack and fjord-wifi:
  *               read = frames the stack wants sent, write = frames received.
  *
- * Provenance (clean-room rewrite, 2026-11-09). This file replaces an earlier
+ * Provenance (clean-room rewrite). This file replaces an earlier
  * driver that was found to follow Linux rtlwifi (GPL-2.0). The author of this
  * version did not read that driver's body, Linux, or any other GPL source.
  * Register names, bit values and sequences come only from FreeBSD rtwn(4):
@@ -42,8 +42,7 @@
  * FreeBSD drives the 8723B only over USB; the PCIe pieces (ring layout, queue
  * kick, PCIe power-on extras, MAC address at efuse 0xd0) are taken from its
  * RTL8188EE and RTL8192CE code, the closest PCIe parts of the same family.
- * The PCI id comes from pci.ids (BSD-3-Clause option). Every source and the time
- * it was read is listed in a source log kept outside this tree.
+ * The PCI id comes from pci.ids (BSD-3-Clause option). See NOTICE.
  *
  * Firmware: rtlwifi/rtl8723befw_36.bin from linux-firmware, under Realtek's own
  * binary redistribution licence (LICENCE.rtlwifi_firmware.txt), not the GPL. It
@@ -329,7 +328,7 @@ typedef struct {
      * handed back (OWN cleared), writes refused because the ring was full */
     uint32_t tail, inflight, pushed, done, full;
     /* Timing: tick of each push; completion latency at reclaim, which runs every
-     * 1 ms tick (CRT6; CRT5 reclaimed only at the next push, so idle gaps showed up
+     * 1 ms tick (reclaiming only at the next push made idle gaps show up
      * as latency); ticks with the ring full. lat_hist: <1, <2, <5, <10, <50, <200, >=200 ms */
     uint64_t push_tick[TX_COUNT];
     uint32_t lat_max, lat_10, full_ticks;
@@ -699,7 +698,7 @@ static void rx_arm(uint32_t i)
  * hold any address it was ever given. Each piece is checked on its own. The first
  * version tested only rx_desc, so after a partial failure the next RTW_RINGS
  * "succeeded" with rx_buf and the TX buffers at physical 0, and the card wrote
- * received frames over low memory: the resets of 2026-11-09/10. */
+ * received frames over low memory, and the machine reset. */
 static int rings_ready(void)
 {
     if (!g.rx_desc.virt || !g.rx_buf.virt) return 0;

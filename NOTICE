@@ -71,8 +71,7 @@ as long as its notice is kept.
               branch): rtl8723b/, rtl8723b/usb/, rtl8192e/, rtl8188e/pci/,
               rtl8192c/, rtl8192c/pci/, pci/, if_rtwn*.c. Register names,
               power-on, firmware upload, efuse and PCIe ring steps were adapted.
-              No Linux or other GPL source was used; the sources read are
-              logged outside this tree.
+              No Linux or other GPL source was used.
    Copyright: Copyright (c) 2010 Damien Bergamini; (c) 2014, 2017 Kevin Lo;
               (c) 2015 Stefan Sperling; (c) 2015-2016 Andriy Voskoboinyk;
               (c) 2017-2018 Farhan Khan; (c) 2026 Ahmad Khalifa
@@ -92,7 +91,7 @@ as long as its notice is kept.
               sys/arm64/broadcom/genet/if_genet.c and if_genetreg.h, themselves
               derived from NetBSD's bcmgenet.c. Register map, reset, ring set-up,
               MDIO and RX filter steps were adapted. No U-Boot, Linux or other
-              GPL source was used (source log kept outside this tree).
+              GPL source was used.
    Copyright: Copyright (c) 2020 Michael J Karels; (c) 2016, 2020 Jared McNeill
    Licence:   BSD-2-Clause. Full text in the file header.
               SPDX: EUPL-1.2 AND BSD-2-Clause.

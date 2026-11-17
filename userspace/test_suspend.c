@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* The guest half of tests/suspend.py (ozel-SUSP1/TASARIM.md 7).
+/* The guest half of tests/suspend.py (include/kernel/sleep.h).
  *
  *   test_suspend files [deep]
  *       /sys/power/state is "freeze mem"; mem_sleep is "[s2idle]" ("[s2idle] deep"
@@ -19,7 +19,7 @@
  *       and "SUS-NAP mono_ms=.. boot_ms=..". The host judges the numbers.
  *
  *   test_suspend tail freeze|mem SECS
- *       KT13's early-wake tests across a sleep (test_sleeptail, test_vvarepoch):
+ *       The early-wake tests across a sleep (test_sleeptail, test_vvarepoch):
  *       on the last CPU, 2.5 ms MONOTONIC sleeps one after another, before,
  *       across and after the suspend, with the vvar periods watched as
  *       test_vvarepoch does. Prints "SUS-TAIL n=.. early=.. late=.. cross_over_us=..

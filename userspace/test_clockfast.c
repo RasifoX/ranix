@@ -7,7 +7,7 @@
  * ns from the vDSO), and 100000 reads in a row never decrease.
  *
  * Under KVM without an invariant TSC flag (QEMU -cpu host), Ranix read the HPET:
- * a trap to the VMM's user space, 12 us a call on Casper, and 2.5 ms sleeps ended
+ * a trap to the VMM's user space, 12 us a call on a Kaby Lake laptop, and 2.5 ms sleeps ended
  * 0.25-0.4 ms late (test_sleeptail). A normal OS uses kvm-clock there. */
 #define _GNU_SOURCE
 #include <stdio.h>

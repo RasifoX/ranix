@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 RasifoX
 # SPDX-License-Identifier: EUPL-1.2
-"""Suspend in QEMU: s2idle and S3 (ozel-SUSP1/TASARIM.md 7).
+"""Suspend in QEMU: s2idle and S3 (include/kernel/sleep.h).
 
 Short boots of build/ranix.elf with build/initramfs and a /test.sh of our own;
 the guest half is userspace/test_suspend.c. One boot per mode:
@@ -17,7 +17,7 @@ the guest half is userspace/test_suspend.c. One boot per mode:
      QEMU reports the guest suspended, woken by the RTC alarm, the clocks as in R
   W  S3 on PIIX4 woken by the monitor's system_wakeup (QEMU reports it as the power button)
   Q  S3 on q35 (-global ICH9-LPC.disable_s3=0) woken by system_wakeup
-  T  KT13's early-wake tests across an s2idle (test_sleeptail, test_vvarepoch):
+  T  the early-wake tests across an s2idle (test_sleeptail, test_vvarepoch):
      2.5 ms sleeps before, across and after; none early, the one across
      included; MONOTONIC does not jump, BOOTTIME takes the sleep; every vvar
      period continues the one before to 1 ns except across the suspend
@@ -100,7 +100,7 @@ def boot(mode):
         return drive(p, mon, log, mode, action)
     finally:
         # whatever went wrong (a monitor timeout, SIGTERM from an outer timeout), the VM goes too:
-        # it runs in its own session and outlived the test on 11-13 (Casper, 31 min, ppid 1)
+        # it runs in its own session and could outlive the test (reparented to init)
         if p.poll() is None:
             os.killpg(p.pid, 9)
             p.wait()

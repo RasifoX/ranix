@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* Swap as a normal OS has it (arastirma/swap.md). Each mode brings swap up on
+/* Swap as a normal OS has it (include/kernel/mm/swap.h). Each mode brings swap up on
  * /dev/zram0 (or a file), sends a patterned range out with MADV_PAGEOUT, and
  * checks the pages come back intact and the counters move:
  *   zram     pages out and back, VmSwap, SwapFree, /proc/swaps, pswpin/out, mm_stat
@@ -438,7 +438,7 @@ static void t_oom(void)
 }
 
 
-/* ── review findings (ozel-MM/INCELEME-vekil.md): each red on the first version ── */
+/* ── review findings: each failed on the first version ── */
 
 /* 1: mprotect and THP collapse race reclaim on other CPUs. Threads flip the
  * protection, collapse to 2 MB and page the range out while the main thread

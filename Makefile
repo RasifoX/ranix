@@ -1053,7 +1053,7 @@ acpieventstest: iso
 	@python3 tests/acpievents.py
 
 # Suspend in QEMU (KVM): s2idle woken by the RTC, the power button and a key; S3
-# on PIIX4 and q35 (ozel-SUSP1/TASARIM.md). Several short boots.
+# on PIIX4 and q35 (include/kernel/sleep.h). Several short boots.
 suspendtest: iso
 	@python3 tests/suspend.py
 

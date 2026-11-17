@@ -1654,7 +1654,7 @@ static long exec_load_interp(process_t *p, vm_space_t *new_vm, const elf_info_t 
 /* Only the top `top` pages, the ones the argument block can reach; the rest of
  * the stack faults in as it is touched (vm.c, MAX_STACK_SIZE). All 256 pages
  * allocated, zeroed and mapped on every exec were most of fork+exec's 2.3x
- * Linux (HIZ1 profile 11-15). */
+ * Linux in a profile. */
 static long exec_map_stack(process_t *p, vm_space_t *new_vm, uint64_t argpg[ARG_WIN_PAGES], int top)
 {
 	if (cgroup_charge_mem(new_vm, p->cgroup, (uint64_t)(top + 1) * PAGE_SIZE) != 0)

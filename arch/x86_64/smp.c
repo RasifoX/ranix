@@ -110,7 +110,7 @@ static void lapic_timer_calibrate(void)
 	lapic_timer_initcnt = 0xFFFFFFFF - remaining;
 	/* From Sky Lake on, the local timer runs from the core crystal, which CPUID 15h
 	 * names (or which is 24 MHz on the clients that leave it out). One PIT period
-	 * measured it 0.4 % off on Casper: every sleep and the uptime ran slow. */
+	 * measured it 0.4 % off on a Kaby Lake laptop: every sleep and the uptime ran slow. */
 	{
 		uint32_t a, b, c, d, max;
 		__asm__ volatile("cpuid" : "=a"(max), "=b"(b), "=c"(c), "=d"(d) : "a"(0));

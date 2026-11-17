@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: EUPL-1.2
  */
 /* ── Ranix rescue channel ─────────────────────────────────────────────────────
- * 2026-11-08, Casper: a task looped forever inside an ioctl holding drm_lock.
+ * The case it was made for: a task looped forever inside an ioctl holding drm_lock.
  * ping still answered (the kernel was fine), but sshd had been stopped by the
  * shutdown that then waited on the stuck task for good, and a person had to hold
  * the power button. This is the way back in for that case: a small
@@ -556,7 +556,7 @@ static int rdev_ioctl(vfs_file_t *f, uint32_t cmd, uint64_t arg)
 		return 0;
 	}
 	case RESCUE_IOC_TEST_SPIN:
-		/* the shape of the 2026-11-08 bug: never checks, never yields */
+		/* the shape of that bug: never checks, never yields */
 		while (kernel_ticks < end) cpu_relax();
 		return 0;
 	}

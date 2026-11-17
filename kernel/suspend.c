@@ -4,7 +4,7 @@
  */
 /*
  * Suspend and resume: the order, the clocks, the files. The machine side is
- * arch/x86_64/sleep.c; the design ozel-SUSP1/TASARIM.md.
+ * arch/x86_64/sleep.c; the overview is in include/kernel/sleep.h.
  *
  *   /sys/power/state            "freeze mem"; root writes one to sleep, the write
  *                               returns after the resume
@@ -362,7 +362,7 @@ static ssize_t pfile_write(vfs_file_t *f, const void *buf, size_t len)
 	if (id == N_WAKEALARM) {
 		/* "+N" from the RTC's own second, as Linux (rtc_read_time): the alarm
 		 * matches the RTC, whose second does not turn with the wall clock's, and
-		 * from the wall clock N came out up to a second short (2.7 s for +4, 11-15) */
+		 * from the wall clock N came out up to a second short (2.7 s for +4) */
 		int64_t at, s = arch_rtc_read(), ns;
 		if (s <= 0) ranix_walltime(&s, &ns);
 		if (wakealarm_parse(k, n, s, &at)) return -EINVAL;

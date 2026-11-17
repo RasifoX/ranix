@@ -2,8 +2,8 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* Kill always wins (arastirma/ajan-insan-ozellikleri.md, item 1).
- * 2026-11-08 a task looped in an ioctl holding a lock, SIGKILL did nothing and
+/* Kill always wins.
+ * A task once looped in an ioctl holding a lock, SIGKILL did nothing and
  * the machine had to be power-cycled. Invariant: a SIGKILLed task is gone
  * promptly wherever it is blocked. Each case parks a child in one kernel wait,
  * kills it 150 ms later and times the reap; every case must finish under

@@ -4,7 +4,7 @@
  */
 /* ".." at the root of a bind mount. A walk that came in through the bind leaves
  * it through the bind's mountpoint; a walk that reached the same directory by
- * its own path goes to its own parent. Found by code reading (2026-11-09): ".."
+ * its own path goes to its own parent. Found by code reading: ".."
  * out of any bind's root jumped to that bind's mountpoint for every walk, so
  * after debian-run bound /root under /opt/debian, "/root/.." was /opt/debian,
  * and a bind whose source sits inside a chroot let ".." climb out of it.

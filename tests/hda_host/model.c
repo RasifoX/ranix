@@ -4,7 +4,7 @@
  */
 /*
  * drivers/sound/hda.c against a model controller and a model Realtek ALC269VC,
- * the codec in the Casper (widget graph as Linux's codec dump shows it):
+ * the codec in the Casper Nirvana (widget graph as Linux's codec dump shows it):
  *   DAC 0x02, 0x03 (out amp 0x57 steps of 0.75 dB, 0 dB at the top)
  *   mixer 0x0c <- 0x02, 0x0b      mixer 0x0d <- 0x03, 0x0b
  *   0x0b: the analog loopback, fed by the microphone pins

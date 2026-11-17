@@ -5,7 +5,7 @@
  * Status: build-checked only. It has not run on hardware: the only Pi 4 is a
  * production server and must not boot Ranix, and QEMU's raspi4b has no GENET.
  *
- * Provenance (clean-room rewrite, 2026-11-09). This file replaces an earlier
+ * Provenance (clean-room rewrite). This file replaces an earlier
  * driver that carried traces of U-Boot's GPL driver. The author of this version
  * did not read that driver's body, U-Boot, Linux, or any other GPL source. The
  * register map, reset, ring set-up, MDIO protocol, RX filter and RGMII link
@@ -16,8 +16,7 @@
  * from the VideoCore mailbox tag 0x00010003 ("Get board MAC address", Raspberry
  * Pi firmware wiki, Mailbox property interface). The register base 0xFD580000 is
  * GENET's bus address 0x7D580000 in the BCM2711 low-peripheral map, as the
- * other Pi 4 drivers in this tree use. Sources and the time each was read:
- * a source log kept outside this tree
+ * other Pi 4 drivers in this tree use. See NOTICE.
  *
  * Not done, on purpose: FreeBSD's PHY driver (brgphy.c) sets the BCM54213PE's
  * RGMII clock skew; that file is BSD-4-Clause, so it was not used. This driver

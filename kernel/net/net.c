@@ -309,7 +309,7 @@ static volatile int net_poll_busy;
 
 /* hw: also the devices' own poll hooks and the dead-namespace reaper. A send's
  * loopback drain only wants the queues: a real NIC's poll costs more than the
- * round trip it serves (bare Casper 11-15). */
+ * round trip it serves (measured on bare metal). */
 static void net_poll_run(int hw)
 {
     uint64_t f = spin_lock_irq(&net_poll_lock);

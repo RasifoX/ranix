@@ -502,7 +502,7 @@ static int view_build(asess_t *s, unsigned tmp_mib)
 	return err;
 }
 
-/* The defaults of TASARIM 10.2: min(R/2, R-1 GiB) a session, with a floor, and
+/* The defaults: min(R/2, R-1 GiB) a session, with a floor, and
  * min(1 GiB, R/4) of R held back from all sessions together. */
 static int budget_build(asess_t *s, const struct asess_attr *a)
 {

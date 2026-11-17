@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 RasifoX
  * SPDX-License-Identifier: EUPL-1.2
  */
-/* Forged TCP that must change nothing (INCELEME-vekil 1). Packets are written
+/* Forged TCP that must change nothing (a review finding). Packets are written
  * by hand through AF_PACKET on lo, so they reach ip_rx like any other:
  *   - a RST from 0.0.0.0:0 to a listening port: the listener stays (it was
  *     found as a "connection" with remote 0:0 and closed);

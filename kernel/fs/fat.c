@@ -50,7 +50,7 @@ typedef struct {
 	int       is_dir;
 	/* where the last read or write left off, (cluster index << 32) | cluster: a
 	 * file read in small pieces walks its chain once, not from the start on every
-	 * read (a 4 MB log took minutes, USB prova 11-16). One word, so racing files
+	 * read (a 4 MB log took minutes). One word, so racing files
 	 * see a pair that was true; the chain never changes (no allocation). */
 	uint64_t  hint;
 } fat_priv_t;

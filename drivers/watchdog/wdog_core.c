@@ -183,8 +183,8 @@ static int cpus_dispatching(uint64_t now)
 	return 1;
 }
 
-/* A timer that does not count is no protection, and on the Casper's Sunrise Point
- * the TCO counter stands still with TMR_HLT clear, under Linux's driver too. The
+/* A timer that does not count is no protection, and on some Sunrise Point
+ * chipsets the TCO counter stands still with TMR_HLT clear, under Linux's driver too. The
  * log says so; pets go on, harmless on a dead register and right if it ever runs. */
 static void hw_timer_check(void)
 {
