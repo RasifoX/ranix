@@ -35,6 +35,8 @@
 #include <kernel/lib/string.h>
 #include <kernel/errno.h>
 #include <kernel/hal.h>
+#include <kernel/time.h>
+#include <asm/cpu.h>
 
 #define EPT_R       (1ULL << 0)
 #define EPT_W       (1ULL << 1)
@@ -207,6 +209,43 @@ void kvm_ept_free(kvm_vm_t *vm)
 {
 	if (vm->ept_root) ept_free_table(vm, vm->ept_root, 3);
 	vm->ept_root = 0;
+}
+
+/* kvm-clock's page (struct pvclock_vcpu_time_info, Linux's pvclock ABI): the
+ * guest's TSC now and the system time then, and the factor that turns TSC
+ * ticks into ns: ns = ((delta << shift) * mul) >> 32, from the host's own
+ * calibration (ns = ticks * tsc_mult >> 28; the guest's TSC runs at the
+ * host's). Flag 1, TSC stable: every vcpu's TSC is the host's plus one offset.
+ * -EAGAIN when the page is not mapped yet: v->prefault names it. */
+int kvm_pvclock_update(kvm_vcpu_t *v)
+{
+	if (!v->pvclock_due) return 0;
+	if (!tsc_mult) { v->pvclock_due = 0; return 0; }
+	uint64_t gpa = v->system_time & ~1ULL;
+	uint64_t mul = tsc_mult << 4;   /* >> 28 as >> 32 */
+	int8_t shift = 0;
+	while (mul > 0xFFFFFFFFULL) { mul >>= 1; shift++; }
+	struct {
+		uint32_t version, pad0;
+		uint64_t tsc_timestamp, system_time;
+		uint32_t tsc_to_system_mul;
+		int8_t   tsc_shift;
+		uint8_t  flags, pad[2];
+	} __attribute__((packed)) p;
+	memset(&p, 0, sizeof(p));
+	p.version = 2;   /* even: complete (one writer, the vcpu's own thread) */
+	uint32_t lo, hi;
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	p.tsc_timestamp = ((uint64_t)hi << 32 | lo) + vmread(TSC_OFFSET);
+	p.system_time = mono_ns() + v->vm->clock_off;
+	p.tsc_to_system_mul = (uint32_t)mul;
+	p.tsc_shift = shift;
+	p.flags = 1;
+	uint64_t missing = 0;
+	int r = kvm_gpa_write(v->vm, gpa, &p, sizeof(p), &missing);
+	if (r == -EAGAIN) { v->prefault = missing; v->prefault_write = 1; return -EAGAIN; }
+	v->pvclock_due = 0;
+	return r == -EFAULT ? 0 : r;   /* no memory there: the guest gets no clock, as on Linux */
 }
 
 /* Write guest-physical memory through the EPT, without sleeping: -EAGAIN with

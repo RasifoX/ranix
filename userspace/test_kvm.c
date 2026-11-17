@@ -40,6 +40,9 @@
  * SI, DI and CX as the CPU leaves them; and TESTB of a device byte (a driver
  * polling a status bit), whose flags the guest then reads.
  *
+ * A sixth VM turns kvm-clock on (MSR_KVM_SYSTEM_TIME_NEW): its pvclock page
+ * holds an even version, a TSC-to-ns factor and the stable flag.
+ *
  * Prints OK, or SKIP where the CPU has no VMX (or is not x86), else FAIL lines. */
 #include <stdio.h>
 #include <stdint.h>
@@ -528,6 +531,59 @@ out:
 	munmap(mem, MEM_SIZE);
 }
 
+/* The kvm-clock guest, at 0x1000: pvclock page at 0x3000, on; then HLT. */
+extern const unsigned char guestc_start[], guestc_end[];
+__asm__(
+	".pushsection .rodata\n"
+	".globl guestc_start, guestc_end\n"
+	"guestc_start:\n"
+	".code16\n"
+	"	mov $0x4b564d01, %ecx\n"
+	"	mov $0x3001, %eax\n"
+	"	xor %edx, %edx\n"
+	"	wrmsr\n"
+	"	hlt\n"
+	".code64\n"
+	"guestc_end:\n"
+	".popsection\n");
+
+static void test_kvmclock(int kvm)
+{
+	int vm = ioctl(kvm, KVM_CREATE_VM, 0);
+	if (vm < 0) { FAIL("kvmclock: KVM_CREATE_VM"); return; }
+	uint8_t *mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mem == MAP_FAILED) { FAIL("kvmclock: mmap"); close(vm); return; }
+	memcpy(mem + 0x1000, guestc_start, (size_t)(guestc_end - guestc_start));
+	if (set_slot(vm, 0, 0, MEM_SIZE, mem) != 0) { FAIL("kvmclock: slot"); goto out; }
+	int vcpu = ioctl(vm, KVM_CREATE_VCPU, 0);
+	int msz = ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
+	struct kvm_run *run = vcpu < 0 ? MAP_FAILED : mmap(NULL, (size_t)msz, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu, 0);
+	if (run == MAP_FAILED) { FAIL("kvmclock: vcpu"); goto out; }
+	struct kvm_sregs sregs;
+	ioctl(vcpu, KVM_GET_SREGS, &sregs);
+	sregs.cs.selector = 0; sregs.cs.base = 0;
+	ioctl(vcpu, KVM_SET_SREGS, &sregs);
+	struct kvm_regs regs; memset(&regs, 0, sizeof(regs));
+	regs.rip = 0x1000; regs.rflags = 0x2;
+	ioctl(vcpu, KVM_SET_REGS, &regs);
+	/* the page is filled before the next entry after the write: run to HLT, then once more */
+	if (ioctl(vcpu, KVM_RUN, 0) != 0 || run->exit_reason != KVM_EXIT_HLT)
+		{ FAIL("kvmclock: exit %u (internal %u)", run->exit_reason, run->internal.suberror); goto out2; }
+	run->immediate_exit = 0;
+	uint32_t ver, mul; uint8_t flags;
+	memcpy(&ver, mem + 0x3000, 4);
+	memcpy(&mul, mem + 0x3000 + 24, 4);
+	flags = mem[0x3000 + 29];
+	if (!ver || (ver & 1) || !mul || !(flags & 1))
+		FAIL("kvmclock: pvclock page version %u mul %u flags %u (want even, nonzero, stable)", ver, mul, flags);
+out2:
+	munmap(run, (size_t)msz);
+	close(vcpu);
+out:
+	close(vm);
+	munmap(mem, MEM_SIZE);
+}
+
 /* KVM_GET_SUPPORTED_CPUID, the MSR index list: what a VMM reads first */
 static void test_tables(int kvm)
 {
@@ -544,6 +600,10 @@ static void test_tables(int kvm)
 		if (!(c.e[i].ecx & (1U << 31))) FAIL("supported CPUID lacks the hypervisor bit");
 	}
 	if (!leaf1) FAIL("supported CPUID has no leaf 1");
+	int kvmfeat = 0;   /* kvm-clock: what a guest without an invariant TSC times it with */
+	for (unsigned i = 0; i < c.h.nent; i++)
+		if (c.e[i].function == 0x40000001 && (c.e[i].eax & (1U << 3)) && (c.e[i].eax & (1U << 24))) kvmfeat = 1;
+	if (!kvmfeat) FAIL("supported CPUID without kvm-clock (0x40000001 CLOCKSOURCE2, STABLE)");
 	struct { struct kvm_msr_list h; uint32_t idx[64]; } l;
 	l.h.nmsrs = 64;
 	if (ioctl(kvm, KVM_GET_MSR_INDEX_LIST, &l) != 0) { FAIL("KVM_GET_MSR_INDEX_LIST: %s", strerror(errno)); return; }
@@ -885,6 +945,7 @@ int main(void)
 	test_apic(kvm);
 	test_dirty_log(kvm);
 	test_stos(kvm);
+	test_kvmclock(kvm);
 	close(kvm);
 	printf(fails ? "FAILED %d\n" : "OK\n", fails);
 	return fails != 0;

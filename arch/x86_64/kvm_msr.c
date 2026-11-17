@@ -52,7 +52,8 @@
 #define MSR_CSTAR            0xC0000083
 #define MSR_SFMASK           0xC0000084
 #define MSR_KERNEL_GS_BASE   0xC0000102
-/* kvmclock, old and new numbers: not offered in CPUID, but a VMM resets them */
+/* kvmclock: the new numbers are offered (CPUID 0x40000001 CLOCKSOURCE2); the
+ * old ones (CLOCKSOURCE) are not, but a VMM resets them */
 #define MSR_KVM_WALL_CLOCK      0x11
 #define MSR_KVM_SYSTEM_TIME     0x12
 #define MSR_KVM_WALL_CLOCK_NEW  0x4b564d00
@@ -164,8 +165,8 @@ int kvm_msr_get(kvm_vcpu_t *v, uint32_t idx, uint64_t *val)
 	case MSR_MISC_ENABLE:       *val = v->misc_enable; return 0;
 	case MSR_KVM_WALL_CLOCK:
 	case MSR_KVM_SYSTEM_TIME:
-	case MSR_KVM_WALL_CLOCK_NEW:
-	case MSR_KVM_SYSTEM_TIME_NEW: *val = 0; return 0;
+	case MSR_KVM_WALL_CLOCK_NEW: *val = 0; return 0;
+	case MSR_KVM_SYSTEM_TIME_NEW: *val = v->system_time; return 0;
 	case MSR_MTRRCAP:           *val = MTRRCAP_VALUE; return 0;
 	case MSR_MTRR_DEF_TYPE:     *val = v->mtrr_def; return 0;
 	}
@@ -215,8 +216,14 @@ int kvm_msr_set(kvm_vcpu_t *v, uint32_t idx, uint64_t val)
 	case MSR_KVM_WALL_CLOCK:
 	case MSR_KVM_SYSTEM_TIME:
 	case MSR_KVM_WALL_CLOCK_NEW:
-	case MSR_KVM_SYSTEM_TIME_NEW:
 		return val ? -1 : 0;   /* off is all there is */
+	case MSR_KVM_SYSTEM_TIME_NEW:
+		/* the guest names a 32-byte pvclock page (bit 0: on); it is filled
+		 * before the next entry, where guest memory may be faulted in */
+		if (val & 1 && ((val & ~1ULL) & 31)) return -1;
+		v->system_time = val;
+		v->pvclock_due = (val & 1) != 0;
+		return 0;
 	case MSR_MTRR_DEF_TYPE: v->mtrr_def = val; return 0;
 	}
 	if (idx >= MSR_MTRR_PHYS0 && idx < MSR_MTRR_PHYS0 + 2 * MTRR_VAR) {

@@ -706,7 +706,9 @@ static int exit_msr(kvm_vcpu_t *v, int write)
 		v->g.r[R_DX] = val >> 32;
 	}
 	skip_instruction();
-	return RUN_GUEST;
+	/* kvm-clock just turned on: its page is filled in the outer loop, where
+	 * guest memory may be faulted in, before the guest runs again */
+	return v->pvclock_due ? RUN_OUTER : RUN_GUEST;
 }
 
 /* MOV to or from a debug register. The guest's DR0-3 and DR6 are only kept
@@ -1035,6 +1037,9 @@ int vmx_vcpu_run(kvm_vcpu_t *v)
 			/* r == 0: the slot went away meanwhile; the guest's access
 			 * exits again and is decided as device memory then */
 		}
+		/* kvm-clock's page: written before the guest runs on; a page not
+		 * mapped yet goes through the prefault above first */
+		if (v->pvclock_due && kvm_pvclock_update(v) == -EAGAIN) continue;
 		int r = run_loaded(v);
 		if (r < 0) return r;
 		if (r == RUN_USER) return 0;

@@ -14,6 +14,10 @@
  * not listed is never in the guest's view, since userspace builds the guest's
  * table from this one; what a guest's CR4 turns on (OSXSAVE) follows the guest.
  *
+ * The KVM leaves (0x40000000 "KVMKVMKVM", 0x40000001) offer kvm-clock when the
+ * host TSC is calibrated: a guest under a host without an invariant TSC (as
+ * Ranix itself is under QEMU's -cpu host) has no other way to time its TSC.
+ *
  * Provenance: leaf and bit positions from the Intel SDM Vol. 2A (CPUID). The
  * table format and the "significant index" rule from Linux's public KVM API
  * description (api.rst, KVM_GET_SUPPORTED_CPUID). Original code. */
@@ -21,6 +25,8 @@
 #include <asm/kvm.h>
 #include <uapi/kvm.h>
 #include <kernel/hal.h>
+#include <kernel/sync.h>
+#include <asm/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/mm/heap.h>
 #include <kernel/lib/string.h>
@@ -138,9 +144,33 @@ void kvm_cpuid_init(void)
 		if (supported[i].function == 0x80000000) supported[i].eax = emax;
 }
 
+/* The KVM leaves, once the host TSC is calibrated (that is after kvm_init at
+ * boot: vdso_init calibrates), so on first use rather than in kvm_cpuid_init. */
+static void add_kvm_leaves(void)
+{
+	static spinlock_t lk = SPINLOCK_INIT;
+	static int done;
+	if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) || !tsc_mult) return;
+	uint64_t f = spin_lock_irq(&lk);
+	if (!done && nsupported + 2 <= SUPPORTED_MAX) {
+		struct kvm_cpuid_entry2 *e = &supported[nsupported++];
+		memset(e, 0, sizeof(*e));
+		e->function = 0x40000000;
+		e->eax = 0x40000001;
+		e->ebx = 0x4b4d564b; e->ecx = 0x564b4d56; e->edx = 0x4d;   /* "KVMKVMKVM\0\0\0" */
+		e = &supported[nsupported++];
+		memset(e, 0, sizeof(*e));
+		e->function = 0x40000001;
+		e->eax = BIT(3) | BIT(24);   /* CLOCKSOURCE2, CLOCKSOURCE_STABLE_BIT */
+		__atomic_store_n(&done, 1, __ATOMIC_RELEASE);
+	}
+	spin_unlock_irq(&lk, f);
+}
+
 /* KVM_GET_SUPPORTED_CPUID: nent in, the table out; E2BIG if it does not fit */
 int kvm_cpuid_supported(struct kvm_cpuid2 *ucpuid)
 {
+	add_kvm_leaves();
 	struct kvm_cpuid2 h;
 	if (copy_from_user(&h, ucpuid, sizeof(h))) return -EFAULT;
 	if (h.nent < nsupported) return -E2BIG;

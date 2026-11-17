@@ -132,6 +132,8 @@ typedef struct kvm_vcpu {
 	struct kvm_msr_entry *msr_guest, *msr_host;
 	uint32_t    msr_count;   /* switched MSRs as last written to the VMCS */
 	uint64_t    misc_enable, mtrr_def, mtrr_var[16], mtrr_fix[11];
+	uint64_t    system_time;   /* MSR_KVM_SYSTEM_TIME_NEW: pvclock page gpa | enable bit */
+	int         pvclock_due;   /* write the pvclock page before the next entry */
 	uint64_t    dr[4], dr6;  /* the guest's debug registers (DR7 is in the VMCS) */
 	/* split irqchip: the APIC, and being woken (kvm_vcpu_kick) */
 	kvm_lapic_t *apic;
@@ -248,6 +250,7 @@ void kvm_ioeventfd_free(kvm_vm_t *vm);
 void kvm_vm_quiesce(kvm_vm_t *vm);   /* no vcpu uses what was published before (vm->lock held) */
 int  kvm_ept_init(kvm_vm_t *vm);
 void kvm_ept_free(kvm_vm_t *vm);
+int  kvm_pvclock_update(kvm_vcpu_t *v);   /* 0 written (or off), -EAGAIN v->prefault first, <0 */
 int  kvm_ept_fault(kvm_vm_t *vm, uint64_t gpa, int write);   /* 1 mapped, 0 no slot there, <0 error */
 void kvm_ept_protect(kvm_vm_t *vm, uint64_t gpa, uint64_t size);   /* writes fault again (dirty log) */
 void kvm_ept_unmap(kvm_vm_t *vm, uint64_t gpa, uint64_t size);
