@@ -3173,14 +3173,41 @@ static void put_walked(vfs_inode_t *in)
 	if (in && !in->cached) vfs_inode_free(in);
 }
 
+/* Renames go one at a time, so the ancestry check below sees the tree the move
+ * lands in: two tasks moving p into q and q into p would each pass it alone, and
+ * a name looked up as a file could be a directory by the time it moves. Linux
+ * serialises cross-directory renames with s_vfs_rename_mutex. */
+static mutex_t rename_dir_lock = MUTEX_INIT;
+
+/* 1 if the directory numbered ino is d or one of d's ancestors inside the mount
+ * rooted at top (NULL: the tree no mount claims). Dentries, not path strings: a
+ * symlink or ".." in the new path reaches the moved directory under another
+ * spelling. */
+static int dentry_under(vfs_dentry_t *d, uint64_t ino, vfs_dentry_t *top)
+{
+	int hit = 0;
+	uint64_t f = spin_lock_irq(&vfs_lock);
+	for (vfs_dentry_t *p = d; p && !hit; p = p->parent) {
+		hit = p->inode && p->inode->ino == ino;
+		if (p == top) break;
+	}
+	spin_unlock_irq(&vfs_lock, f);
+	return hit;
+}
+
 int vfs_rename(const char *old_path, const char *new_path)
 {
+	int dir_locked = 0;
 	const char *old_name, *new_name;
 	char *old_dir = vfs_parent_alloc(old_path, &old_name);
 	char *new_dir = vfs_parent_alloc(new_path, &new_name);
 	vfs_inode_t *old_in = NULL, *new_in = NULL;
 	int ret;
 	if (!old_dir || !new_dir) { ret = -ENOMEM; goto out; }
+	/* from here to the dentry update the tree holds still for every rename:
+	 * what is a directory, and where it stands, is decided under the lock */
+	mutex_lock(&rename_dir_lock);
+	dir_locked = 1;
 	/* a directory takes along the tasks standing in it (fs_rename_cwds); looked
 	 * up before the parents, whose dentries a later walk may reuse */
 	vfs_stat_t mst;
@@ -3209,6 +3236,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 	/* a directory moved under itself would detach a cycle from the tree */
 	size_t ol = strlen(old_path);
 	if (strncmp(old_path, new_path, ol) == 0 && new_path[ol] == '/') { ret = -EINVAL; goto out; }
+	if (moving_dir && !same_dir && dentry_under(new_parent, mst.ino, old_mnt)) { ret = -EINVAL; goto out; }
 	if (dentry_child_pinned(new_parent, new_name)) { ret = -EBUSY; goto out; }
 	if (old_in->iops && new_in->iops &&
 	    (sticky_denied(old_in, old_name) || sticky_denied(new_in, new_name))) {
@@ -3255,6 +3283,7 @@ int vfs_rename(const char *old_path, const char *new_path)
 		spin_unlock_irq(&vfs_lock, f);
 	}
 out:
+	if (dir_locked) mutex_unlock(&rename_dir_lock);
 	put_walked(old_in);
 	if (new_in != old_in) put_walked(new_in);
 	kfree(old_dir); kfree(new_dir);
