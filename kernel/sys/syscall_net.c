@@ -1583,6 +1583,10 @@ static long recvfrom_stream(socket_t *s, const k_iovec *iov, uint64_t niov, int 
                             void *uaddr, uint32_t *klen, uint64_t rcv_deadline)
 {
     size_t len = iov_total(iov, niov);
+    /* nothing asked for: 0 at once, the data left queued (Linux). The copy
+     * loop below takes nothing for 0, and the "data came in" check after it
+     * would send it round again for good. */
+    if (len == 0) return 0;
     while (1) {
         size_t total = 0;
         int got_addr = 0;
