@@ -807,6 +807,7 @@ static long sys_sendfile(int out_fd, int in_fd, long *offset, size_t count)
 	if (count > 0x7ffff000UL) count = 0x7ffff000UL;
 	while (sent < count) {
 		if (task_has_actionable_signal()) { err = -4; break; }
+		cond_resched();   /* the kernel is not preemptible: a long copy shares the CPU */
 		size_t n = count - sent;
 		if (n > sizeof(buf)) n = sizeof(buf);
 		long r = vfs_read(in_fd, buf, n);

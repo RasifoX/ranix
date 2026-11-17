@@ -938,6 +938,16 @@ static long sys_waitid(int idtype, int id, void *infop, int options, void *rusag
 	return 0;
 }
 
+/* 1 when the pipe end fd would block for `want` (poll bits) now */
+static int splice_pipe_would_block(int fd, int want)
+{
+	vfs_file_t *f = fget(task_current()->fds, fd);
+	if (!f) return 0;
+	int r = f->inode && f->inode->fops && f->inode->fops->poll ? f->inode->fops->poll(f) : want;
+	fput(f);
+	return !(r & want);
+}
+
 static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
                        size_t len, unsigned int flags)
 {
@@ -945,6 +955,27 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 	char buf[4096];
 	size_t done = 0;
 	off_t oin = 0, oout = 0;
+	/* As on Linux, one end must be a pipe, and a pipe end takes no offset. Without
+	 * that rule splice was a general copy: an unprivileged caller could pour 2 GB
+	 * of /dev/zero into a file on the RAM-backed root in one call, in the kernel
+	 * the whole time (found by test_fuzz: soft lockups, then the OOM killer). */
+	process_t *p = task_current();
+	vfs_file_t *fi = fget(p->fds, fd_in);
+	vfs_file_t *fo = fget(p->fds, fd_out);
+	/* the access mode counts for files, devices and pipes, as in vfs_read/write
+	 * (a socket's file carries no access mode) */
+#define SPLICE_MODED(f) ((f)->inode && (S_ISREG((f)->inode->mode) || S_ISBLK((f)->inode->mode) || \
+                         S_ISCHR((f)->inode->mode) || S_ISFIFO((f)->inode->mode)))
+	int bad = !fi || !fo || (SPLICE_MODED(fi) && (fi->flags & 3) == O_WRONLY) ||
+	          (SPLICE_MODED(fo) && (fo->flags & 3) == O_RDONLY);
+#undef SPLICE_MODED
+	int pin  = fi && fi->inode && S_ISFIFO(fi->inode->mode);
+	int pout = fo && fo->inode && S_ISFIFO(fo->inode->mode);
+	if (fi) fput(fi);
+	if (fo) fput(fo);
+	if (bad) return -EBADF;
+	if (!pin && !pout) return -EINVAL;
+	if ((pin && off_in) || (pout && off_out)) return -ESPIPE;
 	if (off_in  && copy_from_user(&oin,  off_in,  sizeof(oin))  != 0) return -EFAULT;
 	if (off_out && copy_from_user(&oout, off_out, sizeof(oout)) != 0) return -EFAULT;
 	if (oin < 0 || oout < 0) return -EINVAL;
@@ -952,6 +983,10 @@ static long sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out,
 	if (len > 0x7ffff000UL) len = 0x7ffff000UL;
 	while (done < len) {
 		if (task_has_actionable_signal()) { if (done == 0) return -EINTR; break; }
+		cond_resched();   /* the kernel is not preemptible: a long copy shares the CPU */
+		/* as on Linux, once something moved, return rather than wait on the pipe */
+		if (done && ((pin && splice_pipe_would_block(fd_in, 0x0011)) ||
+		             (pout && splice_pipe_would_block(fd_out, 0x000c)))) break;
 		size_t chunk = len - done;
 		if (chunk > sizeof(buf)) chunk = sizeof(buf);
 		if (off_in) vfs_seek(fd_in, oin, 0);
@@ -1052,6 +1087,19 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
                                 size_t len, unsigned int flags)
 {
 	if (flags) return -EINVAL;   /* no flags defined */
+	/* Linux: both ends regular files, in open for reading, out for writing */
+	process_t *p = task_current();
+	vfs_file_t *fi = fget(p->fds, fd_in);
+	vfs_file_t *fo = fget(p->fds, fd_out);
+	int bad = !fi || !fo || (fi->flags & 3) == O_WRONLY || (fo->flags & 3) == O_RDONLY ||
+	          (fo->flags & O_APPEND);
+	int reg = fi && fo && fi->inode && fo->inode && S_ISREG(fi->inode->mode) && S_ISREG(fo->inode->mode);
+	int dir = fi && fo && fi->inode && fo->inode && (S_ISDIR(fi->inode->mode) || S_ISDIR(fo->inode->mode));
+	if (fi) fput(fi);
+	if (fo) fput(fo);
+	if (bad) return -EBADF;
+	if (dir) return -EISDIR;
+	if (!reg) return -EINVAL;
 	char buf[4096];
 	/* When an offset pointer is given, read/write at that offset and advance the
 	 * caller's copy without disturbing the fd's own position; otherwise use the
@@ -1066,6 +1114,7 @@ static long sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off
 	if (len > 0x7ffff000UL) len = 0x7ffff000UL;
 	while (done < len) {
 		if (task_has_actionable_signal()) { if (done == 0) return -EINTR; break; }
+		cond_resched();
 		size_t chunk = len - done; if (chunk > sizeof(buf)) chunk = sizeof(buf);
 		if (off_in) vfs_seek(fd_in, in_off, SEEK_SET);
 		long r = vfs_read(fd_in, buf, chunk);
