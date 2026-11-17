@@ -61,6 +61,9 @@ int         vm_map(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flag
 int         vm_map_huge(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 int         vm_map_huge_1g(vm_space_t *vs, uint64_t vaddr, uint64_t paddr, uint32_t flags);
 void        vm_unmap(vm_space_t *vs, uint64_t vaddr);
+/* [lo, hi): a shootdown per batch, not per page; may sleep (no spinlock held) */
+void        vm_unmap_range(vm_space_t *vs, uint64_t lo, uint64_t hi);
+uint64_t    vm_skip_empty(vm_space_t *vs, uint64_t vaddr);
 uint64_t    vm_skip_empty(vm_space_t *vs, uint64_t vaddr);   /* next VA whose page table exists */
 void        vm_activate(void);
 void        vm_set_kernel_pt(uint64_t phys);

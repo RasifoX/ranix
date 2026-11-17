@@ -338,6 +338,44 @@ int vm_tlb_elsewhere(vm_space_t *vs)
 	return 0;
 }
 
+/* Unmap [lo, hi) a batch at a time: one shootdown for up to VM_UNMAP_BATCH pages
+ * instead of one per page. A threaded process giving back a 2 GB heap paid half
+ * a million IPI round trips that way, 15 s in the kernel without a yield (found
+ * by test_fuzz). arch_pte_next shows only 4 KB entries; huge mappings go through
+ * vm_unmap in the second pass, which finds the cleared entries empty and so
+ * sends no further IPIs. */
+#define VM_UNMAP_BATCH 128
+void vm_unmap_range(vm_space_t *vs, uint64_t lo, uint64_t hi)
+{
+	lo &= PAGE_MASK;
+	for (uint64_t va = lo; va < hi; ) {
+		uint64_t old[VM_UNMAP_BATCH];
+		int n = 0;
+		uint64_t *pte = NULL;
+		uint64_t lf = spin_lock_irq(&vs->fault_lock);
+		while (n < VM_UNMAP_BATCH && (pte = arch_pte_next(vs, &va, hi))) {
+			if (*pte) { old[n++] = *pte; arch_pte_set(vs, va, pte, 0); }
+			va += PAGE_SIZE;
+		}
+		spin_unlock_irq(&vs->fault_lock, lf);
+		if (n && vm_tlb_elsewhere(vs)) arch_tlb_flush_range(vs, lo, va);
+		for (int i = 0; i < n; i++) {
+			uint64_t pa = arch_pte_page(old[i]);
+			if (pa) { if (anon_page_put(pa)) cgroup_uncharge_mem(vs, PAGE_SIZE); }
+			else if (swp_pte_is(old[i]) && swap_pte_free(old[i])) cgroup_uncharge_mem(vs, PAGE_SIZE);
+		}
+		cond_resched();
+	}
+	int steps = 0;
+	for (uint64_t v = lo; v < hi; ) {
+		uint64_t nx = vm_skip_empty(vs, v);
+		if (nx > v) { v = nx; continue; }
+		vm_unmap(vs, v);
+		v += PAGE_SIZE;
+		if ((++steps & 4095) == 0) cond_resched();
+	}
+}
+
 int vm_handle_fault(uint64_t vaddr, int is_write)
 {
 	return vm_handle_fault_irq(vaddr, is_write, 0);

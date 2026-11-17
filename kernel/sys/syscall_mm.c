@@ -58,8 +58,7 @@ static uint64_t brk_set(process_t *p, uint64_t addr)
 
 	if (new_brk < cur) {
 		/* Shrink: free pages above new_brk */
-		for (uint64_t va = new_brk; va < cur; va += PAGE_SIZE)
-			vm_unmap(vm, va);
+		vm_unmap_range(vm, new_brk, cur);
 		vm->brk = new_brk;
 		return new_brk;
 	}
@@ -71,13 +70,17 @@ static uint64_t brk_set(process_t *p, uint64_t addr)
 			if (!page) cgroup_uncharge_mem(vm, PAGE_SIZE);
 		}
 		if (!page) {
-			for (uint64_t u = cur; u < va; u += PAGE_SIZE)
-				vm_unmap(vm, u);
+			vm_unmap_range(vm, cur, va);
 			return cur;
 		}
 		memset((void *)PHYS_TO_VIRT(page), 0, PAGE_SIZE);
 		anon_page_mark((uint64_t)page);
 		vm_map(vm, va, (uint64_t)page, VM_USER | VM_READ | VM_WRITE);
+		/* a heap as large as RAM is a long loop: yield, and let SIGKILL end it */
+		if (((va - cur) / PAGE_SIZE & 511) == 511) {
+			cond_resched();
+			if (fatal_signal_pending(p)) { vm_unmap_range(vm, cur, va + PAGE_SIZE); return cur; }
+		}
 	}
 	vm->brk = new_brk;
 	return new_brk;
@@ -103,12 +106,7 @@ __attribute__((weak)) uint64_t vm_skip_empty(vm_space_t *vs, uint64_t vaddr) { (
 
 static void unmap_span(process_t *p, uint64_t lo, uint64_t hi)
 {
-	for (uint64_t v = lo; v < hi; ) {
-		uint64_t n = vm_skip_empty(p->vm, v);
-		if (n > v) { v = n; continue; }      /* no table here: nothing mapped */
-		vm_unmap(p->vm, v);
-		v += PAGE_SIZE;
-	}
+	vm_unmap_range(p->vm, lo, hi);
 }
 
 static void drop_old_pages(process_t *p, uint64_t va, uint64_t len)
@@ -130,8 +128,7 @@ static void drop_old_pages(process_t *p, uint64_t va, uint64_t len)
  * Unmapping uncharges what was mapped; the rest never got a page. */
 static void map_undo(process_t *p, uint64_t va, uint64_t v, uint64_t len)
 {
-	for (uint64_t u = va; u < v; u += PAGE_SIZE)
-		vm_unmap(p->vm, u);
+	vm_unmap_range(p->vm, va, v);
 	cgroup_uncharge_mem(p->vm, (long)(len - (v - va)));
 }
 
